@@ -79,8 +79,8 @@ Other commands (e.g. `t` and `x` especially) require whitespace after the initia
 ### Core syntax
 The default interaction pattern is fairly simple:
 - From a new token position (such as the first token that could appear after the prompt you entered when you started the program), pressing **Enter** without doing anything will select the sampler's proposed token
-- If you want to select a different token, type the number on the left-hand column
-- You can also use Tab or Shift-Tab cycle through the token-selection menu
+- If you want to select a different token, type the number on the left-hand column (the raw rank number)
+- You can also use **Tab** or **Shift-Tab** to cycle through the token-selection menu
 - `t TEXT` or `x TEXT` allow you to enter any text you want, including multiple tokens at once (the only difference is that `t` automatically inserts whitespace and `x` will not); if the last token is `an`, `t avocado` will form `an avocado`, whereas `x other` will form `another`
 - `m N` temporarily expands the token-selection menu by N rows (e.g. `m 10` expands it by 10 rows); this resets on the next token, so feel free to expand the available menu as much as you want at a given token position
 - `h N` delegates the next `N` decisions to the model & sampler (e.g. `h 5` lets the model & sampler automatically pick the next 5 tokens):
