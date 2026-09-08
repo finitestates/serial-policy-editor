@@ -108,12 +108,12 @@ _For example: you can just type in `205` to see what token raw-rank 205 is. If y
 
 ### Access the EDGE menu
 `q` accesses the EDGE menu; from here you can:
-    - quit an episode (you can always resume it later)
-    - end an episode (this seals it, but that doesn't prevent you from forking it, replaying it, or doing other things with it)
-    - change your sampler settings
-    - list the episodes that are in your workspace
-    - fork from a particular point in this episode (`fm` lets you see a map of available points; I highly recommend using it)
-    - resume the current episode
+- quit an episode (you can always resume it later)
+- end an episode (this seals it, but that doesn't prevent you from forking it, replaying it, or doing other things with it)
+- change your sampler settings
+- list the episodes that are in your workspace
+- fork from a particular point in this episode (`fm` lets you see a map of available points; I highly recommend using it)
+- resume the current episode
 
 ### Rewinding
 `[` and `]` let you navigate forwards and backwards to different token positions in a live episode.
