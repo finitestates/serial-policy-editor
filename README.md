@@ -159,3 +159,10 @@ The user in this program is referred to as "Teacher" as a reference to Teacher-f
 
 The repository contains source and tests. Model weights, local workspaces,
 virtual environments, and historical local archives are not release inputs.
+
+## License
+
+Copyright (c) 2026 Graham Christopher Andrews.
+
+Serial Policy Editor is released under the [MIT License](LICENSE).
+Third-party dependencies and model weights remain subject to their own licenses.

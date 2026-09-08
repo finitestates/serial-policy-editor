@@ -642,3 +642,10 @@ different hardware, kernels, dtypes, quantization, and near-tied logits can
 produce small numerical differences. The smoke suites emphasize consequential
 agreement such as ranking, sampler support, deterministic selection, replay,
 and cache/full-prefix consistency.
+
+## License
+
+Copyright (c) 2026 Graham Christopher Andrews.
+
+Serial Policy Editor is released under the [MIT License](LICENSE).
+Third-party dependencies and model weights remain subject to their own licenses.
