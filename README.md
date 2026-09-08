@@ -25,6 +25,7 @@ python -m pip install -e '.[llama]'
 ```
 
 Once installed, you can open the program a few different ways:
+```bash
 policy-editor --backend llama.cpp --model /path/to/model.gguf \
   --new-prompt 'Once upon a time'
 ```
