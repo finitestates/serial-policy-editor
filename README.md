@@ -63,8 +63,8 @@ To see a full list of command line flags. There are quite a number, but I've tri
 
 
 ## Basic command usage
-Once an episode is live, nearly everything uses the Enter key before it does anything with two notable exceptions: 
-- **Tab** and **Shift-Tab** cycle through token-selection options or search menu options
+Once an episode is live, nearly everything uses the Enter key before it does anything with a few notable exceptions: 
+- **Tab** and **Shift-Tab** cycle through token-selection options or search options
 - `[` and `]` move backwards and forwards through tokens you have already selected
 - **CTRL-G** executes a search based on token rank number
 
