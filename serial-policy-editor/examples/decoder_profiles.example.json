@@ -1,0 +1,52 @@
+{
+  "decoder_profiles": [
+    {
+      "id": "baseline",
+      "name": "Current baseline",
+      "temperature": 0.8,
+      "top_k": 40,
+      "top_p": 0.95,
+      "min_p": 0.05,
+      "metadata": {
+        "description": "The editor's default sampling policy"
+      }
+    },
+    {
+      "id": "wider-support",
+      "name": "Wider support example",
+      "temperature": 0.9,
+      "top_k": 80,
+      "top_p": 0.98,
+      "min_p": 0.01,
+      "metadata": {
+        "description": "A mechanical example, not a model-independent recommendation"
+      }
+    },
+    {
+      "id": "greedy",
+      "name": "Greedy decoding",
+      "temperature": 0.0,
+      "top_k": 1,
+      "top_p": 1.0,
+      "min_p": 0.0,
+      "metadata": {
+        "description": "Always choose the maximum-logit token"
+      }
+    },
+    {
+      "id": "repetition-guard",
+      "name": "Repetition guard example",
+      "temperature": 0.8,
+      "top_k": 40,
+      "top_p": 0.95,
+      "min_p": 0.05,
+      "repeat_penalty": 1.1,
+      "repeat_last_n": 64,
+      "presence_penalty": 0.0,
+      "frequency_penalty": 0.0,
+      "metadata": {
+        "description": "A mechanical history-penalty example, not a model-independent recommendation"
+      }
+    }
+  ]
+}

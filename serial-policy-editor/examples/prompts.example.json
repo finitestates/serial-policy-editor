@@ -1,0 +1,12 @@
+{
+  "prompts": [
+    {
+      "id": "replace-me",
+      "format": "raw",
+      "prefill": "Replace this value with the exact prefill for your model.",
+      "add_bos": true,
+      "special_tokens": true,
+      "metadata": {}
+    }
+  ]
+}

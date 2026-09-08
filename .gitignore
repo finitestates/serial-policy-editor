@@ -1,0 +1,29 @@
+# Python build and test output
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Local virtual environments and installed runtime dependencies
+.venv/
+venv/
+bin/
+include/
+lib/
+lib64
+pyvenv.cfg
+
+# Local model/runtime assets in this workspace
+gpt2/
+llama.cpp/
+*.gguf
+episodes.sqlite3
+5173ec3cdc064ae4a9ce617bd455ea9c
+
+# Historical snapshots and original archives are preserved, but are not part
+# of the active source baseline.
+prior-art/
