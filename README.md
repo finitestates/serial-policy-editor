@@ -22,16 +22,47 @@ cd serial-policy-editor
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[llama]'
+```
+
+Once installed, you can open the program a few different ways:
 policy-editor --backend llama.cpp --model /path/to/model.gguf \
   --new-prompt 'Once upon a time'
 ```
-
 Or
 ```bash
-policy-editor --backend llama.cpp --model/path/to/model.gguf
+policy-editor --backend llama.cpp --model /path/to/model.gguf
 ```
-And the program will ask you for a prompt. Type in anything, then hit the Escape key, followed by the Enter key.
+Or simply
+```bash
+policy-editor --model /path/to/model.gguf
+```
 
+If you don't enter a prompt as is the case in the last two examples above, the program will ask you for one. Type in anything, then hit the Escape key, followed by the Enter key to use that text as your prompt. 
+
+By default, the program uses llama cpp. If you want to start an episode with a model that uses the HuggingFace Transformers library, do this instead:
+```bash
+cd serial-policy-editor
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[transformers]'
+```
+Running an episode with Transformers uses basically the same semantics as above, except that you need to specify a backend and can't just start a new episode by only specifying the model:
+```bash
+policy-editor --backend transformers --model /path/to/transformers/directory/
+```
+
+You can also just enter:
+```bash
+policy-editor --help
+```
+Or
+```bash
+policy-editor -h
+```
+To see a full list of command line flags. There are quite a number, but I've tried to minimize the amount of flags you need to use for basic episode management.
+
+
+## Basic command usage
 Nearly everything in the program uses the Enter key before it does anything with the exception of using Tab to cycle through options and using `[` and `]` to move backwards and forwards through tokens you have already selected.
 
 To keep things simple, assume that any command described within the program interface itself is followed by hitting Enter.
