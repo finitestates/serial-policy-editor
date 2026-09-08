@@ -39,7 +39,7 @@ policy-editor --backend transformers --model /path/to/transformers/directory \
   --new-prompt 'It was a dark and stormy'
 ```
 
-You can omit `--new-prompt` and you will be asked for one interactively. The backend doesn't need to be specified for llama.cpp, but does need to be provided if you are using transformers.
+You can omit `--new-prompt` and you will be asked for one interactively. Type your prompt, then press **Escape**, followed by **Enter**, to submit it. The backend doesn't need to be specified for llama.cpp, but does need to be provided if you are using transformers.
 
 So, assuming you are using llama.cpp, the fastest way to start the program is just:
 ```bash
@@ -117,25 +117,33 @@ Using `[` and `]` for navigation is handy for backtracking especially if you hav
 
 ## Replay
 
-You may notice that there is both `--resume` and `--replay`. They sound like they might be doing the same thing, so why have both? Replay is like a swiss-army-knife command that can function as a quick way to clone an existing episode, as a stress test for your system, as a counterfactual generator, or--when used within an episode--as a splicing tool. Replay executes each command that generated an episode sequentially using a "tape" of the other episode's actions.
+You may notice that there is both `--resume` and `--replay`. They sound like they might be doing the same thing, so why have both? Resume continues an existing unfinished episode; replay creates a new episode by executing its recorded editing actions. Replay is like a swiss-army-knife command that can function as a quick way to clone an existing episode, as a stress test for your system, as a counterfactual generator, or--when used within an episode--as a splicing tool. Replay executes each command that generated an episode sequentially using a "tape" of the other episode's actions.
 
 So: let's say you started an episode by selecting token `7`, which corresponded to `night`. If you replay that episode, the program will (by default) import the same settings of the original episode, fire the model up, and select `7` again. Often, this corresponds to the same token, but it may not.
 
 Replay will continue acting based on the available tape. But it can be initiated with two different stopping conditions:
 - Handoff (default): if an action is about to select a different token than the one from the source episode at the same position, replay will end and the EDGE menu will open. From there, action proceeds like any other live episode.
-- Ballistic: replay just continues until the tape is exhausted even if different tokens are selected. The only thing that can stop ballistic mode from exhausting the full tape is a rather narrow range of conditions. This can generate episodes that are markedly different than the original especially if you start the replay with a different PRNG seed (`policy-editor --replay <EPISODE #> --random-seed` or `policy-editor --replay <EPISODE #> --seed N`) or alter the sampler settings (not every setting will cause a divergence; some are more prone to that than others).
+- Ballistic: replay just continues until the tape is exhausted even if different tokens are selected. The only thing that can stop ballistic mode from exhausting the full tape is a rather narrow range of conditions. This can generate episodes that are markedly different than the original especially if you start the replay with a different PRNG seed (`policy-editor --replay '#1' --random-seed` or `policy-editor --replay '#1' --seed 77`) or alter the sampler settings (not every setting will cause a divergence; some are more prone to that than others).
+
+For example, to replay episode `#1` in ballistic mode:
+
+```bash
+policy-editor --replay '#1' --divergence-policy ballistic
+```
+
+Replace `#1` with an episode number from your workspace, and keep the quotes in shell commands so `#` is not treated as a comment. The examples assume you are using the same workspace; add `--workspace /path/to/episodes.sqlite3` if needed.
 
 The crucial thing about replay is that it always terminates at the EDGE menu, regardless of if you use handoff or ballistic. It is using another episode as a source in order to create a new live episode. It's one of the things that makes the program special in my opinion: episodes you create do not simply generate archival transcripts (although they do that also), but can be used to create new live episodes with very little effort.
 
-Another way to use replay is within an episode itself. To do this you enter `spr <EPISODE #>` from the EDGE menu. The prompt of that other episode will be entered as raw text as if using the `x` command, and then every other action will be executed as though using normal `--replay`. Replay when used this way can function as a powerful splicing tool, allowing you to compose episodes out of other episodes.
+Another way to use replay is within an episode itself. To do this you enter `spr #1` from the EDGE menu, replacing `#1` with the source episode's number. The prompt of that other episode will be entered as raw text as if using the `x` command, followed by its recorded actions. This appends to the current episode and keeps the destination's model, sampler settings, and random stream; source sampler settings are not imported. Replay when used this way can function as a powerful splicing tool, allowing you to compose episodes out of other episodes.
 
 There are some finer points to all this, which are covered elsewhere, but it is worth drawing attention to this function.
 
-**One final note about replay:** People often over-index how likely a replayed episode is to diverge from the source episode. In my experience, you have to deliberately try to force a divergence or else it won't happen. Since token selection happens via raw rank or directly tokenized text, those tend to be pretty stable, unless you change one of a handful of things about the source sampler config or if your episode contains raw rank selection from deep within the probability distribution. `policy-editor --replay <EPISODE #>` without anything else more often than not produces an episode that looks the same as the source. The underlying math may have shifted slightly, but not enough to matter. Further, whether or not divergence is even undesirable depends on what you are trying to accomplish via replay.
+**One final note about replay:** People often over-index how likely a replayed episode is to diverge from the source episode. In my experience, using the same model and comparable runtime settings, replay usually reproduces the source unless I deliberately change something to encourage divergence. Since token selection happens via raw rank or directly tokenized text, those tend to be pretty stable, unless you change one of a handful of things about the source sampler config or if your episode contains raw rank selection from deep within the probability distribution. `policy-editor --replay '#1'` without anything else more often than not produces an episode that looks the same as the source. The underlying math may have shifted slightly, but not enough to matter. Further, whether or not divergence is even undesirable depends on what you are trying to accomplish via replay.
 
 ## Why "teacher"?
 
-The user in this program is referred to as "Teacher" as a reference to Teacher-forced answers in machine learning. That being said, this program has no real practical machine learning application. Anything you can do here, you can probably accomplish more directly and efficiently via other means. In fact, some of the most fun things to do involve taking the less direct path than you could (e.g. searching for a token and entering it from the search menu as opposed to just entering it directly via `t TEXT`). The purpose of this program is educational, exploratory, and creative--it provides you with a very granular view into how the next token arrives and gives you as much or as little control as you want over that process.
+The user in this program is referred to as "Teacher" as a reference to Teacher-forced answers in machine learning. That being said, this program is not a model-training tool. Anything you can do here, you can probably accomplish more directly and efficiently via other means. In fact, some of the most fun things to do involve taking the less direct path than you could (e.g. searching for a token and entering it from the search menu as opposed to just entering it directly via `t TEXT`). The purpose of this program is educational, exploratory, and creative--it provides you with a very granular view into how the next token arrives and gives you as much or as little control as you want over that process.
 
 
 ## Documentation
