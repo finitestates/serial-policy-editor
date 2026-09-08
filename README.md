@@ -38,7 +38,7 @@ Or simply
 policy-editor --model /path/to/model.gguf
 ```
 
-If you don't enter a prompt as is the case in the last two examples above, the program will ask you for one. Type in anything, then hit the Escape key, followed by the Enter key to use that text as your prompt. 
+If you don't enter a prompt as is the case in the last two examples above, the program will ask you for one. Type in anything, then hit the **Escape** key, followed by the **Enter** key to use that text as your prompt. 
 
 By default, the program uses llama cpp. If you want to start an episode with a model that uses the HuggingFace Transformers library, do this instead:
 ```bash
@@ -64,7 +64,7 @@ To see a full list of command line flags. There are quite a number, but I've tri
 
 
 ## Basic command usage
-Once an episode is live, nearly everything uses the Enter key before it does anything with a few notable exceptions: 
+Once an episode is live, nearly everything uses the **Enter** key before it does anything with a few notable exceptions: 
 - **Tab** and **Shift-Tab** cycle through token-selection options or search options
 - `[` and `]` move backwards and forwards through tokens you have already selected
 - **CTRL-G** executes a search based on token rank number
