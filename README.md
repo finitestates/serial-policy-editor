@@ -23,6 +23,10 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[llama]'
 ```
+For Transformers, use:
+```bash
+python -m pip install -e '.[transformers]'
+```
 
 Once installed, you can open the program a few different ways:
 ```bash
@@ -31,28 +35,18 @@ policy-editor --backend llama.cpp --model /path/to/model.gguf \
 ```
 Or
 ```bash
-policy-editor --backend llama.cpp --model /path/to/model.gguf
+policy-editor --backend transformers --model /path/to/transformers/directory \
+  --new-prompt 'It was a dark and stormy'
 ```
-Or simply
+
+You can omit `--new-prompt` and you will be asked for one interactively. The backend doesn't need to be specified for llama.cpp, but does need to be provided if you are using transformers.
+
+So, assuming you are using llama.cpp, the fastest way to start the program is just:
 ```bash
 policy-editor --model /path/to/model.gguf
 ```
 
-If you don't enter a prompt as is the case in the last two examples above, the program will ask you for one. Type in anything, then hit the **Escape** key, followed by the **Enter** key to use that text as your prompt. 
-
-By default, the program uses llama cpp. If you want to start an episode with a model that uses the HuggingFace Transformers library, do this instead:
-```bash
-cd serial-policy-editor
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e '.[transformers]'
-```
-Running an episode with Transformers uses basically the same semantics as above, except that you need to specify a backend and can't just start a new episode by only specifying the model:
-```bash
-policy-editor --backend transformers --model /path/to/transformers/directory/
-```
-
-You can also just enter:
+For more info, just enter:
 ```bash
 policy-editor --help
 ```
@@ -86,8 +80,8 @@ The default interaction pattern is fairly simple:
 - `m N` temporarily expands the token-selection menu by N rows (e.g. `m 10` expands it by 10 rows); this resets on the next token, so feel free to expand the available menu as much as you want at a given token position
 - `h N` delegates the next `N` decisions to the model & sampler (e.g. `h 5` lets the model & sampler automatically pick the next 5 tokens):
     - `h . N` will delegate `N` decisions to the model & sampler up to a sentence boundary (e.g. `.`, `!`, `?`) or `N`, whichever comes first.
-    - `h | N` will do the same but up to a paragraph boundary (e.g. `\n`).
-    - When using `h . N` or `h | N`, tokens that contain either a sentence boundary or a paragraph boundary and some other text, will not be split-up (e.g. `h . N` will include the full token for things like `."` or `.\n\n`).
+    - `h | N` will do the same but up to a newline (e.g. `\n`).
+    - When using `h . N` or `h | N`, tokens that contain either a sentence boundary or a newline plus some other text, will not be split-up (e.g. `h . N` will include the full token for things like `."` or `.\n\n`).
 - `?` brings up a list of commands with short descriptions of what they do.
 
 After you select a token or enter text, you will automatically be taken to the next position.
@@ -120,6 +114,29 @@ _For example: you can just type in `205` to see what token raw-rank 205 is. If y
 `[` and `]` let you navigate forwards and backwards to different token positions in a live episode.
 
 Using `[` and `]` for navigation is handy for backtracking especially if you have decided that you want to undo some recent actions: all you have to do is hit `[` as many times as necessary and then hit Enter. However, it's important to note that this type of undo action is irreversible. It is roughly equivalent to using the Backspace key. If you are not sure whether or not you want to permanently delete something, it is better to create a fork instead (input `f` at the point you have navigated to, or use the forking option from the EDGE menu).
+
+## Replay
+
+You may notice that there is both `--resume` and `--replay`. They sound like they might be doing the same thing, so why have both? Replay is like a swiss-army-knife command that can function as a quick way to clone an existing episode, as a stress test for your system, as a counterfactual generator, or--when used within an episode--as a splicing tool. Replay executes each command that generated an episode sequentially using a "tape" of the other episode's actions.
+
+So: let's say you started an episode by selecting token `7`, which corresponded to `night`. If you replay that episode, the program will (by default) import the same settings of the original episode, fire the model up, and select `7` again. Often, this corresponds to the same token, but it may not.
+
+Replay will continue acting based on the available tape. But it can be initiated with two different stopping conditions:
+- Handoff (default): if an action is about to select a different token than the one from the source episode at the same position, replay will end and the EDGE menu will open. From there, action proceeds like any other live episode.
+- Ballistic: replay just continues until the tape is exhausted even if different tokens are selected. The only thing that can stop ballistic mode from exhausting the full tape is a rather narrow range of conditions. This can generate episodes that are markedly different than the original especially if you start the replay with a different PRNG seed (`policy-editor --replay <EPISODE #> --random-seed` or `policy-editor --replay <EPISODE #> --seed N`) or alter the sampler settings (not every setting will cause a divergence; some are more prone to that than others).
+
+The crucial thing about replay is that it always terminates at the EDGE menu, regardless of if you use handoff or ballistic. It is using another episode as a source in order to create a new live episode. It's one of the things that makes the program special in my opinion: episodes you create do not simply generate archival transcripts (although they do that also), but can be used to create new live episodes with very little effort.
+
+Another way to use replay is within an episode itself. To do this you enter `spr <EPISODE #>` from the EDGE menu. The prompt of that other episode will be entered as raw text as if using the `x` command, and then every other action will be executed as though using normal `--replay`. Replay when used this way can function as a powerful splicing tool, allowing you to compose episodes out of other episodes.
+
+There are some finer points to all this, which are covered elsewhere, but it is worth drawing attention to this function.
+
+**One final note about replay:** People often over-index how likely a replayed episode is to diverge from the source episode. In my experience, you have to deliberately try to force a divergence or else it won't happen. Since token selection happens via raw rank or directly tokenized text, those tend to be pretty stable, unless you change one of a handful of things about the source sampler config or if your episode contains raw rank selection from deep within the probability distribution. `policy-editor --replay <EPISODE #>` without anything else more often than not produces an episode that looks the same as the source. The underlying math may have shifted slightly, but not enough to matter. Further, whether or not divergence is even undesirable depends on what you are trying to accomplish via replay.
+
+## Why "teacher"?
+
+The user in this program is referred to as "Teacher" as a reference to Teacher-forced answers in machine learning. That being said, this program has no real practical machine learning application. Anything you can do here, you can probably accomplish more directly and efficiently via other means. In fact, some of the most fun things to do involve taking the less direct path than you could (e.g. searching for a token and entering it from the search menu as opposed to just entering it directly via `t TEXT`). The purpose of this program is educational, exploratory, and creative--it provides you with a very granular view into how the next token arrives and gives you as much or as little control as you want over that process.
+
 
 ## Documentation
 
