@@ -522,7 +522,7 @@ def _render_writing(choice: ChoiceSet, candidates: tuple[Candidate, ...],
         fragments.append(("class:table-row", _one_line(
             f"{candidate.rank:>5}  {_probability(candidate.raw_probability)}  {candidate.text!r}", width) + "\n"))
     fragments.append(("", "\n" * (3 - len(shown))))
-    fragments.append(("class:muted", f"{max(0, len(candidates) - 3)} more candidate rows · clear t/x prefix to restore table\n"))
+    fragments.append(("class:muted", f"{max(0, len(candidates) - 3)} more candidate rows · Ctrl+E restores full table\n"))
     fragments.append(("class:prompt-label", "Write text · Enter commits\n"))
     return fragments
 
@@ -542,6 +542,7 @@ def _render_choice(
     search_lens_active: bool = False,
     resolve_candidate: Callable[[int], Candidate] | None = None,
     context_offset: int = 0,
+    expanded_editor: bool = False,
 ) -> StyleAndTextTuples:
     width, height = _terminal_size()
     width = max(width, 36)
@@ -553,7 +554,7 @@ def _render_choice(
         remaining_tokens=remaining_tokens,
         resolve_candidate=resolve_candidate,
     )
-    if _is_writing(command_text):
+    if expanded_editor and _is_writing(command_text):
         return _render_writing(choice, tuple(candidates if display_candidates is None else display_candidates),
                                preview, width, height, context_offset, sort_by_policy)
     context = _safe_rendered_text(choice.context_text_tail)
@@ -1024,6 +1025,7 @@ def read_live_choice(
         )
     bindings = KeyBindings()
     context_offset = 0
+    expanded_editor = False
     completion_owned = bool(initial_command)
     active_table_candidates = tuple(
         candidates if display_candidates is None else display_candidates
@@ -1043,6 +1045,21 @@ def read_live_choice(
 
     def _in_authored_text() -> bool:
         return _is_writing(command_buffer.text)
+
+    def _editor_expanded() -> bool:
+        return review is None and expanded_editor and _in_authored_text()
+
+    def _reset_editor_on_command_change(buffer: Buffer) -> None:
+        nonlocal expanded_editor
+        if not _is_writing(buffer.text):
+            expanded_editor = False
+
+    command_buffer.on_text_changed += _reset_editor_on_command_change
+
+    @bindings.add("c-e", filter=Condition(lambda: review is None and _in_authored_text()))
+    def _toggle_editor(event: object) -> None:
+        nonlocal expanded_editor
+        expanded_editor = not expanded_editor
 
     review_empty = Condition(lambda: review is not None and not command_buffer.text)
     review_has_input = Condition(
@@ -1161,14 +1178,14 @@ def read_live_choice(
                                  remaining_tokens=remaining_tokens, resolve_candidate=resolve_candidate)
         rows = _context_rows(_safe_rendered_text(review.context_text_tail if review else choice.context_text_tail),
                              "" if review else _safe_rendered_text(preview.appended_text or ""), max(1, max(36, width) - 1))
-        budget = _writing_sizes(height)[1] if _in_authored_text() else max(3, min(12, height // 3))
+        budget = _writing_sizes(height)[1] if _editor_expanded() else max(3, min(12, height // 3))
         context_offset = min(max(0, len(rows) - budget), context_offset + max(1, budget - 1))
 
     @bindings.add("pagedown")
     def _context_down(event: object) -> None:
         nonlocal context_offset
         _, height = _terminal_size()
-        budget = _writing_sizes(height)[1] if _in_authored_text() else max(3, min(12, height // 3))
+        budget = _writing_sizes(height)[1] if _editor_expanded() else max(3, min(12, height // 3))
         context_offset = max(0, context_offset - max(1, budget - 1))
 
     @bindings.add("enter")
@@ -1285,6 +1302,7 @@ def read_live_choice(
                 search_lens_active,
                 resolve_candidate,
                 context_offset,
+                _editor_expanded(),
             )
         )
     )
@@ -1297,7 +1315,7 @@ def read_live_choice(
                 height=1,
             ),
             Window(input_control, height=lambda: Dimension.exact(
-                       _writing_sizes(_terminal_size()[1])[0] if review is None and _in_authored_text() else 1),
+                       _writing_sizes(_terminal_size()[1])[0] if _editor_expanded() else 1),
                    wrap_lines=True, style="class:input"),
         ]
     )
@@ -1319,7 +1337,8 @@ def read_live_choice(
                             (
                                 "Historical review is read-only; bare f forks this boundary."
                                 if review is not None
-                                else "Alt+Enter newline · Tab indent · Enter commits · PgUp/PgDn context"
+                                else ("Ctrl+E " + ("collapse" if _editor_expanded() else "expand") +
+                                      " · Alt+Enter newline · Tab indent · Enter commits")
                                 if _in_authored_text()
                                 else (
                                     (f"Next live edge in {remaining_tokens} {remaining_label} · " if remaining_tokens is not None else "q opens the live edge · ") +

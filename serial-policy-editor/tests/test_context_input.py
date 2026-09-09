@@ -68,7 +68,7 @@ def test_writing_layout_stays_fixed_as_draft_grows(height):
     choice = _choice_from_observation(runtime, observation, candidates, context_characters=0, serial=1)
     with patch('trajectory_editor.live_tui._terminal_size', return_value=(80, height)):
         outputs = [''.join(text for _, text in _render_choice(
-            choice, candidates, command, None, lambda text, mode: text, None))
+            choice, candidates, command, None, lambda text, mode: text, None, expanded_editor=True))
             for command in ['t ', 't short', 'x ' + ('long line\n' * 100)]]
     assert len({output.count('\n') for output in outputs}) == 1
     assert all('Writing' in output for output in outputs)
@@ -90,3 +90,62 @@ def test_editing_prefix_restores_layout_without_losing_draft():
     assert result == 'x draft'
     assert _is_writing(result)
     assert not _is_writing('draft')
+
+@pytest.mark.parametrize('mode', ['t', 'x'])
+def test_editor_toggle_preserves_cursor_draft_and_undo(mode, monkeypatch):
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.keys import Keys
+    from types import SimpleNamespace
+    runtime = engine(max_tokens=3)
+    observation = runtime.observe()
+    candidates = runtime.candidates(observation, count=3)
+    choice = _choice_from_observation(runtime, observation, candidates, context_characters=0, serial=1)
+
+    def exercise(app):
+        buffer = app.current_buffer
+        window = app.layout.current_window
+        toggle = next(binding for binding in app.key_bindings.bindings if binding.keys == (Keys.ControlE,))
+        def height():
+            return window.preferred_height(80, 30).preferred
+        assert height() == 1
+        buffer.insert_text('\nsecond line')
+        assert height() == 1  # Newlines never expand implicitly.
+        buffer.cursor_position = 3
+        before = buffer.document
+        buffer.save_to_undo_stack()
+        toggle.handler(SimpleNamespace(app=app))
+        assert height() > 1
+        assert buffer.document == before
+        toggle.handler(SimpleNamespace(app=app))
+        assert height() == 1
+        assert buffer.document == before
+        buffer.insert_text('Z')
+        buffer.undo()
+        assert buffer.document == before
+        toggle.handler(SimpleNamespace(app=app))
+        buffer.text = 'draft'
+        assert height() == 1
+        buffer.text = mode + ' draft'
+        assert height() == 1  # Leaving the command resets the toggle.
+        return buffer.text
+
+    monkeypatch.setattr(Application, 'run', exercise)
+    with create_pipe_input() as pipe:
+        assert read_live_choice(choice, remaining_tokens=3, candidates=candidates,
+                               resolve_insertion=lambda text, mode: text,
+                               initial_command=mode + ' draft', input_device=pipe,
+                               output_device=DummyOutput()) == mode + ' draft'
+
+
+def test_raw_text_uses_normal_table_until_expanded():
+    from trajectory_editor.live_tui import _render_choice
+    runtime = engine(max_tokens=3)
+    observation = runtime.observe()
+    candidates = runtime.candidates(observation, count=3)
+    choice = _choice_from_observation(runtime, observation, candidates, context_characters=0, serial=1)
+    for command in ['t word', 'x many\nlines\nhere']:
+        compact = ''.join(text for _, text in _render_choice(choice, candidates, command, None, lambda text, mode: text, None))
+        expanded = ''.join(text for _, text in _render_choice(choice, candidates, command, None, lambda text, mode: text, None, expanded_editor=True))
+        assert ' · Writing\n' not in compact
+        assert ' · Writing\n' in expanded
+        assert 'decode-p' in compact

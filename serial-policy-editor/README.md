@@ -659,10 +659,12 @@ by default. `--context-chars N` optionally limits it to the last N characters
 (`0`, the default, means no character limit).
 
 For `t TEXT` and `x TEXT`, **Alt+Enter** inserts a newline and **Enter** commits.
-Entering `t ` or `x ` opens a fixed writing area (about a third of the terminal)
-and reduces the candidate table to three rows. The editor scrolls with the cursor
-without moving the surrounding layout as lines are added. Removing the prefix
-restores the compact input and full table, preserving the draft. Multiline paste
+Raw-text commands start in the compact input with the normal candidate table.
+**Ctrl+E** toggles a fixed writing area (about a third of the terminal) with three
+candidate rows. Toggling preserves the draft, cursor, and undo history. The expanded
+editor scrolls without moving surrounding sections as lines are added. Newlines
+and multiline pastes do not expand it automatically. Removing the raw-text prefix
+returns to compact input; a new raw-text command starts compact. Multiline paste
 preserves newlines, blank lines, tabs, and leading/trailing whitespace. Tab inserts
 a literal tab while editing raw text. If your terminal intercepts Alt+Enter,
 press Escape followed by Enter to send the same key sequence.
