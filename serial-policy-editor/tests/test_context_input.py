@@ -52,9 +52,10 @@ def test_context_wraps_wide_characters_and_tabs():
     assert all(sum(get_cwidth(text) for _, text in row) <= 4 for row in rows)
 
 def test_default_keeps_full_context():
-    from dataclasses import replace
+    from unittest.mock import patch
     runtime = engine(max_tokens=3)
-    observation = replace(runtime.observe(), context_text='older ' * 200)
+    with patch.object(runtime.backend, "render", return_value="older " * 200):
+        observation = runtime.observe()
     choice = _choice_from_observation(runtime, observation, (), context_characters=InteractivePolicy().context_characters, serial=1)
     assert choice.context_text_tail == observation.context_text
 

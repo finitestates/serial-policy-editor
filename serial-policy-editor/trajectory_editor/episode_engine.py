@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Any
 
 import numpy as np
@@ -93,7 +94,7 @@ class Observation:
     boundary: int
     sampling_coordinate: int
     prefix_token_ids: tuple[int, ...]
-    context_text: str
+    _render_context: Callable[..., str] = field(repr=False, compare=False)
     logits: np.ndarray = field(repr=False, compare=False)
     distribution: SparseDistribution = field(repr=False, compare=False)
     proposal_token_id: int
@@ -103,6 +104,11 @@ class Observation:
     proposal_decoder_probability: float
     proposal_policy_rank: int
     statistics: ObservationStatistics = field(repr=False, compare=False)
+
+    @cached_property
+    def context_text(self) -> str:
+        """Render this captured boundary once, only when display needs it."""
+        return self._render_context(list(self.prefix_token_ids), special=True)
 
 
 @dataclass(frozen=True)
@@ -340,7 +346,7 @@ class EpisodeEngine:
             boundary=self.boundary,
             sampling_coordinate=coordinate,
             prefix_token_ids=tuple(self.token_ids),
-            context_text=self.text,
+            _render_context=self.backend.render,
             logits=logits,
             distribution=distribution,
             proposal_token_id=proposal,
