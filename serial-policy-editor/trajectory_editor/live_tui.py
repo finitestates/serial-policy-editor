@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Callable
 
 from prompt_toolkit.application import Application, get_app
@@ -430,28 +431,46 @@ def _terminal_size() -> tuple[int, int]:
         return fallback.columns, fallback.lines
 
 
-def _context_rows(context: str, proposal: str, width: int) -> list[StyleAndTextTuples]:
-    """Wrap styled context into terminal rows, preserving the proposal highlight."""
-    rows: list[StyleAndTextTuples] = [[]]
-    column = 0
-    for style, text in (("", context), ("class:proposal", proposal)):
-        for char in text:
-            if char == "\n":
+def _append_wrapped_text(rows: list[StyleAndTextTuples], column: int,
+                         text: str, style: str, width: int) -> int:
+    for char in text:
+        if char == "\n":
+            rows.append([])
+            column = 0
+            continue
+        rendered = " " * (8 - column % 8) if char == "\t" else char
+        for glyph in rendered:
+            cells = max(0, get_cwidth(glyph))
+            if column + cells > width:
                 rows.append([])
                 column = 0
-                continue
-            rendered = " " * (8 - column % 8) if char == "\t" else char
-            for glyph in rendered:
-                cells = max(0, get_cwidth(glyph))
-                if column + cells > width:
-                    rows.append([])
-                    column = 0
-                if rows[-1] and rows[-1][-1][0] == style:
-                    previous_style, previous_text = rows[-1][-1]
-                    rows[-1][-1] = (previous_style, previous_text + glyph)
-                else:
-                    rows[-1].append((style, glyph))
-                column += cells
+            if rows[-1] and rows[-1][-1][0] == style:
+                previous_style, previous_text = rows[-1][-1]
+                rows[-1][-1] = (previous_style, previous_text + glyph)
+            else:
+                rows[-1].append((style, glyph))
+            column += cells
+    return column
+
+
+@lru_cache(maxsize=1)
+def _wrapped_context(context: str, width: int):
+    """Keep only the latest context layout, with immutable cached rows."""
+    rows: list[StyleAndTextTuples] = [[]]
+    column = _append_wrapped_text(rows, 0, context, "", width)
+    return tuple(tuple(row) for row in rows), column
+
+
+@lru_cache(maxsize=1)
+def _safe_context_text(context: str) -> str:
+    return _safe_rendered_text(context)
+
+
+def _context_rows(context: str, proposal: str, width: int) -> list[StyleAndTextTuples]:
+    """Reuse history wrapping while preserving the changing proposal highlight."""
+    cached_rows, column = _wrapped_context(context, width)
+    rows = [list(row) for row in cached_rows]
+    _append_wrapped_text(rows, column, proposal, "class:proposal", width)
     return rows
 
 
@@ -496,7 +515,7 @@ def _render_writing(choice: ChoiceSet, candidates: tuple[Candidate, ...],
                     preview: ActionPreview, width: int, height: int,
                     offset: int, sort_by_policy: bool) -> StyleAndTextTuples:
     _, budget = _writing_sizes(height)
-    rows = _context_rows(_safe_rendered_text(choice.context_text_tail),
+    rows = _context_rows(_safe_context_text(choice.context_text_tail),
                          _safe_rendered_text(preview.appended_text or ""), width - 1)
     end = len(rows) - min(max(0, offset), max(0, len(rows) - budget))
     start = max(0, end - budget)
@@ -557,7 +576,7 @@ def _render_choice(
     if expanded_editor and _is_writing(command_text):
         return _render_writing(choice, tuple(candidates if display_candidates is None else display_candidates),
                                preview, width, height, context_offset, sort_by_policy)
-    context = _safe_rendered_text(choice.context_text_tail)
+    context = _safe_context_text(choice.context_text_tail)
     proposal = (
         _safe_rendered_text(preview.appended_text)
         if preview.appended_text is not None
@@ -824,7 +843,7 @@ def _render_review(
     width, height = _terminal_size()
     width = max(width, 36)
     rule = "─" * max(20, width - 1)
-    context = _safe_rendered_text(review.context_text_tail)
+    context = _safe_context_text(review.context_text_tail)
     position = dict(review.position)
     fragments: StyleAndTextTuples = [
         ("class:status-strong", f"Review boundary {review.aligned_step}"),
@@ -1176,7 +1195,7 @@ def read_live_choice(
         width, height = _terminal_size()
         preview = action_preview(choice, command_buffer.text, candidates, resolve_insertion,
                                  remaining_tokens=remaining_tokens, resolve_candidate=resolve_candidate)
-        rows = _context_rows(_safe_rendered_text(review.context_text_tail if review else choice.context_text_tail),
+        rows = _context_rows(_safe_context_text(review.context_text_tail if review else choice.context_text_tail),
                              "" if review else _safe_rendered_text(preview.appended_text or ""), max(1, max(36, width) - 1))
         budget = _writing_sizes(height)[1] if _editor_expanded() else max(3, min(12, height // 3))
         context_offset = min(max(0, len(rows) - budget), context_offset + max(1, budget - 1))
