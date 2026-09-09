@@ -659,7 +659,10 @@ by default. `--context-chars N` optionally limits it to the last N characters
 (`0`, the default, means no character limit).
 
 For `t TEXT` and `x TEXT`, **Alt+Enter** inserts a newline and **Enter** commits.
-The input area grows up to six rows and scrolls with the cursor. Multiline paste
+Entering `t ` or `x ` opens a fixed writing area (about a third of the terminal)
+and reduces the candidate table to three rows. The editor scrolls with the cursor
+without moving the surrounding layout as lines are added. Removing the prefix
+restores the compact input and full table, preserving the draft. Multiline paste
 preserves newlines, blank lines, tabs, and leading/trailing whitespace. Tab inserts
 a literal tab while editing raw text. If your terminal intercepts Alt+Enter,
 press Escape followed by Enter to send the same key sequence.

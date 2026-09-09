@@ -57,3 +57,36 @@ def test_default_keeps_full_context():
     observation = replace(runtime.observe(), context_text='older ' * 200)
     choice = _choice_from_observation(runtime, observation, (), context_characters=InteractivePolicy().context_characters, serial=1)
     assert choice.context_text_tail == observation.context_text
+
+@pytest.mark.parametrize('height', [24, 30, 50])
+def test_writing_layout_stays_fixed_as_draft_grows(height):
+    from unittest.mock import patch
+    from trajectory_editor.live_tui import _render_choice, _writing_sizes
+    runtime = engine(max_tokens=3)
+    observation = runtime.observe()
+    candidates = runtime.candidates(observation, count=3)
+    choice = _choice_from_observation(runtime, observation, candidates, context_characters=0, serial=1)
+    with patch('trajectory_editor.live_tui._terminal_size', return_value=(80, height)):
+        outputs = [''.join(text for _, text in _render_choice(
+            choice, candidates, command, None, lambda text, mode: text, None))
+            for command in ['t ', 't short', 'x ' + ('long line\n' * 100)]]
+    assert len({output.count('\n') for output in outputs}) == 1
+    assert all('Writing' in output for output in outputs)
+    assert outputs[0].count('\n') + _writing_sizes(height)[0] + 2 <= height
+    assert '101 lines' in outputs[-1]
+
+
+def test_editing_prefix_restores_layout_without_losing_draft():
+    from trajectory_editor.live_tui import _is_writing
+    runtime = engine(max_tokens=3)
+    observation = runtime.observe()
+    candidates = runtime.candidates(observation, count=3)
+    choice = _choice_from_observation(runtime, observation, candidates, context_characters=0, serial=1)
+    with create_pipe_input() as pipe:
+        pipe.send_text('t draft\x01\x1b[3~\x1b[3~x \r')
+        result = read_live_choice(choice, remaining_tokens=3, candidates=candidates,
+                                 resolve_insertion=lambda text, mode: text,
+                                 input_device=pipe, output_device=DummyOutput())
+    assert result == 'x draft'
+    assert _is_writing(result)
+    assert not _is_writing('draft')

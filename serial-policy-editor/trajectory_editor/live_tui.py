@@ -471,6 +471,62 @@ def _context_view(context: str, proposal: str, width: int, height: int,
     return fragments, end - start + 1
 
 
+def _is_writing(command: str) -> bool:
+    return command[:2].lower() in {"t ", "x "}
+
+
+def _writing_sizes(height: int) -> tuple[int, int]:
+    """Reserve a stable editor and context region, independent of draft length."""
+    editor = max(3, min(16, height // 3))
+    context = max(1, min(12, height - editor - 13))
+    return editor, context
+
+
+def _one_line(text: str, width: int) -> str:
+    text = text.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    result = ""
+    for char in text:
+        if get_cwidth(result + char) > max(1, width - 2):
+            return result + "…"
+        result += char
+    return result
+
+
+def _render_writing(choice: ChoiceSet, candidates: tuple[Candidate, ...],
+                    preview: ActionPreview, width: int, height: int,
+                    offset: int, sort_by_policy: bool) -> StyleAndTextTuples:
+    _, budget = _writing_sizes(height)
+    rows = _context_rows(_safe_rendered_text(choice.context_text_tail),
+                         _safe_rendered_text(preview.appended_text or ""), width - 1)
+    end = len(rows) - min(max(0, offset), max(0, len(rows) - budget))
+    start = max(0, end - budget)
+    fragments: StyleAndTextTuples = [
+        ("class:status-strong", f"Step {choice.aligned_step} · Writing\n"),
+        ("class:section", "DECISION BOUNDARY\n"),
+    ]
+    for row in rows[start:end]:
+        fragments.extend(row)
+        fragments.append(("", "\n"))
+    fragments.append(("", "\n" * (budget - (end - start))))
+    fragments.append(("class:muted", f"Context rows {start + 1}–{end}/{len(rows)} · PgUp/PgDn\n"))
+    if preview.kind == "insertion":
+        text = preview.appended_text or ""
+        effect = f"{preview.label} · {text.count(chr(10)) + 1} lines · {len(text)} characters"
+    else:
+        effect = f"{preview.label} · {preview.detail}"
+    fragments.append(("class:effect" if preview.valid else "class:invalid", _one_line(effect, width) + "\n"))
+    fragments.append(("class:rule", "─" * (width - 1) + "\n"))
+    fragments.append(("class:table-header", "Candidates · rank / raw probability / text\n"))
+    shown = _ordered_candidates(candidates, sort_by_policy=sort_by_policy)[:3]
+    for candidate in shown:
+        fragments.append(("class:table-row", _one_line(
+            f"{candidate.rank:>5}  {_probability(candidate.raw_probability)}  {candidate.text!r}", width) + "\n"))
+    fragments.append(("", "\n" * (3 - len(shown))))
+    fragments.append(("class:muted", f"{max(0, len(candidates) - 3)} more candidate rows · clear t/x prefix to restore table\n"))
+    fragments.append(("class:prompt-label", "Write text · Enter commits\n"))
+    return fragments
+
+
 def _render_choice(
     choice: ChoiceSet,
     candidates: tuple[Candidate, ...],
@@ -497,6 +553,9 @@ def _render_choice(
         remaining_tokens=remaining_tokens,
         resolve_candidate=resolve_candidate,
     )
+    if _is_writing(command_text):
+        return _render_writing(choice, tuple(candidates if display_candidates is None else display_candidates),
+                               preview, width, height, context_offset, sort_by_policy)
     context = _safe_rendered_text(choice.context_text_tail)
     proposal = (
         _safe_rendered_text(preview.appended_text)
@@ -956,7 +1015,7 @@ def read_live_choice(
     show_policy_rank: bool = False,
     sort_by_policy: bool = False,
 ) -> str | None:
-    """Read one command with a live preview; Enter remains the sole submit."""
+    """Read one command with a live preview and a stable raw-text editor."""
     command_buffer = Buffer(multiline=True)
     if initial_command and review is None:
         command_buffer.document = Document(
@@ -983,7 +1042,7 @@ def read_live_choice(
         command_buffer.document = Document(text, cursor_position=len(text))
 
     def _in_authored_text() -> bool:
-        return command_buffer.text[:2].lower() in {"t ", "x "}
+        return _is_writing(command_buffer.text)
 
     review_empty = Condition(lambda: review is not None and not command_buffer.text)
     review_has_input = Condition(
@@ -1102,14 +1161,15 @@ def read_live_choice(
                                  remaining_tokens=remaining_tokens, resolve_candidate=resolve_candidate)
         rows = _context_rows(_safe_rendered_text(review.context_text_tail if review else choice.context_text_tail),
                              "" if review else _safe_rendered_text(preview.appended_text or ""), max(1, max(36, width) - 1))
-        budget = max(3, min(12, height // 3))
+        budget = _writing_sizes(height)[1] if _in_authored_text() else max(3, min(12, height // 3))
         context_offset = min(max(0, len(rows) - budget), context_offset + max(1, budget - 1))
 
     @bindings.add("pagedown")
     def _context_down(event: object) -> None:
         nonlocal context_offset
         _, height = _terminal_size()
-        context_offset = max(0, context_offset - max(2, min(12, height // 3) - 1))
+        budget = _writing_sizes(height)[1] if _in_authored_text() else max(3, min(12, height // 3))
+        context_offset = max(0, context_offset - max(1, budget - 1))
 
     @bindings.add("enter")
     def _submit(event: object) -> None:
@@ -1236,7 +1296,8 @@ def read_live_choice(
                 width=Dimension.exact(2),
                 height=1,
             ),
-            Window(input_control, height=Dimension(min=1, max=6),
+            Window(input_control, height=lambda: Dimension.exact(
+                       _writing_sizes(_terminal_size()[1])[0] if review is None and _in_authored_text() else 1),
                    wrap_lines=True, style="class:input"),
         ]
     )
@@ -1252,12 +1313,14 @@ def read_live_choice(
             prompt_row,
             Window(
                 FormattedTextControl(
-                    [
+                    lambda: [
                         (
                             "class:hint",
                             (
                                 "Historical review is read-only; bare f forks this boundary."
                                 if review is not None
+                                else "Alt+Enter newline · Tab indent · Enter commits · PgUp/PgDn context"
+                                if _in_authored_text()
                                 else (
                                     (f"Next live edge in {remaining_tokens} {remaining_label} · " if remaining_tokens is not None else "q opens the live edge · ") +
                                     "Enter commits · Alt+Enter newline in t/x · PgUp/PgDn context · Ctrl+G explores rank."
