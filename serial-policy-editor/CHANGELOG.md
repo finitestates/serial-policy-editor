@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.6.dev0 — development snapshot
+
+- Use the full terminal for the live editor, historical review, and EDGE menu.
+  Anchor input at the bottom and reserve room for candidate rows and feedback.
+- Retain full context by default, with Page Up/Page Down scrolling and an optional
+  `--context-chars` limit. Support multiline raw text, pasted whitespace, and
+  explicit Ctrl+E expansion of the writing area.
+- Reuse sampler statistics when history penalties are inactive, defer context
+  decoding until display, cache context wrapping, and skip evidence loading for
+  plain text projection.
+- Keep experimental history replacement, fork-edit variations, token repair,
+  and the proposed 100-token hold default on `codex/history-edit`. The main
+  branch retains the 24-token hold default and existing replay behavior.
+- This is an unreleased development snapshot; the 0.3.5 release is unchanged.
+
 ## 0.3.5
 
 - Documentation-focused release with unchanged 0.3.4 runtime behavior, CLI

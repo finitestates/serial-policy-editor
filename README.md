@@ -1,4 +1,4 @@
-# Serial Policy Editor 0.3.5
+# Serial Policy Editor 0.3.6.dev0
 
 Steer a local language model in your terminal: choose individual tokens, insert
 text, delegate a span, and rewind or fork the result. Serial Policy Replay (SPR)
@@ -9,8 +9,13 @@ SPE supports **llama.cpp (GGUF)** and **Hugging Face Transformers (local model
 directories)**. A SQLite workspace keeps episodes, editing actions, and token
 evidence for resumption, replay, and text or evidence projection.
 
-**0.3.5 is 0.3.4 with improved documentation and updated release metadata.**
-There are no new features, command-line switches, or workspace-format changes.
+**0.3.6.dev0 is a development snapshot toward 0.3.6, not the final release.**
+It includes full-screen editing, scrollable context, multiline input, and
+performance improvements. The latest released version remains
+[0.3.5](https://github.com/finitestates/serial-policy-editor/tree/v0.3.5).
+Experimental history replacement and fork-edit variations live separately on
+[`codex/history-edit`](https://github.com/finitestates/serial-policy-editor/tree/codex/history-edit);
+they are not included in `main`.
 
 ## Getting started
 

@@ -27,3 +27,6 @@ episodes.sqlite3
 # Historical snapshots and original archives are preserved, but are not part
 # of the active source baseline.
 prior-art/
+
+# Separate local checkouts for experimental branches
+.worktrees/
