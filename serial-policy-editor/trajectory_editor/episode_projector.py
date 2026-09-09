@@ -208,11 +208,30 @@ def project_episode(
     if annotations not in {"none", "inline", "footnotes"}:
         raise EditorError("annotations must be none, inline, or footnotes")
     episode = store.get_episode(episode_id)
+    base = str(episode["initial_text"]) if include_initial else ""
+    if not (
+        annotations != "none"
+        or with_loss
+        or with_rank
+        or with_policy_rank
+        or full_evidence
+        or with_model_probs
+    ):
+        # Full-sequence detokenization is authoritative for the seamless view.
+        text = base + str(episode["visible_text"])
+        if with_lineage:
+            text += "\n\n" + project_lineage(store, episode_id)
+        return EpisodeProjection(
+            episode_id=episode_id,
+            text=text,
+            annotations=(),
+            status=str(episode["status"]),
+            terminal_reason=episode.get("terminal_reason"),
+        )
     tokens = store.tokens(episode_id)
     actions = store.actions(episode_id)
     interactions = store.interactions(episode_id)
     actions_by_ordinal = {int(action["ordinal"]): action for action in actions}
-    base = str(episode["initial_text"]) if include_initial else ""
     visible = [token for token in tokens if bool(token["realized_visible"])]
     notes_by_boundary: dict[int, list[str]] = {}
     for interaction in interactions:
@@ -263,16 +282,6 @@ def project_episode(
         if evidence:
             pieces.append("{" + ", ".join(evidence) + "}")
 
-    if not (
-        annotations != "none"
-        or with_loss
-        or with_rank
-        or with_policy_rank
-        or full_evidence
-        or with_model_probs
-    ):
-        # Full-sequence detokenization is authoritative for the seamless view.
-        pieces = [base, str(episode["visible_text"])]
     if footnotes:
         pieces.append("\n\n")
         pieces.extend(
