@@ -60,6 +60,13 @@ def _validated_logits(logits: np.ndarray) -> np.ndarray:
     return values
 
 
+def _validated_history(history_token_ids, vocabulary_size: int) -> np.ndarray:
+    history = np.asarray(history_token_ids, dtype=np.int64)
+    if history.ndim != 1 or np.any(history < 0) or np.any(history >= vocabulary_size):
+        raise ValueError("history token ids must address the decoder vocabulary")
+    return history
+
+
 def _history_penalty_surface(
     values: np.ndarray,
     config: SamplingConfig,
@@ -71,9 +78,7 @@ def _history_penalty_surface(
         if config.history_penalties_active:
             raise ValueError("active history penalties require exact prefix token ids")
         return values.copy(), np.zeros(len(values), dtype=np.int64), 0
-    history = np.asarray(history_token_ids, dtype=np.int64)
-    if history.ndim != 1 or np.any(history < 0) or np.any(history >= len(values)):
-        raise ValueError("history token ids must address the decoder vocabulary")
+    history = _validated_history(history_token_ids, len(values))
     if config.repeat_last_n == 0 or not len(history):
         considered = history[:0]
     elif config.repeat_last_n == -1:
@@ -193,13 +198,23 @@ class ObservationStatistics:
 
     def __init__(self, logits, config, history_token_ids):
         self.logits = _validated_logits(logits).copy()
-        self.adjusted, _, _ = _history_penalty_surface(
-            self.logits, config, history_token_ids
-        )
+        penalties_active = config.history_penalties_active
+        if penalties_active:
+            self.adjusted, _, _ = _history_penalty_surface(
+                self.logits, config, history_token_ids
+            )
+        else:
+            if history_token_ids is not None:
+                _validated_history(history_token_ids, len(self.logits))
+            self.adjusted = self.logits
         self.maximum = float(np.max(self.logits))
-        self.denominator = float(np.sum(np.exp(self.logits - self.maximum)))
+        exponentials = np.exp(self.logits - self.maximum)
+        self.denominator = float(np.sum(exponentials))
         self.log_z = self.maximum + float(np.log(self.denominator))
-        self.policy_probabilities = _softmax(self.adjusted)
+        self.policy_probabilities = (
+            _softmax(self.adjusted) if penalties_active
+            else exponentials / self.denominator
+        )
         _, scaled, stages = _stages_from_adjusted(self.adjusted, config)
         ids = stages["after_min_p"]
         assert ids is not None
@@ -210,10 +225,14 @@ class ObservationStatistics:
         ):
             array.setflags(write=False)
         self._raw_ranks: dict[int, int] = {}
-        self._policy_ranks: dict[int, int] = {}
+        self._policy_ranks: dict[int, int] = (
+            {} if penalties_active else self._raw_ranks
+        )
         self._ordered: list[int] = []
 
     def raw_probabilities(self, token_ids):
+        if self.adjusted is self.logits:
+            return self.policy_probabilities[list(token_ids)]
         return np.exp(self.logits[list(token_ids)] - self.maximum) / self.denominator
 
     def raw_nll(self, token_id: int) -> float:

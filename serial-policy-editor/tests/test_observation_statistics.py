@@ -44,6 +44,7 @@ def test_statistics_match_existing_math(temperature, penalties):
 
 def test_menu_and_accept_prepare_once():
     runtime = engine()
+    runtime.sampling = replace(runtime.sampling, repeat_penalty=1.2)
     with patch(
         "trajectory_editor.sampling._history_penalty_surface",
         wraps=__import__("trajectory_editor.sampling", fromlist=[""])._history_penalty_surface,
@@ -113,3 +114,63 @@ def test_termination_rejects_current_observation():
     runtime.terminate()
     with pytest.raises(EditorError, match="stale"):
         runtime.candidates(observation)
+
+
+@pytest.mark.parametrize("config", [
+    SamplingConfig(),
+    SamplingConfig(repeat_last_n=0, repeat_penalty=1.5,
+                   presence_penalty=0.5, frequency_penalty=0.2),
+])
+def test_inactive_penalties_reuse_raw_statistics(config):
+    values = np.array([2.0, 2.0, -1.0, 0.0])
+    with patch("trajectory_editor.sampling._history_penalty_surface") as prepare:
+        stats = ObservationStatistics(values, config, [0, 0, 2])
+        prepare.assert_not_called()
+    assert stats.adjusted is stats.logits
+    assert stats._policy_ranks is stats._raw_ranks
+    assert not stats.adjusted.flags.writeable
+    assert not stats.policy_probabilities.flags.writeable
+    ids = stats.top_raw_ids(4)
+    rows = policy_token_evidence(values, config, [0, 0, 2], ids)
+    assert stats.raw_probabilities(ids).tolist() == [raw_probability(values, i) for i in ids]
+    for token, row in zip(ids, rows):
+        assert stats.policy_rank(token) == row["policy_rank"]
+        assert stats.policy_probabilities[token] == row["policy_probability"]
+
+
+@pytest.mark.parametrize("history", [[-1], [4], [[0]]])
+def test_inactive_penalties_still_validate_history(history):
+    with pytest.raises(ValueError, match="history token ids"):
+        ObservationStatistics(np.zeros(4), SamplingConfig(), history)
+
+
+def test_history_penalties_toggle_mid_episode():
+    runtime = engine(max_tokens=8)
+    runtime.apply(Accept())
+    off = runtime.observe()
+    config = runtime.sampling
+    runtime.sampling = replace(config, presence_penalty=20.0, repeat_last_n=-1)
+    with pytest.raises(EditorError, match="stale"):
+        runtime.candidates(off)
+    on = runtime.observe()
+    token = runtime.visible_token_ids[0]
+    assert on.statistics.adjusted[token] == on.logits[token] - 20.0
+    assert on.statistics.policy_rank(token) != on.statistics.raw_rank(token)
+    ids = list(range(len(on.logits)))
+    rows = policy_token_evidence(on.logits, runtime.sampling, runtime.token_ids, ids)
+    for i, row in zip(ids, rows):
+        assert on.statistics.policy_rank(i) == row["policy_rank"]
+        assert on.statistics.policy_probabilities[i] == row["policy_probability"]
+        assert on.statistics.raw_rank(i) == off.statistics.raw_rank(i)
+    np.testing.assert_array_equal(on.statistics.raw_probabilities(ids), off.statistics.raw_probabilities(ids))
+    expected = sampling_distribution(on.logits, runtime.sampling, runtime.token_ids)
+    np.testing.assert_array_equal(on.distribution.ids, expected.ids)
+    np.testing.assert_array_equal(on.distribution.probabilities, expected.probabilities)
+    runtime.sampling = config
+    with pytest.raises(EditorError, match="stale"):
+        runtime.candidates(on)
+    restored = runtime.observe()
+    assert restored.statistics.adjusted is restored.statistics.logits
+    np.testing.assert_array_equal(restored.distribution.ids, off.distribution.ids)
+    np.testing.assert_array_equal(restored.distribution.probabilities, off.distribution.probabilities)
+    np.testing.assert_array_equal(restored.statistics.policy_probabilities, off.statistics.policy_probabilities)
