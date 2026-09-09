@@ -139,7 +139,7 @@ def read_live_edge_command(
     )
     root = HSplit(
         [
-            Window(header, wrap_lines=True, dont_extend_height=True),
+            Window(header, wrap_lines=True),
             prompt_row,
             Window(
                 footer,
@@ -154,7 +154,7 @@ def read_live_edge_command(
         layout=layout,
         key_bindings=bindings,
         style=_live_style(theme),
-        full_screen=False,
+        full_screen=True,
         erase_when_done=True,
         mouse_support=False,
         input=input_device,  # type: ignore[arg-type]

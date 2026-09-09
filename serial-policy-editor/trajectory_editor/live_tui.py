@@ -418,13 +418,6 @@ def _terminal_size() -> tuple[int, int]:
         app = get_app()
         size = app.output.get_size()
         rows = int(size.rows)
-        try:
-            rows -= int(app.renderer.rows_above_layout)
-        except Exception:
-            # Before prompt_toolkit receives its cursor-position response, the
-            # inline layout height can be unknown. The conservative row budget
-            # below still protects the fixed input shell in that first frame.
-            pass
         return int(size.columns), max(1, rows)
     except Exception:
         fallback = shutil.get_terminal_size(fallback=(100, 30))
@@ -474,10 +467,26 @@ def _context_rows(context: str, proposal: str, width: int) -> list[StyleAndTextT
     return rows
 
 
+def _feedback_line_limit(height: int) -> int:
+    return max(1, height // 5 - 1)
+
+
+def _choice_context_budget(height: int, candidate_count: int,
+                           feedback: ChoiceFeedback | None, view_rows: int = 0) -> int:
+    feedback_rows = 0
+    if feedback is not None:
+        shown = min(len(feedback.lines), _feedback_line_limit(height))
+        feedback_rows = 2 + shown + int(shown < len(feedback.lines))
+    # Reserve the input/footer, headings, and candidate overflow indicators first.
+    available = max(2, height - 16 - feedback_rows - view_rows)
+    table = min(candidate_count, max(4, available // 3))
+    return max(1, available - table)
+
+
 def _context_view(context: str, proposal: str, width: int, height: int,
-                  offset: int = 0) -> tuple[StyleAndTextTuples, int]:
+                  offset: int = 0, *, budget: int | None = None) -> tuple[StyleAndTextTuples, int]:
     rows = _context_rows(context, proposal, max(1, width - 1))
-    budget = max(3, min(12, height // 3))
+    budget = max(1, height // 3) if budget is None else max(1, budget)
     offset = min(max(0, offset), max(0, len(rows) - budget))
     end = len(rows) - offset
     start = max(0, end - budget)
@@ -496,8 +505,8 @@ def _is_writing(command: str) -> bool:
 
 def _writing_sizes(height: int) -> tuple[int, int]:
     """Reserve a stable editor and context region, independent of draft length."""
-    editor = max(3, min(16, height // 3))
-    context = max(1, min(12, height - editor - 13))
+    editor = max(3, height // 3)
+    context = max(1, height - editor - 14)
     return editor, context
 
 
@@ -582,10 +591,7 @@ def _render_choice(
         if preview.appended_text is not None
         else None
     )
-    context_fragments, approximate_context_lines = _context_view(
-        context, proposal or "", width, height, context_offset,
-    )
-    feedback_line_limit = max(2, height // 4)
+    feedback_line_limit = _feedback_line_limit(height)
     displayed_feedback_lines = (
         ()
         if feedback is None
@@ -626,8 +632,14 @@ def _render_choice(
     )
     current_view_is_lens = search_lens_active
     view_status_rows = int(external_focus is not None) + int(current_view_is_lens)
+    context_budget = _choice_context_budget(
+        height, len(table_candidates), feedback, view_status_rows,
+    )
+    context_fragments, approximate_context_lines = _context_view(
+        context, proposal or "", width, height, context_offset, budget=context_budget,
+    )
     maximum_rows = max(
-        4,
+        1,
         height
         - approximate_context_lines
         - 15
@@ -691,8 +703,8 @@ def _render_choice(
         fragments.extend(
             [
                 ("class:proposal-label", preview.label),
-                ("class:muted", f" · rendered {repr(preview.appended_text or '')}"),
-                ("class:muted", f" · {preview.detail}\n"),
+                ("class:muted", _one_line(f" · rendered {repr(preview.appended_text or '')}", max(1, width - len(preview.label)))),
+                ("class:muted", "\n"),
             ]
         )
     else:
@@ -816,7 +828,7 @@ def _render_choice(
     fragments.extend(
         [
             ("class:help-key", "accept"),
-            ("class:muted", " proposal  "),
+            ("class:muted", "  "),
             ("class:help-key", "rank"),
             ("class:muted", " choose  "),
             ("class:help-key", "tab/⇧tab"),
@@ -826,8 +838,7 @@ def _render_choice(
             ("class:help-key", "h [N]"),
             ("class:muted", " hold  "),
             ("class:help-key", "?"),
-            ("class:muted", " all commands\n"),
-            ("class:prompt-label", "Teacher action · Enter commits\n"),
+            ("class:muted", " help\n"),
         ]
     )
     return fragments
@@ -851,7 +862,9 @@ def _render_review(
         ("class:rule", rule + "\n"),
         ("class:section", "HISTORICAL BOUNDARY REVIEW\n\n"),
     ]
-    context_fragments, _ = _context_view(context, "", width, height, context_offset)
+    context_fragments, _ = _context_view(
+        context, "", width, height, context_offset, budget=max(1, height - 15),
+    )
     fragments.extend(context_fragments)
     fragments.append(("", "\n"))
     if position.get("kind") == "edge":
@@ -1189,6 +1202,17 @@ def read_live_choice(
     def _insert_newline(event: object) -> None:
         command_buffer.insert_text("\n")
 
+    def _scroll_budget(height: int, preview: ActionPreview) -> int:
+        if _editor_expanded():
+            return _writing_sizes(height)[1]
+        if review is not None:
+            return max(1, height - 15)
+        outside_table = (preview.candidate_rank is not None and
+            any(row.rank == preview.candidate_rank for row in candidates) and
+            not any(row.rank == preview.candidate_rank for row in active_table_candidates))
+        return _choice_context_budget(height, len(active_table_candidates), feedback,
+                                      int(search_lens_active) + int(outside_table))
+
     @bindings.add("pageup")
     def _context_up(event: object) -> None:
         nonlocal context_offset
@@ -1197,14 +1221,16 @@ def read_live_choice(
                                  remaining_tokens=remaining_tokens, resolve_candidate=resolve_candidate)
         rows = _context_rows(_safe_context_text(review.context_text_tail if review else choice.context_text_tail),
                              "" if review else _safe_rendered_text(preview.appended_text or ""), max(1, max(36, width) - 1))
-        budget = _writing_sizes(height)[1] if _editor_expanded() else max(3, min(12, height // 3))
+        budget = _scroll_budget(height, preview)
         context_offset = min(max(0, len(rows) - budget), context_offset + max(1, budget - 1))
 
     @bindings.add("pagedown")
     def _context_down(event: object) -> None:
         nonlocal context_offset
         _, height = _terminal_size()
-        budget = _writing_sizes(height)[1] if _editor_expanded() else max(3, min(12, height // 3))
+        preview = action_preview(choice, command_buffer.text, candidates, resolve_insertion,
+                                 remaining_tokens=remaining_tokens, resolve_candidate=resolve_candidate)
+        budget = _scroll_budget(height, preview)
         context_offset = max(0, context_offset - max(1, budget - 1))
 
     @bindings.add("enter")
@@ -1344,7 +1370,6 @@ def read_live_choice(
             Window(
                 choice_control,
                 wrap_lines=True,
-                dont_extend_height=True,
                 always_hide_cursor=True,
             ),
             prompt_row,
@@ -1378,7 +1403,7 @@ def read_live_choice(
         layout=layout,
         key_bindings=bindings,
         style=_live_style(theme),
-        full_screen=False,
+        full_screen=True,
         erase_when_done=True,
         mouse_support=False,
         input=input_device,  # type: ignore[arg-type]

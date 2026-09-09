@@ -652,8 +652,10 @@ Third-party dependencies and model weights remain subject to their own licenses.
 
 ### Context scrolling and multiline input
 
-The live decision boundary and historical review show a terminal-sized context
-window, starting at the newest text. **Page Up / Page Down** scroll through older
+The live editor, historical review, and EDGE menu use the full terminal screen,
+with input anchored at the bottom. Context and the writing area grow when the
+terminal gets taller. The context window starts at the newest text; space is
+reserved for candidate rows and feedback. **Page Up / Page Down** scroll through older
 and newer context; the row indicator shows your position. All context is retained
 by default. `--context-chars N` optionally limits it to the last N characters
 (`0`, the default, means no character limit).
