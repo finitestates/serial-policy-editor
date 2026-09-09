@@ -17,6 +17,7 @@ from prompt_toolkit.layout.containers import HSplit, VSplit, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.layout import Layout
+from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.styles import Style
 
 from .domain import Candidate, ChoiceSet, EditorError, InsertMode
@@ -429,6 +430,47 @@ def _terminal_size() -> tuple[int, int]:
         return fallback.columns, fallback.lines
 
 
+def _context_rows(context: str, proposal: str, width: int) -> list[StyleAndTextTuples]:
+    """Wrap styled context into terminal rows, preserving the proposal highlight."""
+    rows: list[StyleAndTextTuples] = [[]]
+    column = 0
+    for style, text in (("", context), ("class:proposal", proposal)):
+        for char in text:
+            if char == "\n":
+                rows.append([])
+                column = 0
+                continue
+            rendered = " " * (8 - column % 8) if char == "\t" else char
+            for glyph in rendered:
+                cells = max(0, get_cwidth(glyph))
+                if column + cells > width:
+                    rows.append([])
+                    column = 0
+                if rows[-1] and rows[-1][-1][0] == style:
+                    previous_style, previous_text = rows[-1][-1]
+                    rows[-1][-1] = (previous_style, previous_text + glyph)
+                else:
+                    rows[-1].append((style, glyph))
+                column += cells
+    return rows
+
+
+def _context_view(context: str, proposal: str, width: int, height: int,
+                  offset: int = 0) -> tuple[StyleAndTextTuples, int]:
+    rows = _context_rows(context, proposal, max(1, width - 1))
+    budget = max(3, min(12, height // 3))
+    offset = min(max(0, offset), max(0, len(rows) - budget))
+    end = len(rows) - offset
+    start = max(0, end - budget)
+    fragments: StyleAndTextTuples = []
+    for row in rows[start:end]:
+        fragments.extend(row)
+        fragments.append(("", "\n"))
+    fragments.append(("class:muted",
+                      f"Context rows {start + 1}–{end}/{len(rows)} · PgUp/PgDn scroll\n"))
+    return fragments, end - start + 1
+
+
 def _render_choice(
     choice: ChoiceSet,
     candidates: tuple[Candidate, ...],
@@ -443,6 +485,7 @@ def _render_choice(
     display_candidates: tuple[Candidate, ...] | None = None,
     search_lens_active: bool = False,
     resolve_candidate: Callable[[int], Candidate] | None = None,
+    context_offset: int = 0,
 ) -> StyleAndTextTuples:
     width, height = _terminal_size()
     width = max(width, 36)
@@ -460,11 +503,8 @@ def _render_choice(
         if preview.appended_text is not None
         else None
     )
-    context_width = max(20, width - 4)
-    rendered_context = "…" + context + (proposal or "")
-    approximate_context_lines = sum(
-        max(1, (len(line) + context_width - 1) // context_width)
-        for line in rendered_context.split("\n")
+    context_fragments, approximate_context_lines = _context_view(
+        context, proposal or "", width, height, context_offset,
     )
     feedback_line_limit = max(2, height // 4)
     displayed_feedback_lines = (
@@ -532,13 +572,11 @@ def _render_choice(
             ("class:muted", (f"{remaining_tokens} tokens remaining\n" if remaining_tokens is not None else "No token budget\n")),
             ("class:rule", rule + "\n"),
             ("class:section", "DECISION BOUNDARY\n\n"),
-            ("class:muted", "…"),
-            ("", context),
+
         ]
     )
-    if proposal is not None:
-        fragments.append(("class:proposal", proposal))
-    fragments.append(("", "\n\n"))
+    fragments.extend(context_fragments)
+    fragments.append(("", "\n"))
 
     if preview.kind == "candidate":
         rank = (
@@ -720,9 +758,10 @@ def _render_review(
     review: BoundaryReview,
     *,
     seamless: bool = False,
+    context_offset: int = 0,
 ) -> StyleAndTextTuples:
     """Render one journal-backed historical boundary, never a live preview."""
-    width, _ = _terminal_size()
+    width, height = _terminal_size()
     width = max(width, 36)
     rule = "─" * max(20, width - 1)
     context = _safe_rendered_text(review.context_text_tail)
@@ -732,9 +771,10 @@ def _render_review(
         ("class:muted", f" · active boundary {review.active_aligned_step}\n"),
         ("class:rule", rule + "\n"),
         ("class:section", "HISTORICAL BOUNDARY REVIEW\n\n"),
-        ("class:muted", "…"),
-        ("", context + "\n\n"),
     ]
+    context_fragments, _ = _context_view(context, "", width, height, context_offset)
+    fragments.extend(context_fragments)
+    fragments.append(("", "\n"))
     if position.get("kind") == "edge":
         fragments.extend(
             [
@@ -917,13 +957,14 @@ def read_live_choice(
     sort_by_policy: bool = False,
 ) -> str | None:
     """Read one command with a live preview; Enter remains the sole submit."""
-    command_buffer = Buffer(multiline=False)
+    command_buffer = Buffer(multiline=True)
     if initial_command and review is None:
         command_buffer.document = Document(
             initial_command,
             cursor_position=len(initial_command),
         )
     bindings = KeyBindings()
+    context_offset = 0
     completion_owned = bool(initial_command)
     active_table_candidates = tuple(
         candidates if display_candidates is None else display_candidates
@@ -1049,6 +1090,27 @@ def read_live_choice(
             if rank >= 1 and (choice.vocabulary_size is None or rank <= choice.vocabulary_size):
                 event.app.exit(result=f"ms {rank}")  # type: ignore[attr-defined]
 
+    @bindings.add("escape", "enter", filter=Condition(lambda: review is None and _in_authored_text()))
+    def _insert_newline(event: object) -> None:
+        command_buffer.insert_text("\n")
+
+    @bindings.add("pageup")
+    def _context_up(event: object) -> None:
+        nonlocal context_offset
+        width, height = _terminal_size()
+        preview = action_preview(choice, command_buffer.text, candidates, resolve_insertion,
+                                 remaining_tokens=remaining_tokens, resolve_candidate=resolve_candidate)
+        rows = _context_rows(_safe_rendered_text(review.context_text_tail if review else choice.context_text_tail),
+                             "" if review else _safe_rendered_text(preview.appended_text or ""), max(1, max(36, width) - 1))
+        budget = max(3, min(12, height // 3))
+        context_offset = min(max(0, len(rows) - budget), context_offset + max(1, budget - 1))
+
+    @bindings.add("pagedown")
+    def _context_down(event: object) -> None:
+        nonlocal context_offset
+        _, height = _terminal_size()
+        context_offset = max(0, context_offset - max(2, min(12, height // 3) - 1))
+
     @bindings.add("enter")
     def _submit(event: object) -> None:
         result = command_buffer.text
@@ -1144,6 +1206,7 @@ def read_live_choice(
                 lambda: _render_review(
                     review,
                     seamless=seamless,
+                    context_offset=context_offset,
                 )
             )
             if review is not None
@@ -1161,6 +1224,7 @@ def read_live_choice(
                 display_candidates,
                 search_lens_active,
                 resolve_candidate,
+                context_offset,
             )
         )
     )
@@ -1172,7 +1236,8 @@ def read_live_choice(
                 width=Dimension.exact(2),
                 height=1,
             ),
-            Window(input_control, height=1, style="class:input"),
+            Window(input_control, height=Dimension(min=1, max=6),
+                   wrap_lines=True, style="class:input"),
         ]
     )
     remaining_label = "token" if remaining_tokens == 1 else "tokens"
@@ -1195,7 +1260,7 @@ def read_live_choice(
                                 if review is not None
                                 else (
                                     (f"Next live edge in {remaining_tokens} {remaining_label} · " if remaining_tokens is not None else "q opens the live edge · ") +
-                                    "Enter selects · Ctrl+G explores a numeric rank · ms N opens its neighborhood."
+                                    "Enter commits · Alt+Enter newline in t/x · PgUp/PgDn context · Ctrl+G explores rank."
                                 )
                             ),
                         )

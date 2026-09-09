@@ -92,7 +92,7 @@ class InteractivePolicy:
         menu_size: int = 12,
         search_radius: int = 3,
         default_hold_tokens: int = 24,
-        context_characters: int = 320,
+        context_characters: int = 0,
         manual_acceptance: bool = False,
         show_policy_rank: bool = False,
         store: EpisodeStore | None = None,

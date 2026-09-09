@@ -649,3 +649,17 @@ Copyright (c) 2026 Graham Christopher Andrews.
 
 Serial Policy Editor is released under the [MIT License](LICENSE).
 Third-party dependencies and model weights remain subject to their own licenses.
+
+### Context scrolling and multiline input
+
+The live decision boundary and historical review show a terminal-sized context
+window, starting at the newest text. **Page Up / Page Down** scroll through older
+and newer context; the row indicator shows your position. All context is retained
+by default. `--context-chars N` optionally limits it to the last N characters
+(`0`, the default, means no character limit).
+
+For `t TEXT` and `x TEXT`, **Alt+Enter** inserts a newline and **Enter** commits.
+The input area grows up to six rows and scrolls with the cursor. Multiline paste
+preserves newlines, blank lines, tabs, and leading/trailing whitespace. Tab inserts
+a literal tab while editing raw text. If your terminal intercepts Alt+Enter,
+press Escape followed by Enter to send the same key sequence.

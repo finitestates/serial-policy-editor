@@ -145,7 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--table-depth", type=int, default=12)
     parser.add_argument("--search-radius", type=int, default=3)
     parser.add_argument("--hold-default", type=int, default=24)
-    parser.add_argument("--context-chars", type=int, default=320)
+    parser.add_argument("--context-chars", type=int, default=0, help="Context character limit (0 keeps all context)")
     parser.add_argument("--plain-ui", action="store_true")
     parser.add_argument(
         "--cache",
