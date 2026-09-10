@@ -19,6 +19,7 @@ transformers-bnb = ["torch>=2.1", "transformers>=4.45,<6", "bitsandbytes>=0.43"]
 
 [project.scripts]
 policy-editor = "trajectory_editor.episode_cli:main"
+policy-editor-server = "trajectory_editor.headless:main"
 
 [tool.setuptools]
 packages = ["trajectory_editor"]
@@ -30,3 +31,6 @@ markers = [
     "llama_smoke: opt-in integration tests using a real local GGUF model",
     "transformers_smoke: opt-in integration tests using a real local Hugging Face model",
      ]
+
+[tool.setuptools.package-data]
+trajectory_editor = ["web/*.html", "web/*.css", "web/*.js"]

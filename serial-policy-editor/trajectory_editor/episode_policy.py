@@ -107,6 +107,7 @@ class EpisodeRunner:
         tape: Sequence[TapeStep] | ReplayPlan | None = None,
         live_policy: LivePolicy | None = None,
         stop_after_tape: bool = True,
+        max_live_actions: int | None = None,
     ) -> RunResult:
         outcomes: list[ActionOutcome] = []
         replayed = 0
@@ -185,8 +186,10 @@ class EpisodeRunner:
             )
             if outcomes and outcomes[-1].stop_reason == "replay-eog":
                 should_run_live = False
+            live_actions = 0
             while (
-                should_run_live
+                (max_live_actions is None or live_actions < max_live_actions)
+                and should_run_live
                 and not self.engine.ended
                 and not self.engine.checkpointed
                 and live_policy is not None
@@ -196,6 +199,7 @@ class EpisodeRunner:
                 active_action = action
                 executing_replay = False
                 outcome = self.engine.apply(action)
+                live_actions += 1
                 self.store.record_action(self.episode_id, ordinal, outcome)
                 outcomes.append(outcome)
                 ordinal += 1

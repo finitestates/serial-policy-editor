@@ -674,6 +674,11 @@ preserves newlines, blank lines, tabs, and leading/trailing whitespace. Tab inse
 a literal tab while editing raw text. If your terminal intercepts Alt+Enter,
 press Escape followed by Enter to send the same key sequence.
 
+## Headless preview
+
+The `codex/0.3.6-headless` branch includes a local HTTP service and browser editor.
+See [HEADLESS.md](HEADLESS.md) for launch instructions, the API contract, and preview limits.
+
 ### KV cache precision (llama.cpp)
 
 Use `--cache-type-k` and `--cache-type-v` to choose `f16`, `q8_0`, or
@@ -689,5 +694,6 @@ They can change token probabilities and replay results; speed and compatibility
 depend on the model and backend. Quantized V requires Flash Attention, which SPE
 requests by default; do not combine it with `--no-flash-attn`.
 Settings are saved with episodes and restored on resume, fork, and replay;
-explicit launch options override saved settings. `--cache off` controls prefix reuse,
+explicit launch options override saved settings. The local headless server
+accepts the same two cache-precision options. `--cache off` controls prefix reuse,
 not cache precision.
