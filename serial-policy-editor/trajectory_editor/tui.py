@@ -8,9 +8,10 @@ import pydoc
 import re
 import sys
 import termios
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Iterator, Mapping, Protocol
 
 from .domain import Candidate, ChoiceSet, EditAction, EditorError, InsertMode
 from .ui_themes import resolve_live_theme
@@ -70,6 +71,7 @@ class TerminalIO:
             and sys.stdout.isatty()
             and importlib.util.find_spec("prompt_toolkit") is not None
         )
+        self._live_session: object | None = None
 
     @property
     def supports_live_choices(self) -> bool:
@@ -78,6 +80,25 @@ class TerminalIO:
     @property
     def live_theme(self) -> str:
         return self._live_theme
+
+    @contextmanager
+    def live_session(self) -> Iterator[object | None]:
+        """Own the alternate screen for one complete interactive episode."""
+        if not self._live_choices:
+            yield None
+            return
+
+        from .live_tui import PersistentFullscreenSession
+
+        previous = self._live_session
+        if previous is not None:
+            raise RuntimeError("live session is already active")
+        with PersistentFullscreenSession() as session:
+            self._live_session = session
+            try:
+                yield session
+            finally:
+                self._live_session = previous
 
     def read_choice(
         self,
@@ -103,6 +124,8 @@ class TerminalIO:
             raise RuntimeError("live choice input is not available")
         from .live_tui import read_live_choice
 
+        live_session = self._live_session
+
         return read_live_choice(
             choice,
             remaining_tokens=remaining_tokens,
@@ -121,6 +144,16 @@ class TerminalIO:
             show_policy_rank=show_policy_rank,
             sort_by_policy=sort_by_policy,
             theme=self._live_theme,
+            input_device=(
+                getattr(live_session, "input_device", None)
+                if live_session is not None
+                else None
+            ),
+            output_device=(
+                getattr(live_session, "output_device", None)
+                if live_session is not None
+                else None
+            ),
         )
 
     def read_live_edge_command(
@@ -137,6 +170,8 @@ class TerminalIO:
             raise RuntimeError("live edge input is not available")
         from .edge_tui import read_live_edge_command
 
+        live_session = self._live_session
+
         return read_live_edge_command(
             episode_id=episode_id,
             boundary=boundary,
@@ -144,6 +179,16 @@ class TerminalIO:
             remaining_tokens=remaining_tokens,
             sampler_summary=sampler_summary,
             theme=self._live_theme,
+            input_device=(
+                getattr(live_session, "input_device", None)
+                if live_session is not None
+                else None
+            ),
+            output_device=(
+                getattr(live_session, "output_device", None)
+                if live_session is not None
+                else None
+            ),
         )
 
     def read(self, prompt: str) -> str | None:

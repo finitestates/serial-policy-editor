@@ -155,7 +155,9 @@ def read_live_edge_command(
         key_bindings=bindings,
         style=_live_style(theme),
         full_screen=True,
-        erase_when_done=True,
+        # The outer live session owns the alternate screen and the visible
+        # frame should remain until the next edge surface is rendered.
+        erase_when_done=False,
         mouse_support=False,
         input=input_device,  # type: ignore[arg-type]
         output=output_device,  # type: ignore[arg-type]

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import shutil
+import sys
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Callable
 
-from prompt_toolkit.application import Application, get_app
+from prompt_toolkit.application import Application, create_app_session, get_app
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition
@@ -34,6 +36,90 @@ from .ui_themes import DEFAULT_LIVE_THEME
 
 
 InsertionResolver = Callable[[str, InsertMode], str]
+
+
+class _PersistentAlternateScreenOutput:
+    """Proxy an output while an outer editor session owns its screen."""
+
+    def __init__(self, output: object) -> None:
+        self._output = output
+
+    def enter_alternate_screen(self) -> None:
+        # The outer session entered it once.  Let each temporary application
+        # maintain its own renderer state without touching the terminal buffer.
+        return None
+
+    def quit_alternate_screen(self) -> None:
+        # The outer session restores the terminal after the editing loop.
+        return None
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._output, name)
+
+
+class PersistentFullscreenSession(
+    AbstractContextManager["PersistentFullscreenSession"]
+):
+    """Keep prompt-toolkit's alternate screen active across live surfaces."""
+
+    def __init__(
+        self,
+        *,
+        input_device: object | None = None,
+        output_device: object | None = None,
+    ) -> None:
+        self._input_device = input_device
+        self._output_device = output_device
+        self._app_session: object | None = None
+        self._terminal_output: object | None = None
+        self.input_device: object | None = None
+        self.output_device: object | None = None
+
+    def __enter__(self) -> "PersistentFullscreenSession":
+        if self._app_session is not None:
+            raise RuntimeError("fullscreen session is already active")
+
+        app_session = create_app_session(
+            input=self._input_device,
+            output=self._output_device,
+        )
+        session = app_session.__enter__()
+        terminal_output = session.output
+        self._app_session = app_session
+        self._terminal_output = terminal_output
+        try:
+            terminal_output.enter_alternate_screen()
+            terminal_output.flush()
+            self.input_device = session.input
+            self.output_device = _PersistentAlternateScreenOutput(terminal_output)
+        except BaseException:
+            self._app_session = None
+            self._terminal_output = None
+            app_session.__exit__(*sys.exc_info())
+            raise
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: object | None,
+    ) -> bool | None:
+        app_session = self._app_session
+        terminal_output = self._terminal_output
+        self._app_session = None
+        self._terminal_output = None
+        self.input_device = None
+        self.output_device = None
+        session_result: bool | None = False
+        try:
+            if terminal_output is not None:
+                terminal_output.quit_alternate_screen()
+                terminal_output.flush()
+        finally:
+            if app_session is not None:
+                session_result = app_session.__exit__(exc_type, exc_value, traceback)
+        return session_result
 
 
 @dataclass(frozen=True)
@@ -1404,7 +1490,10 @@ def read_live_choice(
         key_bindings=bindings,
         style=_live_style(theme),
         full_screen=True,
-        erase_when_done=True,
+        # The outer PersistentFullscreenSession owns the alternate screen;
+        # temporary surfaces must leave their last frame in place for the next
+        # application to redraw over it.
+        erase_when_done=False,
         mouse_support=False,
         input=input_device,  # type: ignore[arg-type]
         output=output_device,  # type: ignore[arg-type]

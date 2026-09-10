@@ -906,6 +906,8 @@ def main(argv: list[str] | None = None) -> int:
         action.dest for action in parser._actions
         if any(token.split("=", 1)[0] in action.option_strings for token in arguments)
     }
+    live_session = None
+    live_session_entered = False
     try:
         if args.until is not None and args.replay is None:
             raise EditorError("--until requires --replay")
@@ -1095,6 +1097,11 @@ def main(argv: list[str] | None = None) -> int:
                     mode="fork",
                 )
 
+            open_live_session = getattr(io, "live_session", None)
+            if callable(open_live_session):
+                live_session = open_live_session()
+                live_session.__enter__()
+                live_session_entered = True
             store.visit(episode_id)
             enter_edge = False
             while True:
@@ -1304,6 +1311,9 @@ def main(argv: list[str] | None = None) -> int:
     except (EditorError, OSError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    finally:
+        if live_session_entered and live_session is not None:
+            live_session.__exit__(*sys.exc_info())
 
 
 if __name__ == "__main__":
