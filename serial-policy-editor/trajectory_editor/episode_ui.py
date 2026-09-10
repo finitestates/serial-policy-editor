@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .domain import Candidate, ChoiceSet, EditorError
@@ -375,7 +375,7 @@ class InteractivePolicy:
         feedback: ChoiceFeedback | None = None
         policy_sort = False
         policy_columns = bool(
-            self.show_policy_rank and engine.sampling.history_penalties_active
+            self.show_policy_rank and engine.sampling.policy_active
         )
         review_boundary: int | None = None
         seamless_targets = (
@@ -423,7 +423,7 @@ class InteractivePolicy:
                         self.seamless and review_boundary is not None
                     ),
                     search_lens_active=search_lens_active,
-                    policy_active=engine.sampling.history_penalties_active,
+                    policy_active=engine.sampling.policy_active,
                     show_policy_rank=policy_columns,
                     sort_by_policy=policy_sort,
                 )
@@ -489,6 +489,42 @@ class InteractivePolicy:
                     raise ForkRequested(review_boundary)
                 review_boundary = None
                 if not live:
+                    display_choice(self.io, choice, remaining_tokens=engine.remaining)
+                continue
+            if command.kind == CommandKind.BIAS:
+                candidate = resolve_candidate(command.search_rank)
+                biases = dict(engine.sampling.logit_bias)
+                old = biases.get(candidate.token_id, 0.0)
+                step = command.bias_amount if command.bias_amount is not None else engine.sampling.bias_step
+                value = 0.0 if command.bias_operator == "=" else old + (step if command.bias_operator == "+" else -step)
+                biases[candidate.token_id] = value
+                try:
+                    updated = replace(engine.sampling, logit_bias=tuple(biases.items()))
+                except EditorError as exc:
+                    feedback = ChoiceFeedback("error", "INVALID BIAS", (str(exc),))
+                    if not live:
+                        self.io.write(str(exc))
+                    continue
+                if self.store is not None and self.episode_id is not None:
+                    with self.store.transaction():
+                        self.store.record_sampling_segment(self.episode_id,
+                            start_boundary=engine.boundary, sampling=updated,
+                            stream_fingerprint=engine.stream_fingerprint,
+                            coordinate_offset=engine.coordinate_offset)
+                        self._interaction(engine.boundary, "logit-bias", {
+                            "token_id": candidate.token_id, "text": candidate.text,
+                            "raw_rank": candidate.rank, "previous": old, "bias": value})
+                engine.sampling = updated
+                observation = engine.observe()
+                ranks = tuple(exposed)
+                exposed = {rank: engine.candidates(observation, start_rank=rank, count=1)[0] for rank in ranks}
+                preview_candidates = dict(exposed)
+                candidates = tuple(resolve_candidate(c.rank) for c in choice.candidates)
+                choice = _choice_from_observation(engine, observation, candidates,
+                    context_characters=self.context_characters, serial=self.choice_serial)
+                feedback = ChoiceFeedback("status", "BIAS UPDATED", (f"{candidate.text!r} (id={candidate.token_id}): {value:+g}",))
+                if not live:
+                    self.io.write(f"Bias {candidate.text!r}: {value:+g}")
                     display_choice(self.io, choice, remaining_tokens=engine.remaining)
                 continue
             if command.kind == CommandKind.HELP:

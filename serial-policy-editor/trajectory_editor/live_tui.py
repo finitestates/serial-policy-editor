@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 from dataclasses import dataclass
 from functools import lru_cache
@@ -114,6 +115,14 @@ def action_preview(
             policy_probability=choice.proposal_policy_probability,
             is_eog=choice.proposal_is_eog,
         )
+
+    bias_match = re.fullmatch(r"(\d+)\s*([+\-=])\s*(\d+(?:\.\d*)?|\.\d+)?", stripped)
+    if bias_match:
+        rank, operator, amount = bias_match.groups()
+        rank = int(rank)
+        valid = 1 <= rank <= (choice.vocabulary_size or len(candidates)) and not (operator == "=" and amount is not None)
+        return ActionPreview(kind="effect", label="token bias", valid=valid,
+            detail=(f"Adjust bias for raw rank {rank}; stay at this step." if valid else "Invalid bias command."))
 
     if stripped.isdigit():
         requested_rank = int(stripped)
@@ -553,7 +562,8 @@ def _render_writing(choice: ChoiceSet, candidates: tuple[Candidate, ...],
     shown = _ordered_candidates(candidates, sort_by_policy=sort_by_policy)[:3]
     for candidate in shown:
         fragments.append(("class:table-row", _one_line(
-            f"{candidate.rank:>5}  {_probability(candidate.raw_probability)}  {candidate.text!r}", width) + "\n"))
+            f"{candidate.rank:>5}  {_probability(candidate.raw_probability)}  {candidate.text!r}"
+            + (f" [bias {candidate.logit_bias:+g}]" if candidate.logit_bias else ""), width) + "\n"))
     fragments.append(("", "\n" * (3 - len(shown))))
     fragments.append(("class:muted", f"{max(0, len(candidates) - 3)} more candidate rows · Ctrl+E restores full table\n"))
     return fragments
@@ -761,6 +771,8 @@ def _render_choice(
                 f"{marker} {candidate.rank:>5}{policy_column}  {raw_probability:>8}  "
                 f"{decoder:>8}  "
             )
+        if candidate.logit_bias:
+            target_suffix += f" [bias {candidate.logit_bias:+g}]"
         text_width = max(8, width - len(prefix) - 1)
         if candidate.rank == preview.candidate_rank:
             row_style = "class:selected-row"

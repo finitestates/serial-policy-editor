@@ -29,8 +29,27 @@ class SamplingConfig:
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
     seed: int = 12345
+    logit_bias: tuple[tuple[int, float], ...] = ()
+    bias_step: float = 0.5
 
     def __post_init__(self) -> None:
+        if type(self.bias_step) not in (int, float) or not math.isfinite(self.bias_step) or self.bias_step <= 0:
+            raise EditorError("bias_step must be a finite positive number")
+        try:
+            pairs = tuple(tuple(pair) for pair in self.logit_bias)
+        except TypeError as exc:
+            raise EditorError("logit_bias must contain token-id/value pairs") from exc
+        seen = set()
+        for pair in pairs:
+            if len(pair) != 2:
+                raise EditorError("logit_bias must contain token-id/value pairs")
+            token, bias = pair
+            if type(token) is not int or token < 0 or token in seen:
+                raise EditorError("bias token IDs must be unique nonnegative integers")
+            if type(bias) not in (int, float) or not math.isfinite(bias):
+                raise EditorError("logit biases must be finite numbers")
+            seen.add(token)
+        object.__setattr__(self, "logit_bias", tuple(sorted((token, float(bias)) for token, bias in pairs if bias != 0)))
         if (
             type(self.temperature) not in {int, float}
             or not math.isfinite(float(self.temperature))
@@ -76,6 +95,10 @@ class SamplingConfig:
             )
 
     @property
+    def policy_active(self) -> bool:
+        return self.history_penalties_active or bool(self.logit_bias)
+
+    @property
     def history_penalties_active(self) -> bool:
         return bool(
             self.repeat_last_n != 0
@@ -105,6 +128,8 @@ class SamplingConfig:
                 "frequency_penalty", defaults.frequency_penalty
             ),
             seed=value.get("seed", defaults.seed),
+            logit_bias=value.get("logit_bias", ()),
+            bias_step=value.get("bias_step", defaults.bias_step),
         )
 
     @classmethod
@@ -123,6 +148,8 @@ class SamplingConfig:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            **({"logit_bias": [list(pair) for pair in self.logit_bias]} if self.logit_bias else {}),
+            **({"bias_step": self.bias_step} if self.bias_step != 0.5 else {}),
             "temperature": self.temperature,
             "top_k": self.top_k,
             "top_p": self.top_p,
@@ -146,12 +173,14 @@ class Candidate:
     raw_probability: float
     decoder_probability: float
     is_eog: bool
+    logit_bias: float = 0.0
     policy_rank: int | None = None
     policy_probability: float | None = None
     policy_logit_adjustment: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "logit_bias": self.logit_bias,
             "rank": self.rank,
             "token_id": self.token_id,
             "text": self.text,

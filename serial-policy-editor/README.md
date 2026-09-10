@@ -697,3 +697,46 @@ Settings are saved with episodes and restored on resume, fork, and replay;
 explicit launch options override saved settings. The local headless server
 accepts the same two cache-precision options. `--cache off` controls prefix reuse,
 not cache precision.
+
+### Single-token logit biases
+
+At a live token position, use a **raw rank** followed by an operator:
+
+- `12-` or `7+`: decrease or increase that token's bias by 0.5.
+- `8-0.25` or `8+2`: adjust by an explicit positive amount.
+- `12=`: clear that token's bias back to zero.
+
+The rank identifies the token now; the bias then follows its token ID throughout
+this episode. Commands accumulate without advancing, so you can enter `12-`,
+`7-`, `201+`, then `6` to make your actual move. Raw ranks remain unchanged;
+the sampled proposal and decoding probabilities refresh. Biased menu tokens show
+`[bias +/-N]`. Use `--bias-step 1` to change the default increment (also available
+as `s bias_step=1` in the EDGE menu).
+
+Biases are added after history penalties and before temperature, top-k, top-p,
+and min-p. Positive values encourage a token; negative values discourage it.
+They do not ban tokens or prevent Teacher from selecting them. Bias commands
+neither evaluate new tokens nor advance the sampling coordinate. Clearing all
+biases restores the proposal for the unchanged context and sampler settings.
+
+Resume restores biases. Fork and rewind use exactly the existing sampler-state
+semantics: both select the state at the target boundary, including adjustments
+already recorded at that boundary. Rewind removes changes at later boundaries.
+Replay follows the recorded bias states unless explicitly overridden; in-place
+SPR keeps the destination sampler, including its biases. Switching models clears
+inherited token-ID biases.
+
+Export the current surviving bias set as a JSON preset:
+
+```bash
+policy-editor --workspace episodes.sqlite3 --project '#1' --biases-only > biases.json
+policy-editor --model /path/to/model.gguf --biases biases.json --new-prompt 'Once upon a time'
+```
+
+`--biases` replaces the saved bias set, including on resume, fork, or replay.
+An empty `biases` list explicitly clears it. The preset contains a format version,
+model metadata, and entries with `token_id` and `bias`; readable `text` is included
+when recorded locally. Loading checks vocabulary size, supplied model metadata,
+and any supplied token text. Use presets with the model/tokenizer they were made
+for; token IDs are not portable across tokenizers. The preset stores bias values,
+not the default interactive step. Multi-token rules are not included in this pass.

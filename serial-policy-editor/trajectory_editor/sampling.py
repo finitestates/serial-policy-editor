@@ -207,6 +207,15 @@ class ObservationStatistics:
             if history_token_ids is not None:
                 _validated_history(history_token_ids, len(self.logits))
             self.adjusted = self.logits
+        if config.logit_bias:
+            self.adjusted = self.adjusted.copy()
+            for token, bias in config.logit_bias:
+                if token >= len(self.logits):
+                    raise ValueError("bias token id is outside the decoder vocabulary")
+                self.adjusted[token] += bias
+            if not np.all(np.isfinite(self.adjusted)):
+                raise ValueError("biases produced non-finite policy logits")
+        penalties_active = config.policy_active
         self.maximum = float(np.max(self.logits))
         exponentials = np.exp(self.logits - self.maximum)
         self.denominator = float(np.sum(exponentials))

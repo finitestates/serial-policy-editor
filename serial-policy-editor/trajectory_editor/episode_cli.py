@@ -19,6 +19,7 @@ from typing import Any
 from prompt_toolkit import prompt
 from prompt_toolkit.validation import Validator
 
+from .bias_presets import load_bias_preset, project_biases
 from .backend_factory import BACKEND_NAMES, create_backend
 from .decoder import KV_CACHE_TYPES, LlamaCppSettings
 from .domain import MAX_SEED, MIN_SEED, EditorError, SamplingConfig
@@ -57,6 +58,8 @@ SAMPLER_FIELDS = (
     "presence_penalty",
     "frequency_penalty",
     "seed",
+    "logit_bias",
+    "bias_step",
 )
 SAMPLER_ALIASES = {
     "temp": "temperature",
@@ -193,6 +196,9 @@ def build_parser() -> argparse.ArgumentParser:
         ("frequency_penalty", float),
     ):
         sampling.add_argument("--" + name.replace("_", "-"), type=kind)
+    sampling.add_argument("--biases", type=Path, help="load a JSON bias preset (replaces the saved bias set)")
+    sampling.add_argument("--bias-step", type=float, help="default positive bias adjustment (default: 0.5)")
+    parser.set_defaults(logit_bias=None)
     seed_options = sampling.add_mutually_exclusive_group()
     seed_options.add_argument("--seed", type=int)
     seed_options.add_argument(
@@ -242,6 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
     transformers.add_argument("--transformers-torch-interop-threads", type=int)
 
     projection = parser.add_argument_group("projection")
+    projection.add_argument("--biases-only", action="store_true", help="with --project, emit a loadable JSON bias preset")
     projection.add_argument(
         "--annotations", choices=("none", "inline", "footnotes"), default="none"
     )
@@ -295,7 +302,7 @@ def _sampler_override(current: SamplingConfig, raw: str) -> SamplingConfig:
             raise EditorError("sampler changes use key=value (for example top_k=20)")
         key, value = piece.split("=", 1)
         key = SAMPLER_ALIASES.get(key.strip().lower(), key.strip().lower())
-        if key not in values:
+        if key not in values or key == "logit_bias":
             raise EditorError(f"unknown sampler field {key!r}")
         try:
             values[key] = int(value) if key in {"top_k", "repeat_last_n", "seed"} else float(value)
@@ -688,6 +695,8 @@ def main(argv: list[str] | None = None) -> int:
                     setattr(args, field, store.resolve_id(value))
             if args.at is not None and args.fork_from is None:
                 raise EditorError("--at is only valid with --fork-from")
+            if args.biases_only and (not args.project or args.procedure):
+                raise EditorError("--biases-only requires --project and cannot be combined with --procedure")
             if args.procedure and not args.project:
                 raise EditorError("--procedure requires --project EPISODE_ID")
             if args.lineage is not None:
@@ -699,6 +708,9 @@ def main(argv: list[str] | None = None) -> int:
                 _print_list(store)
                 return 0
             if args.project:
+                if args.biases_only:
+                    print(project_biases(store, args.project))
+                    return 0
                 if args.procedure:
                     print(project_procedure(store, args.project))
                     return 0
@@ -744,6 +756,11 @@ def main(argv: list[str] | None = None) -> int:
             source_id = args.resume or args.fork_from or args.replay
             source = store.get_episode(source_id) if source_id else None
             backend, provenance, model_changed = _load_episode_backend(args, source, io)
+            if model_changed:
+                args.logit_bias = ()
+                io.write("Model changed: token-ID biases reset; load a matching preset to apply biases.")
+            if args.biases is not None:
+                args.logit_bias = load_bias_preset(args.biases, backend, provenance)
             requested_id = args.episode_id
             parent_id: str | None = None
             fork_boundary: int | None = None

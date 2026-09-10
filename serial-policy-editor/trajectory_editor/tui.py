@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import math
 import json
 import pydoc
 import re
@@ -252,6 +253,7 @@ class TerminalIO:
 
 
 class CommandKind(str, Enum):
+    BIAS = "bias"
     EDIT = "edit"
     HOLD = "hold"
     NOTE_BEFORE = "note-before"
@@ -301,6 +303,8 @@ class TeacherCommand:
     force: bool = False
     fork_address: ForkAddress | None = None
     warning: str | None = None
+    bias_operator: str | None = None
+    bias_amount: float | None = None
 
 
 HELP_TEXT = """Commands:
@@ -310,6 +314,8 @@ HELP_TEXT = """Commands:
                     Enter remains the only commit action
                     --manual-acceptance leaves the command blank instead
   accept             commit the sampled proposal
+  N+ / N-           adjust token bias by the default step without advancing
+  N+0.5 / N-0.5     adjust by an explicit amount; N= clears that token bias
   1..N              commit a candidate; the proposal rank records acceptance
   t TEXT            insert continuation text (adds a joining space if needed)
   x TEXT            insert exact text
@@ -462,6 +468,19 @@ def parse_command(
     vocabulary_size: int | None = None,
     default_search_radius: int = 3,
 ) -> TeacherCommand:
+    match = re.fullmatch(r"\s*(\d+)\s*([+\-=])\s*(\d+(?:\.\d*)?|\.\d+)?\s*", raw)
+    if match:
+        rank, operator, amount = match.groups()
+        rank = int(rank)
+        if not 1 <= rank <= (vocabulary_size or menu_size):
+            raise EditorError("bias rank is outside the vocabulary")
+        if operator == "=" and amount is not None:
+            raise EditorError("use rank= to clear a bias")
+        value = float(amount) if amount is not None else None
+        if value is not None and (not math.isfinite(value) or value <= 0):
+            raise EditorError("bias adjustment must be finite and positive")
+        return TeacherCommand(CommandKind.BIAS, search_rank=rank,
+                              bias_operator=operator, bias_amount=value)
     if raw.startswith("/"):
         payload = raw[1:]
         if not payload:
@@ -722,6 +741,8 @@ def display_candidates(
             else "     --"
         )
         suffix = " [END]" if candidate.is_eog else ""
+        if candidate.logit_bias:
+            suffix += f" [bias {candidate.logit_bias:+g}]"
         if target_token_id is not None and candidate.token_id == target_token_id:
             suffix += " [MATCH]"
         policy = (
