@@ -98,6 +98,53 @@ def test_submission_consumes_stale_typeahead():
             assert session.read_choice(choice_state()) == '3'
 
 
+def test_processing_keeps_editor_geometry_without_busy_notice():
+    output = RecordingOutput()
+    processing_painted = threading.Event()
+
+    class StableSession(DrivenSession):
+        def __init__(self, pipe):
+            super().__init__(pipe, output, ['1\r', '3\r'])
+            self.geometry = {}
+
+        def _rendered(self, app):
+            if not app.is_done and self.choice_view is not None:
+                phase = 'ready' if self.accepting_input else 'submitted'
+                self.geometry.setdefault(phase, []).append((
+                    self._surface_size(),
+                    tuple((window.render_info._x_offset,
+                           window.render_info._y_offset,
+                           window.render_info.window_width,
+                           window.render_info.window_height)
+                          for window in self.choice_view.layout.find_all_windows()
+                          if window.render_info is not None),
+                ))
+                if phase == 'submitted' and getattr(self, 'processing_check', False):
+                    self.processing_notice = self._notice
+                    processing_painted.set()
+            super()._rendered(app)
+
+    state = choice_state()
+    with create_pipe_input() as pipe:
+        with StableSession(pipe) as session:
+            assert session.read_choice(state) == '1'
+            # Repaint after the former 150 ms busy threshold while work is pending.
+            def check_processing():
+                session.processing_check = True
+                session.application.invalidate()
+
+            session._call(lambda: session._loop.call_later(0.25, check_processing))
+            assert processing_painted.wait(3), 'Processing frame did not render'
+            assert session.processing_notice == ''
+            assert session._surface_size() == (80, 24)
+            assert session.read_choice(state) == '3'
+            ready = session.geometry['ready']
+            assert len(ready) >= 2
+            assert all(frame == ready[0]
+                       for frames in session.geometry.values() for frame in frames)
+            assert output.events == ['enter', 'erase']
+
+
 def test_preview_callbacks_execute_on_episode_thread():
     output = RecordingOutput()
     runtime = engine(max_tokens=10)

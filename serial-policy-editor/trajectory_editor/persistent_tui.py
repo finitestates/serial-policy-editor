@@ -142,7 +142,6 @@ class PersistentTerminalSession(AbstractContextManager):
         self._notice = ""
         self._messages = deque(maxlen=80)
         self._prompt_context = ""
-        self._busy_timer = None
 
     @property
     def accepting_input(self) -> bool:
@@ -315,11 +314,7 @@ class PersistentTerminalSession(AbstractContextManager):
     def _show(self, request):
         if self._closing:
             return
-        if self._busy_timer is not None:
-            self._busy_timer.cancel()
         self._current = request
-        if self._notice == "Working…":
-            self._notice = ""
         state = request.state
         if isinstance(state, ChoiceViewState):
             self._prompt_context = ""
@@ -377,13 +372,6 @@ class PersistentTerminalSession(AbstractContextManager):
             request.response.set_exception(exception)
         self._notice = ""
         self._events.put(None)
-        self._busy_timer = self._loop.call_later(0.15, self._show_busy, request)
-
-    def _show_busy(self, request):
-        if (self._current is request and not self.accepting_input
-                and not self._closing and not self._notice):
-            self._notice = "Working…"
-            self.application.invalidate()
 
     def _preview(self, request, key, callback):
         # UI-only cache containing thread-safe futures. A newer preview of the
