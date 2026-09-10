@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import shutil
 from dataclasses import dataclass
 from functools import lru_cache
@@ -22,6 +21,7 @@ from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.styles import Style
 
+from .tui import parse_bias_command
 from .domain import Candidate, ChoiceSet, EditorError, InsertMode
 from .tui import (
     BoundaryReview,
@@ -116,13 +116,13 @@ def action_preview(
             is_eog=choice.proposal_is_eog,
         )
 
-    bias_match = re.fullmatch(r"(\d+)\s*([+\-=])\s*(\d+(?:\.\d*)?|\.\d+)?", stripped)
-    if bias_match:
-        rank, operator, amount = bias_match.groups()
-        rank = int(rank)
-        valid = 1 <= rank <= (choice.vocabulary_size or len(candidates)) and not (operator == "=" and amount is not None)
-        return ActionPreview(kind="effect", label="token bias", valid=valid,
-            detail=(f"Adjust bias for raw rank {rank}; stay at this step." if valid else "Invalid bias command."))
+    try:
+        bias_command = parse_bias_command(stripped, vocabulary_size=choice.vocabulary_size or len(candidates))
+    except EditorError as exc:
+        return ActionPreview(kind="effect", label="invalid bias", valid=False, detail=str(exc))
+    if bias_command is not None:
+        return ActionPreview(kind="effect", label="token bias", valid=True,
+            detail="Update this bias rule; stay at this step.")
 
     if stripped.isdigit():
         requested_rank = int(stripped)

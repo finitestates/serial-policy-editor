@@ -79,7 +79,7 @@ def test_fork_rewind_resume_replay_and_projection_agree(tmp_path):
         assert initial_bias != final_bias
         preset = tmp_path/'bias.json'
         preset.write_text(project_biases(store, source))
-        assert load_bias_preset(preset, backend, backend.provenance()) == final_bias
+        assert load_bias_preset(preset, backend, backend.provenance()).logit_bias == final_bias
         resumed = _restore_engine(store, source, backend, max_tokens=None, sampling_override=None)
         assert resumed.sampling.logit_bias == final_bias
         replay, plan = _spr_engine_from_source(store, source, backend,

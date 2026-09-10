@@ -207,9 +207,10 @@ class ObservationStatistics:
             if history_token_ids is not None:
                 _validated_history(history_token_ids, len(self.logits))
             self.adjusted = self.logits
-        if config.logit_bias:
+        active_biases = config.active_biases(history_token_ids)
+        if active_biases:
             self.adjusted = self.adjusted.copy()
-            for token, bias in config.logit_bias:
+            for token, bias in active_biases.items():
                 if token >= len(self.logits):
                     raise ValueError("bias token id is outside the decoder vocabulary")
                 self.adjusted[token] += bias

@@ -31,6 +31,7 @@ class SamplingConfig:
     seed: int = 12345
     logit_bias: tuple[tuple[int, float], ...] = ()
     bias_step: float = 0.5
+    sequence_bias: tuple[tuple[tuple[int, ...], float], ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.bias_step) not in (int, float) or not math.isfinite(self.bias_step) or self.bias_step <= 0:
@@ -49,6 +50,24 @@ class SamplingConfig:
             if type(bias) not in (int, float) or not math.isfinite(bias):
                 raise EditorError("logit biases must be finite numbers")
             seen.add(token)
+        try:
+            sequences = tuple((tuple(tokens), bias) for tokens, bias in self.sequence_bias)
+        except (TypeError, ValueError) as exc:
+            raise EditorError("sequence_bias must contain token-sequence/value pairs") from exc
+        sequence_seen = set()
+        for tokens, bias in sequences:
+            if not tokens or any(type(token) is not int or token < 0 for token in tokens):
+                raise EditorError("bias sequences require nonnegative integer token IDs")
+            if tokens in sequence_seen or (len(tokens) == 1 and tokens[0] in seen):
+                raise EditorError("duplicate bias rule")
+            if type(bias) not in (int, float) or not math.isfinite(bias):
+                raise EditorError("sequence biases must be finite numbers")
+            sequence_seen.add(tokens)
+            if len(tokens) == 1:
+                pairs += ((tokens[0], bias),)
+                seen.add(tokens[0])
+        object.__setattr__(self, "sequence_bias", tuple(sorted(
+            (tokens, float(bias)) for tokens, bias in sequences if len(tokens) > 1 and bias != 0)))
         object.__setattr__(self, "logit_bias", tuple(sorted((token, float(bias)) for token, bias in pairs if bias != 0)))
         if (
             type(self.temperature) not in {int, float}
@@ -96,7 +115,18 @@ class SamplingConfig:
 
     @property
     def policy_active(self) -> bool:
-        return self.history_penalties_active or bool(self.logit_bias)
+        return self.history_penalties_active or bool(self.logit_bias) or bool(self.sequence_bias)
+
+    def active_biases(self, history) -> dict[int, float]:
+        """Sum unconditional biases and rules whose prefix matches the context tail."""
+        result = dict(self.logit_bias)
+        if self.sequence_bias and history is None:
+            raise EditorError("sequence biases require exact context token IDs")
+        for tokens, bias in self.sequence_bias:
+            prefix = tokens[:-1]
+            if len(history) >= len(prefix) and tuple(history[-len(prefix):]) == prefix:
+                result[tokens[-1]] = result.get(tokens[-1], 0.0) + bias
+        return result
 
     @property
     def history_penalties_active(self) -> bool:
@@ -129,6 +159,7 @@ class SamplingConfig:
             ),
             seed=value.get("seed", defaults.seed),
             logit_bias=value.get("logit_bias", ()),
+            sequence_bias=value.get("sequence_bias", ()),
             bias_step=value.get("bias_step", defaults.bias_step),
         )
 
@@ -148,6 +179,7 @@ class SamplingConfig:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            **({"sequence_bias": [[list(tokens), bias] for tokens, bias in self.sequence_bias]} if self.sequence_bias else {}),
             **({"logit_bias": [list(pair) for pair in self.logit_bias]} if self.logit_bias else {}),
             **({"bias_step": self.bias_step} if self.bias_step != 0.5 else {}),
             "temperature": self.temperature,

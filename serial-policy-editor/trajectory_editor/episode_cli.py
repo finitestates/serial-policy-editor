@@ -59,6 +59,7 @@ SAMPLER_FIELDS = (
     "frequency_penalty",
     "seed",
     "logit_bias",
+    "sequence_bias",
     "bias_step",
 )
 SAMPLER_ALIASES = {
@@ -198,7 +199,7 @@ def build_parser() -> argparse.ArgumentParser:
         sampling.add_argument("--" + name.replace("_", "-"), type=kind)
     sampling.add_argument("--biases", type=Path, help="load a JSON bias preset (replaces the saved bias set)")
     sampling.add_argument("--bias-step", type=float, help="default positive bias adjustment (default: 0.5)")
-    parser.set_defaults(logit_bias=None)
+    parser.set_defaults(logit_bias=None, sequence_bias=None)
     seed_options = sampling.add_mutually_exclusive_group()
     seed_options.add_argument("--seed", type=int)
     seed_options.add_argument(
@@ -302,7 +303,7 @@ def _sampler_override(current: SamplingConfig, raw: str) -> SamplingConfig:
             raise EditorError("sampler changes use key=value (for example top_k=20)")
         key, value = piece.split("=", 1)
         key = SAMPLER_ALIASES.get(key.strip().lower(), key.strip().lower())
-        if key not in values or key == "logit_bias":
+        if key not in values or key in {"logit_bias", "sequence_bias"}:
             raise EditorError(f"unknown sampler field {key!r}")
         try:
             values[key] = int(value) if key in {"top_k", "repeat_last_n", "seed"} else float(value)
@@ -758,9 +759,12 @@ def main(argv: list[str] | None = None) -> int:
             backend, provenance, model_changed = _load_episode_backend(args, source, io)
             if model_changed:
                 args.logit_bias = ()
+                args.sequence_bias = ()
                 io.write("Model changed: token-ID biases reset; load a matching preset to apply biases.")
             if args.biases is not None:
-                args.logit_bias = load_bias_preset(args.biases, backend, provenance)
+                preset = load_bias_preset(args.biases, backend, provenance)
+                args.logit_bias = preset.logit_bias
+                args.sequence_bias = preset.sequence_bias
             requested_id = args.episode_id
             parent_id: str | None = None
             fork_boundary: int | None = None

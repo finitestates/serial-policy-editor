@@ -492,28 +492,53 @@ class InteractivePolicy:
                     display_choice(self.io, choice, remaining_tokens=engine.remaining)
                 continue
             if command.kind == CommandKind.BIAS:
-                candidate = resolve_candidate(command.search_rank)
-                biases = dict(engine.sampling.logit_bias)
-                old = biases.get(candidate.token_id, 0.0)
-                step = command.bias_amount if command.bias_amount is not None else engine.sampling.bias_step
-                value = 0.0 if command.bias_operator == "=" else old + (step if command.bias_operator == "+" else -step)
-                biases[candidate.token_id] = value
                 try:
-                    updated = replace(engine.sampling, logit_bias=tuple(biases.items()))
+                    if command.bias_text is not None:
+                        tokens = tuple(engine.backend.tokenize(command.bias_text, add_bos=False, special=False))
+                    elif command.bias_last is not None:
+                        if command.bias_last > len(observation.prefix_token_ids):
+                            raise EditorError("bl requests more tokens than the current context contains")
+                        tokens = observation.prefix_token_ids[-command.bias_last:]
+                    else:
+                        candidate = resolve_candidate(command.search_rank)
+                        prefix = () if command.bias_prefix is None else tuple(
+                            engine.backend.tokenize(command.bias_prefix, add_bos=False, special=False))
+                        if command.bias_prefix is not None and not prefix:
+                            raise EditorError("bias prefix produced no tokens")
+                        tokens = (*prefix, candidate.token_id)
+                    if not tokens:
+                        raise EditorError("bias phrase produced no tokens")
+                    single = len(tokens) == 1
+                    biases = dict(engine.sampling.logit_bias if single else engine.sampling.sequence_bias)
+                    key = tokens[0] if single else tokens
+                    old = biases.get(key, 0.0)
+                    step = command.bias_amount if command.bias_amount is not None else engine.sampling.bias_step
+                    value = 0.0 if command.bias_operator == "=" else old + (step if command.bias_operator == "+" else -step)
+                    biases[key] = value
+                    updated = replace(engine.sampling, **{
+                        "logit_bias" if single else "sequence_bias": tuple(biases.items())})
                 except EditorError as exc:
                     feedback = ChoiceFeedback("error", "INVALID BIAS", (str(exc),))
                     if not live:
                         self.io.write(str(exc))
                     continue
+                texts = [engine.backend.token_text(token) for token in tokens]
+                label = (f"{texts[0]!r} (id={tokens[0]})" if single else
+                         f"After {texts[:-1]!r} → {texts[-1]!r} (ids={list(tokens)})")
                 if self.store is not None and self.episode_id is not None:
                     with self.store.transaction():
                         self.store.record_sampling_segment(self.episode_id,
                             start_boundary=engine.boundary, sampling=updated,
                             stream_fingerprint=engine.stream_fingerprint,
                             coordinate_offset=engine.coordinate_offset)
-                        self._interaction(engine.boundary, "logit-bias", {
-                            "token_id": candidate.token_id, "text": candidate.text,
-                            "raw_rank": candidate.rank, "previous": old, "bias": value})
+                        payload = {"previous": old, "bias": value}
+                        if single:
+                            payload.update(token_id=tokens[0], text=texts[0],
+                                           raw_rank=raw_rank(observation.logits, tokens[0]))
+                        else:
+                            payload.update(token_ids=list(tokens), texts=texts)
+                        self._interaction(engine.boundary,
+                            "logit-bias" if single else "sequence-bias", payload)
                 engine.sampling = updated
                 observation = engine.observe()
                 ranks = tuple(exposed)
@@ -522,9 +547,9 @@ class InteractivePolicy:
                 candidates = tuple(resolve_candidate(c.rank) for c in choice.candidates)
                 choice = _choice_from_observation(engine, observation, candidates,
                     context_characters=self.context_characters, serial=self.choice_serial)
-                feedback = ChoiceFeedback("status", "BIAS UPDATED", (f"{candidate.text!r} (id={candidate.token_id}): {value:+g}",))
+                feedback = ChoiceFeedback("status", "BIAS UPDATED", (f"{label}: {value:+g}",))
                 if not live:
-                    self.io.write(f"Bias {candidate.text!r}: {value:+g}")
+                    self.io.write(f"Bias {label}: {value:+g}")
                     display_choice(self.io, choice, remaining_tokens=engine.remaining)
                 continue
             if command.kind == CommandKind.HELP:

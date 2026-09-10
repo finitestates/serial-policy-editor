@@ -305,6 +305,9 @@ class TeacherCommand:
     warning: str | None = None
     bias_operator: str | None = None
     bias_amount: float | None = None
+    bias_text: str | None = None
+    bias_prefix: str | None = None
+    bias_last: int | None = None
 
 
 HELP_TEXT = """Commands:
@@ -314,6 +317,9 @@ HELP_TEXT = """Commands:
                     Enter remains the only commit action
                     --manual-acceptance leaves the command blank instead
   accept             commit the sampled proposal
+  b " TEXT" +/-[N]  bias completion of the tokenized phrase; = clears it
+  bl X +/-[N]       bias the last X context tokens; bl 1 is a single-token bias
+  N+/-[X] ... " P"  bias ranked token N only after the tokenized prefix P
   N+ / N-           adjust token bias by the default step without advancing
   N+0.5 / N-0.5     adjust by an explicit amount; N= clears that token bias
   1..N              commit a candidate; the proposal rank records acceptance
@@ -460,6 +466,47 @@ def parse_fork_address(raw: str) -> ForkAddress | None:
     raise EditorError("use f, f N, or f - N")
 
 
+def parse_bias_command(raw: str, *, vocabulary_size: int) -> TeacherCommand | None:
+    """Parse bias edits without interpreting quoted text as another command."""
+    quoted = r'"(?:[^"\\]|\\.)*"'
+    adjustment = r"(?P<op>[+\-=])\s*(?P<amount>\d+(?:\.\d*)?|\.\d+)?"
+    patterns = (
+        rf"b\s+(?P<text>{quoted})\s*{adjustment}",
+        rf"bl\s+(?P<last>\d+)\s*{adjustment}",
+        rf"(?P<rank>\d+)\s*{adjustment}(?:\s*\.\.\.\s*(?P<prefix>{quoted}))?",
+    )
+    for pattern in patterns:
+        match = re.fullmatch(pattern, raw.strip())
+        if match is None:
+            continue
+        fields = match.groupdict()
+        operator, amount = fields["op"], fields["amount"]
+        rank = int(fields["rank"]) if fields.get("rank") is not None else None
+        last = int(fields["last"]) if fields.get("last") is not None else None
+        if rank is not None and not 1 <= rank <= vocabulary_size:
+            raise EditorError("bias rank is outside the vocabulary")
+        if last is not None and last < 1:
+            raise EditorError("bl requires a positive token count")
+        if operator == "=" and amount is not None:
+            raise EditorError("use = without an amount to clear a bias")
+        value = float(amount) if amount is not None else None
+        if value is not None and (not math.isfinite(value) or value <= 0):
+            raise EditorError("bias adjustment must be finite and positive")
+        strings = {}
+        for name in ("text", "prefix"):
+            if fields.get(name) is not None:
+                try:
+                    strings[name] = json.loads(fields[name])
+                except ValueError as exc:
+                    raise EditorError("bias text must be a valid JSON string") from exc
+                if not strings[name]:
+                    raise EditorError("bias text/prefix cannot be empty; use rank+/-/= for a single token")
+        return TeacherCommand(CommandKind.BIAS, search_rank=rank,
+            bias_operator=operator, bias_amount=value, bias_last=last,
+            bias_text=strings.get("text"), bias_prefix=strings.get("prefix"))
+    return None
+
+
 def parse_command(
     raw: str,
     *,
@@ -468,19 +515,9 @@ def parse_command(
     vocabulary_size: int | None = None,
     default_search_radius: int = 3,
 ) -> TeacherCommand:
-    match = re.fullmatch(r"\s*(\d+)\s*([+\-=])\s*(\d+(?:\.\d*)?|\.\d+)?\s*", raw)
-    if match:
-        rank, operator, amount = match.groups()
-        rank = int(rank)
-        if not 1 <= rank <= (vocabulary_size or menu_size):
-            raise EditorError("bias rank is outside the vocabulary")
-        if operator == "=" and amount is not None:
-            raise EditorError("use rank= to clear a bias")
-        value = float(amount) if amount is not None else None
-        if value is not None and (not math.isfinite(value) or value <= 0):
-            raise EditorError("bias adjustment must be finite and positive")
-        return TeacherCommand(CommandKind.BIAS, search_rank=rank,
-                              bias_operator=operator, bias_amount=value)
+    bias_command = parse_bias_command(raw, vocabulary_size=vocabulary_size or menu_size)
+    if bias_command is not None:
+        return bias_command
     if raw.startswith("/"):
         payload = raw[1:]
         if not payload:

@@ -739,4 +739,47 @@ model metadata, and entries with `token_id` and `bias`; readable `text` is inclu
 when recorded locally. Loading checks vocabulary size, supplied model metadata,
 and any supplied token text. Use presets with the model/tokenizer they were made
 for; token IDs are not portable across tokenizers. The preset stores bias values,
-not the default interactive step. Multi-token rules are not included in this pass.
+not the default interactive step. Sequence rules are described below.
+
+### Sequence biases
+
+Sequence rules adjust the **final token only**, when the current model-visible
+context ends in all the preceding tokens of the rule. They encourage completion,
+not starting the phrase. Raw model probabilities and raw ranks remain untouched.
+Matching rules add together, including any ordinary bias on the final token.
+The displayed `[bias +/-N]` is the total currently active bias for that token.
+
+Three ways to enter a rule:
+
+```text
+b " New York" +0.5
+bl 3 -
+12+0.5 ... " New"
+```
+
+- `b` tokenizes the quoted phrase without adding a BOS token. JSON quoting allows
+  escaped quotes, newlines (`\n`), and exact leading spaces.
+- `bl X` captures the last X actual context tokens, including prompt tokens if
+  the span reaches into the prompt. X must be positive and no greater than the
+  context length. It does not insert text or retroactively change those tokens.
+- The conditional rank form tokenizes the quoted prefix separately, then appends
+  the exact token ID at that raw rank. It does not retokenize their combined text.
+
+All forms accept bare `+`/`-` for the default increment and `=` to clear the exact
+rule (`b " New York" =`, `bl 3 =`, or `12= ... " New"`). A one-token phrase and
+`bl 1` update the same single-token bias as the rank commands. Empty phrases and
+empty conditional prefixes are rejected. Confirmation shows the interpreted
+prefix, final token, token IDs, and the resulting rule bias.
+
+The commands stay at the same live position. Multiple rules may be edited before
+making a move, and `v` still sorts by policy rank while raw ranks remain visible.
+Rules follow the same sampler-state persistence, resume, replay, fork, and rewind
+semantics as single-token biases. Matching is recomputed from the restored context;
+there is no separate matcher state to restore. Rewinding retains rules at the
+target boundary and discards later rule changes, exactly like other sampler settings.
+
+`--project '#1' --biases-only` exports both kinds of rules. A preset containing
+sequences uses `spe-logit-bias-v2`, with a `token_ids` list per entry and optional
+per-token `texts`. Single-token-only exports retain the v1 format. Both formats
+load through `--biases`; loading a preset replaces **both** the ordinary and
+sequence bias sets. Existing episodes and v1 presets remain supported.

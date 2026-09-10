@@ -317,7 +317,7 @@ def project_procedure(store: EpisodeStore, episode_id: str) -> str:
     backend = episode["backend"]
     model = backend.get("filename") or backend.get("model_path") or backend.get("model") or "unknown"
     model = PurePosixPath(str(model).replace(chr(92), "/")).name
-    fields = {key: getattr(initial, key) for key in initial.__dataclass_fields__ if key != "logit_bias"}
+    fields = {key: getattr(initial, key) for key in initial.__dataclass_fields__ if key not in {"logit_bias", "sequence_bias"}}
     lines = [
         f"MODEL   : {_procedure_text(model)}",
         f"BACKEND : {_procedure_text(str(backend.get('backend', 'unknown')))}",
@@ -344,8 +344,12 @@ def project_procedure(store: EpisodeStore, episode_id: str) -> str:
                 rows.append((at, "c", None))
         if config.logit_bias != current.logit_bias:
             rows.append((at, f"# Set token-ID biases to {config.logit_bias!r}", None))
+        if config.sequence_bias != current.sequence_bias:
+            rows.append((at, f"# Set sequence biases to {config.sequence_bias!r}", None))
         current = config
 
+    if initial.sequence_bias:
+        lines.insert(3, f"SEQUENCES: {initial.sequence_bias!r}")
     if initial.logit_bias:
         lines.insert(3, f"BIASES  : token-ID/value pairs {initial.logit_bias!r}")
 

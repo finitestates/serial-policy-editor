@@ -220,7 +220,9 @@ class EpisodeEngine:
 
     @sampling.setter
     def sampling(self, value: SamplingConfig) -> None:
-        if any(token >= self.backend.vocabulary_size() for token, _ in value.logit_bias):
+        bias_tokens = [token for token, _ in value.logit_bias]
+        bias_tokens.extend(token for tokens, _ in value.sequence_bias for token in tokens)
+        if any(token >= self.backend.vocabulary_size() for token in bias_tokens):
             raise EditorError("bias token id is outside the model vocabulary")
         self._sampling = value
         self._invalidate_observation()
@@ -375,7 +377,7 @@ class EpisodeEngine:
         statistics = observation.statistics
         ordered = statistics.top_raw_ids(end)[start_rank - 1 : end]
         probabilities = statistics.raw_probabilities(ordered)
-        biases = dict(self.sampling.logit_bias)
+        biases = self.sampling.active_biases(observation.prefix_token_ids)
         return tuple(
             Candidate(
                 rank=rank,
