@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from contextlib import ExitStack
 from dataclasses import replace
 import secrets
 import sys
@@ -144,7 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--table-depth", type=int, default=12)
     parser.add_argument("--search-radius", type=int, default=3)
-    parser.add_argument("--hold-default", type=int, default=24)
+    parser.add_argument("--hold-default", type=int, default=100)
     parser.add_argument("--context-chars", type=int, default=0, help="Context character limit (0 keeps all context)")
     parser.add_argument("--plain-ui", action="store_true")
     parser.add_argument(
@@ -906,14 +907,12 @@ def main(argv: list[str] | None = None) -> int:
         action.dest for action in parser._actions
         if any(token.split("=", 1)[0] in action.option_strings for token in arguments)
     }
-    live_session = None
-    live_session_entered = False
     try:
         if args.until is not None and args.replay is None:
             raise EditorError("--until requires --replay")
         if args.fixed_config and args.replay is None:
             raise EditorError("--fixed-config requires --replay")
-        with EpisodeStore(args.workspace) as store:
+        with EpisodeStore(args.workspace) as store, ExitStack() as ui_stack:
             for field in ("resume", "fork_from", "replay", "project", "lineage"):
                 value = getattr(args, field)
                 if value:
@@ -1099,9 +1098,7 @@ def main(argv: list[str] | None = None) -> int:
 
             open_live_session = getattr(io, "live_session", None)
             if callable(open_live_session):
-                live_session = open_live_session()
-                live_session.__enter__()
-                live_session_entered = True
+                ui_stack.enter_context(open_live_session())
             store.visit(episode_id)
             enter_edge = False
             while True:
@@ -1311,9 +1308,6 @@ def main(argv: list[str] | None = None) -> int:
     except (EditorError, OSError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    finally:
-        if live_session_entered and live_session is not None:
-            live_session.__exit__(*sys.exc_info())
 
 
 if __name__ == "__main__":
