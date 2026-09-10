@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.6.dev0 — development snapshot
+## 0.3.6 — 2026-09-10
 
 - Use the full terminal for the live editor, historical review, and EDGE menu.
   Anchor input at the bottom and reserve room for candidate rows and feedback.
@@ -10,10 +10,13 @@
 - Reuse sampler statistics when history penalties are inactive, defer context
   decoding until display, cache context wrapping, and skip evidence loading for
   plain text projection.
-- Keep experimental history replacement, fork-edit variations, token repair,
-  and the proposed 100-token hold default on `codex/history-edit`. The main
-  branch retains the 24-token hold default and existing replay behavior.
-- This is an unreleased development snapshot; the 0.3.5 release is unchanged.
+- Keep one terminal application alive across interactive commands, including
+  editing, review, menus, confirmations, and episode navigation. Preserve raw
+  mode between actions and restore the terminal when the session ends.
+- Remove transient busy feedback to prevent editor layout shifts.
+- Increase the default hold from 24 to 100 tokens; `--hold-default` remains
+  available for customization.
+- Exclude experimental history replacement and fork-edit variations.
 
 ## 0.3.5
 

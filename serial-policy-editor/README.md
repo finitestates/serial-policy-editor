@@ -1,17 +1,15 @@
-# Serial Policy Editor 0.3.6.dev0
+# Serial Policy Editor 0.3.6
 
 Serial Policy Editor (SPE) is a terminal editor for steering a local language
 model one token, text insertion, or delegated span at a time. Save your choices,
 rewind or fork a continuation, and replay the recorded editing procedure in a
 new context.
 
-**0.3.6.dev0 is a development snapshot toward 0.3.6, not the final release.**
-It includes full-screen editing, scrollable context, multiline input, and
-performance improvements. The latest released version remains
-[0.3.5](https://github.com/finitestates/serial-policy-editor/tree/v0.3.5).
-Experimental history replacement and fork-edit variations live separately on
-[`codex/history-edit`](https://github.com/finitestates/serial-policy-editor/tree/codex/history-edit);
-they are not included in `main`.
+**0.3.6 adds a persistent full-screen editor, scrollable context, multiline input,
+Ctrl+E input expansion, and performance improvements.** The default hold is now
+100 tokens; use `--hold-default` to choose another value. Transient busy feedback
+has been removed to prevent layout shifts. Experimental history replacement and
+fork-edit variations are excluded from this release.
 
 Start with [installation](#install) and the [first-session walkthrough](#your-first-session).
 The rest of this guide covers the [editor](#the-editor), [live-edge menu](#live-edge-menu),

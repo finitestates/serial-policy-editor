@@ -22,7 +22,7 @@ Replace `--help` with your usual launch arguments. An already installed `policy-
 - The UI runs on a dedicated thread. The caller keeps exclusive ownership of the engine, backend and SQLite connection. Preview requests execute on that owner while it waits for input; rendering never invokes backend callbacks directly.
 - Submitting a command disables the obsolete view immediately. Input arriving before the next view is ready is consumed, preventing accidental duplicate commits. Ctrl-C still interrupts the episode thread.
 - Preview work is cached within each view, bounded, and superseded queued requests are cancelled. Missing insertion previews show a pending state until ready.
-- A delayed working indicator avoids flashing during short transitions. The application remains able to resize while the episode owner is busy.
+- The application remains able to resize while the episode owner is busy. The delayed working indicator was removed in `567aaca` to prevent layout shifts.
 - Incidental printed output is captured during fullscreen operation and emitted after terminal restoration. CLI error handling runs after the session closes.
 
 Standalone `read_live_choice()` and `read_live_edge_command()` remain available for callers that want a single synchronous prompt. The CLI uses the persistent session.
