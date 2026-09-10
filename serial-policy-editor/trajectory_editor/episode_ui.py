@@ -31,6 +31,7 @@ from .episode_policy import (
 from .episode_store import EpisodeStore
 from .episode_hash import token_prefix_sha256
 from .sampling import raw_rank
+from .scoped_bias import ScopedBias
 from .tui import (
     HELP_TEXT,
     IO,
@@ -509,14 +510,28 @@ class InteractivePolicy:
                     if not tokens:
                         raise EditorError("bias phrase produced no tokens")
                     single = len(tokens) == 1
-                    biases = dict(engine.sampling.logit_bias if single else engine.sampling.sequence_bias)
-                    key = tokens[0] if single else tokens
-                    old = biases.get(key, 0.0)
+                    scoped_rule = None
+                    if command.bias_triggers is not None:
+                        triggers = tuple(tuple(engine.backend.tokenize(text, add_bos=False, special=False))
+                                         for text in command.bias_triggers)
+                        scoped_rule = ScopedBias(triggers, tokens, command.bias_until, 0)
+                        biases = {rule.key: rule for rule in engine.sampling.scoped_bias}
+                        key = scoped_rule.key
+                        old = biases[key].bias if key in biases else 0.0
+                    else:
+                        biases = dict(engine.sampling.logit_bias if single else engine.sampling.sequence_bias)
+                        key = tokens[0] if single else tokens
+                        old = biases.get(key, 0.0)
                     step = command.bias_amount if command.bias_amount is not None else engine.sampling.bias_step
                     value = 0.0 if command.bias_operator == "=" else old + (step if command.bias_operator == "+" else -step)
-                    biases[key] = value
-                    updated = replace(engine.sampling, **{
-                        "logit_bias" if single else "sequence_bias": tuple(biases.items())})
+                    if scoped_rule is not None:
+                        scoped_rule = replace(scoped_rule, bias=value)
+                        biases[key] = scoped_rule
+                        updated = replace(engine.sampling, scoped_bias=tuple(biases.values()))
+                    else:
+                        biases[key] = value
+                        updated = replace(engine.sampling, **{
+                            "logit_bias" if single else "sequence_bias": tuple(biases.items())})
                 except EditorError as exc:
                     feedback = ChoiceFeedback("error", "INVALID BIAS", (str(exc),))
                     if not live:
@@ -525,6 +540,10 @@ class InteractivePolicy:
                 texts = [engine.backend.token_text(token) for token in tokens]
                 label = (f"{texts[0]!r} (id={tokens[0]})" if single else
                          f"After {texts[:-1]!r} → {texts[-1]!r} (ids={list(tokens)})")
+                if scoped_rule is not None:
+                    trigger_texts = [[engine.backend.token_text(token) for token in trigger]
+                                     for trigger in scoped_rule.triggers]
+                    label += f" after any of {trigger_texts!r} until {scoped_rule.until}"
                 if self.store is not None and self.episode_id is not None:
                     with self.store.transaction():
                         self.store.record_sampling_segment(self.episode_id,
@@ -532,13 +551,16 @@ class InteractivePolicy:
                             stream_fingerprint=engine.stream_fingerprint,
                             coordinate_offset=engine.coordinate_offset)
                         payload = {"previous": old, "bias": value}
-                        if single:
+                        if scoped_rule is not None:
+                            payload.update(rule=scoped_rule.to_dict(), target_texts=texts,
+                                           trigger_texts=trigger_texts)
+                        elif single:
                             payload.update(token_id=tokens[0], text=texts[0],
                                            raw_rank=raw_rank(observation.logits, tokens[0]))
                         else:
                             payload.update(token_ids=list(tokens), texts=texts)
                         self._interaction(engine.boundary,
-                            "logit-bias" if single else "sequence-bias", payload)
+                            "scoped-bias" if scoped_rule is not None else ("logit-bias" if single else "sequence-bias"), payload)
                 engine.sampling = updated
                 observation = engine.observe()
                 ranks = tuple(exposed)

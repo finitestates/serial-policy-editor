@@ -30,10 +30,20 @@ class SamplingConfig:
     frequency_penalty: float = 0.0
     seed: int = 12345
     logit_bias: tuple[tuple[int, float], ...] = ()
+    scoped_bias: tuple = ()
     bias_step: float = 0.5
     sequence_bias: tuple[tuple[tuple[int, ...], float], ...] = ()
 
     def __post_init__(self) -> None:
+        from .scoped_bias import ScopedBias
+        try:
+            rules = tuple(ScopedBias.from_record(rule) for rule in self.scoped_bias)
+        except TypeError as exc:
+            raise EditorError("scoped_bias must be a list of rules") from exc
+        if len({rule.key for rule in rules}) != len(rules):
+            raise EditorError("duplicate scoped bias rule")
+        object.__setattr__(self, "scoped_bias", tuple(sorted(
+            (rule for rule in rules if rule.bias != 0), key=lambda rule: rule.key)))
         if type(self.bias_step) not in (int, float) or not math.isfinite(self.bias_step) or self.bias_step <= 0:
             raise EditorError("bias_step must be a finite positive number")
         try:
@@ -115,9 +125,9 @@ class SamplingConfig:
 
     @property
     def policy_active(self) -> bool:
-        return self.history_penalties_active or bool(self.logit_bias) or bool(self.sequence_bias)
+        return self.history_penalties_active or bool(self.logit_bias) or bool(self.sequence_bias) or bool(self.scoped_bias)
 
-    def active_biases(self, history) -> dict[int, float]:
+    def active_biases(self, history, boundaries=None) -> dict[int, float]:
         """Sum unconditional biases and rules whose prefix matches the context tail."""
         result = dict(self.logit_bias)
         if self.sequence_bias and history is None:
@@ -126,6 +136,10 @@ class SamplingConfig:
             prefix = tokens[:-1]
             if len(history) >= len(prefix) and tuple(history[-len(prefix):]) == prefix:
                 result[tokens[-1]] = result.get(tokens[-1], 0.0) + bias
+        if self.scoped_bias:
+            from .scoped_bias import active_scoped_biases
+            for token, bias in active_scoped_biases(self.scoped_bias, history, boundaries).items():
+                result[token] = result.get(token, 0.0) + bias
         return result
 
     @property
@@ -160,6 +174,7 @@ class SamplingConfig:
             seed=value.get("seed", defaults.seed),
             logit_bias=value.get("logit_bias", ()),
             sequence_bias=value.get("sequence_bias", ()),
+            scoped_bias=value.get("scoped_bias", ()),
             bias_step=value.get("bias_step", defaults.bias_step),
         )
 
@@ -179,6 +194,7 @@ class SamplingConfig:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            **({"scoped_bias": [rule.to_dict() for rule in self.scoped_bias]} if self.scoped_bias else {}),
             **({"sequence_bias": [[list(tokens), bias] for tokens, bias in self.sequence_bias]} if self.sequence_bias else {}),
             **({"logit_bias": [list(pair) for pair in self.logit_bias]} if self.logit_bias else {}),
             **({"bias_step": self.bias_step} if self.bias_step != 0.5 else {}),

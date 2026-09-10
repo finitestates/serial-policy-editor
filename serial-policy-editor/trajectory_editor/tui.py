@@ -308,6 +308,8 @@ class TeacherCommand:
     bias_text: str | None = None
     bias_prefix: str | None = None
     bias_last: int | None = None
+    bias_triggers: tuple[str, ...] | None = None
+    bias_until: str | None = None
 
 
 HELP_TEXT = """Commands:
@@ -317,6 +319,8 @@ HELP_TEXT = """Commands:
                     Enter remains the only commit action
                     --manual-acceptance leaves the command blank instead
   accept             commit the sampled proposal
+  b " T" + after [" A", " B"] until .   trigger any alternative until . ! ?
+  N- after " A" until |                use a ranked target; expire at newline
   b " TEXT" +/-[N]  bias completion of the tokenized phrase; = clears it
   bl X +/-[N]       bias the last X context tokens; bl 1 is a single-token bias
   N+/-[X] ... " P"  bias ranked token N only after the tokenized prefix P
@@ -470,10 +474,12 @@ def parse_bias_command(raw: str, *, vocabulary_size: int) -> TeacherCommand | No
     """Parse bias edits without interpreting quoted text as another command."""
     quoted = r'"(?:[^"\\]|\\.)*"'
     adjustment = r"(?P<op>[+\-=])\s*(?P<amount>\d+(?:\.\d*)?|\.\d+)?"
+    alternatives = rf"(?:{quoted}|\[\s*{quoted}(?:\s*,\s*{quoted})*\s*\])"
+    scope = rf"(?:\s+after\s+(?P<triggers>{alternatives})\s+until\s+(?P<until>[.|]))?"
     patterns = (
-        rf"b\s+(?P<text>{quoted})\s*{adjustment}",
+        rf"b\s+(?P<text>{quoted})\s*{adjustment}{scope}",
         rf"bl\s+(?P<last>\d+)\s*{adjustment}",
-        rf"(?P<rank>\d+)\s*{adjustment}(?:\s*\.\.\.\s*(?P<prefix>{quoted}))?",
+        rf"(?P<rank>\d+)\s*{adjustment}(?:\s*\.\.\.\s*(?P<prefix>{quoted}))?{scope}",
     )
     for pattern in patterns:
         match = re.fullmatch(pattern, raw.strip())
@@ -501,9 +507,23 @@ def parse_bias_command(raw: str, *, vocabulary_size: int) -> TeacherCommand | No
                     raise EditorError("bias text must be a valid JSON string") from exc
                 if not strings[name]:
                     raise EditorError("bias text/prefix cannot be empty; use rank+/-/= for a single token")
+        triggers = None
+        until = None
+        if fields.get("triggers") is not None:
+            if strings.get("prefix") is not None:
+                raise EditorError("Use a quoted b target for scoped multi-token rules")
+            try:
+                decoded = json.loads(fields["triggers"])
+            except ValueError as exc:
+                raise EditorError("Triggers must be JSON strings") from exc
+            triggers = (decoded,) if isinstance(decoded, str) else tuple(decoded)
+            if any(not text for text in triggers):
+                raise EditorError("Trigger alternatives cannot be empty")
+            until = "sentence" if fields["until"] == "." else "newline"
         return TeacherCommand(CommandKind.BIAS, search_rank=rank,
             bias_operator=operator, bias_amount=value, bias_last=last,
-            bias_text=strings.get("text"), bias_prefix=strings.get("prefix"))
+            bias_text=strings.get("text"), bias_prefix=strings.get("prefix"),
+            bias_triggers=triggers, bias_until=until)
     return None
 
 

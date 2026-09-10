@@ -196,7 +196,7 @@ def top_raw_ids(logits: np.ndarray, count: int) -> list[int]:
 class ObservationStatistics:
     """Owned numeric snapshot, with selected-token ranks computed lazily."""
 
-    def __init__(self, logits, config, history_token_ids):
+    def __init__(self, logits, config, history_token_ids, boundaries=None):
         self.logits = _validated_logits(logits).copy()
         penalties_active = config.history_penalties_active
         if penalties_active:
@@ -207,7 +207,8 @@ class ObservationStatistics:
             if history_token_ids is not None:
                 _validated_history(history_token_ids, len(self.logits))
             self.adjusted = self.logits
-        active_biases = config.active_biases(history_token_ids)
+        active_biases = config.active_biases(history_token_ids, boundaries)
+        self.active_biases = active_biases
         if active_biases:
             self.adjusted = self.adjusted.copy()
             for token, bias in active_biases.items():

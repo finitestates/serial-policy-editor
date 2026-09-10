@@ -222,6 +222,9 @@ class EpisodeEngine:
     def sampling(self, value: SamplingConfig) -> None:
         bias_tokens = [token for token, _ in value.logit_bias]
         bias_tokens.extend(token for tokens, _ in value.sequence_bias for token in tokens)
+        for rule in value.scoped_bias:
+            bias_tokens.extend(rule.target)
+            bias_tokens.extend(token for trigger in rule.triggers for token in trigger)
         if any(token >= self.backend.vocabulary_size() for token in bias_tokens):
             raise EditorError("bias token id is outside the model vocabulary")
         self._sampling = value
@@ -327,6 +330,11 @@ class EpisodeEngine:
         ):
             raise EditorError("request refers to a stale observation")
 
+    def _classify_token_boundary(self, token_id):
+        if token_id not in self._token_boundaries:
+            self._token_boundaries[token_id] = token_boundaries(self.backend.token_text(token_id))
+        return self._token_boundaries[token_id]
+
     def observe(self) -> Observation:
         if self.ended or self.checkpointed:
             raise EditorError("the episode has no live decision boundary")
@@ -336,7 +344,7 @@ class EpisodeEngine:
         logits = np.asarray(self.backend.last_logits(), dtype=np.float64)
         if logits.ndim != 1 or len(logits) != self.backend.vocabulary_size():
             raise RuntimeError("backend logits do not match its vocabulary")
-        statistics = ObservationStatistics(logits, self.sampling, key[0])
+        statistics = ObservationStatistics(logits, self.sampling, key[0], self._classify_token_boundary)
         logits = statistics.logits
         distribution = statistics.distribution
         coordinate = self.coordinate_offset + self.boundary
@@ -377,7 +385,7 @@ class EpisodeEngine:
         statistics = observation.statistics
         ordered = statistics.top_raw_ids(end)[start_rank - 1 : end]
         probabilities = statistics.raw_probabilities(ordered)
-        biases = self.sampling.active_biases(observation.prefix_token_ids)
+        biases = observation.statistics.active_biases
         return tuple(
             Candidate(
                 rank=rank,

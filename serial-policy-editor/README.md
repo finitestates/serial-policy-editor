@@ -783,3 +783,52 @@ sequences uses `spe-logit-bias-v2`, with a `token_ids` list per entry and option
 per-token `texts`. Single-token-only exports retain the v1 format. Both formats
 load through `--biases`; loading a preset replaces **both** the ordinary and
 sequence bias sets. Existing episodes and v1 presets remain supported.
+
+### Triggered biases with a sentence or line lifetime
+
+A scoped rule activates after any trigger appears in the current span:
+
+```text
+b " wings" +0.5 after " dragon" until .
+b " scales" + after [" dragon", " wyvern", " winged serpent"] until .
+12- after " dragon" until |
+```
+
+`until .` expires after a token containing `.`, `!`, or `?`, using the same
+heuristic as a sentence-bounded hold. `until |` expires after a token containing
+a newline; it means one line, not a paragraph. The delimiter-containing token is
+chosen under the active rule, which expires afterward. Tokens remain whole;
+a trigger containing the delimiter itself cannot activate a rule past it.
+
+Targets and triggers are exact token sequences. Brackets mean any of the listed
+alternatives; each string is tokenized separately. Repeated triggers or duplicate
+alternatives do not multiply a rule's strength. Distinct active rules add together,
+including ordinary and sequence biases. Multi-token targets still adjust only
+the final token when the target prefix matches the context tail within the span.
+These rules do not perform semantic similarity matching.
+
+Use bare `+`/`-` for the configured step, an explicit amount to change it, or `=`
+to clear the exact rule. The target, trigger set, and lifetime identify the rule;
+reordering alternatives does not create a new rule. For example:
+
+```text
+b " wings" = after [" wyvern", " dragon"] until .
+```
+
+The rule above clears the corresponding wings rule with those two alternatives,
+not an unconditional wings bias or a rule with a different lifetime. `until` is
+required. Scoped syntax supports `b "target"` and ranked targets; use a quoted
+multi-token target instead of combining `...` with `after`.
+
+Activation is recomputed from the current model-visible context, including the
+prompt and Teacher-inserted tokens. If a trigger is already in the current span,
+a newly added rule applies immediately. Fork, rewind, resume, and replay therefore
+restore activation from the same context and saved sampler state, with no separate
+activation flag. Raw model ranks and probabilities remain unchanged; `v` shows
+the adjusted ordering and `[bias +/-N]` shows the total active bias.
+
+Preset loading/projection includes scoped rules using `spe-logit-bias-v3`:
+`scoped_biases` contains objects with `triggers` (lists of token-ID sequences),
+`target` (a token-ID sequence), `until` (`sentence` or `newline`), and `bias`.
+Optional `target_texts` and `trigger_texts` aid inspection and are checked on load.
+Older v1/v2 presets still load; loading any preset replaces all three bias sets.
