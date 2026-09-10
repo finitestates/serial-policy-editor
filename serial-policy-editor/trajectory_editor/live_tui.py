@@ -39,6 +39,10 @@ InsertionResolver = Callable[[str, InsertMode], str]
 class PreviewPending(Exception):
     """A preview has been requested from the episode thread."""
 
+    def __init__(self, appended_text: str | None = None):
+        super().__init__()
+        self.appended_text = appended_text
+
 
 @dataclass(frozen=True)
 class ActionPreview:
@@ -154,12 +158,8 @@ def action_preview(
 
     if len(raw) >= 2 and raw[:2].lower() in {"t ", "x "}:
         supplied = raw[2:]
+        label = "continuation insertion" if raw[:1].lower() == "t" else "exact insertion"
         if not supplied:
-            label = (
-                "continuation insertion"
-                if raw[:1].lower() == "t"
-                else "exact insertion"
-            )
             return ActionPreview(
                 kind="effect",
                 label=label,
@@ -173,10 +173,10 @@ def action_preview(
         )
         try:
             rendered = resolve_insertion(supplied, mode)
-        except PreviewPending:
+        except PreviewPending as pending:
             return ActionPreview(
-                kind="effect", label="preparing insertion preview",
-                detail="Tokenization and budget are validated on Enter.",
+                kind="pending", label=label, detail="",
+                appended_text=pending.appended_text,
             )
         except Exception as exc:
             return ActionPreview(
@@ -187,11 +187,7 @@ def action_preview(
             )
         return ActionPreview(
             kind="insertion",
-            label=(
-                "continuation insertion"
-                if mode == InsertMode.CONTINUATION
-                else "exact insertion"
-            ),
+            label=label,
             detail="Tokenization and budget are validated on Enter.",
             appended_text=rendered,
         )
@@ -546,7 +542,7 @@ def _render_writing(choice: ChoiceSet, candidates: tuple[Candidate, ...],
         fragments.append(("", "\n"))
     fragments.append(("", "\n" * (budget - (end - start))))
     fragments.append(("class:muted", f"Context rows {start + 1}–{end}/{len(rows)} · PgUp/PgDn\n"))
-    if preview.kind == "insertion":
+    if preview.kind in {"insertion", "pending"}:
         text = preview.appended_text or ""
         effect = f"{preview.label} · {text.count(chr(10)) + 1} lines · {len(text)} characters"
     else:
@@ -560,7 +556,6 @@ def _render_writing(choice: ChoiceSet, candidates: tuple[Candidate, ...],
             f"{candidate.rank:>5}  {_probability(candidate.raw_probability)}  {candidate.text!r}", width) + "\n"))
     fragments.append(("", "\n" * (3 - len(shown))))
     fragments.append(("class:muted", f"{max(0, len(candidates) - 3)} more candidate rows · Ctrl+E restores full table\n"))
-    fragments.append(("class:prompt-label", "Write text · Enter commits\n"))
     return fragments
 
 
@@ -709,11 +704,10 @@ def _render_choice(
                 ),
             ]
         )
-    elif preview.kind == "insertion":
+    elif preview.kind in {"insertion", "pending"}:
         fragments.extend(
             [
                 ("class:proposal-label", preview.label),
-                ("class:muted", _one_line(f" · rendered {repr(preview.appended_text or '')}", max(1, width - len(preview.label)))),
                 ("class:muted", "\n"),
             ]
         )

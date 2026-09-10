@@ -66,6 +66,45 @@ def choice_state(runtime=None):
                            resolve_insertion=lambda text, mode: text)
 
 
+@pytest.mark.parametrize('command', ['t', 'x'])
+@pytest.mark.parametrize('expanded', [False, True])
+def test_pending_insertion_keeps_wrapped_context_in_place(command, expanded):
+    from trajectory_editor.live_tui import _render_choice
+    from trajectory_editor.persistent_tui import _Request
+
+    state = choice_state()
+    request = _Request(state)
+    with create_pipe_input() as pipe:
+        session = PersistentTerminalSession(input_device=pipe, output_device=RecordingOutput())
+
+        def resolve(text, mode):
+            return session._preview(request, ('insertion', text, mode), lambda: text)
+
+        def render(draft):
+            return ''.join(text for _, text in _render_choice(
+                state.choice, state.candidates, command + ' ' + draft,
+                state.remaining_tokens, resolve, None,
+                expanded_editor=expanded, terminal_size=(80, 60)))
+
+        draft = 'a wrapped draft ' * 12
+        render(draft)
+        next(iter(request.previews.values())).set_result(draft)
+        ready = render(draft)
+        pending = render(draft + ' ')
+        label = 'continuation insertion' if command == 't' else 'exact insertion'
+        assert label in ready and label in pending
+        ready_label = next(line for line in ready.splitlines() if line.startswith(label))
+        assert ready_label in pending.splitlines()
+        assert ready.splitlines().index(ready_label) == pending.splitlines().index(ready_label)
+        assert ' · rendered ' not in ready
+        # The draft and row counter stay at the same positions during resolution.
+        assert pending.split(' · PgUp/PgDn')[0] == ready.split(' · PgUp/PgDn')[0]
+        assert 'validated on Enter' not in pending
+        list(request.previews.values())[-1].set_result(draft + ' ')
+        assert draft + ' ' == resolve(draft + ' ', list(request.previews)[-1][2])
+        assert render(draft + ' ') != pending
+
+
 def test_choices_edge_prompts_and_pager_share_one_renderer():
     output = RecordingOutput()
     state = choice_state()

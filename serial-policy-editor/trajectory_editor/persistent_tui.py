@@ -49,6 +49,7 @@ class _Request:
     response: Future = field(default_factory=Future)
     previews: OrderedDict = field(default_factory=OrderedDict)
     latest: dict[str, tuple] = field(default_factory=dict)
+    insertion_display: dict[Any, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -378,7 +379,10 @@ class PersistentTerminalSession(AbstractContextManager):
         # same kind cancels obsolete queued work, and each view has its own cache.
         cached = request.previews.get(key)
         if cached is not None and not cached.cancelled() and cached.done():
-            return cached.result()
+            result = cached.result()
+            if key[0] == "insertion":
+                request.insertion_display[key[2]] = result
+            return result
         if not request.response.done() and (cached is None or cached.cancelled()):
             previous = request.latest.get(key[0])
             if previous is not None:
@@ -394,4 +398,6 @@ class PersistentTerminalSession(AbstractContextManager):
             self._events.put(_Resolution(request, callback, cached))
         if key[0] == "candidate":
             return None
-        raise PreviewPending
+        # Preserve the displayed draft while its replacement is being resolved.
+        # Clearing it here collapses wrapped context rows between keystrokes.
+        raise PreviewPending(request.insertion_display.get(key[2]))

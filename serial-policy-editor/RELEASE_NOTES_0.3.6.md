@@ -15,6 +15,9 @@ hold to 100 tokens.
   and episode navigation, with terminal restoration on exit.
 - Scrollable context, multiline raw input, and explicit Ctrl+E input expansion.
 - Remove the transient busy indicator to prevent layout shifts (`567aaca`).
+- Keep insertion previews and mode labels visible while typing `t`/`x`, preventing
+  context rows from briefly collapsing between updates. Remove redundant preview
+  text and commit hints.
 - Increase the default hold from 24 to 100 tokens (`841b569`). Use
   `--hold-default 24` to retain the previous default.
 
