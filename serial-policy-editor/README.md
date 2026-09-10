@@ -673,3 +673,21 @@ returns to compact input; a new raw-text command starts compact. Multiline paste
 preserves newlines, blank lines, tabs, and leading/trailing whitespace. Tab inserts
 a literal tab while editing raw text. If your terminal intercepts Alt+Enter,
 press Escape followed by Enter to send the same key sequence.
+
+### KV cache precision (llama.cpp)
+
+Use `--cache-type-k` and `--cache-type-v` to choose `f16`, `q8_0`, or
+`q4_0` independently. Omitting these options preserves the library defaults.
+For example:
+
+```bash
+policy-editor --model /path/to/model.gguf --cache-type-k q8_0 --cache-type-v q8_0
+```
+
+Quantized caches reduce context-cache memory without changing model weights.
+They can change token probabilities and replay results; speed and compatibility
+depend on the model and backend. Quantized V requires Flash Attention, which SPE
+requests by default; do not combine it with `--no-flash-attn`.
+Settings are saved with episodes and restored on resume, fork, and replay;
+explicit launch options override saved settings. `--cache off` controls prefix reuse,
+not cache precision.

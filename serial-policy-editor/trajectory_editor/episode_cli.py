@@ -20,7 +20,7 @@ from prompt_toolkit import prompt
 from prompt_toolkit.validation import Validator
 
 from .backend_factory import BACKEND_NAMES, create_backend
-from .decoder import LlamaCppSettings
+from .decoder import KV_CACHE_TYPES, LlamaCppSettings
 from .domain import MAX_SEED, MIN_SEED, EditorError, SamplingConfig
 from .episode_actions import Write
 from .episode_engine import EpisodeEngine
@@ -206,6 +206,9 @@ def build_parser() -> argparse.ArgumentParser:
     llama.add_argument("--n-gpu-layers", type=int)
     llama.add_argument("--main-gpu", type=int)
     llama.add_argument("--no-flash-attn", action="store_true")
+    for component in ("k", "v"):
+        llama.add_argument(f"--cache-type-{component}", dest=f"type_{component}",
+            choices=KV_CACHE_TYPES, help="KV cache precision (default: library default; quantized V requires Flash Attention)")
     llama.add_argument("--no-mmap", action="store_true")
     llama.add_argument("--use-mlock", action="store_true")
 
@@ -302,6 +305,8 @@ def _backend(args: argparse.Namespace):
     if args.model is None:
         raise EditorError("--model is required to start, resume, fork, or replay")
     llama = LlamaCppSettings(
+        type_k=args.type_k,
+        type_v=args.type_v,
         n_ctx=args.n_ctx,
         n_batch=args.n_batch,
         n_ubatch=args.n_ubatch,
@@ -392,7 +397,7 @@ def _load_episode_backend(args, source, io, *, use_saved=False, current_backend=
                 key: value for key, value in vars(selected).items()
                 if key.startswith("transformers_") or key in {
                     "n_ctx", "n_batch", "n_ubatch", "n_threads", "n_threads_batch",
-                    "n_gpu_layers", "main_gpu", "no_flash_attn", "no_mmap", "use_mlock", "cache"
+                    "n_gpu_layers", "main_gpu", "no_flash_attn", "no_mmap", "use_mlock", "cache", "type_k", "type_v"
                 }
             }
             return backend, provenance, changed

@@ -17,6 +17,8 @@ from .episode_backend import CacheMode, EpisodeBackend, validate_cache_mode
 # Public spelling retained because backend_factory and a few user scripts used it.
 Decoder = EpisodeBackend
 
+KV_CACHE_TYPES = ("f16", "q8_0", "q4_0")
+
 
 @dataclass(frozen=True)
 class LlamaCppSettings:
@@ -33,8 +35,8 @@ class LlamaCppSettings:
     main_gpu: int | None = None
     tensor_split: tuple[float, ...] | None = None
     offload_kqv: bool | None = None
-    type_k: int | None = None
-    type_v: int | None = None
+    type_k: str | int | None = None
+    type_v: str | int | None = None
     numa: bool | int | None = False
     rope_scaling_type: int | None = None
     rope_freq_base: float | None = None
@@ -56,6 +58,12 @@ class LlamaCppSettings:
             raise EditorError("n_gpu_layers must be an integer or auto")
         if self.main_gpu is not None and type(self.main_gpu) is not int:
             raise EditorError("main_gpu must be an integer or auto")
+        for name in ("type_k", "type_v"):
+            value = getattr(self, name)
+            if value is not None and type(value) is not int and value not in KV_CACHE_TYPES:
+                raise EditorError(f"{name} must be one of {KV_CACHE_TYPES} or a GGML type integer")
+        if not self.flash_attn and self.type_v in ("q8_0", "q4_0"):
+            raise EditorError("Quantized V cache requires Flash Attention; remove --no-flash-attn or use --cache-type-v f16")
         if self.tensor_split is not None and (
             not self.tensor_split
             or any(
@@ -118,6 +126,20 @@ class LlamaCppDecoder:
             "rope_freq_base": settings.rope_freq_base,
             "rope_freq_scale": settings.rope_freq_scale,
         }
+        for name in ("type_k", "type_v"):
+            value = options[name]
+            if isinstance(value, str):
+                constant = "GGML_TYPE_" + value.upper()
+                if not hasattr(llama_cpp, constant):
+                    raise EditorError(f"Installed llama-cpp-python does not support cache type {value}")
+                options[name] = getattr(llama_cpp, constant)
+        if not settings.flash_attn and options["type_v"] is not None:
+            quantized_types = {
+                getattr(llama_cpp, "GGML_TYPE_" + name.upper(), None)
+                for name in KV_CACHE_TYPES if name != "f16"
+            }
+            if options["type_v"] in quantized_types:
+                raise EditorError("Quantized V cache requires Flash Attention")
         self._model = Llama(**{k: v for k, v in options.items() if v is not None})
         n_vocab = getattr(self._model, "n_vocab", None)
         self._vocabulary_size = int(n_vocab() if callable(n_vocab) else n_vocab)
