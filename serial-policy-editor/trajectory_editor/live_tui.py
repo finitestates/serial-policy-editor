@@ -36,6 +36,10 @@ from .ui_themes import DEFAULT_LIVE_THEME
 InsertionResolver = Callable[[str, InsertMode], str]
 
 
+class PreviewPending(Exception):
+    """A preview has been requested from the episode thread."""
+
+
 @dataclass(frozen=True)
 class ActionPreview:
     kind: str
@@ -169,6 +173,11 @@ def action_preview(
         )
         try:
             rendered = resolve_insertion(supplied, mode)
+        except PreviewPending:
+            return ActionPreview(
+                kind="effect", label="preparing insertion preview",
+                detail="Tokenization and budget are validated on Enter.",
+            )
         except Exception as exc:
             return ActionPreview(
                 kind="invalid",
@@ -571,8 +580,9 @@ def _render_choice(
     resolve_candidate: Callable[[int], Candidate] | None = None,
     context_offset: int = 0,
     expanded_editor: bool = False,
+    terminal_size: tuple[int, int] | None = None,
 ) -> StyleAndTextTuples:
-    width, height = _terminal_size()
+    width, height = terminal_size or _terminal_size()
     width = max(width, 36)
     preview = action_preview(
         choice,
@@ -849,9 +859,10 @@ def _render_review(
     *,
     seamless: bool = False,
     context_offset: int = 0,
+    terminal_size: tuple[int, int] | None = None,
 ) -> StyleAndTextTuples:
     """Render one journal-backed historical boundary, never a live preview."""
-    width, height = _terminal_size()
+    width, height = terminal_size or _terminal_size()
     width = max(width, 36)
     rule = "─" * max(20, width - 1)
     context = _safe_context_text(review.context_text_tail)
@@ -1026,6 +1037,382 @@ def _live_style(theme: str) -> Style:
         raise ValueError(f"unknown live UI theme: {theme!r}") from exc
 
 
+@dataclass(frozen=True)
+class ChoiceViewState:
+    """One prepared decision view; the engine remains outside the renderer."""
+
+    choice: ChoiceSet
+    remaining_tokens: int | None
+    candidates: tuple[Candidate, ...]
+    resolve_insertion: InsertionResolver
+    display_candidates: tuple[Candidate, ...] | None = None
+    resolve_candidate: Callable[[int], Candidate] | None = None
+    target_token_id: int | None = None
+    feedback: ChoiceFeedback | None = None
+    initial_command: str | None = None
+    review: BoundaryReview | None = None
+    seamless: bool = False
+    reactivate_on_review_enter: bool = False
+    search_lens_active: bool = False
+    policy_active: bool = False
+    show_policy_rank: bool = False
+    sort_by_policy: bool = False
+
+
+class LiveChoiceView:
+    """Reusable layout, bindings and buffer for live choices and history review."""
+
+    def __init__(self, state: ChoiceViewState, *, submit=None, enabled=lambda: True,
+                 terminal_size=None):
+        self.submit = submit
+        self.terminal_size = terminal_size or _terminal_size
+        self.command_buffer = Buffer(multiline=True, read_only=Condition(lambda: not enabled()))
+        self.bindings = KeyBindings()
+        self.context_offset = 0
+        self.expanded_editor = False
+        self._context_key = None
+        self.update(state)
+
+        def _replace_buffer(text: str, *, owned: bool) -> None:
+            self.completion_owned = owned
+            self.command_buffer.document = Document(text, cursor_position=len(text))
+
+        def _in_authored_text() -> bool:
+            return _is_writing(self.command_buffer.text)
+
+        def _editor_expanded() -> bool:
+            return self.state.review is None and self.expanded_editor and _in_authored_text()
+
+        def _reset_editor_on_command_change(buffer: Buffer) -> None:
+            if not _is_writing(buffer.text):
+                self.expanded_editor = False
+
+        self.command_buffer.on_text_changed += _reset_editor_on_command_change
+
+        @self.bindings.add("c-e", filter=Condition(lambda: self.state.review is None and _in_authored_text()))
+        def _toggle_editor(event: object) -> None:
+            self.expanded_editor = not self.expanded_editor
+
+        review_empty = Condition(lambda: self.state.review is not None and not self.command_buffer.text)
+        review_has_input = Condition(
+            lambda: self.state.review is not None and bool(self.command_buffer.text)
+        )
+        active_empty = Condition(
+            lambda: self.state.review is None and (not self.command_buffer.text or self.completion_owned)
+        )
+
+        def _navigate(direction: int, event: object) -> None:
+            # The initial proposal rank is replace-on-first-typing only.  Once Tab
+            # is used, the rank in the buffer is a navigation result, so ordinary
+            # editing must not treat the next typed character as a replacement.
+            # Keep the buffer non-owned for every navigation result, including the
+            # first one selected from an otherwise blank prompt.
+            if not self.navigation_commands:
+                return
+            current = self.command_buffer.text
+            if not current:
+                suggestions = (
+                    self.state.feedback.completion_commands if self.state.feedback is not None else ()
+                )
+                if suggestions:
+                    _replace_buffer(
+                        suggestions[0] if direction > 0 else suggestions[-1],
+                        owned=False,
+                    )
+                    return
+                if (
+                    direction > 0
+                    and self.state.search_lens_active
+                ):
+                    match_command = (
+                        self.state.feedback.initial_tab_command
+                        if self.state.feedback is not None
+                        else None
+                    )
+                    if match_command is None and self.state.target_token_id is not None:
+                        match_command = next(
+                            (
+                                str(candidate.rank)
+                                for candidate in self.active_table_candidates
+                                if candidate.token_id == self.state.target_token_id
+                            ),
+                            None,
+                        )
+                    if match_command is not None:
+                        _replace_buffer(match_command, owned=False)
+                        return
+            if not current:
+                if self.state.search_lens_active and self.state.target_token_id is not None:
+                    match_command = next(
+                        (
+                            str(candidate.rank)
+                            for candidate in self.active_table_candidates
+                            if candidate.token_id == self.state.target_token_id
+                        ),
+                        self.navigation_commands[0],
+                    )
+                    index = self.navigation_commands.index(match_command)
+                else:
+                    _replace_buffer(
+                        self.navigation_commands[0] if direction > 0 else self.navigation_commands[-1],
+                        owned=False,
+                    )
+                    return
+            else:
+                try:
+                    index = self.navigation_commands.index(current)
+                except ValueError:
+                    if self.state.search_lens_active:
+                        match_command = next(
+                            (
+                                str(candidate.rank)
+                                for candidate in self.active_table_candidates
+                                if candidate.token_id == self.state.target_token_id
+                            ),
+                            self.navigation_commands[0],
+                        )
+                        _replace_buffer(match_command, owned=False)
+                        return
+                    proposal_rank = next(
+                        (
+                            candidate.rank
+                            for candidate in self.active_table_candidates
+                            if candidate.token_id == self.state.choice.proposal_token_id
+                        ),
+                        None,
+                    )
+                    if current.isdigit() and int(current) == proposal_rank:
+                        index = 0
+                    else:
+                        return
+            _replace_buffer(
+                self.navigation_commands[(index + direction) % len(self.navigation_commands)],
+                owned=False,
+            )
+
+        @self.bindings.add("c-g")
+        def _explore_rank(event: object) -> None:
+            raw = self.command_buffer.text.strip()
+            if self.state.review is None and raw.isdigit():
+                rank = int(raw)
+                if rank >= 1 and (self.state.choice.vocabulary_size is None or rank <= self.state.choice.vocabulary_size):
+                    self._finish(event, result=f"ms {rank}")  # type: ignore[attr-defined]
+
+        @self.bindings.add("escape", "enter", filter=Condition(lambda: self.state.review is None and _in_authored_text()))
+        def _insert_newline(event: object) -> None:
+            self.command_buffer.insert_text("\n")
+
+        def _scroll_budget(height: int, preview: ActionPreview) -> int:
+            if _editor_expanded():
+                return _writing_sizes(height)[1]
+            if self.state.review is not None:
+                return max(1, height - 15)
+            outside_table = (preview.candidate_rank is not None and
+                any(row.rank == preview.candidate_rank for row in self.state.candidates) and
+                not any(row.rank == preview.candidate_rank for row in self.active_table_candidates))
+            return _choice_context_budget(height, len(self.active_table_candidates), self.state.feedback,
+                                          int(self.state.search_lens_active) + int(outside_table))
+
+        @self.bindings.add("pageup")
+        def _context_up(event: object) -> None:
+            width, height = self.terminal_size()
+            preview = action_preview(self.state.choice, self.command_buffer.text, self.state.candidates, self.state.resolve_insertion,
+                                     remaining_tokens=self.state.remaining_tokens, resolve_candidate=self.state.resolve_candidate)
+            rows = _context_rows(_safe_context_text(self.state.review.context_text_tail if self.state.review else self.state.choice.context_text_tail),
+                                 "" if self.state.review else _safe_rendered_text(preview.appended_text or ""), max(1, max(36, width) - 1))
+            budget = _scroll_budget(height, preview)
+            self.context_offset = min(max(0, len(rows) - budget), self.context_offset + max(1, budget - 1))
+
+        @self.bindings.add("pagedown")
+        def _context_down(event: object) -> None:
+            _, height = self.terminal_size()
+            preview = action_preview(self.state.choice, self.command_buffer.text, self.state.candidates, self.state.resolve_insertion,
+                                     remaining_tokens=self.state.remaining_tokens, resolve_candidate=self.state.resolve_candidate)
+            budget = _scroll_budget(height, preview)
+            self.context_offset = max(0, self.context_offset - max(1, budget - 1))
+
+        @self.bindings.add("enter")
+        def _submit(event: object) -> None:
+            result = self.command_buffer.text
+            if self.state.review is not None:
+                if self.state.seamless and self.state.reactivate_on_review_enter and not result.strip():
+                    result = SEAMLESS_REACTIVATE
+                elif result.strip().lower() not in {"f", "fork"}:
+                    result = "\x1b"
+            self._finish(event, result=result)  # type: ignore[attr-defined]
+
+        @self.bindings.add("[", filter=active_empty | review_empty)
+        def _review_back(event: object) -> None:
+            self._finish(event, result="[")  # type: ignore[attr-defined]
+
+        @self.bindings.add("]", filter=active_empty | review_empty)
+        def _review_forward(event: object) -> None:
+            self._finish(event, result="]")  # type: ignore[attr-defined]
+
+        @self.bindings.add("escape", filter=Condition(lambda: self.state.review is not None))
+        def _leave_review(event: object) -> None:
+            self._finish(event, result="\x1b")  # type: ignore[attr-defined]
+
+        @self.bindings.add(
+            "escape",
+            filter=Condition(lambda: self.state.review is None and self.state.search_lens_active),
+        )
+        def _leave_search_lens(event: object) -> None:
+            self._finish(event, result="\x1b")  # type: ignore[attr-defined]
+
+        @self.bindings.add("f", filter=review_empty)
+        def _review_fork(event: object) -> None:
+            del event
+            _replace_buffer("f", owned=False)
+
+        @self.bindings.add(Keys.Any, filter=review_empty)
+        def _consume_and_leave_review(event: object) -> None:
+            self._finish(event, result="\x1b")  # type: ignore[attr-defined]
+
+        @self.bindings.add(Keys.Any, filter=review_has_input)
+        def _consume_extra_review_input(event: object) -> None:
+            self._finish(event, result="\x1b")  # type: ignore[attr-defined]
+
+        @self.bindings.add("backspace", filter=review_has_input)
+        def _leave_review_on_backspace(event: object) -> None:
+            self._finish(event, result="\x1b")  # type: ignore[attr-defined]
+
+        @self.bindings.add("c-c")
+        def _interrupt(event: object) -> None:
+            self._finish(event, exception=KeyboardInterrupt())  # type: ignore[attr-defined]
+
+        @self.bindings.add("c-d", filter=Condition(lambda: not self.command_buffer.text))
+        def _closed(event: object) -> None:
+            self._finish(event, result=None)  # type: ignore[attr-defined]
+
+        @self.bindings.add("tab")
+        def _next_completion(event: object) -> None:
+            if self.state.review is not None:
+                self._finish(event, result="\x1b")  # type: ignore[attr-defined]
+                return
+            if _in_authored_text():
+                self.command_buffer.insert_text("\t")
+                return
+            _navigate(1, event)
+
+        @self.bindings.add("s-tab")
+        def _previous_completion(event: object) -> None:
+            if self.state.review is not None:
+                self._finish(event, result="\x1b")  # type: ignore[attr-defined]
+                return
+            if _in_authored_text():
+                self.command_buffer.insert_text("\t")
+                return
+            _navigate(-1, event)
+
+        completion_filter = Condition(lambda: self.completion_owned)
+
+        @self.bindings.add("backspace", filter=completion_filter)
+        def _clear_completion(event: object) -> None:
+            del event
+            _replace_buffer("", owned=False)
+
+        @self.bindings.add(Keys.BracketedPaste, filter=completion_filter)
+        def _replace_completion_with_paste(event: object) -> None:
+            _replace_buffer(event.data, owned=False)  # type: ignore[attr-defined]
+
+        @self.bindings.add(Keys.Any, filter=completion_filter)
+        def _replace_completion_with_typing(event: object) -> None:
+            _replace_buffer(event.data, owned=False)  # type: ignore[attr-defined]
+
+        choice_control = FormattedTextControl(self._render)
+        input_control = BufferControl(buffer=self.command_buffer, focusable=True)
+        prompt_row = VSplit(
+            [
+                Window(
+                    FormattedTextControl([("class:prompt", "› ")]),
+                    width=Dimension.exact(2),
+                    height=1,
+                ),
+                Window(input_control, height=lambda: Dimension.exact(
+                           _writing_sizes(self.terminal_size()[1])[0] if _editor_expanded() else 1),
+                       wrap_lines=True, style="class:input"),
+            ]
+        )
+        root = HSplit(
+            [
+                Window(
+                    choice_control,
+                    wrap_lines=True,
+                    always_hide_cursor=True,
+                ),
+                prompt_row,
+                Window(
+                    FormattedTextControl(
+                        lambda: [
+                            (
+                                "class:hint",
+                                (
+                                    "Historical review is read-only; bare f forks this boundary."
+                                    if self.state.review is not None
+                                    else ("Ctrl+E " + ("collapse" if _editor_expanded() else "expand") +
+                                          " · Alt+Enter newline · Tab indent · Enter commits")
+                                    if _in_authored_text()
+                                    else (
+                                        (f"Next live edge in {self.state.remaining_tokens} {self.remaining_label} · " if self.state.remaining_tokens is not None else "q opens the live edge · ") +
+                                        "Enter commits · Alt+Enter newline in t/x · PgUp/PgDn context · Ctrl+G explores rank."
+                                    )
+                                ),
+                            )
+                        ]
+                    ),
+                    wrap_lines=True,
+                    dont_extend_height=True,
+                    always_hide_cursor=True,
+                ),
+            ]
+        )
+        self.layout = Layout(root, focused_element=input_control)
+
+    def update(self, state: ChoiceViewState) -> None:
+        context_key = (
+            state.choice.context_token_sha256,
+            state.review.aligned_step if state.review else None,
+        )
+        if context_key != self._context_key:
+            self.context_offset = 0
+        self._context_key = context_key
+        self.state = state
+        self.expanded_editor = False
+        self.completion_owned = bool(state.initial_command and state.review is None)
+        self.active_table_candidates = tuple(
+            state.candidates if state.display_candidates is None else state.display_candidates
+        )
+        self.navigation_commands = _navigation_command_cycle(
+            state.choice, self.active_table_candidates, state.feedback,
+            sort_by_policy=state.sort_by_policy, search_lens_active=state.search_lens_active,
+        )
+        self.remaining_label = "token" if state.remaining_tokens == 1 else "tokens"
+        text = state.initial_command if self.completion_owned else ""
+        self.command_buffer.reset(document=Document(text, cursor_position=len(text)))
+
+    def _finish(self, event, *, result=None, exception=None) -> None:
+        if self.submit is None:
+            event.app.exit(result=result, exception=exception)
+        else:
+            self.submit(result=result, exception=exception)
+
+    def _render(self):
+        state = self.state
+        if state.review is not None:
+            return _render_review(state.review, seamless=state.seamless,
+                                  context_offset=self.context_offset, terminal_size=self.terminal_size())
+        return _render_choice(
+            state.choice, state.candidates, self.command_buffer.text,
+            state.remaining_tokens, state.resolve_insertion, state.target_token_id,
+            state.feedback, state.policy_active, state.show_policy_rank,
+            state.sort_by_policy, state.display_candidates, state.search_lens_active,
+            state.resolve_candidate, self.context_offset,
+            self.expanded_editor and _is_writing(self.command_buffer.text),
+            terminal_size=self.terminal_size(),
+        )
+
+
 def read_live_choice(
     choice: ChoiceSet,
     *,
@@ -1048,365 +1435,20 @@ def read_live_choice(
     show_policy_rank: bool = False,
     sort_by_policy: bool = False,
 ) -> str | None:
-    """Read one command with a live preview and a stable raw-text editor."""
-    command_buffer = Buffer(multiline=True)
-    if initial_command and review is None:
-        command_buffer.document = Document(
-            initial_command,
-            cursor_position=len(initial_command),
-        )
-    bindings = KeyBindings()
-    context_offset = 0
-    expanded_editor = False
-    completion_owned = bool(initial_command)
-    active_table_candidates = tuple(
-        candidates if display_candidates is None else display_candidates
+    """Standalone adapter; interactive episodes use a persistent LiveChoiceView."""
+    state = ChoiceViewState(
+        choice=choice, remaining_tokens=remaining_tokens, candidates=candidates,
+        resolve_insertion=resolve_insertion, display_candidates=display_candidates,
+        resolve_candidate=resolve_candidate, target_token_id=target_token_id,
+        feedback=feedback, initial_command=initial_command, review=review,
+        seamless=seamless, reactivate_on_review_enter=reactivate_on_review_enter,
+        search_lens_active=search_lens_active, policy_active=policy_active,
+        show_policy_rank=show_policy_rank, sort_by_policy=sort_by_policy,
     )
-    navigation_commands = _navigation_command_cycle(
-        choice,
-        active_table_candidates,
-        feedback,
-        sort_by_policy=sort_by_policy,
-        search_lens_active=search_lens_active,
-    )
-
-    def _replace_buffer(text: str, *, owned: bool) -> None:
-        nonlocal completion_owned
-        completion_owned = owned
-        command_buffer.document = Document(text, cursor_position=len(text))
-
-    def _in_authored_text() -> bool:
-        return _is_writing(command_buffer.text)
-
-    def _editor_expanded() -> bool:
-        return review is None and expanded_editor and _in_authored_text()
-
-    def _reset_editor_on_command_change(buffer: Buffer) -> None:
-        nonlocal expanded_editor
-        if not _is_writing(buffer.text):
-            expanded_editor = False
-
-    command_buffer.on_text_changed += _reset_editor_on_command_change
-
-    @bindings.add("c-e", filter=Condition(lambda: review is None and _in_authored_text()))
-    def _toggle_editor(event: object) -> None:
-        nonlocal expanded_editor
-        expanded_editor = not expanded_editor
-
-    review_empty = Condition(lambda: review is not None and not command_buffer.text)
-    review_has_input = Condition(
-        lambda: review is not None and bool(command_buffer.text)
-    )
-    active_empty = Condition(
-        lambda: review is None and (not command_buffer.text or completion_owned)
-    )
-
-    def _navigate(direction: int, event: object) -> None:
-        # The initial proposal rank is replace-on-first-typing only.  Once Tab
-        # is used, the rank in the buffer is a navigation result, so ordinary
-        # editing must not treat the next typed character as a replacement.
-        # Keep the buffer non-owned for every navigation result, including the
-        # first one selected from an otherwise blank prompt.
-        if not navigation_commands:
-            return
-        current = command_buffer.text
-        if not current:
-            suggestions = (
-                feedback.completion_commands if feedback is not None else ()
-            )
-            if suggestions:
-                _replace_buffer(
-                    suggestions[0] if direction > 0 else suggestions[-1],
-                    owned=False,
-                )
-                return
-            if (
-                direction > 0
-                and search_lens_active
-            ):
-                match_command = (
-                    feedback.initial_tab_command
-                    if feedback is not None
-                    else None
-                )
-                if match_command is None and target_token_id is not None:
-                    match_command = next(
-                        (
-                            str(candidate.rank)
-                            for candidate in active_table_candidates
-                            if candidate.token_id == target_token_id
-                        ),
-                        None,
-                    )
-                if match_command is not None:
-                    _replace_buffer(match_command, owned=False)
-                    return
-        if not current:
-            if search_lens_active and target_token_id is not None:
-                match_command = next(
-                    (
-                        str(candidate.rank)
-                        for candidate in active_table_candidates
-                        if candidate.token_id == target_token_id
-                    ),
-                    navigation_commands[0],
-                )
-                index = navigation_commands.index(match_command)
-            else:
-                _replace_buffer(
-                    navigation_commands[0] if direction > 0 else navigation_commands[-1],
-                    owned=False,
-                )
-                return
-        else:
-            try:
-                index = navigation_commands.index(current)
-            except ValueError:
-                if search_lens_active:
-                    match_command = next(
-                        (
-                            str(candidate.rank)
-                            for candidate in active_table_candidates
-                            if candidate.token_id == target_token_id
-                        ),
-                        navigation_commands[0],
-                    )
-                    _replace_buffer(match_command, owned=False)
-                    return
-                proposal_rank = next(
-                    (
-                        candidate.rank
-                        for candidate in active_table_candidates
-                        if candidate.token_id == choice.proposal_token_id
-                    ),
-                    None,
-                )
-                if current.isdigit() and int(current) == proposal_rank:
-                    index = 0
-                else:
-                    return
-        _replace_buffer(
-            navigation_commands[(index + direction) % len(navigation_commands)],
-            owned=False,
-        )
-
-    @bindings.add("c-g")
-    def _explore_rank(event: object) -> None:
-        raw = command_buffer.text.strip()
-        if review is None and raw.isdigit():
-            rank = int(raw)
-            if rank >= 1 and (choice.vocabulary_size is None or rank <= choice.vocabulary_size):
-                event.app.exit(result=f"ms {rank}")  # type: ignore[attr-defined]
-
-    @bindings.add("escape", "enter", filter=Condition(lambda: review is None and _in_authored_text()))
-    def _insert_newline(event: object) -> None:
-        command_buffer.insert_text("\n")
-
-    def _scroll_budget(height: int, preview: ActionPreview) -> int:
-        if _editor_expanded():
-            return _writing_sizes(height)[1]
-        if review is not None:
-            return max(1, height - 15)
-        outside_table = (preview.candidate_rank is not None and
-            any(row.rank == preview.candidate_rank for row in candidates) and
-            not any(row.rank == preview.candidate_rank for row in active_table_candidates))
-        return _choice_context_budget(height, len(active_table_candidates), feedback,
-                                      int(search_lens_active) + int(outside_table))
-
-    @bindings.add("pageup")
-    def _context_up(event: object) -> None:
-        nonlocal context_offset
-        width, height = _terminal_size()
-        preview = action_preview(choice, command_buffer.text, candidates, resolve_insertion,
-                                 remaining_tokens=remaining_tokens, resolve_candidate=resolve_candidate)
-        rows = _context_rows(_safe_context_text(review.context_text_tail if review else choice.context_text_tail),
-                             "" if review else _safe_rendered_text(preview.appended_text or ""), max(1, max(36, width) - 1))
-        budget = _scroll_budget(height, preview)
-        context_offset = min(max(0, len(rows) - budget), context_offset + max(1, budget - 1))
-
-    @bindings.add("pagedown")
-    def _context_down(event: object) -> None:
-        nonlocal context_offset
-        _, height = _terminal_size()
-        preview = action_preview(choice, command_buffer.text, candidates, resolve_insertion,
-                                 remaining_tokens=remaining_tokens, resolve_candidate=resolve_candidate)
-        budget = _scroll_budget(height, preview)
-        context_offset = max(0, context_offset - max(1, budget - 1))
-
-    @bindings.add("enter")
-    def _submit(event: object) -> None:
-        result = command_buffer.text
-        if review is not None:
-            if seamless and reactivate_on_review_enter and not result.strip():
-                result = SEAMLESS_REACTIVATE
-            elif result.strip().lower() not in {"f", "fork"}:
-                result = "\x1b"
-        event.app.exit(result=result)  # type: ignore[attr-defined]
-
-    @bindings.add("[", filter=active_empty | review_empty)
-    def _review_back(event: object) -> None:
-        event.app.exit(result="[")  # type: ignore[attr-defined]
-
-    @bindings.add("]", filter=active_empty | review_empty)
-    def _review_forward(event: object) -> None:
-        event.app.exit(result="]")  # type: ignore[attr-defined]
-
-    @bindings.add("escape", filter=Condition(lambda: review is not None))
-    def _leave_review(event: object) -> None:
-        event.app.exit(result="\x1b")  # type: ignore[attr-defined]
-
-    @bindings.add(
-        "escape",
-        filter=Condition(lambda: review is None and search_lens_active),
-    )
-    def _leave_search_lens(event: object) -> None:
-        event.app.exit(result="\x1b")  # type: ignore[attr-defined]
-
-    @bindings.add("f", filter=review_empty)
-    def _review_fork(event: object) -> None:
-        del event
-        _replace_buffer("f", owned=False)
-
-    @bindings.add(Keys.Any, filter=review_empty)
-    def _consume_and_leave_review(event: object) -> None:
-        event.app.exit(result="\x1b")  # type: ignore[attr-defined]
-
-    @bindings.add(Keys.Any, filter=review_has_input)
-    def _consume_extra_review_input(event: object) -> None:
-        event.app.exit(result="\x1b")  # type: ignore[attr-defined]
-
-    @bindings.add("backspace", filter=review_has_input)
-    def _leave_review_on_backspace(event: object) -> None:
-        event.app.exit(result="\x1b")  # type: ignore[attr-defined]
-
-    @bindings.add("c-c")
-    def _interrupt(event: object) -> None:
-        event.app.exit(exception=KeyboardInterrupt())  # type: ignore[attr-defined]
-
-    @bindings.add("c-d", filter=Condition(lambda: not command_buffer.text))
-    def _closed(event: object) -> None:
-        event.app.exit(result=None)  # type: ignore[attr-defined]
-
-    @bindings.add("tab")
-    def _next_completion(event: object) -> None:
-        if review is not None:
-            event.app.exit(result="\x1b")  # type: ignore[attr-defined]
-            return
-        if _in_authored_text():
-            command_buffer.insert_text("\t")
-            return
-        _navigate(1, event)
-
-    @bindings.add("s-tab")
-    def _previous_completion(event: object) -> None:
-        if review is not None:
-            event.app.exit(result="\x1b")  # type: ignore[attr-defined]
-            return
-        if _in_authored_text():
-            command_buffer.insert_text("\t")
-            return
-        _navigate(-1, event)
-
-    completion_filter = Condition(lambda: completion_owned)
-
-    @bindings.add("backspace", filter=completion_filter)
-    def _clear_completion(event: object) -> None:
-        del event
-        _replace_buffer("", owned=False)
-
-    @bindings.add(Keys.BracketedPaste, filter=completion_filter)
-    def _replace_completion_with_paste(event: object) -> None:
-        _replace_buffer(event.data, owned=False)  # type: ignore[attr-defined]
-
-    @bindings.add(Keys.Any, filter=completion_filter)
-    def _replace_completion_with_typing(event: object) -> None:
-        _replace_buffer(event.data, owned=False)  # type: ignore[attr-defined]
-
-    choice_control = FormattedTextControl(
-        text=(
-            (
-                lambda: _render_review(
-                    review,
-                    seamless=seamless,
-                    context_offset=context_offset,
-                )
-            )
-            if review is not None
-            else lambda: _render_choice(
-                choice,
-                candidates,
-                command_buffer.text,
-                remaining_tokens,
-                resolve_insertion,
-                target_token_id,
-                feedback,
-                policy_active,
-                show_policy_rank,
-                sort_by_policy,
-                display_candidates,
-                search_lens_active,
-                resolve_candidate,
-                context_offset,
-                _editor_expanded(),
-            )
-        )
-    )
-    input_control = BufferControl(buffer=command_buffer, focusable=True)
-    prompt_row = VSplit(
-        [
-            Window(
-                FormattedTextControl([("class:prompt", "› ")]),
-                width=Dimension.exact(2),
-                height=1,
-            ),
-            Window(input_control, height=lambda: Dimension.exact(
-                       _writing_sizes(_terminal_size()[1])[0] if _editor_expanded() else 1),
-                   wrap_lines=True, style="class:input"),
-        ]
-    )
-    remaining_label = "token" if remaining_tokens == 1 else "tokens"
-    root = HSplit(
-        [
-            Window(
-                choice_control,
-                wrap_lines=True,
-                always_hide_cursor=True,
-            ),
-            prompt_row,
-            Window(
-                FormattedTextControl(
-                    lambda: [
-                        (
-                            "class:hint",
-                            (
-                                "Historical review is read-only; bare f forks this boundary."
-                                if review is not None
-                                else ("Ctrl+E " + ("collapse" if _editor_expanded() else "expand") +
-                                      " · Alt+Enter newline · Tab indent · Enter commits")
-                                if _in_authored_text()
-                                else (
-                                    (f"Next live edge in {remaining_tokens} {remaining_label} · " if remaining_tokens is not None else "q opens the live edge · ") +
-                                    "Enter commits · Alt+Enter newline in t/x · PgUp/PgDn context · Ctrl+G explores rank."
-                                )
-                            ),
-                        )
-                    ]
-                ),
-                wrap_lines=True,
-                dont_extend_height=True,
-                always_hide_cursor=True,
-            ),
-        ]
-    )
-    layout = Layout(root, focused_element=input_control)
+    view = LiveChoiceView(state)
     application: Application[str | None] = Application(
-        layout=layout,
-        key_bindings=bindings,
-        style=_live_style(theme),
-        full_screen=True,
-        erase_when_done=True,
-        mouse_support=False,
-        input=input_device,  # type: ignore[arg-type]
-        output=output_device,  # type: ignore[arg-type]
+        layout=view.layout, key_bindings=view.bindings, style=_live_style(theme),
+        full_screen=True, erase_when_done=False, mouse_support=False,
+        input=input_device, output=output_device,
     )
     return application.run()

@@ -54,6 +54,7 @@ def test_fullscreen_resize_preserves_controls_and_uses_extra_height(writing, wid
 
     async def exercise(app):
         assert app.full_screen
+        assert not app.erase_when_done
         with set_app(app):
             if writing:
                 app.current_buffer.text = 't ' + 'draft\n' * 100
@@ -90,6 +91,7 @@ def test_edge_uses_full_screen_with_bottom_input():
 
     async def exercise(app):
         assert app.full_screen
+        assert not app.erase_when_done
         with set_app(app):
             lines = paint(app, output)
             assert any('Command ›' in line for line in lines[-3:])

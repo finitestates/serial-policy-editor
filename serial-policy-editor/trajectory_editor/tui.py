@@ -8,9 +8,11 @@ import pydoc
 import re
 import sys
 import termios
+from contextlib import contextmanager, redirect_stdout, redirect_stderr
+from io import StringIO
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Iterator, Mapping, Protocol
 
 from .domain import Candidate, ChoiceSet, EditAction, EditorError, InsertMode
 from .ui_themes import resolve_live_theme
@@ -55,6 +57,26 @@ class BoundaryReview:
     next_token: Mapping[str, Any] | None = None
 
 
+class _SessionOutput(StringIO):
+    """Hold incidental print output until fullscreen exits, showing live status."""
+
+    def __init__(self, session, original):
+        super().__init__()
+        self.session = session
+        self.original = original
+
+    def write(self, text):
+        result = super().write(text)
+        self.session.write(text, end="")
+        return result
+
+    def isatty(self):
+        return self.original.isatty()
+
+    def fileno(self):
+        return self.original.fileno()
+
+
 class TerminalIO:
     def __init__(
         self,
@@ -70,6 +92,7 @@ class TerminalIO:
             and sys.stdout.isatty()
             and importlib.util.find_spec("prompt_toolkit") is not None
         )
+        self._live_session: object | None = None
 
     @property
     def supports_live_choices(self) -> bool:
@@ -78,6 +101,36 @@ class TerminalIO:
     @property
     def live_theme(self) -> str:
         return self._live_theme
+
+    @contextmanager
+    def live_session(self) -> Iterator[object | None]:
+        """Keep one terminal application alive throughout the interactive loop."""
+        if not self._live_choices:
+            yield None
+            return
+        if self._live_session is not None:
+            raise RuntimeError("live session is already active")
+        from .persistent_tui import PersistentTerminalSession
+
+        session = PersistentTerminalSession(theme=self._live_theme)
+        stdout, stderr = sys.stdout, sys.stderr
+        captured_out = _SessionOutput(session, stdout)
+        captured_err = _SessionOutput(session, stderr)
+        try:
+            with session:
+                self._live_session = session
+                try:
+                    with redirect_stdout(captured_out), redirect_stderr(captured_err):
+                        yield session
+                finally:
+                    self._live_session = None
+        finally:
+            # CLI summaries and errors belong to the restored normal screen.
+            # Prompt-toolkit writes through the output captured before redirection.
+            stdout.write(captured_out.getvalue())
+            stderr.write(captured_err.getvalue())
+            stdout.flush()
+            stderr.flush()
 
     def read_choice(
         self,
@@ -101,10 +154,9 @@ class TerminalIO:
     ) -> str | None:
         if not self._live_choices:
             raise RuntimeError("live choice input is not available")
-        from .live_tui import read_live_choice
+        from .live_tui import ChoiceViewState, read_live_choice
 
-        return read_live_choice(
-            choice,
+        options = dict(
             remaining_tokens=remaining_tokens,
             candidates=candidates,
             display_candidates=display_candidates,
@@ -120,8 +172,10 @@ class TerminalIO:
             policy_active=policy_active,
             show_policy_rank=show_policy_rank,
             sort_by_policy=sort_by_policy,
-            theme=self._live_theme,
         )
+        if self._live_session is not None:
+            return self._live_session.read_choice(ChoiceViewState(choice, **options))
+        return read_live_choice(choice, theme=self._live_theme, **options)
 
     def read_live_edge_command(
         self,
@@ -135,18 +189,19 @@ class TerminalIO:
         """Read one command from the structured live-edge surface."""
         if not self._live_choices:
             raise RuntimeError("live edge input is not available")
-        from .edge_tui import read_live_edge_command
+        from .edge_tui import EdgeViewState, read_live_edge_command
 
-        return read_live_edge_command(
-            episode_id=episode_id,
-            boundary=boundary,
-            current_budget=current_budget,
-            remaining_tokens=remaining_tokens,
-            sampler_summary=sampler_summary,
-            theme=self._live_theme,
+        options = dict(
+            episode_id=episode_id, boundary=boundary, current_budget=current_budget,
+            remaining_tokens=remaining_tokens, sampler_summary=sampler_summary,
         )
+        if self._live_session is not None:
+            return self._live_session.read_edge(EdgeViewState(**options))
+        return read_live_edge_command(theme=self._live_theme, **options)
 
     def read(self, prompt: str) -> str | None:
+        if self._live_session is not None:
+            return self._live_session.read(prompt)
         try:
             return input(prompt)
         except EOFError:
@@ -154,6 +209,8 @@ class TerminalIO:
 
     def read_key(self, prompt: str) -> str | None:
         """Read one unbuffered key without echoing it on an interactive TTY."""
+        if self._live_session is not None:
+            return self._live_session.read(prompt, single_key=True)
         if not sys.stdin.isatty():
             value = self.read(prompt)
             if value is None:
@@ -179,9 +236,18 @@ class TerminalIO:
         return value
 
     def write(self, text: str = "", *, end: str = "\n") -> None:
+        if self._live_session is not None:
+            if len(text.splitlines()) > 6:
+                self._live_session.page(text)
+            else:
+                self._live_session.write(text, end=end)
+            return
         print(text, end=end, flush=True)
 
     def page(self, text: str) -> None:
+        if self._live_session is not None:
+            self._live_session.page(text)
+            return
         pydoc.pager(text)
 
 

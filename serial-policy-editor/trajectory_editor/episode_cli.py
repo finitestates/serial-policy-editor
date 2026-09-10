@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from contextlib import ExitStack
 from dataclasses import replace
 import secrets
 import sys
@@ -911,7 +912,7 @@ def main(argv: list[str] | None = None) -> int:
             raise EditorError("--until requires --replay")
         if args.fixed_config and args.replay is None:
             raise EditorError("--fixed-config requires --replay")
-        with EpisodeStore(args.workspace) as store:
+        with EpisodeStore(args.workspace) as store, ExitStack() as ui_stack:
             for field in ("resume", "fork_from", "replay", "project", "lineage"):
                 value = getattr(args, field)
                 if value:
@@ -1095,6 +1096,9 @@ def main(argv: list[str] | None = None) -> int:
                     mode="fork",
                 )
 
+            open_live_session = getattr(io, "live_session", None)
+            if callable(open_live_session):
+                ui_stack.enter_context(open_live_session())
             store.visit(episode_id)
             enter_edge = False
             while True:
