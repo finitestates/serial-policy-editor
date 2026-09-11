@@ -494,73 +494,119 @@ class InteractivePolicy:
                 continue
             if command.kind == CommandKind.BIAS:
                 try:
-                    if command.bias_text is not None:
-                        tokens = tuple(engine.backend.tokenize(command.bias_text, add_bos=False, special=False))
+                    targets = []
+                    if command.bias_targets is not None:
+                        for target_text in command.bias_targets:
+                            tokens = tuple(engine.backend.tokenize(
+                                target_text, add_bos=False, special=False))
+                            if not tokens:
+                                raise EditorError("bias phrase produced no tokens")
+                            targets.append(tokens)
                     elif command.bias_last is not None:
                         if command.bias_last > len(observation.prefix_token_ids):
                             raise EditorError("bl requests more tokens than the current context contains")
-                        tokens = observation.prefix_token_ids[-command.bias_last:]
+                        targets.append(observation.prefix_token_ids[-command.bias_last:])
                     else:
                         candidate = resolve_candidate(command.search_rank)
                         prefix = () if command.bias_prefix is None else tuple(
                             engine.backend.tokenize(command.bias_prefix, add_bos=False, special=False))
                         if command.bias_prefix is not None and not prefix:
                             raise EditorError("bias prefix produced no tokens")
-                        tokens = (*prefix, candidate.token_id)
-                    if not tokens:
-                        raise EditorError("bias phrase produced no tokens")
-                    single = len(tokens) == 1
-                    scoped_rule = None
+                        targets.append((*prefix, candidate.token_id))
+                    if len(set(targets)) != len(targets):
+                        raise EditorError("bias targets resolve to duplicate token sequences")
+
+                    triggers = None
+                    trigger_texts = None
+                    lifetime = None
                     if command.bias_triggers is not None:
-                        triggers = tuple(tuple(engine.backend.tokenize(text, add_bos=False, special=False))
-                                         for text in command.bias_triggers)
-                        scoped_rule = ScopedBias(triggers, tokens, command.bias_until, 0)
-                        biases = {rule.key: rule for rule in engine.sampling.scoped_bias}
-                        key = scoped_rule.key
-                        old = biases[key].bias if key in biases else 0.0
-                    else:
-                        biases = dict(engine.sampling.logit_bias if single else engine.sampling.sequence_bias)
-                        key = tokens[0] if single else tokens
-                        old = biases.get(key, 0.0)
+                        triggers = tuple(tuple(engine.backend.tokenize(
+                            text, add_bos=False, special=False)) for text in command.bias_triggers)
+                        if any(not trigger for trigger in triggers):
+                            raise EditorError("bias trigger produced no tokens")
+                        trigger_texts = [[engine.backend.token_text(token) for token in trigger]
+                                         for trigger in triggers]
+                        lifetime = command.bias_until
+                        if command.bias_stop_text is not None:
+                            stop = tuple(engine.backend.tokenize(
+                                command.bias_stop_text, add_bos=False, special=False))
+                            if len(stop) != 1:
+                                raise EditorError(
+                                    "scoped-bias stop text must tokenize to exactly one token; "
+                                    "use until #N for an explicit token ID")
+                            lifetime = stop[0]
+                        elif command.bias_stop_token is not None:
+                            lifetime = command.bias_stop_token
+                        if lifetime is None:
+                            raise EditorError("scoped bias requires a stop token or lifetime")
+
+                    logit_biases = dict(engine.sampling.logit_bias)
+                    sequence_biases = dict(engine.sampling.sequence_bias)
+                    scoped_biases = {rule.key: rule for rule in engine.sampling.scoped_bias}
                     step = command.bias_amount if command.bias_amount is not None else engine.sampling.bias_step
-                    value = 0.0 if command.bias_operator == "=" else old + (step if command.bias_operator == "+" else -step)
-                    if scoped_rule is not None:
-                        scoped_rule = replace(scoped_rule, bias=value)
-                        biases[key] = scoped_rule
-                        updated = replace(engine.sampling, scoped_bias=tuple(biases.values()))
-                    else:
-                        biases[key] = value
-                        updated = replace(engine.sampling, **{
-                            "logit_bias" if single else "sequence_bias": tuple(biases.items())})
+                    updates = []
+                    for tokens in targets:
+                        texts = [engine.backend.token_text(token) for token in tokens]
+                        if triggers is not None:
+                            scoped_rule = ScopedBias(triggers, tokens, lifetime, 0)
+                            key = scoped_rule.key
+                            old = scoped_biases[key].bias if key in scoped_biases else 0.0
+                            value = 0.0 if command.bias_operator == "=" else old + (
+                                step if command.bias_operator == "+" else -step)
+                            scoped_rule = replace(scoped_rule, bias=value)
+                            scoped_biases[key] = scoped_rule
+                            label = (f"{texts[0]!r} (id={tokens[0]})" if len(tokens) == 1 else
+                                     f"After {texts[:-1]!r} → {texts[-1]!r} (ids={list(tokens)})")
+                            label += f" after any of {trigger_texts!r}"
+                            if type(lifetime) is int:
+                                label += (f" until {engine.backend.token_text(lifetime)!r} "
+                                          f"(id={lifetime})")
+                            else:
+                                label += f" until {lifetime}"
+                            payload = {
+                                "previous": old, "bias": value,
+                                "rule": scoped_rule.to_dict(), "target_texts": texts,
+                                "trigger_texts": trigger_texts,
+                            }
+                            updates.append(("scoped-bias", payload, label, value))
+                        else:
+                            single = len(tokens) == 1
+                            biases = logit_biases if single else sequence_biases
+                            key = tokens[0] if single else tokens
+                            old = biases.get(key, 0.0)
+                            value = 0.0 if command.bias_operator == "=" else old + (
+                                step if command.bias_operator == "+" else -step)
+                            biases[key] = value
+                            label = (f"{texts[0]!r} (id={tokens[0]})" if single else
+                                     f"After {texts[:-1]!r} → {texts[-1]!r} (ids={list(tokens)})")
+                            payload = {"previous": old, "bias": value}
+                            if single:
+                                payload.update(token_id=tokens[0], text=texts[0],
+                                               raw_rank=raw_rank(observation.logits, tokens[0]))
+                                kind = "logit-bias"
+                            else:
+                                payload.update(token_ids=list(tokens), texts=texts)
+                                kind = "sequence-bias"
+                            updates.append((kind, payload, label, value))
+
+                    updated = replace(engine.sampling,
+                        logit_bias=tuple(logit_biases.items()),
+                        sequence_bias=tuple(sequence_biases.items()),
+                        scoped_bias=tuple(scoped_biases.values()))
                 except EditorError as exc:
                     feedback = ChoiceFeedback("error", "INVALID BIAS", (str(exc),))
                     if not live:
                         self.io.write(str(exc))
                     continue
-                texts = [engine.backend.token_text(token) for token in tokens]
-                label = (f"{texts[0]!r} (id={tokens[0]})" if single else
-                         f"After {texts[:-1]!r} → {texts[-1]!r} (ids={list(tokens)})")
-                if scoped_rule is not None:
-                    trigger_texts = [[engine.backend.token_text(token) for token in trigger]
-                                     for trigger in scoped_rule.triggers]
-                    label += f" after any of {trigger_texts!r} until {scoped_rule.until}"
+
                 if self.store is not None and self.episode_id is not None:
                     with self.store.transaction():
                         self.store.record_sampling_segment(self.episode_id,
                             start_boundary=engine.boundary, sampling=updated,
                             stream_fingerprint=engine.stream_fingerprint,
                             coordinate_offset=engine.coordinate_offset)
-                        payload = {"previous": old, "bias": value}
-                        if scoped_rule is not None:
-                            payload.update(rule=scoped_rule.to_dict(), target_texts=texts,
-                                           trigger_texts=trigger_texts)
-                        elif single:
-                            payload.update(token_id=tokens[0], text=texts[0],
-                                           raw_rank=raw_rank(observation.logits, tokens[0]))
-                        else:
-                            payload.update(token_ids=list(tokens), texts=texts)
-                        self._interaction(engine.boundary,
-                            "scoped-bias" if scoped_rule is not None else ("logit-bias" if single else "sequence-bias"), payload)
+                        for kind, payload, _label, _value in updates:
+                            self._interaction(engine.boundary, kind, payload)
                 engine.sampling = updated
                 observation = engine.observe()
                 ranks = tuple(exposed)
@@ -569,9 +615,12 @@ class InteractivePolicy:
                 candidates = tuple(resolve_candidate(c.rank) for c in choice.candidates)
                 choice = _choice_from_observation(engine, observation, candidates,
                     context_characters=self.context_characters, serial=self.choice_serial)
-                feedback = ChoiceFeedback("status", "BIAS UPDATED", (f"{label}: {value:+g}",))
+                lines = tuple(f"{label}: {value:+g}" for _kind, _payload, label, value in updates)
+                feedback = ChoiceFeedback(
+                    "status", "BIAS UPDATED" if len(lines) == 1 else "BIASES UPDATED", lines)
                 if not live:
-                    self.io.write(f"Bias {label}: {value:+g}")
+                    for line in lines:
+                        self.io.write(f"Bias {line}")
                     display_choice(self.io, choice, remaining_tokens=engine.remaining)
                 continue
             if command.kind == CommandKind.HELP:

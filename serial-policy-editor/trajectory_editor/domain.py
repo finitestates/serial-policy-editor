@@ -43,7 +43,7 @@ class SamplingConfig:
         if len({rule.key for rule in rules}) != len(rules):
             raise EditorError("duplicate scoped bias rule")
         object.__setattr__(self, "scoped_bias", tuple(sorted(
-            (rule for rule in rules if rule.bias != 0), key=lambda rule: rule.key)))
+            (rule for rule in rules if rule.bias != 0), key=lambda rule: rule.sort_key)))
         if type(self.bias_step) not in (int, float) or not math.isfinite(self.bias_step) or self.bias_step <= 0:
             raise EditorError("bias_step must be a finite positive number")
         try:

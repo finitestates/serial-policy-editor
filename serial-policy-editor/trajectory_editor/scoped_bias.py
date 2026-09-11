@@ -6,11 +6,16 @@ from collections.abc import Mapping
 from .domain import EditorError
 
 
+LEGACY_LIFETIMES = ("sentence", "newline")
+
+
 @dataclass(frozen=True)
 class ScopedBias:
     triggers: tuple[tuple[int, ...], ...]
     target: tuple[int, ...]
-    until: str
+    # New rules store one exact stop-token ID. The legacy sentence/newline
+    # classifiers remain readable so existing episodes and v3 presets still work.
+    until: int | str
     bias: float
 
     def __post_init__(self):
@@ -22,8 +27,8 @@ class ScopedBias:
         if not triggers or any(not tokens or any(type(t) is not int or t < 0 for t in tokens)
                                for tokens in (*triggers, target)):
             raise EditorError("Scoped bias sequences require nonnegative integer token IDs")
-        if self.until not in ("sentence", "newline"):
-            raise EditorError("Scoped bias lifetime must be sentence or newline")
+        if not (type(self.until) is int and self.until >= 0) and self.until not in LEGACY_LIFETIMES:
+            raise EditorError("Scoped bias lifetime must be an exact stop-token ID, sentence, or newline")
         if type(self.bias) not in (int, float) or not math.isfinite(self.bias):
             raise EditorError("Scoped bias must be finite")
         object.__setattr__(self, "triggers", tuple(sorted(set(triggers))))
@@ -33,6 +38,11 @@ class ScopedBias:
     @property
     def key(self):
         return self.triggers, self.target, self.until
+
+    @property
+    def sort_key(self):
+        lifetime = (0, self.until) if type(self.until) is int else (1, self.until)
+        return self.triggers, self.target, lifetime
 
     @classmethod
     def from_record(cls, value):
@@ -47,16 +57,23 @@ class ScopedBias:
                 "target": list(self.target), "until": self.until, "bias": self.bias}
 
 
-def active_scoped_biases(rules, history, boundaries):
-    if history is None or boundaries is None:
-        raise EditorError("Scoped biases require exact context tokens and boundary classification")
+def active_scoped_biases(rules, history, boundaries=None):
+    if history is None:
+        raise EditorError("Scoped biases require exact context tokens")
     spans = {}
     result = {}
     for rule in rules:
         if rule.until not in spans:
             start = len(history)
-            while start and rule.until not in boundaries(history[start - 1]):
-                start -= 1
+            if type(rule.until) is int:
+                while start and history[start - 1] != rule.until:
+                    start -= 1
+            else:
+                if boundaries is None:
+                    raise EditorError(
+                        "legacy sentence/newline scoped biases require boundary classification")
+                while start and rule.until not in boundaries(history[start - 1]):
+                    start -= 1
             spans[rule.until] = tuple(history[start:])
         span = spans[rule.until]
         prefix = rule.target[:-1]

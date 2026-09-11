@@ -749,16 +749,25 @@ not starting the phrase. Raw model probabilities and raw ranks remain untouched.
 Matching rules add together, including any ordinary bias on the final token.
 The displayed `[bias +/-N]` is the total currently active bias for that token.
 
-Three ways to enter a rule:
+Several ways to enter a rule:
 
 ```text
+b New York +0.5
+b {New York, New Jersey, "C"} +0.25
 b " New York" +0.5
 bl 3 -
 12+0.5 ... " New"
 ```
 
-- `b` tokenizes the quoted phrase without adding a BOS token. JSON quoting allows
-  escaped quotes, newlines (`\n`), and exact leading spaces.
+- `b` bare text is continuation-oriented: surrounding whitespace is stripped and
+  SPE supplies one leading space before tokenization. This makes `b wings +` mean
+  the common token spelling `" wings"` without making you type the space or quotes.
+- `{...}` applies the same edit to several comma-separated targets. Bare items get
+  the same automatic leading space; quoted items are exact. Multiword bare items are
+  fine because commas, not spaces, separate the group.
+- A quoted `b` phrase remains exact. JSON quoting supports escaped quotes, newlines
+  (`\n`), and intentional leading/no-leading whitespace. The older exact JSON-list
+  form such as `[" wings", " scales"]` remains accepted.
 - `bl X` captures the last X actual context tokens, including prompt tokens if
   the span reaches into the prompt. X must be positive and no greater than the
   context length. It does not insert text or retroactively change those tokens.
@@ -784,51 +793,57 @@ per-token `texts`. Single-token-only exports retain the v1 format. Both formats
 load through `--biases`; loading a preset replaces **both** the ordinary and
 sequence bias sets. Existing episodes and v1 presets remain supported.
 
-### Triggered biases with a sentence or line lifetime
+### Triggered biases with exact stop tokens
 
-A scoped rule activates after any trigger appears in the current span:
+A scoped rule activates after any trigger appears since its most recent stop token:
 
 ```text
-b " wings" +0.5 after " dragon" until .
-b " scales" + after [" dragon", " wyvern", " winged serpent"] until .
-12- after " dragon" until |
+b wings +0.5 after dragon until "."
+b {scales, claws} + after {dragon, wyvern, winged serpent} until "."
+12- after dragon until "\n"
 ```
 
-`until .` expires after a token containing `.`, `!`, or `?`, using the same
-heuristic as a sentence-bounded hold. `until |` expires after a token containing
-a newline; it means one line, not a paragraph. The delimiter-containing token is
-chosen under the active rule, which expires afterward. Tokens remain whole;
-a trigger containing the delimiter itself cannot activate a rule past it.
+Bare targets and triggers use the same continuation-friendly spelling as ordinary
+`b` commands: `wings` means `" wings"`, while quoted strings are exact. Braces mean
+"any/all of these comma-separated items": any trigger activates the gate, and the
+same edit is compiled into one ordinary scoped rule per target. Quoted items inside
+a brace group stay exact, for example `{hello, "Hello", "\n"}`.
 
-Targets and triggers are exact token sequences. Brackets mean any of the listed
-alternatives; each string is tokenized separately. Repeated triggers or duplicate
-alternatives do not multiply a rule's strength. Distinct active rules add together,
-including ordinary and sequence biases. Multi-token targets still adjust only
-the final token when the target prefix matches the context tail within the span.
-These rules do not perform semantic similarity matching.
+The preferred `until "TOKEN"` form names one **exact stop token**. SPE tokenizes the
+quoted text without a BOS token and requires it to resolve to exactly one token; if
+it does not, use `until #N` to name a token ID explicitly. The stop token itself is
+chosen while the rule is active, then the rule is inactive on the following
+decision. Because activation is derived from token history, rewind, fork, resume,
+and replay need no separate matcher state.
+
+For compatibility with existing commands and saved rules, unquoted `until .` still
+means the older sentence heuristic (a token containing `.`, `!`, or `?`) and
+`until |` still means the older newline heuristic. New commands should generally
+prefer quoted exact stops such as `until "."`, `until "!"`, or `until "\n"`.
+
+Targets and triggers are exact token sequences after the human spelling is expanded.
+Repeated triggers do not multiply a rule's strength. Distinct active rules add
+together, including ordinary and sequence biases. Multi-token targets still adjust
+only the final token when the target prefix matches the context tail within the
+active span. These rules do not perform semantic similarity matching.
 
 Use bare `+`/`-` for the configured step, an explicit amount to change it, or `=`
-to clear the exact rule. The target, trigger set, and lifetime identify the rule;
-reordering alternatives does not create a new rule. For example:
+to clear the exact rule. The target, trigger set, and stop condition identify the
+rule; reordering trigger alternatives does not create a new rule. Multiple targets
+are command-line sugar only and remain separate ordinary rules in saved sampler
+state. Multiple targets also work without a scope:
 
 ```text
-b " wings" = after [" wyvern", " dragon"] until .
+b {wings, scales, claws} +0.5
+b {wings, scales} = after {wyvern, dragon} until "."
 ```
 
-The rule above clears the corresponding wings rule with those two alternatives,
-not an unconditional wings bias or a rule with a different lifetime. `until` is
-required. Scoped syntax supports `b "target"` and ranked targets; use a quoted
-multi-token target instead of combining `...` with `after`.
+Scoped syntax supports human/quoted `b` targets and ranked targets. Use a `b` target
+for scoped multi-token rules rather than combining the rank-prefix `...` form with
+`after`.
 
-Activation is recomputed from the current model-visible context, including the
-prompt and Teacher-inserted tokens. If a trigger is already in the current span,
-a newly added rule applies immediately. Fork, rewind, resume, and replay therefore
-restore activation from the same context and saved sampler state, with no separate
-activation flag. Raw model ranks and probabilities remain unchanged; `v` shows
-the adjusted ordering and `[bias +/-N]` shows the total active bias.
-
-Preset loading/projection includes scoped rules using `spe-logit-bias-v3`:
-`scoped_biases` contains objects with `triggers` (lists of token-ID sequences),
-`target` (a token-ID sequence), `until` (`sentence` or `newline`), and `bias`.
-Optional `target_texts` and `trigger_texts` aid inspection and are checked on load.
-Older v1/v2 presets still load; loading any preset replaces all three bias sets.
+Preset loading/projection continues to use `spe-logit-bias-v3`. `scoped_biases`
+contains `triggers` (lists of token-ID sequences), `target` (a token-ID sequence),
+`until`, and `bias`. New exact-stop rules store the stop token ID in `until`; legacy
+`sentence`/`newline` values remain readable for old episodes and presets. Older
+v1/v2 presets still load, and loading any preset replaces all three bias sets.

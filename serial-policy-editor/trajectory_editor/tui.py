@@ -305,11 +305,23 @@ class TeacherCommand:
     warning: str | None = None
     bias_operator: str | None = None
     bias_amount: float | None = None
-    bias_text: str | None = None
+    bias_targets: tuple[str, ...] | None = None
     bias_prefix: str | None = None
     bias_last: int | None = None
     bias_triggers: tuple[str, ...] | None = None
     bias_until: str | None = None
+    bias_stop_text: str | None = None
+    bias_stop_token: int | None = None
+
+    @property
+    def bias_text(self) -> str | None:
+        """Backward-compatible scalar view of bias_targets."""
+        return self.bias_targets[0] if self.bias_targets is not None and len(self.bias_targets) == 1 else None
+
+    @property
+    def bias_texts(self) -> tuple[str, ...] | None:
+        """Backward-compatible batch view of bias_targets."""
+        return self.bias_targets if self.bias_targets is not None and len(self.bias_targets) > 1 else None
 
 
 HELP_TEXT = """Commands:
@@ -319,9 +331,12 @@ HELP_TEXT = """Commands:
                     Enter remains the only commit action
                     --manual-acceptance leaves the command blank instead
   accept             commit the sampled proposal
-  b " T" + after [" A", " B"] until .   trigger any alternative until . ! ?
-  N- after " A" until |                use a ranked target; expire at newline
-  b " TEXT" +/-[N]  bias completion of the tokenized phrase; = clears it
+  b wings +          bare words/phrases imply the usual leading space
+  b {wings, scales, claws} +0.5          bias several targets at once
+  b {wings, scales} + after {dragon, wyvern} until "."
+                    braces are comma-separated human text; quoted items stay exact
+  N- after dragon until "\n"            ranked target with an exact one-token stop
+  b " TEXT" +/-[N]  quoted text remains exact; = clears the exact bias
   bl X +/-[N]       bias the last X context tokens; bl 1 is a single-token bias
   N+/-[X] ... " P"  bias ranked token N only after the tokenized prefix P
   N+ / N-           adjust token bias by the default step without advancing
@@ -364,7 +379,9 @@ Structured short commands may omit separating spaces: h5, h.5, h|5,
 f-5, m10, ms+10, ms-10, and c900 are equivalent to their spaced forms. Text-bearing
 commands /, t, x, n, and p keep their whitespace exactly as entered.
 The older newline-hold spellings h / N and h/N remain accepted as deprecated
-aliases for h | N and h|N.
+aliases for h | N and h|N. Bias lists may also use the older exact JSON form
+[" target", " other"]. Scoped `until .` / `until |` remain compatibility aliases
+for sentence/newline lifetimes; quoted `until "..."` names one exact stop token.
 """
 
 
@@ -470,14 +487,122 @@ def parse_fork_address(raw: str) -> ForkAddress | None:
     raise EditorError("use f, f N, or f - N")
 
 
+def _split_human_bias_group(raw: str) -> tuple[str, ...]:
+    """Split a {...} group on commas outside JSON-quoted strings."""
+    body = raw.strip()[1:-1]
+    items = []
+    start = 0
+    quoted = False
+    escaped = False
+    for index, character in enumerate(body):
+        if quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = False
+        elif character == '"':
+            quoted = True
+        elif character == ',':
+            items.append(body[start:index])
+            start = index + 1
+    if quoted or escaped:
+        raise EditorError("unterminated quoted text in bias group")
+    items.append(body[start:])
+    if any(not item.strip() for item in items):
+        raise EditorError("bias groups cannot contain empty alternatives")
+    return tuple(items)
+
+
+def _parse_bias_text(raw: str, *, label: str) -> tuple[str, ...]:
+    """Decode exact JSON text or friendlier bare/braced text.
+
+    Bare text is continuation-oriented: surrounding whitespace is stripped and a
+    single leading space is supplied automatically. Quoted JSON strings are exact.
+    The legacy JSON-list form remains exact for backwards compatibility.
+    """
+    value = raw.strip()
+    if not value:
+        raise EditorError(f"{label} cannot be empty")
+    if value.startswith('['):
+        try:
+            decoded = json.loads(value)
+        except ValueError as exc:
+            raise EditorError(f"{label} must be valid JSON") from exc
+        if not isinstance(decoded, list) or any(not isinstance(item, str) for item in decoded):
+            raise EditorError(f"{label} JSON form must be a list of strings")
+        result = tuple(decoded)
+    elif value.startswith('{'):
+        if not value.endswith('}'):
+            raise EditorError(f"unterminated {label} group")
+        result_list = []
+        for item in _split_human_bias_group(value):
+            item = item.strip()
+            if item.startswith('"'):
+                try:
+                    decoded = json.loads(item)
+                except ValueError as exc:
+                    raise EditorError(f"quoted {label} must be a valid JSON string") from exc
+                if not isinstance(decoded, str):
+                    raise EditorError(f"quoted {label} must be a JSON string")
+                result_list.append(decoded)
+            else:
+                if '"' in item or any(character in item for character in '{}[]'):
+                    raise EditorError(f"invalid bare {label}: {item!r}")
+                result_list.append(' ' + item)
+        result = tuple(result_list)
+    elif value.startswith('"'):
+        try:
+            decoded = json.loads(value)
+        except ValueError as exc:
+            raise EditorError(f"{label} must be a valid JSON string") from exc
+        if not isinstance(decoded, str):
+            raise EditorError(f"{label} must be a JSON string")
+        result = (decoded,)
+    else:
+        if any(character in value for character in '{}[]"'):
+            raise EditorError(f"invalid bare {label}")
+        result = (' ' + value.strip(),)
+    if not result or any(not item for item in result):
+        raise EditorError(f"{label} alternatives cannot be empty")
+    return result
+
+
+def _parse_bias_stop(raw: str, *, vocabulary_size: int) -> tuple[str | None, str | None, int | None]:
+    """Return (legacy lifetime, exact stop text, explicit stop token)."""
+    value = raw.strip()
+    if value == '.':
+        return 'sentence', None, None
+    if value == '|':
+        return 'newline', None, None
+    if value.startswith('#'):
+        try:
+            token = int(value[1:])
+        except ValueError as exc:
+            raise EditorError("stop token IDs use until #N") from exc
+        if not 0 <= token < vocabulary_size:
+            raise EditorError("stop token ID is outside the vocabulary")
+        return None, None, token
+    if value.startswith('"'):
+        try:
+            decoded = json.loads(value)
+        except ValueError as exc:
+            raise EditorError("until must be a valid JSON string, ., |, or #N") from exc
+        if not isinstance(decoded, str) or not decoded:
+            raise EditorError("stop text must be a nonempty JSON string")
+        return None, decoded, None
+    raise EditorError('use until "TOKEN" (or legacy until . / until |)')
+
+
 def parse_bias_command(raw: str, *, vocabulary_size: int) -> TeacherCommand | None:
     """Parse bias edits without interpreting quoted text as another command."""
     quoted = r'"(?:[^"\\]|\\.)*"'
     adjustment = r"(?P<op>[+\-=])\s*(?P<amount>\d+(?:\.\d*)?|\.\d+)?"
-    alternatives = rf"(?:{quoted}|\[\s*{quoted}(?:\s*,\s*{quoted})*\s*\])"
-    scope = rf"(?:\s+after\s+(?P<triggers>{alternatives})\s+until\s+(?P<until>[.|]))?"
+    stop = rf"(?:{quoted}|\#[0-9]+|[.|])"
+    scope = rf"(?:\s+after\s+(?P<triggers>.+?)\s+until\s+(?P<until>{stop}))?"
     patterns = (
-        rf"b\s+(?P<text>{quoted})\s*{adjustment}{scope}",
+        rf"b\s+(?P<text>.+?)\s*{adjustment}{scope}",
         rf"bl\s+(?P<last>\d+)\s*{adjustment}",
         rf"(?P<rank>\d+)\s*{adjustment}(?:\s*\.\.\.\s*(?P<prefix>{quoted}))?{scope}",
     )
@@ -498,34 +623,38 @@ def parse_bias_command(raw: str, *, vocabulary_size: int) -> TeacherCommand | No
         value = float(amount) if amount is not None else None
         if value is not None and (not math.isfinite(value) or value <= 0):
             raise EditorError("bias adjustment must be finite and positive")
-        strings = {}
-        for name in ("text", "prefix"):
-            if fields.get(name) is not None:
-                try:
-                    strings[name] = json.loads(fields[name])
-                except ValueError as exc:
-                    raise EditorError("bias text must be a valid JSON string") from exc
-                if not strings[name]:
-                    raise EditorError("bias text/prefix cannot be empty; use rank+/-/= for a single token")
+
+        targets = None
+        if fields.get("text") is not None:
+            targets = _parse_bias_text(fields["text"], label="bias target")
+            if len(set(targets)) != len(targets):
+                raise EditorError("bias target alternatives cannot contain duplicates")
+
+        prefix = None
+        if fields.get("prefix") is not None:
+            try:
+                prefix = json.loads(fields["prefix"])
+            except ValueError as exc:
+                raise EditorError("bias prefix must be a valid JSON string") from exc
+            if not isinstance(prefix, str) or not prefix:
+                raise EditorError("bias prefix cannot be empty")
+
         triggers = None
         until = None
+        stop_text = None
+        stop_token = None
         if fields.get("triggers") is not None:
-            if strings.get("prefix") is not None:
-                raise EditorError("Use a quoted b target for scoped multi-token rules")
-            try:
-                decoded = json.loads(fields["triggers"])
-            except ValueError as exc:
-                raise EditorError("Triggers must be JSON strings") from exc
-            triggers = (decoded,) if isinstance(decoded, str) else tuple(decoded)
-            if any(not text for text in triggers):
-                raise EditorError("Trigger alternatives cannot be empty")
-            until = "sentence" if fields["until"] == "." else "newline"
+            if prefix is not None:
+                raise EditorError("Use a b target for scoped multi-token rules")
+            triggers = _parse_bias_text(fields["triggers"], label="bias trigger")
+            until, stop_text, stop_token = _parse_bias_stop(
+                fields["until"], vocabulary_size=vocabulary_size)
+
         return TeacherCommand(CommandKind.BIAS, search_rank=rank,
             bias_operator=operator, bias_amount=value, bias_last=last,
-            bias_text=strings.get("text"), bias_prefix=strings.get("prefix"),
-            bias_triggers=triggers, bias_until=until)
+            bias_targets=targets, bias_prefix=prefix, bias_triggers=triggers,
+            bias_until=until, bias_stop_text=stop_text, bias_stop_token=stop_token)
     return None
-
 
 def parse_command(
     raw: str,

@@ -54,9 +54,10 @@ def load_bias_preset(path: Path, backend, provenance: dict) -> SamplingConfig:
         if not isinstance(row, dict):
             raise EditorError("Scoped bias must be an object")
         rule = ScopedBias.from_record({k: v for k, v in row.items()
-                                      if k not in {"target_texts", "trigger_texts"}})
+                                      if k not in {"target_texts", "trigger_texts", "until_text"}})
         rules.append(rule)
-        all_tokens = (*rule.target, *(t for trigger in rule.triggers for t in trigger))
+        stop_tokens = (rule.until,) if type(rule.until) is int else ()
+        all_tokens = (*rule.target, *(t for trigger in rule.triggers for t in trigger), *stop_tokens)
         if any(token >= backend.vocabulary_size() for token in all_tokens):
             raise EditorError("Scoped bias token ID is outside the loaded vocabulary")
         if "target_texts" in row and row["target_texts"] != [backend.token_text(t) for t in rule.target]:
@@ -64,6 +65,8 @@ def load_bias_preset(path: Path, backend, provenance: dict) -> SamplingConfig:
         # Check labels against the supplied order before canonical sorting.
         if "trigger_texts" in row and row["trigger_texts"] != [[backend.token_text(t) for t in trigger] for trigger in row["triggers"]]:
             raise EditorError("Scoped bias trigger text mismatch")
+        if "until_text" in row and (type(rule.until) is not int or row["until_text"] != backend.token_text(rule.until)):
+            raise EditorError("Scoped bias stop-token text mismatch")
     result = SamplingConfig(logit_bias=pairs, sequence_bias=sequences, scoped_bias=rules)
     for tokens, row in addressed:
         if any(token >= backend.vocabulary_size() for token in tokens):

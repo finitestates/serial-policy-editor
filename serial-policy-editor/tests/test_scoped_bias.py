@@ -213,3 +213,132 @@ def test_real_trigger_changes_proposal_then_expires():
         assert runtime.observe().statistics.active_biases == {}
     finally:
         decoder._model.close()
+
+
+def test_scoped_many_target_syntax():
+    command = parse_command(
+        'b [" B", "C"] +0.25 after " A" until .',
+        menu_size=3, vocabulary_size=8, default_hold_tokens=10)
+    assert command.bias_text is None
+    assert command.bias_texts == (' B', 'C')
+    assert command.bias_amount == .25
+    assert command.bias_triggers == (' A',)
+    assert command.bias_until == 'sentence'
+
+
+def test_scoped_many_target_command_expands_to_existing_rules(tmp_path):
+    model = Backend()
+    runtime = EpisodeEngine(model, initial_token_ids=[7, 1], sampling=SamplingConfig())
+    before = runtime.observe()
+    with EpisodeStore(tmp_path/'many.db') as store:
+        source = _create_episode(store, runtime, backend_provenance=model.provenance())
+        with patch.object(model, 'eval', side_effect=AssertionError('Unexpected evaluation')):
+            with pytest.raises(EdgeRequested):
+                InteractivePolicy(io=ScriptedIO([
+                    'b [" B", "C"] +0.25 after " A" until .', 'q']),
+                    store=store, episode_id=source).choose(runtime, before)
+        assert len(runtime.sampling.scoped_bias) == 2
+        assert {rule.target: rule.bias for rule in runtime.sampling.scoped_bias} == {
+            (2,): .25, (3,): .25,
+        }
+        assert runtime.observe().statistics.active_biases == {2: .25, 3: .25}
+        # The persisted representation remains ordinary v3 rules, not a new schema.
+        data = json.loads(project_biases(store, source))
+        assert data['format'] == 'spe-logit-bias-v3'
+        assert len(data['scoped_biases']) == 2
+
+
+def test_human_readable_bias_syntax_adds_spaces_but_quotes_stay_exact():
+    command = parse_command(
+        'b {wings, scales, "C", fire breath} +0.25 after {dragon, " hello"} until "!"',
+        menu_size=3, vocabulary_size=8, default_hold_tokens=10)
+    assert command.bias_targets == (' wings', ' scales', 'C', ' fire breath')
+    assert command.bias_triggers == (' dragon', ' hello')
+    assert command.bias_amount == .25
+    assert command.bias_until is None
+    assert command.bias_stop_text == '!'
+    assert command.bias_stop_token is None
+
+    scalar = parse_command(
+        'b wings +', menu_size=3, vocabulary_size=8, default_hold_tokens=10)
+    assert scalar.bias_targets == (' wings',)
+    assert scalar.bias_text == ' wings'
+
+
+def test_human_group_handles_commas_inside_exact_strings():
+    command = parse_command(
+        'b {plain phrase, "exact, comma"} +',
+        menu_size=3, vocabulary_size=8, default_hold_tokens=10)
+    assert command.bias_targets == (' plain phrase', 'exact, comma')
+
+
+def test_exact_and_legacy_stop_syntax_are_distinct():
+    exact = parse_command(
+        'b B + after A until "."',
+        menu_size=3, vocabulary_size=8, default_hold_tokens=10)
+    assert exact.bias_stop_text == '.' and exact.bias_until is None
+
+    legacy = parse_command(
+        'b B + after A until .',
+        menu_size=3, vocabulary_size=8, default_hold_tokens=10)
+    assert legacy.bias_until == 'sentence' and legacy.bias_stop_text is None
+
+    explicit = parse_command(
+        'b B + after A until #5',
+        menu_size=3, vocabulary_size=8, default_hold_tokens=10)
+    assert explicit.bias_stop_token == 5
+
+
+def test_many_human_targets_work_without_scope(tmp_path):
+    model = Backend()
+    runtime = EpisodeEngine(model, initial_token_ids=[7], sampling=SamplingConfig())
+    before = runtime.observe()
+    with EpisodeStore(tmp_path/'human-many.db') as store:
+        source = _create_episode(store, runtime, backend_provenance=model.provenance())
+        with patch.object(model, 'eval', side_effect=AssertionError('Unexpected evaluation')):
+            with pytest.raises(EdgeRequested):
+                InteractivePolicy(io=ScriptedIO(['b {A, B} +0.25', 'q']),
+                    store=store, episode_id=source).choose(runtime, before)
+    assert runtime.sampling.logit_bias == ((1, .25), (2, .25))
+
+
+def test_exact_stop_token_expires_without_boundary_classifier(tmp_path):
+    model = Backend()
+    runtime = EpisodeEngine(model, initial_token_ids=[7, 1], sampling=SamplingConfig())
+    before = runtime.observe()
+    with EpisodeStore(tmp_path/'exact-stop.db') as store:
+        source = _create_episode(store, runtime, backend_provenance=model.provenance())
+        with patch.object(model, 'eval', side_effect=AssertionError('Unexpected evaluation')):
+            with pytest.raises(EdgeRequested):
+                InteractivePolicy(io=ScriptedIO([
+                    'b {B, "C"} +0.25 after A until "!"', 'q']),
+                    store=store, episode_id=source).choose(runtime, before)
+    assert {rule.target: rule.until for rule in runtime.sampling.scoped_bias} == {
+        (2,): 5, (3,): 5,
+    }
+    assert runtime.sampling.active_biases([7, 1], None) == {2: .25, 3: .25}
+    assert runtime.sampling.active_biases([7, 1, 5], None) == {}
+    preset = tmp_path/'exact-stop.json'
+    with EpisodeStore(tmp_path/'exact-stop.db') as reopened:
+        preset.write_text(project_biases(reopened, source))
+    assert {row['until'] for row in json.loads(preset.read_text())['scoped_biases']} == {5}
+    assert load_bias_preset(preset, model, model.provenance()) == runtime.sampling
+
+
+def test_exact_stop_text_must_be_one_token():
+    model = Backend()
+    runtime = EpisodeEngine(model, initial_token_ids=[7, 1], sampling=SamplingConfig())
+    with pytest.raises(EdgeRequested):
+        InteractivePolicy(io=ScriptedIO([
+            'b B + after A until " A B"', 'q'])).choose(runtime, runtime.observe())
+    assert runtime.sampling.scoped_bias == ()
+
+
+@pytest.mark.parametrize('text', [
+    'b {} +', 'b {A,} +', 'b {,A} +', 'b {A, A} +',
+    'b B + after {} until "!"', 'b B + after A until ""',
+    'b B + after A until #99',
+])
+def test_invalid_human_bias_syntax(text):
+    with pytest.raises(EditorError):
+        parse_command(text, menu_size=3, vocabulary_size=8, default_hold_tokens=10)
