@@ -9,6 +9,7 @@ from trajectory_editor.bias_catalog import (
     CompileOptions,
     compile_catalog,
     compile_term,
+    generate_forms,
     load_yaml_source,
 )
 from trajectory_editor.bias_cli import main as bias_main
@@ -122,6 +123,20 @@ def test_yaml_lexical_scalars_do_not_change_with_yaml_quote_style(tmp_path):
         encoding="utf-8",
     )
     assert load_yaml_source(path) == {"terms": ["yes", "yes", "yes"]}
+
+
+def test_sentence_case_generates_natural_multiword_capitalization():
+    options = CompileOptions(
+        cases=("sentence",),
+        leading_space=False,
+        plural=False,
+    )
+
+    assert generate_forms("my favorite chair", options) == ("My favorite chair",)
+    assert "My favorite chair" in generate_forms(
+        "my favorite chair",
+        CompileOptions(leading_space=False, plural=False),
+    )
 
 
 def test_named_group_includes_implicit_terms_and_preserves_word_phrase_modes(backend):
@@ -249,6 +264,35 @@ def test_explicit_forms_and_per_term_levels(backend):
     entry = catalog.require("shadowing")
     assert entry.level == "exhaustive"
     assert (9, 10, 8) in {route.token_ids for route in entry.routes}
+
+
+def test_per_term_mode_and_edge_scales_override_auto(backend):
+    catalog = compile_catalog(
+        {
+            "defaults": {
+                "cases": ["original"],
+                "plural": False,
+                "leading_space": False,
+            },
+            "terms": {
+                "port of call": {
+                    "mode": "path",
+                    "head_scale": 0.25,
+                    "continuation_scale": 0.75,
+                },
+            },
+        },
+        backend,
+    )
+
+    entry = catalog.require("port of call")
+    assert entry.mode == "path"
+    assert {(route.mode, route.head_scale, route.continuation_scale)
+            for route in entry.routes} == {("path", 0.25, 0.75)}
+    restored = BiasCatalog.from_json(catalog.to_json())
+    restored_route = restored.require("port of call").routes[0]
+    assert restored_route.head_scale == 0.25
+    assert restored_route.continuation_scale == 0.75
 
 
 def test_group_cycles_and_reserved_global_are_rejected(backend):

@@ -69,7 +69,46 @@ def load_bias_preset(path: Path, backend, provenance: dict) -> SamplingConfig:
     return SamplingConfig(bias_rules=rules, bias_groups=groups)
 
 
-def project_biases(store, episode_id: str, *, rules_only: bool = False) -> str:
+def project_biases_yaml(store, episode_id: str) -> str:
+    """Export runtime group names as standalone compiler-input YAML.
+
+    This intentionally exports human-readable group membership rather than
+    active bias values or model-specific compiled routes.  Explicit catalog
+    reference markers are stripped because a standalone YAML source cannot
+    resolve an external catalog.
+    """
+
+    try:
+        import yaml
+    except ImportError as exc:  # pragma: no cover - PyYAML is a package dependency.
+        raise EditorError("PyYAML is required for editor-friendly bias export") from exc
+    config = store.final_sampling(episode_id)
+    groups = {
+        group.name: [
+            member[1:] if member.startswith("@") else member
+            for member in group.members
+        ]
+        for group in config.bias_groups
+    }
+    return yaml.safe_dump(
+        {"groups": groups},
+        allow_unicode=True,
+        default_flow_style=False,
+        sort_keys=False,
+    )
+
+
+def project_biases(
+    store,
+    episode_id: str,
+    *,
+    rules_only: bool = False,
+    editor_friendly: bool = False,
+) -> str:
+    if editor_friendly:
+        if rules_only:
+            raise EditorError("editor-friendly export cannot be combined with --rules-only")
+        return project_biases_yaml(store, episode_id)
     episode = store.get_episode(episode_id)
     config = store.final_sampling(episode_id)
     model = {

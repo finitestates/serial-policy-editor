@@ -60,6 +60,12 @@ def _triggers(value: Any) -> tuple[tuple[int, ...], ...]:
     ))
 
 
+def _scale(value: Any, *, path: str) -> float:
+    if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+        raise EditorError(f"{path} must be a finite nonnegative number")
+    return float(value)
+
+
 @dataclass(frozen=True)
 class BiasRule:
     """One logical bias amount applied to one or more token routes."""
@@ -69,6 +75,8 @@ class BiasRule:
     mode: str = "tail"
     triggers: tuple[tuple[int, ...], ...] = ()
     until: int | str | None = None
+    head_scale: float = 1.0
+    continuation_scale: float = 1.0
 
     def __post_init__(self) -> None:
         routes = _routes(self.routes, path="bias rule routes")
@@ -90,18 +98,39 @@ class BiasRule:
             raise EditorError("bias rule triggers require a stop token or lifetime")
         if until is not None and not triggers:
             raise EditorError("bias rule scopes require at least one trigger")
+        head_scale = _scale(self.head_scale, path="bias rule head_scale")
+        continuation_scale = _scale(
+            self.continuation_scale,
+            path="bias rule continuation_scale",
+        )
         object.__setattr__(self, "routes", tuple(sorted(routes)))
         object.__setattr__(self, "triggers", tuple(sorted(triggers)))
         object.__setattr__(self, "bias", float(self.bias))
+        object.__setattr__(self, "head_scale", head_scale)
+        object.__setattr__(self, "continuation_scale", continuation_scale)
 
     @property
     def key(self) -> tuple[Any, ...]:
-        return self.routes, self.mode, self.triggers, self.until
+        return (
+            self.routes,
+            self.mode,
+            self.triggers,
+            self.until,
+            self.head_scale,
+            self.continuation_scale,
+        )
 
     @property
     def sort_key(self) -> tuple[Any, ...]:
         lifetime = (0, self.until) if type(self.until) is int else (1, self.until)
-        return self.routes, self.mode, self.triggers, lifetime
+        return (
+            self.routes,
+            self.mode,
+            self.triggers,
+            lifetime,
+            self.head_scale,
+            self.continuation_scale,
+        )
 
     @classmethod
     def from_record(cls, value: Any) -> "BiasRule":
@@ -112,7 +141,10 @@ class BiasRule:
         routes = value.get("routes")
         if routes is None and "target" in value:
             routes = [value["target"]]
-        allowed = {"routes", "target", "bias", "mode", "triggers", "until"}
+        allowed = {
+            "routes", "target", "bias", "mode", "triggers", "until",
+            "head_scale", "continuation_scale",
+        }
         unknown = set(value) - allowed
         if unknown:
             raise EditorError(f"unknown bias rule fields: {', '.join(sorted(unknown))}")
@@ -124,6 +156,8 @@ class BiasRule:
             mode=value.get("mode", "tail"),
             triggers=value.get("triggers", ()),
             until=value.get("until"),
+            head_scale=value.get("head_scale", 1.0),
+            continuation_scale=value.get("continuation_scale", 1.0),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -136,6 +170,10 @@ class BiasRule:
             result["triggers"] = [list(trigger) for trigger in self.triggers]
         if self.until is not None:
             result["until"] = self.until
+        if self.head_scale != 1.0:
+            result["head_scale"] = self.head_scale
+        if self.continuation_scale != 1.0:
+            result["continuation_scale"] = self.continuation_scale
         return result
 
 
@@ -264,36 +302,49 @@ def _trigger_matches(rule: BiasRule, span: Sequence[int]) -> bool:
     )
 
 
-def _tail_tokens(routes: Sequence[Sequence[int]], history: Sequence[int]) -> set[int]:
-    result: set[int] = set()
+def _tail_tokens(routes: Sequence[Sequence[int]], history: Sequence[int]) -> dict[int, float]:
+    result: dict[int, float] = {}
     for route in routes:
         prefix = route[:-1]
         if not prefix or _endswith(history, prefix):
-            result.add(route[-1])
+            result[route[-1]] = 1.0
     return result
 
 
-def _path_tokens(routes: Sequence[Sequence[int]], history: Sequence[int]) -> set[int]:
+def _path_tokens(
+    routes: Sequence[Sequence[int]],
+    history: Sequence[int],
+    *,
+    head_scale: float,
+    continuation_scale: float,
+) -> dict[int, float]:
     """Return next edges for all routes whose longest prefix matches history."""
 
-    result: set[int] = set()
+    result: dict[int, float] = {}
     for route in routes:
         # The empty prefix is the route's starting edge.  Search longest first
         # so a route never biases both its head and its continuation at once.
         for prefix_length in range(min(len(route) - 1, len(history)), -1, -1):
             prefix = route[:prefix_length]
             if _endswith(history, prefix):
-                result.add(route[prefix_length])
+                token = route[prefix_length]
+                scale = head_scale if prefix_length == 0 else continuation_scale
+                result[token] = max(result.get(token, 0.0), scale)
                 break
     return result
 
 
-def _rule_tokens(rule: BiasRule, history: Sequence[int], boundaries: Any) -> set[int]:
+def _rule_tokens(rule: BiasRule, history: Sequence[int], boundaries: Any) -> dict[int, float]:
     span = _scoped_span(rule, history, boundaries)
     if rule.triggers and not _trigger_matches(rule, span):
-        return set()
+        return {}
     if rule.mode == "path":
-        return _path_tokens(rule.routes, span)
+        return _path_tokens(
+            rule.routes,
+            span,
+            head_scale=rule.head_scale,
+            continuation_scale=rule.continuation_scale,
+        )
     return _tail_tokens(rule.routes, span)
 
 
@@ -321,8 +372,8 @@ class BiasMatcher:
             history = ()
         result: dict[int, float] = {}
         for rule in self.rules:
-            for token in _rule_tokens(rule, history, boundaries):
-                result[token] = result.get(token, 0.0) + rule.bias
+            for token, scale in _rule_tokens(rule, history, boundaries).items():
+                result[token] = result.get(token, 0.0) + rule.bias * scale
         return result
 
 
@@ -335,13 +386,23 @@ def routes_for_catalog_entry(entry: Any, bias: float, *, mode: str | None = None
 
     if not hasattr(entry, "routes"):
         raise EditorError("catalog entry must expose compiled routes")
-    grouped: dict[str, list[tuple[int, ...]]] = {}
+    grouped: dict[tuple[str, float, float], list[tuple[int, ...]]] = {}
     for route in entry.routes:
         selected = mode or route.mode
         if selected not in BIAS_MODES:
             raise EditorError(f"catalog route has unsupported bias mode {selected!r}")
-        grouped.setdefault(selected, []).append(tuple(route.token_ids))
+        grouped.setdefault(
+            (selected, route.head_scale, route.continuation_scale),
+            [],
+        ).append(tuple(route.token_ids))
     return tuple(
-        BiasRule(routes=tuple(routes), bias=bias, mode=selected)
-        for selected, routes in sorted(grouped.items())
+        BiasRule(
+            routes=tuple(routes),
+            bias=bias,
+            mode=selected,
+            head_scale=head_scale,
+            continuation_scale=continuation_scale,
+        )
+        for (selected, head_scale, continuation_scale), routes
+        in sorted(grouped.items())
     )

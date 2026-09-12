@@ -776,6 +776,12 @@ so users do not need to write them.
 suffix forms; increase it only for terms where the extra routes are useful.
 Canonical routes are reserved first, then deterministic alternate routes are
 selected round-robin across generated forms until the budget is full.
+Per-term YAML may set `mode: auto`, `tail`, or `path`; `auto` preserves the
+default lexical-term/phrase distinction. Case controls include sentence case,
+so a phrase such as `my favorite chair` can also search `My favorite chair`.
+Path terms may also set
+`head_scale` and `continuation_scale` to make a common head gentler while the
+phrase is being completed.
 
 The runtime matcher now has one logical route engine. A plain lexical target
 that tokenizes into multiple pieces uses telescoping path semantics: `b
@@ -815,6 +821,7 @@ Export the current surviving bias set as a JSON preset:
 ```bash
 policy-editor --workspace episodes.sqlite3 --project '#1' --biases-only > biases.json
 policy-editor --workspace episodes.sqlite3 --project '#1' --biases-only --rules-only > rules.json
+policy-editor --workspace episodes.sqlite3 --project '#1' --biases-only --editor-friendly > groups.yaml
 policy-editor --model /path/to/model.gguf --biases biases.json --new-prompt 'Once upon a time'
 ```
 
@@ -828,6 +835,11 @@ size and supplied model metadata. Use presets with the model/tokenizer they
 were made for; token IDs are not portable across tokenizers. Presets store bias
 values, not the default interactive step. The supported preset format is
 `spe-bias-rules-v2`.
+`--editor-friendly` instead emits standalone YAML `groups:` definitions that
+can be fed back into `policy-editor-bias`; it omits active bias amounts and
+model-specific compiled routes. The export contains named groups only; direct
+one-shot bias rules are intentionally omitted. This makes the result a clean,
+recompilable description of the groups themselves.
 
 ### Logical bias rules
 

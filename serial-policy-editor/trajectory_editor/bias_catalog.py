@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import unicodedata
 from collections.abc import Mapping, Sequence
@@ -22,6 +23,7 @@ from .domain import EditorError
 CATALOG_FORMAT = "spe-bias-catalog-v1"
 LEVELS = ("minimal", "standard", "exhaustive")
 MODES = ("tail", "path")
+COMPILE_MODES = ("auto", *MODES)
 DEFAULT_LEVEL = "standard"
 DEFAULT_MAX_ROUTES = 4096
 DEFAULT_STANDARD_MAX_ROUTE_TOKENS = 2
@@ -87,6 +89,16 @@ def _as_int(value: Any, *, path: str, minimum: int = 0) -> int:
     return result
 
 
+def _as_scale(value: Any, *, path: str) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise _error(path, "must be a finite nonnegative number") from exc
+    if not math.isfinite(result) or result < 0:
+        raise _error(path, "must be a finite nonnegative number")
+    return result
+
+
 def _as_string_list(value: Any, *, path: str) -> tuple[str, ...]:
     if isinstance(value, str):
         return (normalize_scalar(value, path=path),)
@@ -106,10 +118,20 @@ def _parse_level(value: Any, *, path: str) -> str:
     return result
 
 
+def _parse_mode(value: Any, *, path: str) -> str:
+    result = str(value).strip().lower()
+    if result not in COMPILE_MODES:
+        raise _error(path, f"must be one of {', '.join(COMPILE_MODES)}")
+    return result
+
+
 @dataclass(frozen=True)
 class CompileOptions:
     level: str = DEFAULT_LEVEL
-    cases: tuple[str, ...] = ("original", "lower", "title")
+    mode: str = "auto"
+    head_scale: float = 1.0
+    continuation_scale: float = 1.0
+    cases: tuple[str, ...] = ("original", "lower", "title", "sentence")
     leading_space: bool = True
     plural: bool = True
     suffixes: tuple[str, ...] = ()
@@ -119,7 +141,13 @@ class CompileOptions:
     def __post_init__(self) -> None:
         if self.level not in LEVELS:
             raise EditorError(f"unknown compilation level {self.level!r}")
-        allowed_cases = {"original", "lower", "title", "upper"}
+        if self.mode not in COMPILE_MODES:
+            raise EditorError(f"unknown compilation mode {self.mode!r}")
+        for name in ("head_scale", "continuation_scale"):
+            value = getattr(self, name)
+            if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+                raise EditorError(f"{name} must be a finite nonnegative number")
+        allowed_cases = {"original", "lower", "title", "sentence", "upper"}
         if not self.cases or any(case not in allowed_cases for case in self.cases):
             raise EditorError("cases must contain supported case names")
         if self.max_routes < 1:
@@ -153,6 +181,15 @@ class CompileOptions:
             max_route_tokens = _as_int(max_route_tokens, path=f"{path}.max_route_tokens", minimum=1)
         return cls(
             level=_parse_level(value.get("level", current.level), path=f"{path}.level"),
+            mode=_parse_mode(value.get("mode", current.mode), path=f"{path}.mode"),
+            head_scale=_as_scale(
+                value.get("head_scale", current.head_scale),
+                path=f"{path}.head_scale",
+            ),
+            continuation_scale=_as_scale(
+                value.get("continuation_scale", current.continuation_scale),
+                path=f"{path}.continuation_scale",
+            ),
             cases=cases,
             leading_space=leading,
             plural=_as_bool(value.get("plural", current.plural), path=f"{path}.plural"),
@@ -180,6 +217,8 @@ class CompiledRoute:
     mode: str
     strategies: tuple[str, ...]
     sources: tuple[str, ...] = ()
+    head_scale: float = 1.0
+    continuation_scale: float = 1.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -189,6 +228,9 @@ class CompiledRoute:
             "mode": self.mode,
             "strategies": list(self.strategies),
             **({"sources": list(self.sources)} if self.sources else {}),
+            **({"head_scale": self.head_scale} if self.head_scale != 1.0 else {}),
+            **({"continuation_scale": self.continuation_scale}
+               if self.continuation_scale != 1.0 else {}),
         }
 
 
@@ -338,9 +380,14 @@ def _model_identity(model: Mapping[str, Any]) -> tuple[Any, ...]:
 
 
 def _merge_routes(left: Sequence[CompiledRoute], right: Sequence[CompiledRoute]) -> tuple[CompiledRoute, ...]:
-    merged: dict[tuple[tuple[int, ...], str], CompiledRoute] = {}
+    merged: dict[tuple[tuple[int, ...], str, float, float], CompiledRoute] = {}
     for route in (*left, *right):
-        key = (route.token_ids, route.mode)
+        key = (
+            route.token_ids,
+            route.mode,
+            route.head_scale,
+            route.continuation_scale,
+        )
         current = merged.get(key)
         if current is None:
             merged[key] = route
@@ -352,6 +399,8 @@ def _merge_routes(left: Sequence[CompiledRoute], right: Sequence[CompiledRoute])
             mode=current.mode,
             strategies=tuple(dict.fromkeys((*current.strategies, *route.strategies))),
             sources=tuple(dict.fromkeys((*current.sources, *route.sources))),
+            head_scale=current.head_scale,
+            continuation_scale=current.continuation_scale,
         )
     return tuple(merged.values())
 
@@ -390,7 +439,19 @@ def _routes_from_dict(value: Any, *, path: str) -> tuple[CompiledRoute, ...]:
         token_texts = tuple(str(text) for text in raw.get("token_texts", ()))
         strategies = tuple(str(strategy) for strategy in raw.get("strategies", ()))
         sources = tuple(str(source) for source in raw.get("sources", ()))
-        routes.append(CompiledRoute(ids, texts, token_texts, mode, strategies, sources))
+        routes.append(CompiledRoute(
+            ids,
+            texts,
+            token_texts,
+            mode,
+            strategies,
+            sources,
+            _as_scale(raw.get("head_scale", 1.0), path=f"{route_path}.head_scale"),
+            _as_scale(
+                raw.get("continuation_scale", 1.0),
+                path=f"{route_path}.continuation_scale",
+            ),
+        ))
     return tuple(routes)
 
 
@@ -488,6 +549,8 @@ def generate_forms(source: str, options: CompileOptions, explicit_forms: Sequenc
                 value = base.lower()
             elif case == "title":
                 value = base.title()
+            elif case == "sentence":
+                value = base.capitalize()
             else:
                 value = base.upper()
             expanded.append(value)
@@ -609,7 +672,9 @@ def compile_term(
 ) -> CatalogEntry:
     name = normalize_scalar(name, path="term name")
     source = normalize_scalar(source, path=f"term {name!r}")
-    mode = "tail" if any(character.isspace() for character in source) else "path"
+    mode = options.mode
+    if mode == "auto":
+        mode = "tail" if any(character.isspace() for character in source) else "path"
     forms = generate_forms(source, options, explicit_forms)
     index = surface_index if surface_index is not None else _surface_index(backend)
     route_map: dict[tuple[int, ...], CompiledRoute] = {}
@@ -647,6 +712,8 @@ def compile_term(
                     mode=mode,
                     strategies=(strategy,),
                     sources=(name,),
+                    head_scale=options.head_scale,
+                    continuation_scale=options.continuation_scale,
                 )
             else:
                 route_map[route] = CompiledRoute(
@@ -656,6 +723,8 @@ def compile_term(
                     mode=existing.mode,
                     strategies=tuple(dict.fromkeys((*existing.strategies, strategy))),
                     sources=existing.sources,
+                    head_scale=existing.head_scale,
+                    continuation_scale=existing.continuation_scale,
                 )
 
         if form_alternates:
@@ -892,6 +961,8 @@ def compile_catalog(
                     mode=route.mode,
                     strategies=route.strategies,
                     sources=tuple(dict.fromkeys((*route.sources, target))),
+                    head_scale=route.head_scale,
+                    continuation_scale=route.continuation_scale,
                 )
                 for route in child.routes
             )
@@ -927,7 +998,11 @@ def compile_catalog(
         compiler={
             "format_version": 1,
             "default_level": defaults.level,
+            "default_mode": defaults.mode,
+            "default_head_scale": defaults.head_scale,
+            "default_continuation_scale": defaults.continuation_scale,
             "levels": list(LEVELS),
+            "modes": list(COMPILE_MODES),
             "default_route_limits": {
                 "standard_max_route_tokens": DEFAULT_STANDARD_MAX_ROUTE_TOKENS,
                 "exhaustive_max_route_tokens": DEFAULT_EXHAUSTIVE_MAX_ROUTE_TOKENS,

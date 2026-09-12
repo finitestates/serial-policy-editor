@@ -47,7 +47,10 @@ The expanded source shape is:
 ```yaml
 defaults:
   level: standard
-  cases: [original, lower, title]
+  mode: auto
+  head_scale: 1.0
+  continuation_scale: 1.0
+  cases: [original, lower, title, sentence]
   leading_space: true
   plural: true
   suffixes:
@@ -61,7 +64,10 @@ terms:
   - shadow:
       text: shadow
       level: standard
-      cases: [original, lower, title]
+      mode: auto
+      head_scale: 1.0
+      continuation_scale: 1.0
+      cases: [original, lower, title, sentence]
       leading_space: true
       plural: true
       suffixes: [ing, ed, ly]
@@ -133,18 +139,36 @@ The recognized compiler options are:
 | Option | Values | Meaning |
 | --- | --- | --- |
 | `level` | `minimal`, `standard`, `exhaustive` | Controls how deeply alternate token routes are searched. |
-| `cases` | list of `original`, `lower`, `title`, `upper` | Case variants to search. A scalar is also accepted. |
+| `mode` | `auto`, `tail`, `path` | `auto` uses path for single lexical terms and tail for phrases; the other values force the mode. |
+| `head_scale` | finite nonnegative number | Scales the first edge of a path rule. |
+| `continuation_scale` | finite nonnegative number | Scales continuation edges after a matching path prefix. |
+| `cases` | list of `original`, `lower`, `title`, `sentence`, `upper` | Case variants to search. A scalar is also accepted. `sentence` turns `my favorite chair` into `My favorite chair`. |
 | `leading_space` | `true` or `false` | Include the leading-space surface variant. `both` acts like `true`; `none` acts like `false`. |
 | `plural` | boolean | Search the standard pluralization variants. |
 | `suffixes` | string or list of strings | Additional suffixes to search, such as `ing`, `ed`, or `ly`. |
 | `max_routes` | positive integer | Maximum routes retained for each term across all generated forms. |
 | `max_route_tokens` | positive integer | Maximum number of tokens in one route. Omit it for the normal level-dependent depth. |
 
-Defaults are `standard`, `original/lower/title`, leading-space variants,
-pluralization enabled, no extra suffixes, `max_routes: 4096`, and the
-level-dependent default route depth. The command-line options `--level`,
-`--max-routes`, and `--max-route-tokens` override the YAML options for the
-whole compilation.
+Defaults are `standard`, `original/lower/title/sentence`, leading-space variants,
+automatic mode, unit head/continuation scales, pluralization enabled, no extra
+suffixes, `max_routes: 4096`, and the level-dependent default route depth. The
+command-line options `--level`, `--max-routes`, and `--max-route-tokens`
+override the YAML options for the whole compilation.
+
+For a phrase whose first token is common but whose continuation is distinctive,
+force path mode and make the head gentler:
+
+```yaml
+terms:
+  New York:
+    mode: path
+    head_scale: 0.25
+    continuation_scale: 1.0
+```
+
+Scales affect path rules. Tail rules continue to apply their full bias only to
+the matching completion edge. When alternate routes share a token at different
+positions, the strongest applicable scale is used once for that logical rule.
 
 Canonical routes are retained first. Remaining routes are selected
 deterministically, round-robin across generated forms, until `max_routes` is

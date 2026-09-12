@@ -1,8 +1,14 @@
 import json
 
 import pytest
+import yaml
 
-from trajectory_editor.bias_catalog import BiasCatalog, CatalogEntry, CompiledRoute
+from trajectory_editor.bias_catalog import (
+    BiasCatalog,
+    CatalogEntry,
+    CompiledRoute,
+    compile_catalog,
+)
 from trajectory_editor.bias_presets import FORMAT, load_bias_preset, project_biases
 from trajectory_editor.bias_rules import BiasGroup, BiasMatcher, BiasRule, routes_for_catalog_entry
 from trajectory_editor.domain import EditorError, SamplingConfig
@@ -24,6 +30,21 @@ def test_path_rule_telescopes_from_head_to_continuation():
     assert matcher.active_biases([4, 10, 11]) == {12: 1.5}
     # Once a route has completed, the term can begin again at a later edge.
     assert matcher.active_biases([10, 11, 12]) == {10: 1.5}
+
+
+def test_path_rule_can_scale_head_and_continuation_edges():
+    rule = BiasRule(
+        routes=((10, 11, 12),),
+        bias=4.0,
+        mode="path",
+        head_scale=0.25,
+        continuation_scale=0.75,
+    )
+    matcher = BiasMatcher((rule,))
+
+    assert matcher.active_biases([]) == {10: 1.0}
+    assert matcher.active_biases([10]) == {11: 3.0}
+    assert matcher.active_biases([10, 11]) == {12: 3.0}
 
 
 def test_alternate_routes_share_one_logical_bias_amount():
@@ -153,6 +174,36 @@ def test_projected_named_groups_can_be_exported_full_or_flattened(tmp_path):
     assert flat["bias_rules"] == [{
         "routes": [[1, 2]], "mode": "path", "bias": 2.0,
     }]
+
+
+def test_editor_friendly_export_is_compiler_input_yaml(tmp_path):
+    backend = NoEogBackend()
+    config = SamplingConfig(bias_groups=(BiasGroup(
+        name="nautical",
+        members=("shadow", "port of call"),
+        rules=(BiasRule(routes=((1, 2),), bias=0, mode="path"),),
+        bias=2.0,
+    ),))
+    runtime = EpisodeEngine(backend, initial_text="P", sampling=config)
+    with EpisodeStore(tmp_path / "episodes.db") as store:
+        episode = _create_episode(
+            store, runtime, backend_provenance=backend.provenance()
+        )
+        exported = project_biases(store, episode, editor_friendly=True)
+
+    assert yaml.safe_load(exported) == {
+        "groups": {"nautical": ["shadow", "port of call"]}
+    }
+    catalog = compile_catalog(
+        yaml.safe_load(exported),
+        CatalogBackend(),
+        options_override={
+            "cases": ["original"],
+            "leading_space": False,
+            "plural": False,
+        },
+    )
+    assert catalog.require("nautical").members == ("shadow", "port of call")
 
 
 class CatalogBackend(NoEogBackend):

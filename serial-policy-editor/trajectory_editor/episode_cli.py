@@ -262,6 +262,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --biases-only, flatten named groups into ordinary logical rules",
     )
     projection.add_argument(
+        "--editor-friendly",
+        action="store_true",
+        help="with --biases-only, emit standalone YAML group definitions for policy-editor-bias",
+    )
+    projection.add_argument(
         "--annotations", choices=("none", "inline", "footnotes"), default="none"
     )
     projection.add_argument("--with-loss", action="store_true")
@@ -711,6 +716,10 @@ def main(argv: list[str] | None = None) -> int:
                 raise EditorError("--at is only valid with --fork-from")
             if args.rules_only and not args.biases_only:
                 raise EditorError("--rules-only requires --biases-only")
+            if args.editor_friendly and not args.biases_only:
+                raise EditorError("--editor-friendly requires --biases-only")
+            if args.editor_friendly and args.rules_only:
+                raise EditorError("--editor-friendly cannot be combined with --rules-only")
             if args.biases_only and (not args.project or args.procedure):
                 raise EditorError("--biases-only requires --project and cannot be combined with --procedure")
             if args.procedure and not args.project:
@@ -725,7 +734,12 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if args.project:
                 if args.biases_only:
-                    print(project_biases(store, args.project, rules_only=args.rules_only))
+                    print(project_biases(
+                        store,
+                        args.project,
+                        rules_only=args.rules_only,
+                        editor_friendly=args.editor_friendly,
+                    ))
                     return 0
                 if args.procedure:
                     print(project_procedure(store, args.project))
