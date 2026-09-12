@@ -531,7 +531,6 @@ def _enumerate_routes(
     index: SurfaceIndex,
     *,
     max_tokens: int,
-    max_routes: int,
 ) -> tuple[tuple[int, ...], ...]:
     routes: list[tuple[int, ...]] = []
     frontier: list[tuple[int, tuple[int, ...]]] = [(0, ())]
@@ -544,10 +543,6 @@ def _enumerate_routes(
                 rendered = None
             if rendered == surface:
                 routes.append(tokens)
-                if len(routes) > max_routes:
-                    raise EditorError(
-                        f"route search for {surface!r} exceeded max_routes={max_routes}"
-                    )
             continue
         if len(tokens) >= max_tokens:
             continue
@@ -558,6 +553,35 @@ def _enumerate_routes(
             for token_id in reversed(token_ids):
                 frontier.append((next_position, (*tokens, int(token_id))))
     return tuple(dict.fromkeys(routes))
+
+
+def _route_quality(
+    route: Sequence[int],
+    token_texts: Sequence[str],
+    all_routes: Sequence[Sequence[int]],
+) -> tuple[Any, ...]:
+    """Return a deterministic, tokenizer-local quality key for an alternate route.
+
+    Lower keys are preferred.  The route count and tiny-piece penalties favor
+    cohesive decompositions; the leading-piece and local fan-out terms prefer
+    routes whose first edge carries more of the term and is less ambiguous.
+    Token IDs only break otherwise identical ties.
+    """
+
+    content_lengths = tuple(len(text.replace(" ", "")) for text in token_texts)
+    tiny_piece_count = sum(length <= 1 for length in content_lengths)
+    head = route[0]
+    head_fanout = sum(
+        1 for candidate in all_routes if candidate and candidate[0] == head
+    )
+    return (
+        len(route),
+        tiny_piece_count,
+        -content_lengths[0],
+        -min(content_lengths),
+        head_fanout,
+        tuple(route),
+    )
 
 
 def _canonical_route(surface: str, backend: Any) -> tuple[int, ...]:
@@ -589,28 +613,33 @@ def compile_term(
     forms = generate_forms(source, options, explicit_forms)
     index = surface_index if surface_index is not None else _surface_index(backend)
     route_map: dict[tuple[int, ...], CompiledRoute] = {}
+    canonical_order: list[tuple[int, ...]] = []
+    canonical_routes: set[tuple[int, ...]] = set()
+    alternate_buckets: list[list[tuple[int, ...]]] = []
+
     for form in forms:
         canonical = _canonical_route(form, backend)
+        if canonical not in canonical_routes:
+            canonical_routes.add(canonical)
+            canonical_order.append(canonical)
+
         candidates: list[tuple[tuple[int, ...], str]] = [(canonical, "canonical")]
+        form_alternates: list[tuple[int, ...]] = []
         if options.level != "minimal":
             for route in _enumerate_routes(
                 form,
                 backend,
                 index,
                 max_tokens=options.route_limit(),
-                max_routes=options.max_routes,
             ):
                 if route != canonical:
                     candidates.append((route, "alternate"))
+                    form_alternates.append(route)
+
         for route, strategy in candidates:
             token_texts = tuple(str(backend.token_text(token)) for token in route)
             existing = route_map.get(route)
             if existing is None:
-                if len(route_map) >= options.max_routes:
-                    raise EditorError(
-                        f"route compilation for term {name!r} exceeded "
-                        f"max_routes={options.max_routes}"
-                    )
                 route_map[route] = CompiledRoute(
                     token_ids=route,
                     texts=(form,),
@@ -628,10 +657,51 @@ def compile_term(
                     strategies=tuple(dict.fromkeys((*existing.strategies, strategy))),
                     sources=existing.sources,
                 )
+
+        if form_alternates:
+            unique = tuple(dict.fromkeys(form_alternates))
+            alternate_buckets.append(sorted(
+                unique,
+                key=lambda route: _route_quality(
+                    route,
+                    route_map[route].token_texts,
+                    tuple(candidate for candidate, _ in candidates),
+                ),
+            ))
+
+    if len(canonical_order) > options.max_routes:
+        raise EditorError(
+            f"canonical routes for term {name!r} exceed "
+            f"max_routes={options.max_routes}"
+        )
+
+    selected_order = list(canonical_order)
+    selected = set(selected_order)
+    while len(selected_order) < options.max_routes and alternate_buckets:
+        progressed = False
+        remaining_buckets: list[list[tuple[int, ...]]] = []
+        for bucket in alternate_buckets:
+            while bucket and bucket[0] in selected:
+                bucket.pop(0)
+            if not bucket:
+                continue
+            route = bucket.pop(0)
+            progressed = True
+            if route not in selected:
+                selected.add(route)
+                selected_order.append(route)
+            if bucket:
+                remaining_buckets.append(bucket)
+            if len(selected_order) >= options.max_routes:
+                break
+        alternate_buckets = remaining_buckets
+        if not progressed:
+            break
+
     return CatalogEntry(
         name=name,
         kind="term",
-        routes=tuple(route_map.values()),
+        routes=tuple(route_map[route] for route in selected_order),
         mode=mode,
         source=source,
         level=options.level,

@@ -169,6 +169,59 @@ def test_standard_and_exhaustive_levels_find_bounded_alternate_routes(backend):
     assert (9, 10, 8) in exhaustive_routes
 
 
+def test_route_budget_round_robins_alternates_across_forms():
+    class Backend:
+        pieces = {
+            0: "<EOG>",
+            1: "ab",
+            2: "a",
+            3: "b",
+            4: "a",
+            5: "b",
+            6: "AB",
+            7: "A",
+            8: "B",
+            9: "A",
+            10: "B",
+        }
+        canonical = {"ab": (1,), "AB": (6,)}
+
+        def vocabulary_size(self):
+            return len(self.pieces)
+
+        def token_text(self, token_id):
+            return self.pieces[int(token_id)]
+
+        def is_eog(self, token_id):
+            return int(token_id) == 0
+
+        def tokenize(self, text, *, add_bos=False, special=False):
+            assert not add_bos and not special
+            return list(self.canonical[text])
+
+        def render(self, token_ids, *, special=False):
+            assert not special
+            return "".join(self.pieces[int(token)] for token in token_ids)
+
+        def provenance(self, *, include_model_sha256=False):
+            del include_model_sha256
+            return {"backend": "round-robin-test", "vocabulary_size": self.vocabulary_size()}
+
+    entry = compile_term(
+        "ab",
+        "ab",
+        Backend(),
+        options=CompileOptions(
+            level="exhaustive", cases=("original", "upper"),
+            leading_space=False, plural=False, max_routes=4,
+        ),
+    )
+
+    assert [route.token_ids for route in entry.routes] == [
+        (1,), (6,), (2, 3), (7, 8),
+    ]
+
+
 def test_max_routes_applies_across_all_generated_forms(backend):
     with pytest.raises(EditorError, match="term 'Shadow'.*max_routes=1"):
         compile_term(

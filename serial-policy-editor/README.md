@@ -763,13 +763,17 @@ policy-editor-bias \
 ```
 
 Use `--level minimal`, `--level standard`, or `--level exhaustive` to select
-canonical routes, bounded alternate routes, or a larger bounded exact-route
-search. `--term TEXT` may be repeated for one-off compilation without a YAML
-file. YAML quoting is only YAML syntax: quoted, unquoted, and single-quoted
-semantic terms receive the same spacing and case expansion. The compiler adds
-leading-space variants automatically, so users do not need to write them.
+canonical routes, bounded alternate routes, or a broader exact-route search.
+`--max-route-tokens` controls decomposition depth, while `--max-routes`
+controls how many routes are retained. `--term TEXT` may be repeated for
+one-off compilation without a YAML file. YAML quoting is only YAML syntax:
+quoted, unquoted, and single-quoted semantic terms receive the same spacing
+and case expansion. The compiler adds leading-space variants automatically,
+so users do not need to write them.
 `max_routes` is a per-term cap across all generated case, spacing, plural, and
 suffix forms; increase it only for terms where the extra routes are useful.
+Canonical routes are reserved first, then deterministic alternate routes are
+selected round-robin across generated forms until the budget is full.
 
 The runtime matcher now has one logical route engine. A plain lexical target
 that tokenizes into multiple pieces uses telescoping path semantics: `b

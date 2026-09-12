@@ -34,8 +34,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="compile one semantic term; may be repeated",
     )
     parser.add_argument("--level", choices=("minimal", "standard", "exhaustive"), default=None)
-    parser.add_argument("--max-routes", type=int, default=None)
-    parser.add_argument("--max-route-tokens", type=int, default=None)
+    parser.add_argument(
+        "--max-routes",
+        type=int,
+        default=None,
+        help="maximum unique routes retained per term; canonical routes are reserved first",
+    )
+    parser.add_argument(
+        "--max-route-tokens",
+        type=int,
+        default=None,
+        help="maximum tokens in one route",
+    )
     parser.add_argument(
         "--merge",
         type=Path,
