@@ -14,7 +14,7 @@ from typing import Any
 
 from .domain import Candidate, ChoiceSet, EditorError
 from .bias_catalog import BiasCatalog
-from .bias_rules import BiasRule, routes_for_catalog_entry
+from .bias_rules import BiasGroup, BiasRule, routes_for_catalog_entry
 from .episode_actions import (
     EndGeneration,
     Finish,
@@ -504,6 +504,113 @@ class InteractivePolicy:
                 continue
             if command.kind == CommandKind.BIAS:
                 try:
+                    if command.bias_group_name is not None:
+                        groups_by_name = {
+                            group.name: group for group in engine.sampling.bias_groups
+                        }
+                        group_name = command.bias_group_name
+                        member_texts = command.bias_group_members or ()
+                        member_bare = command.bias_group_member_bare or tuple(
+                            False for _ in member_texts
+                        )
+                        existing = groups_by_name.get(group_name)
+                        if existing is None and self.catalog is not None:
+                            catalog_entry = self.catalog.resolve(group_name)
+                            if catalog_entry is not None and catalog_entry.kind == "group":
+                                existing = BiasGroup(
+                                    name=group_name,
+                                    rules=routes_for_catalog_entry(catalog_entry, 0),
+                                    members=catalog_entry.members,
+                                )
+                        template_by_key = {
+                            rule.key: rule for rule in (existing.rules if existing else ())
+                        }
+                        member_names = list(existing.members if existing else ())
+                        added_members = []
+                        for target_text, is_bare in zip(member_texts, member_bare):
+                            semantic = (
+                                target_text[1:]
+                                if is_bare and target_text.startswith(" ")
+                                else target_text
+                            )
+                            entry = None
+                            if is_bare and semantic.startswith("@"):
+                                if self.catalog is None:
+                                    raise EditorError(
+                                        f"catalog reference {semantic!r} requires --bias-catalog"
+                                    )
+                                if not semantic[1:]:
+                                    raise EditorError("catalog reference cannot be empty")
+                                entry = self.catalog.require(semantic[1:])
+                            elif is_bare and self.catalog is not None:
+                                entry = self.catalog.resolve(semantic)
+                            nested = groups_by_name.get(semantic) if is_bare else None
+                            if nested is not None:
+                                templates = nested.rules
+                            elif entry is not None:
+                                templates = routes_for_catalog_entry(entry, 0)
+                            else:
+                                tokens = tuple(engine.backend.tokenize(
+                                    target_text, add_bos=False, special=False))
+                                if not tokens:
+                                    raise EditorError("bias group member produced no tokens")
+                                templates = (BiasRule(
+                                    routes=(tokens,), bias=0,
+                                    mode=_default_bias_mode(target_text),
+                                ),)
+                            for template in templates:
+                                template_by_key[template.key] = template
+                            member_name = semantic if is_bare else target_text
+                            if member_name not in member_names:
+                                member_names.append(member_name)
+                                added_members.append(member_name)
+                        group = BiasGroup(
+                            name=group_name,
+                            rules=tuple(template_by_key.values()),
+                            bias=existing.bias if existing else 0.0,
+                            members=tuple(member_names),
+                        )
+                        groups_by_name[group.name] = group
+                        updated = replace(
+                            engine.sampling,
+                            bias_groups=tuple(groups_by_name.values()),
+                        )
+                        updates = [(
+                            "bias-group",
+                            {
+                                "group": group.to_dict(),
+                                "added_members": added_members,
+                            },
+                            f"Group {group.name!r} · {len(group.members)} members",
+                            group.bias,
+                        )]
+                        if self.store is not None and self.episode_id is not None:
+                            with self.store.transaction():
+                                self.store.record_sampling_segment(self.episode_id,
+                                    start_boundary=engine.boundary, sampling=updated,
+                                    stream_fingerprint=engine.stream_fingerprint,
+                                    coordinate_offset=engine.coordinate_offset)
+                                for kind, payload, _label, _value in updates:
+                                    self._interaction(engine.boundary, kind, payload)
+                        engine.sampling = updated
+                        observation = engine.observe()
+                        ranks = tuple(exposed)
+                        exposed = {rank: engine.candidates(observation, start_rank=rank, count=1)[0] for rank in ranks}
+                        preview_candidates = dict(exposed)
+                        candidates = tuple(resolve_candidate(c.rank) for c in choice.candidates)
+                        choice = _choice_from_observation(engine, observation, candidates,
+                            context_characters=self.context_characters, serial=self.choice_serial)
+                        feedback = ChoiceFeedback(
+                            "status", "BIAS GROUP UPDATED", (
+                                f"{updates[0][2]}: {group.bias:+g}",
+                            ))
+                        if not live:
+                            self.io.write(f"Bias {updates[0][2]}: {group.bias:+g}")
+                            display_choice(self.io, choice, remaining_tokens=engine.remaining)
+                        continue
+                    groups_by_name = {
+                        group.name: group for group in engine.sampling.bias_groups
+                    }
                     specs = []
                     if command.bias_targets is not None:
                         bare_flags = command.bias_target_bare or tuple(
@@ -527,6 +634,21 @@ class InteractivePolicy:
                                 entry = self.catalog.require(semantic[1:])
                             elif is_bare and self.catalog is not None:
                                 entry = self.catalog.resolve(semantic)
+                            runtime_group = groups_by_name.get(semantic) if is_bare else None
+                            if runtime_group is not None:
+                                specs.append(("group", runtime_group))
+                                continue
+                            if entry is not None and entry.kind == "group":
+                                runtime_group = groups_by_name.get(entry.name)
+                                if runtime_group is None:
+                                    runtime_group = BiasGroup(
+                                        name=entry.name,
+                                        rules=routes_for_catalog_entry(entry, 0),
+                                        members=entry.members,
+                                    )
+                                    groups_by_name[entry.name] = runtime_group
+                                specs.append(("group", runtime_group))
+                                continue
                             if entry is not None:
                                 specs.append(("catalog", entry))
                                 continue
@@ -581,6 +703,16 @@ class InteractivePolicy:
                     updates = []
                     logical_specs = []
                     for kind, value in specs:
+                        if kind == "group":
+                            if triggers is not None:
+                                raise EditorError(
+                                    "scoped updates to named bias groups are not supported"
+                                )
+                            logical_specs.append((
+                                value,
+                                f"Group {value.name!r} ({len(value.rules)} rules)",
+                            ))
+                            continue
                         if kind == "catalog":
                             entry = value
                             for template in routes_for_catalog_entry(entry, 0):
@@ -613,7 +745,32 @@ class InteractivePolicy:
                         logical_specs.append((template, label))
 
                     logical_keys = set()
+                    group_names = set()
                     for template, label in logical_specs:
+                        if isinstance(template, BiasGroup):
+                            group = groups_by_name[template.name]
+                            if group.name in group_names:
+                                raise EditorError(
+                                    "bias targets resolve to duplicate named groups"
+                                )
+                            group_names.add(group.name)
+                            old = group.bias
+                            value = 0.0 if command.bias_operator == "=" else old + (
+                                step if command.bias_operator == "+" else -step
+                            )
+                            group = replace(group, bias=value)
+                            groups_by_name[group.name] = group
+                            updates.append((
+                                "bias-group",
+                                {
+                                    "previous": old,
+                                    "bias": value,
+                                    "group": group.to_dict(),
+                                },
+                                label,
+                                value,
+                            ))
+                            continue
                         if template.key in logical_keys:
                             raise EditorError("bias targets resolve to duplicate logical rules")
                         logical_keys.add(template.key)
@@ -633,8 +790,11 @@ class InteractivePolicy:
                         }
                         updates.append(("bias-rule", payload, label, value))
 
-                    updated = replace(engine.sampling,
-                        bias_rules=tuple(logical_biases.values()))
+                    updated = replace(
+                        engine.sampling,
+                        bias_rules=tuple(logical_biases.values()),
+                        bias_groups=tuple(groups_by_name.values()),
+                    )
                 except EditorError as exc:
                     feedback = ChoiceFeedback("error", "INVALID BIAS", (str(exc),))
                     if not live:

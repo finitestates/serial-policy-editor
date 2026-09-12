@@ -1,11 +1,13 @@
-# Serial Policy Editor 0.3.6
+# Serial Policy Editor 0.3.7
 
 Serial Policy Editor (SPE) is a terminal editor for steering a local language
 model one token, text insertion, or delegated span at a time. Save your choices,
 rewind or fork a continuation, and replay the recorded editing procedure in a
 new context.
 
-**0.3.6 adds a persistent full-screen editor, scrollable context, multiline input,
+**0.3.7 adds model-specific bias catalogs, named runtime groups, and portable
+rules-only export.** It also includes the persistent full-screen editor,
+scrollable context, multiline input,
 Ctrl+E input expansion, and performance improvements.** The default hold is now
 100 tokens; use `--hold-default` to choose another value. Transient busy feedback
 has been removed to prevent layout shifts. Experimental history replacement and
@@ -676,7 +678,7 @@ press Escape followed by Enter to send the same key sequence.
 
 ## Headless preview
 
-The `codex/0.3.6-headless` branch includes a local HTTP service and browser editor.
+An experimental headless branch includes a local HTTP service and browser editor.
 See [HEADLESS.md](HEADLESS.md) for launch instructions, the API contract, and preview limits.
 
 ### KV cache precision (llama.cpp)
@@ -781,8 +783,8 @@ velociraptor +1` biases a viable starting token and then the next route token
 after each matching prefix. Whitespace phrases retain tail semantics by
 default, so a phrase continues to mean “bias the completion after this prefix.”
 Alternate routes sharing an edge contribute once per logical rule rather than
-once per route. Logical rules can be saved in the `spe-bias-rules-v1` JSON
-preset format.
+once per route. Logical rules and named groups can be saved in the
+`spe-bias-rules-v2` JSON preset format.
 
 Load a compiled catalog into an interactive episode with
 `--bias-catalog catalog.json`. A bare bias target uses a matching catalog entry
@@ -790,20 +792,39 @@ when one exists and otherwise falls back to one-shot tokenizer resolution;
 `b @name +1` requires that catalog entry. Quoted runtime text bypasses catalog
 lookup and remains an exact text target.
 
+Named groups can also be created during an episode:
+
+```text
+b nautical -> {anchor, steamship, " port of call"}
+b nautical +1
+```
+
+The arrow command creates or appends to a durable group. A later bare reference
+to that name uses the same compiled routes as a catalog group; `@name` remains
+strictly a catalog reference. The group has one shared bias amount, so adding a
+member immediately inherits the group's current amount. Group definitions and
+their bias changes are sampler state: replay, fork, and rewind restore them at
+the relevant boundary. Runtime groups are included in the normal `--biases-only`
+export.
+
 Export the current surviving bias set as a JSON preset:
 
 ```bash
 policy-editor --workspace episodes.sqlite3 --project '#1' --biases-only > biases.json
+policy-editor --workspace episodes.sqlite3 --project '#1' --biases-only --rules-only > rules.json
 policy-editor --model /path/to/model.gguf --biases biases.json --new-prompt 'Once upon a time'
 ```
 
 `--biases` replaces the saved bias set, including on resume, fork, or replay.
-An empty `bias_rules` list explicitly clears it. The preset contains a format
-version, model metadata, and a `bias_rules` list of logical routes. Loading
-checks vocabulary size and supplied model metadata. Use presets with the
-model/tokenizer they were made for; token IDs are not portable across
-tokenizers. The preset stores bias values, not the default interactive step.
-The only supported preset format is `spe-bias-rules-v1`.
+An empty `bias_rules` list explicitly clears direct rules. A full preset contains
+a format version, model metadata, direct logical rules, and any named groups.
+`--rules-only` flattens the group's effective routes into ordinary logical rules
+and omits group names and runtime metadata, producing a portable rules-only
+preset that can be loaded like any other bias file. Loading checks vocabulary
+size and supplied model metadata. Use presets with the model/tokenizer they
+were made for; token IDs are not portable across tokenizers. Presets store bias
+values, not the default interactive step. The supported preset format is
+`spe-bias-rules-v2`.
 
 ### Logical bias rules
 
@@ -852,8 +873,9 @@ semantics as single-token biases. Matching is recomputed from the restored conte
 there is no separate matcher state to restore. Rewinding retains rules at the
 target boundary and discards later rule changes, exactly like other sampler settings.
 
-`--project '#1' --biases-only` exports the complete logical rule set. Loading a
-preset replaces the saved rule set.
+`--project '#1' --biases-only` exports the complete logical rule and group set;
+add `--rules-only` to flatten named groups into ordinary logical rules. Loading
+a preset replaces the saved direct rules and named groups.
 
 ### Triggered biases with exact stop tokens
 

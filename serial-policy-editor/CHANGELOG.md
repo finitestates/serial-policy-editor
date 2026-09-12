@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.7 — 2026-09-12
+
+- Add model-specific YAML bias catalogs with deterministic term decomposition,
+  bounded route selection, and catalog groups.
+- Replace the experimental bias representations with unified logical rules,
+  including telescoping path semantics for lexical multi-token terms.
+- Add durable runtime groups with append-only membership, shared bias amounts,
+  and sampler-state rewind/replay/fork behavior.
+- Add full named-group bias presets and `--rules-only` flattened export.
+
 ## 0.3.6 — 2026-09-10
 
 - Use the full terminal for the live editor, historical review, and EDGE menu.

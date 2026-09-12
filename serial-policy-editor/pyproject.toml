@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "serial-policy-editor"
-version = "0.3.6"
+version = "0.3.7"
 description = "A small terminal editor for human-steered model continuations and serial policy replay"
 readme = "README.md"
 license = {file = "LICENSE"}

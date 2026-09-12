@@ -191,6 +191,15 @@ def test_exact_token_search_preserves_payload_and_has_separate_views() -> None:
     assert parse('ms - 9').search_rows == 9
 
 
+def test_runtime_bias_group_command_preserves_bare_and_quoted_members() -> None:
+    command = parse('b nautical -> {anchor, " shadow"}')
+
+    assert command.kind == CommandKind.BIAS
+    assert command.bias_group_name == "nautical"
+    assert command.bias_group_members == (" anchor", " shadow")
+    assert command.bias_group_member_bare == (True, False)
+
+
 @pytest.mark.parametrize('rank', (13, 499, 700, 1000))
 def test_rank_selection_does_not_require_menu_exposure(rank) -> None:
     assert parse(str(rank)).action.selected_rank == rank

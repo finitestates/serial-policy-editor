@@ -317,7 +317,11 @@ def project_procedure(store: EpisodeStore, episode_id: str) -> str:
     backend = episode["backend"]
     model = backend.get("filename") or backend.get("model_path") or backend.get("model") or "unknown"
     model = PurePosixPath(str(model).replace(chr(92), "/")).name
-    fields = {key: getattr(initial, key) for key in initial.__dataclass_fields__ if key != "bias_rules"}
+    fields = {
+        key: getattr(initial, key)
+        for key in initial.__dataclass_fields__
+        if key not in {"bias_rules", "bias_groups"}
+    }
     lines = [
         f"MODEL   : {_procedure_text(model)}",
         f"BACKEND : {_procedure_text(str(backend.get('backend', 'unknown')))}",
@@ -344,10 +348,14 @@ def project_procedure(store: EpisodeStore, episode_id: str) -> str:
                 rows.append((at, "c", None))
         if config.bias_rules != current.bias_rules:
             rows.append((at, f"# Set logical bias rules to {[r.to_dict() for r in config.bias_rules]!r}", None))
+        if config.bias_groups != current.bias_groups:
+            rows.append((at, f"# Set bias groups to {[group.to_dict() for group in config.bias_groups]!r}", None))
         current = config
 
     if initial.bias_rules:
         lines.insert(3, f"RULES   : logical bias rules {[r.to_dict() for r in initial.bias_rules]!r}")
+    if initial.bias_groups:
+        lines.insert(4, f"GROUPS  : {[group.to_dict() for group in initial.bias_groups]!r}")
 
     for step in steps:
         boundary = step["boundary"]

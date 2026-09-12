@@ -60,6 +60,7 @@ SAMPLER_FIELDS = (
     "frequency_penalty",
     "seed",
     "bias_rules",
+    "bias_groups",
     "bias_step",
 )
 SAMPLER_ALIASES = {
@@ -204,7 +205,7 @@ def build_parser() -> argparse.ArgumentParser:
         sampling.add_argument("--" + name.replace("_", "-"), type=kind)
     sampling.add_argument("--biases", type=Path, help="load a JSON bias preset (replaces the saved bias set)")
     sampling.add_argument("--bias-step", type=float, help="default positive bias adjustment (default: 0.5)")
-    parser.set_defaults(bias_rules=None)
+    parser.set_defaults(bias_rules=None, bias_groups=None)
     seed_options = sampling.add_mutually_exclusive_group()
     seed_options.add_argument("--seed", type=int)
     seed_options.add_argument(
@@ -255,6 +256,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     projection = parser.add_argument_group("projection")
     projection.add_argument("--biases-only", action="store_true", help="with --project, emit a loadable JSON bias preset")
+    projection.add_argument(
+        "--rules-only",
+        action="store_true",
+        help="with --biases-only, flatten named groups into ordinary logical rules",
+    )
     projection.add_argument(
         "--annotations", choices=("none", "inline", "footnotes"), default="none"
     )
@@ -308,7 +314,7 @@ def _sampler_override(current: SamplingConfig, raw: str) -> SamplingConfig:
             raise EditorError("sampler changes use key=value (for example top_k=20)")
         key, value = piece.split("=", 1)
         key = SAMPLER_ALIASES.get(key.strip().lower(), key.strip().lower())
-        if key not in values or key in {"bias_rules"}:
+        if key not in values or key in {"bias_rules", "bias_groups"}:
             raise EditorError(f"unknown sampler field {key!r}")
         try:
             values[key] = int(value) if key in {"top_k", "repeat_last_n", "seed"} else float(value)
@@ -703,6 +709,8 @@ def main(argv: list[str] | None = None) -> int:
                     setattr(args, field, store.resolve_id(value))
             if args.at is not None and args.fork_from is None:
                 raise EditorError("--at is only valid with --fork-from")
+            if args.rules_only and not args.biases_only:
+                raise EditorError("--rules-only requires --biases-only")
             if args.biases_only and (not args.project or args.procedure):
                 raise EditorError("--biases-only requires --project and cannot be combined with --procedure")
             if args.procedure and not args.project:
@@ -717,7 +725,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if args.project:
                 if args.biases_only:
-                    print(project_biases(store, args.project))
+                    print(project_biases(store, args.project, rules_only=args.rules_only))
                     return 0
                 if args.procedure:
                     print(project_procedure(store, args.project))
@@ -771,10 +779,12 @@ def main(argv: list[str] | None = None) -> int:
                 )
             if model_changed:
                 args.bias_rules = ()
+                args.bias_groups = ()
                 io.write("Model changed: token-ID biases reset; load a matching preset to apply biases.")
             if args.biases is not None:
                 preset = load_bias_preset(args.biases, backend, provenance)
                 args.bias_rules = preset.bias_rules
+                args.bias_groups = preset.bias_groups
             requested_id = args.episode_id
             parent_id: str | None = None
             fork_boundary: int | None = None

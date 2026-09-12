@@ -31,9 +31,10 @@ class SamplingConfig:
     seed: int = 12345
     bias_step: float = 0.5
     bias_rules: tuple = ()
+    bias_groups: tuple = ()
 
     def __post_init__(self) -> None:
-        from .bias_rules import BiasRule
+        from .bias_rules import BiasGroup, BiasRule
         if type(self.bias_step) not in (int, float) or not math.isfinite(self.bias_step) or self.bias_step <= 0:
             raise EditorError("bias_step must be a finite positive number")
         try:
@@ -46,6 +47,13 @@ class SamplingConfig:
             (rule for rule in rules if rule.bias != 0),
             key=lambda rule: rule.sort_key,
         )))
+        try:
+            groups = tuple(BiasGroup.from_record(group) for group in self.bias_groups)
+        except TypeError as exc:
+            raise EditorError("bias_groups must be a list of groups") from exc
+        if len({group.name for group in groups}) != len(groups):
+            raise EditorError("duplicate bias group")
+        object.__setattr__(self, "bias_groups", tuple(sorted(groups, key=lambda group: group.name)))
         if (
             type(self.temperature) not in {int, float}
             or not math.isfinite(float(self.temperature))
@@ -95,12 +103,21 @@ class SamplingConfig:
         return (
             self.history_penalties_active
             or bool(self.bias_rules)
+            or any(group.bias != 0.0 for group in self.bias_groups)
+        )
+
+    @property
+    def effective_bias_rules(self) -> tuple:
+        from .bias_rules import merge_bias_rules
+        return merge_bias_rules(
+            (*self.bias_rules,
+             *(rule for group in self.bias_groups for rule in group.effective_rules()))
         )
 
     def active_biases(self, history, boundaries=None) -> dict[int, float]:
         """Return the logical rules active for the current model-token tail."""
         from .bias_rules import BiasMatcher
-        return BiasMatcher(self.bias_rules).active_biases(history, boundaries)
+        return BiasMatcher(self.effective_bias_rules).active_biases(history, boundaries)
 
     @property
     def history_penalties_active(self) -> bool:
@@ -139,6 +156,7 @@ class SamplingConfig:
             seed=value.get("seed", defaults.seed),
             bias_step=value.get("bias_step", defaults.bias_step),
             bias_rules=value.get("bias_rules", ()),
+            bias_groups=value.get("bias_groups", ()),
         )
 
     @classmethod
@@ -164,6 +182,7 @@ class SamplingConfig:
     def to_dict(self) -> dict[str, Any]:
         return {
             **({"bias_rules": [rule.to_dict() for rule in self.bias_rules]} if self.bias_rules else {}),
+            **({"bias_groups": [group.to_dict() for group in self.bias_groups]} if self.bias_groups else {}),
             **({"bias_step": self.bias_step} if self.bias_step != 0.5 else {}),
             "temperature": self.temperature,
             "top_k": self.top_k,

@@ -14,8 +14,9 @@ matching prefix.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .domain import EditorError
@@ -23,6 +24,7 @@ from .domain import EditorError
 
 BIAS_MODES = ("tail", "path")
 LEGACY_LIFETIMES = ("sentence", "newline")
+GROUP_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 
 
 def _sequence(value: Any, *, path: str, allow_empty: bool = False) -> tuple[int, ...]:
@@ -135,6 +137,94 @@ class BiasRule:
         if self.until is not None:
             result["until"] = self.until
         return result
+
+
+@dataclass(frozen=True)
+class BiasGroup:
+    """A durable named collection of bias-rule templates and one adjustment."""
+
+    name: str
+    rules: tuple[BiasRule, ...]
+    bias: float = 0.0
+    members: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not GROUP_NAME_RE.fullmatch(self.name):
+            raise EditorError(
+                "bias group names must begin with a letter or underscore and "
+                "contain only letters, numbers, underscores, periods, or hyphens"
+            )
+        try:
+            rules = tuple(BiasRule.from_record(rule) for rule in self.rules)
+        except TypeError as exc:
+            raise EditorError("bias group rules must be a list of rules") from exc
+        if not rules:
+            raise EditorError("bias groups must contain at least one rule")
+        if any(rule.bias != 0.0 for rule in rules):
+            raise EditorError("bias group rules must be bias-free templates")
+        if type(self.bias) not in (int, float) or not math.isfinite(self.bias):
+            raise EditorError("bias group amount must be finite")
+        if not isinstance(self.members, Sequence) or isinstance(self.members, (str, bytes, bytearray)):
+            raise EditorError("bias group members must be a list of names")
+        members = tuple(str(member) for member in self.members)
+        if any(not member for member in members):
+            raise EditorError("bias group members cannot be empty")
+        object.__setattr__(self, "rules", tuple(sorted(rules, key=lambda rule: rule.sort_key)))
+        object.__setattr__(self, "bias", float(self.bias))
+        object.__setattr__(self, "members", tuple(dict.fromkeys(members)))
+
+    @property
+    def key(self) -> str:
+        return self.name
+
+    def effective_rules(self) -> tuple[BiasRule, ...]:
+        return tuple(replace(rule, bias=self.bias) for rule in self.rules if self.bias != 0.0)
+
+    @classmethod
+    def from_record(cls, value: Any) -> "BiasGroup":
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, Mapping):
+            raise EditorError("bias group must be an object")
+        allowed = {"name", "rules", "bias", "members"}
+        unknown = set(value) - allowed
+        if unknown:
+            raise EditorError(f"unknown bias group fields: {', '.join(sorted(unknown))}")
+        if "name" not in value or "rules" not in value:
+            raise EditorError("bias group requires name and rules")
+        return cls(
+            name=value["name"],
+            rules=value["rules"],
+            bias=value.get("bias", 0.0),
+            members=value.get("members", ()),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "bias": self.bias,
+            "members": list(self.members),
+            "rules": [rule.to_dict() for rule in self.rules],
+        }
+
+
+def merge_bias_rules(rules: Sequence[BiasRule]) -> tuple[BiasRule, ...]:
+    """Combine rules with identical logical routes by adding their amounts."""
+
+    merged: dict[tuple[Any, ...], BiasRule] = {}
+    for rule in rules:
+        normalized = BiasRule.from_record(rule)
+        existing = merged.get(normalized.key)
+        if existing is None:
+            merged[normalized.key] = normalized
+        else:
+            merged[normalized.key] = replace(
+                existing, bias=existing.bias + normalized.bias
+            )
+    return tuple(sorted(
+        (rule for rule in merged.values() if rule.bias != 0.0),
+        key=lambda rule: rule.sort_key,
+    ))
 
 
 def _endswith(history: Sequence[int], prefix: Sequence[int]) -> bool:

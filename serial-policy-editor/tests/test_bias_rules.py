@@ -4,7 +4,7 @@ import pytest
 
 from trajectory_editor.bias_catalog import BiasCatalog, CatalogEntry, CompiledRoute
 from trajectory_editor.bias_presets import FORMAT, load_bias_preset, project_biases
-from trajectory_editor.bias_rules import BiasMatcher, BiasRule, routes_for_catalog_entry
+from trajectory_editor.bias_rules import BiasGroup, BiasMatcher, BiasRule, routes_for_catalog_entry
 from trajectory_editor.domain import EditorError, SamplingConfig
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_lifecycle import _create_episode
@@ -83,6 +83,24 @@ def test_sampling_config_round_trips_logical_rules():
     assert config.active_biases([1]) == {2: -1.25, 3: -1.25}
 
 
+def test_sampling_config_round_trips_named_groups_and_flattens_effective_rules():
+    config = SamplingConfig(bias_groups=(BiasGroup(
+        name="nautical",
+        members=("anchor", "steamship"),
+        rules=(
+            BiasRule(routes=((14,),), bias=0, mode="path"),
+            BiasRule(routes=((15, 16),), bias=0, mode="tail"),
+        ),
+        bias=1.5,
+    ),))
+    restored = SamplingConfig.from_record(json.loads(json.dumps(config.to_dict())))
+
+    assert restored == config
+    assert config.active_biases([]) == {14: 1.5}
+    assert config.active_biases([15]) == {14: 1.5, 16: 1.5}
+    assert len(config.effective_bias_rules) == 2
+
+
 def test_logical_preset_round_trips_rules(tmp_path):
     path = tmp_path / "logical.json"
     path.write_text(json.dumps({
@@ -98,7 +116,7 @@ def test_logical_preset_round_trips_rules(tmp_path):
     assert config.active_biases([1]) == {2: 0.75, 3: 0.75}
 
 
-def test_projected_logical_rules_use_v1_preset(tmp_path):
+def test_projected_logical_rules_use_v2_preset(tmp_path):
     backend = NoEogBackend()
     config = SamplingConfig(bias_rules=(BiasRule(
         routes=((1, 2),), bias=1.25, mode="path"),))
@@ -111,6 +129,30 @@ def test_projected_logical_rules_use_v1_preset(tmp_path):
 
     assert exported["format"] == FORMAT
     assert exported["bias_rules"][0]["routes"] == [[1, 2]]
+
+
+def test_projected_named_groups_can_be_exported_full_or_flattened(tmp_path):
+    backend = NoEogBackend()
+    config = SamplingConfig(bias_groups=(BiasGroup(
+        name="nautical",
+        members=("anchor",),
+        rules=(BiasRule(routes=((1, 2),), bias=0, mode="path"),),
+        bias=2.0,
+    ),))
+    runtime = EpisodeEngine(backend, initial_text="P", sampling=config)
+    with EpisodeStore(tmp_path / "episodes.db") as store:
+        episode = _create_episode(
+            store, runtime, backend_provenance=backend.provenance()
+        )
+        full = json.loads(project_biases(store, episode))
+        flat = json.loads(project_biases(store, episode, rules_only=True))
+
+    assert full["bias_groups"][0]["name"] == "nautical"
+    assert full["bias_groups"][0]["bias"] == 2.0
+    assert "bias_groups" not in flat
+    assert flat["bias_rules"] == [{
+        "routes": [[1, 2]], "mode": "path", "bias": 2.0,
+    }]
 
 
 class CatalogBackend(NoEogBackend):
@@ -183,6 +225,42 @@ def test_at_reference_requires_catalog_entry_and_quotes_bypass_resolution():
             io=ScriptedIO(['b "velociraptor" +2', "q"]), catalog=catalog
         ).choose(quoted, quoted.observe())
     assert quoted.sampling.bias_rules[0].routes == ((8, 9),)
+
+
+def test_runtime_groups_are_append_only_and_share_one_bias():
+    backend = CatalogBackend()
+    catalog = BiasCatalog(
+        model={},
+        compiler={},
+        entries={
+            "anchor": CatalogEntry(
+                name="anchor", kind="term",
+                routes=(CompiledRoute((1,), ("anchor",), ("anchor",), "path", ("canonical",)),),
+            ),
+            "steamship": CatalogEntry(
+                name="steamship", kind="term",
+                routes=(CompiledRoute((2, 3), (" steamship",), (" steam", "ship"), "tail", ("canonical",)),),
+            ),
+        },
+    )
+    runtime = EpisodeEngine(backend, initial_token_ids=[7], sampling=SamplingConfig())
+    with pytest.raises(EdgeRequested):
+        InteractivePolicy(
+            io=ScriptedIO([
+                "b nautical -> {anchor}",
+                "b nautical +2",
+                "b nautical -> {steamship}",
+                "q",
+            ]),
+            catalog=catalog,
+        ).choose(runtime, runtime.observe())
+
+    group = runtime.sampling.bias_groups[0]
+    assert group.name == "nautical"
+    assert group.members == ("anchor", "steamship")
+    assert group.bias == 2.0
+    assert runtime.sampling.active_biases([]) == {1: 2.0}
+    assert runtime.sampling.active_biases([2]) == {1: 2.0, 3: 2.0}
 
 
 @pytest.mark.parametrize("value", [

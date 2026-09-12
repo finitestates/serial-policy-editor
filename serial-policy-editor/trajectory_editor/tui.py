@@ -313,6 +313,9 @@ class TeacherCommand:
     bias_until: str | None = None
     bias_stop_text: str | None = None
     bias_stop_token: int | None = None
+    bias_group_name: str | None = None
+    bias_group_members: tuple[str, ...] | None = None
+    bias_group_member_bare: tuple[bool, ...] | None = None
 
     @property
     def bias_text(self) -> str | None:
@@ -336,6 +339,8 @@ HELP_TEXT = """Commands:
   b {wings, scales, claws} +0.5          bias several targets at once
   b {wings, scales} + after {dragon, wyvern} until "."
                     braces are comma-separated human text; quoted items stay exact
+  b nautical -> {anchor, steamship, wharf}
+                    create or append a durable runtime bias group
   N- after dragon until "\n"            ranked target with an exact one-token stop
   b " TEXT" +/-[N]  quoted text remains exact; = clears the exact bias
   bl X +/-[N]       bias the last X context tokens; bl 1 is a single-token bias
@@ -607,6 +612,20 @@ def _parse_bias_stop(raw: str, *, vocabulary_size: int) -> tuple[str | None, str
 def parse_bias_command(raw: str, *, vocabulary_size: int) -> TeacherCommand | None:
     """Parse bias edits without interpreting quoted text as another command."""
     quoted = r'"(?:[^"\\]|\\.)*"'
+    group_match = re.fullmatch(
+        r"b\s+(?P<name>[A-Za-z_][A-Za-z0-9_.-]*)\s*->\s*(?P<members>\{.*\})",
+        raw.strip(),
+    )
+    if group_match is not None:
+        members, bare_flags = _parse_bias_text(
+            group_match.group("members"), label="bias group members", return_bare=True
+        )
+        return TeacherCommand(
+            CommandKind.BIAS,
+            bias_group_name=group_match.group("name"),
+            bias_group_members=members,
+            bias_group_member_bare=bare_flags,
+        )
     adjustment = r"(?P<op>[+\-=])\s*(?P<amount>\d+(?:\.\d*)?|\.\d+)?"
     stop = rf"(?:{quoted}|\#[0-9]+|[.|])"
     scope = rf"(?:\s+after\s+(?P<triggers>.+?)\s+until\s+(?P<until>{stop}))?"

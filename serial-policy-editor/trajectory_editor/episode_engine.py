@@ -221,7 +221,8 @@ class EpisodeEngine:
     @sampling.setter
     def sampling(self, value: SamplingConfig) -> None:
         bias_tokens = []
-        for rule in value.bias_rules:
+        for rule in (*value.bias_rules,
+                     *(rule for group in value.bias_groups for rule in group.rules)):
             bias_tokens.extend(token for route in rule.routes for token in route)
             bias_tokens.extend(token for trigger in rule.triggers for token in trigger)
             if type(rule.until) is int:
