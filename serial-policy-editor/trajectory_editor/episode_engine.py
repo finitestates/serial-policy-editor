@@ -220,11 +220,7 @@ class EpisodeEngine:
 
     @sampling.setter
     def sampling(self, value: SamplingConfig) -> None:
-        bias_tokens = [token for token, _ in value.logit_bias]
-        bias_tokens.extend(token for tokens, _ in value.sequence_bias for token in tokens)
-        for rule in value.scoped_bias:
-            bias_tokens.extend(rule.target)
-            bias_tokens.extend(token for trigger in rule.triggers for token in trigger)
+        bias_tokens = []
         for rule in value.bias_rules:
             bias_tokens.extend(token for route in rule.routes for token in route)
             bias_tokens.extend(token for trigger in rule.triggers for token in trigger)
@@ -399,7 +395,7 @@ class EpisodeEngine:
                 raw_probability=float(probability),
                 decoder_probability=observation.distribution.probability(int(token_id)),
                 is_eog=self.backend.is_eog(int(token_id)),
-                logit_bias=biases.get(int(token_id), 0.0),
+                bias=biases.get(int(token_id), 0.0),
                 policy_rank=statistics.policy_rank(int(token_id)),
                 policy_probability=float(statistics.policy_probabilities[token_id]),
                 policy_logit_adjustment=float(statistics.adjusted[token_id] - statistics.logits[token_id]),

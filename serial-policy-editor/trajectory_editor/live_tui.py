@@ -563,7 +563,7 @@ def _render_writing(choice: ChoiceSet, candidates: tuple[Candidate, ...],
     for candidate in shown:
         fragments.append(("class:table-row", _one_line(
             f"{candidate.rank:>5}  {_probability(candidate.raw_probability)}  {candidate.text!r}"
-            + (f" [bias {candidate.logit_bias:+g}]" if candidate.logit_bias else ""), width) + "\n"))
+            + (f" [bias {candidate.bias:+g}]" if candidate.bias else ""), width) + "\n"))
     fragments.append(("", "\n" * (3 - len(shown))))
     fragments.append(("class:muted", f"{max(0, len(candidates) - 3)} more candidate rows · Ctrl+E restores full table\n"))
     return fragments
@@ -771,8 +771,8 @@ def _render_choice(
                 f"{marker} {candidate.rank:>5}{policy_column}  {raw_probability:>8}  "
                 f"{decoder:>8}  "
             )
-        if candidate.logit_bias:
-            target_suffix += f" [bias {candidate.logit_bias:+g}]"
+        if candidate.bias:
+            target_suffix += f" [bias {candidate.bias:+g}]"
         text_width = max(8, width - len(prefix) - 1)
         if candidate.rank == preview.candidate_rank:
             row_style = "class:selected-row"

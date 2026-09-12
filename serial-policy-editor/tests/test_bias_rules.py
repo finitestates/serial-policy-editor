@@ -3,7 +3,7 @@ import json
 import pytest
 
 from trajectory_editor.bias_catalog import BiasCatalog, CatalogEntry, CompiledRoute
-from trajectory_editor.bias_presets import LOGICAL_FORMAT, load_bias_preset, project_biases
+from trajectory_editor.bias_presets import FORMAT, load_bias_preset, project_biases
 from trajectory_editor.bias_rules import BiasMatcher, BiasRule, routes_for_catalog_entry
 from trajectory_editor.domain import EditorError, SamplingConfig
 from trajectory_editor.episode_engine import EpisodeEngine
@@ -86,9 +86,8 @@ def test_sampling_config_round_trips_logical_rules():
 def test_logical_preset_round_trips_rules(tmp_path):
     path = tmp_path / "logical.json"
     path.write_text(json.dumps({
-        "format": LOGICAL_FORMAT,
+        "format": FORMAT,
         "model": {"vocabulary_size": 8},
-        "biases": [],
         "bias_rules": [{
             "routes": [[1, 2], [1, 3]], "mode": "path", "bias": 0.75,
         }],
@@ -99,7 +98,7 @@ def test_logical_preset_round_trips_rules(tmp_path):
     assert config.active_biases([1]) == {2: 0.75, 3: 0.75}
 
 
-def test_projected_logical_rules_use_v4_preset(tmp_path):
+def test_projected_logical_rules_use_v1_preset(tmp_path):
     backend = NoEogBackend()
     config = SamplingConfig(bias_rules=(BiasRule(
         routes=((1, 2),), bias=1.25, mode="path"),))
@@ -110,7 +109,7 @@ def test_projected_logical_rules_use_v4_preset(tmp_path):
         )
         exported = json.loads(project_biases(store, episode))
 
-    assert exported["format"] == LOGICAL_FORMAT
+    assert exported["format"] == FORMAT
     assert exported["bias_rules"][0]["routes"] == [[1, 2]]
 
 

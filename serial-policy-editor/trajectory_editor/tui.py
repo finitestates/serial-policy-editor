@@ -940,8 +940,8 @@ def display_candidates(
             else "     --"
         )
         suffix = " [END]" if candidate.is_eog else ""
-        if candidate.logit_bias:
-            suffix += f" [bias {candidate.logit_bias:+g}]"
+        if candidate.bias:
+            suffix += f" [bias {candidate.bias:+g}]"
         if target_token_id is not None and candidate.token_id == target_token_id:
             suffix += " [MATCH]"
         policy = (

@@ -29,61 +29,13 @@ class SamplingConfig:
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
     seed: int = 12345
-    logit_bias: tuple[tuple[int, float], ...] = ()
-    scoped_bias: tuple = ()
     bias_step: float = 0.5
-    sequence_bias: tuple[tuple[tuple[int, ...], float], ...] = ()
-    # New logical rules are stored separately from the legacy fields above so
-    # old episode records remain readable while the matcher can operate on one
-    # representation.  New callers should prefer BiasRule.
     bias_rules: tuple = ()
 
     def __post_init__(self) -> None:
-        from .scoped_bias import ScopedBias
         from .bias_rules import BiasRule
-        try:
-            rules = tuple(ScopedBias.from_record(rule) for rule in self.scoped_bias)
-        except TypeError as exc:
-            raise EditorError("scoped_bias must be a list of rules") from exc
-        if len({rule.key for rule in rules}) != len(rules):
-            raise EditorError("duplicate scoped bias rule")
-        object.__setattr__(self, "scoped_bias", tuple(sorted(
-            (rule for rule in rules if rule.bias != 0), key=lambda rule: rule.sort_key)))
         if type(self.bias_step) not in (int, float) or not math.isfinite(self.bias_step) or self.bias_step <= 0:
             raise EditorError("bias_step must be a finite positive number")
-        try:
-            pairs = tuple(tuple(pair) for pair in self.logit_bias)
-        except TypeError as exc:
-            raise EditorError("logit_bias must contain token-id/value pairs") from exc
-        seen = set()
-        for pair in pairs:
-            if len(pair) != 2:
-                raise EditorError("logit_bias must contain token-id/value pairs")
-            token, bias = pair
-            if type(token) is not int or token < 0 or token in seen:
-                raise EditorError("bias token IDs must be unique nonnegative integers")
-            if type(bias) not in (int, float) or not math.isfinite(bias):
-                raise EditorError("logit biases must be finite numbers")
-            seen.add(token)
-        try:
-            sequences = tuple((tuple(tokens), bias) for tokens, bias in self.sequence_bias)
-        except (TypeError, ValueError) as exc:
-            raise EditorError("sequence_bias must contain token-sequence/value pairs") from exc
-        sequence_seen = set()
-        for tokens, bias in sequences:
-            if not tokens or any(type(token) is not int or token < 0 for token in tokens):
-                raise EditorError("bias sequences require nonnegative integer token IDs")
-            if tokens in sequence_seen or (len(tokens) == 1 and tokens[0] in seen):
-                raise EditorError("duplicate bias rule")
-            if type(bias) not in (int, float) or not math.isfinite(bias):
-                raise EditorError("sequence biases must be finite numbers")
-            sequence_seen.add(tokens)
-            if len(tokens) == 1:
-                pairs += ((tokens[0], bias),)
-                seen.add(tokens[0])
-        object.__setattr__(self, "sequence_bias", tuple(sorted(
-            (tokens, float(bias)) for tokens, bias in sequences if len(tokens) > 1 and bias != 0)))
-        object.__setattr__(self, "logit_bias", tuple(sorted((token, float(bias)) for token, bias in pairs if bias != 0)))
         try:
             rules = tuple(BiasRule.from_record(rule) for rule in self.bias_rules)
         except TypeError as exc:
@@ -142,36 +94,13 @@ class SamplingConfig:
     def policy_active(self) -> bool:
         return (
             self.history_penalties_active
-            or bool(self.logit_bias)
-            or bool(self.sequence_bias)
-            or bool(self.scoped_bias)
             or bool(self.bias_rules)
         )
 
     def active_biases(self, history, boundaries=None) -> dict[int, float]:
-        """Sum legacy and logical rules through the same route matcher."""
-        from .bias_rules import BiasMatcher, BiasRule
-
-        rules = [
-            BiasRule(routes=((token,),), bias=bias, mode="path")
-            for token, bias in self.logit_bias
-        ]
-        rules.extend(
-            BiasRule(routes=(tokens,), bias=bias, mode="tail")
-            for tokens, bias in self.sequence_bias
-        )
-        rules.extend(
-            BiasRule(
-                routes=(rule.target,),
-                bias=rule.bias,
-                mode="tail",
-                triggers=rule.triggers,
-                until=rule.until,
-            )
-            for rule in self.scoped_bias
-        )
-        rules.extend(self.bias_rules)
-        return BiasMatcher(rules).active_biases(history, boundaries)
+        """Return the logical rules active for the current model-token tail."""
+        from .bias_rules import BiasMatcher
+        return BiasMatcher(self.bias_rules).active_biases(history, boundaries)
 
     @property
     def history_penalties_active(self) -> bool:
@@ -188,6 +117,11 @@ class SamplingConfig:
     def from_mapping(cls, value: Mapping[str, Any]) -> "SamplingConfig":
         """Build configuration from partial values; use from_record for saved state."""
 
+        removed = {"logit_bias", "sequence_bias", "scoped_bias"} & set(value)
+        if removed:
+            raise EditorError(
+                "unsupported bias fields: " + ", ".join(sorted(removed))
+            )
         defaults = cls()
         return cls(
             temperature=value.get("temperature", defaults.temperature),
@@ -203,9 +137,6 @@ class SamplingConfig:
                 "frequency_penalty", defaults.frequency_penalty
             ),
             seed=value.get("seed", defaults.seed),
-            logit_bias=value.get("logit_bias", ()),
-            sequence_bias=value.get("sequence_bias", ()),
-            scoped_bias=value.get("scoped_bias", ()),
             bias_step=value.get("bias_step", defaults.bias_step),
             bias_rules=value.get("bias_rules", ()),
         )
@@ -215,6 +146,12 @@ class SamplingConfig:
         """Restore a complete saved configuration without filling defaults."""
         if not isinstance(value, Mapping):
             raise EditorError("saved sampler settings must be an object")
+        removed = {"logit_bias", "sequence_bias", "scoped_bias"} & set(value)
+        if removed:
+            raise EditorError(
+                "saved sampler settings use removed bias fields: "
+                + ", ".join(sorted(removed))
+            )
         expected = cls().to_dict()
         missing = sorted(expected.keys() - value.keys())
         if missing:
@@ -227,9 +164,6 @@ class SamplingConfig:
     def to_dict(self) -> dict[str, Any]:
         return {
             **({"bias_rules": [rule.to_dict() for rule in self.bias_rules]} if self.bias_rules else {}),
-            **({"scoped_bias": [rule.to_dict() for rule in self.scoped_bias]} if self.scoped_bias else {}),
-            **({"sequence_bias": [[list(tokens), bias] for tokens, bias in self.sequence_bias]} if self.sequence_bias else {}),
-            **({"logit_bias": [list(pair) for pair in self.logit_bias]} if self.logit_bias else {}),
             **({"bias_step": self.bias_step} if self.bias_step != 0.5 else {}),
             "temperature": self.temperature,
             "top_k": self.top_k,
@@ -254,14 +188,14 @@ class Candidate:
     raw_probability: float
     decoder_probability: float
     is_eog: bool
-    logit_bias: float = 0.0
+    bias: float = 0.0
     policy_rank: int | None = None
     policy_probability: float | None = None
     policy_logit_adjustment: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "logit_bias": self.logit_bias,
+            "bias": self.bias,
             "rank": self.rank,
             "token_id": self.token_id,
             "text": self.text,

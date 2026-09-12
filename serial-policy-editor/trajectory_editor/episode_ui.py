@@ -33,7 +33,6 @@ from .episode_policy import (
 from .episode_store import EpisodeStore
 from .episode_hash import token_prefix_sha256
 from .sampling import raw_rank
-from .scoped_bias import ScopedBias
 from .tui import (
     HELP_TEXT,
     IO,
@@ -577,14 +576,10 @@ class InteractivePolicy:
                         if lifetime is None:
                             raise EditorError("scoped bias requires a stop token or lifetime")
 
-                    logit_biases = dict(engine.sampling.logit_bias)
-                    sequence_biases = dict(engine.sampling.sequence_bias)
-                    scoped_biases = {rule.key: rule for rule in engine.sampling.scoped_bias}
                     logical_biases = {rule.key: rule for rule in engine.sampling.bias_rules}
                     step = command.bias_amount if command.bias_amount is not None else engine.sampling.bias_step
                     updates = []
                     logical_specs = []
-                    legacy_specs = []
                     for kind, value in specs:
                         if kind == "catalog":
                             entry = value
@@ -600,17 +595,22 @@ class InteractivePolicy:
                                 ))
                             continue
                         tokens, default_mode = value
-                        use_logical = default_mode == "path" and len(tokens) > 1
-                        if use_logical:
-                            template = BiasRule(
-                                routes=(tokens,), bias=0, mode=default_mode,
-                                triggers=triggers or (),
-                                until=lifetime if triggers is not None else None,
+                        template = BiasRule(
+                            routes=(tokens,), bias=0, mode=default_mode,
+                            triggers=triggers or (),
+                            until=lifetime if triggers is not None else None,
+                        )
+                        texts = [engine.backend.token_text(token) for token in tokens]
+                        label = (
+                            f"Path {texts!r} (ids={list(tokens)})"
+                            if default_mode == "path"
+                            else (
+                                f"{texts[0]!r} (id={tokens[0]})"
+                                if len(tokens) == 1
+                                else f"After {texts[:-1]!r} → {texts[-1]!r} (ids={list(tokens)})"
                             )
-                            texts = [engine.backend.token_text(token) for token in tokens]
-                            logical_specs.append((template, f"Path {texts!r} (ids={list(tokens)})"))
-                        else:
-                            legacy_specs.append((tokens, default_mode))
+                        )
+                        logical_specs.append((template, label))
 
                     logical_keys = set()
                     for template, label in logical_specs:
@@ -633,54 +633,7 @@ class InteractivePolicy:
                         }
                         updates.append(("bias-rule", payload, label, value))
 
-                    for tokens, _default_mode in legacy_specs:
-                        texts = [engine.backend.token_text(token) for token in tokens]
-                        if triggers is not None:
-                            scoped_rule = ScopedBias(triggers, tokens, lifetime, 0)
-                            key = scoped_rule.key
-                            old = scoped_biases[key].bias if key in scoped_biases else 0.0
-                            value = 0.0 if command.bias_operator == "=" else old + (
-                                step if command.bias_operator == "+" else -step)
-                            scoped_rule = replace(scoped_rule, bias=value)
-                            scoped_biases[key] = scoped_rule
-                            label = (f"{texts[0]!r} (id={tokens[0]})" if len(tokens) == 1 else
-                                     f"After {texts[:-1]!r} → {texts[-1]!r} (ids={list(tokens)})")
-                            label += f" after any of {trigger_texts!r}"
-                            if type(lifetime) is int:
-                                label += (f" until {engine.backend.token_text(lifetime)!r} "
-                                          f"(id={lifetime})")
-                            else:
-                                label += f" until {lifetime}"
-                            payload = {
-                                "previous": old, "bias": value,
-                                "rule": scoped_rule.to_dict(), "target_texts": texts,
-                                "trigger_texts": trigger_texts,
-                            }
-                            updates.append(("scoped-bias", payload, label, value))
-                        else:
-                            single = len(tokens) == 1
-                            biases = logit_biases if single else sequence_biases
-                            key = tokens[0] if single else tokens
-                            old = biases.get(key, 0.0)
-                            value = 0.0 if command.bias_operator == "=" else old + (
-                                step if command.bias_operator == "+" else -step)
-                            biases[key] = value
-                            label = (f"{texts[0]!r} (id={tokens[0]})" if single else
-                                     f"After {texts[:-1]!r} → {texts[-1]!r} (ids={list(tokens)})")
-                            payload = {"previous": old, "bias": value}
-                            if single:
-                                payload.update(token_id=tokens[0], text=texts[0],
-                                               raw_rank=raw_rank(observation.logits, tokens[0]))
-                                kind = "logit-bias"
-                            else:
-                                payload.update(token_ids=list(tokens), texts=texts)
-                                kind = "sequence-bias"
-                            updates.append((kind, payload, label, value))
-
                     updated = replace(engine.sampling,
-                        logit_bias=tuple(logit_biases.items()),
-                        sequence_bias=tuple(sequence_biases.items()),
-                        scoped_bias=tuple(scoped_biases.values()),
                         bias_rules=tuple(logical_biases.values()))
                 except EditorError as exc:
                     feedback = ChoiceFeedback("error", "INVALID BIAS", (str(exc),))
