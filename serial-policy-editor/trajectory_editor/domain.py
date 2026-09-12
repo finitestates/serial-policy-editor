@@ -33,9 +33,14 @@ class SamplingConfig:
     scoped_bias: tuple = ()
     bias_step: float = 0.5
     sequence_bias: tuple[tuple[tuple[int, ...], float], ...] = ()
+    # New logical rules are stored separately from the legacy fields above so
+    # old episode records remain readable while the matcher can operate on one
+    # representation.  New callers should prefer BiasRule.
+    bias_rules: tuple = ()
 
     def __post_init__(self) -> None:
         from .scoped_bias import ScopedBias
+        from .bias_rules import BiasRule
         try:
             rules = tuple(ScopedBias.from_record(rule) for rule in self.scoped_bias)
         except TypeError as exc:
@@ -79,6 +84,16 @@ class SamplingConfig:
         object.__setattr__(self, "sequence_bias", tuple(sorted(
             (tokens, float(bias)) for tokens, bias in sequences if len(tokens) > 1 and bias != 0)))
         object.__setattr__(self, "logit_bias", tuple(sorted((token, float(bias)) for token, bias in pairs if bias != 0)))
+        try:
+            rules = tuple(BiasRule.from_record(rule) for rule in self.bias_rules)
+        except TypeError as exc:
+            raise EditorError("bias_rules must be a list of rules") from exc
+        if len({rule.key for rule in rules}) != len(rules):
+            raise EditorError("duplicate bias rule")
+        object.__setattr__(self, "bias_rules", tuple(sorted(
+            (rule for rule in rules if rule.bias != 0),
+            key=lambda rule: rule.sort_key,
+        )))
         if (
             type(self.temperature) not in {int, float}
             or not math.isfinite(float(self.temperature))
@@ -125,22 +140,38 @@ class SamplingConfig:
 
     @property
     def policy_active(self) -> bool:
-        return self.history_penalties_active or bool(self.logit_bias) or bool(self.sequence_bias) or bool(self.scoped_bias)
+        return (
+            self.history_penalties_active
+            or bool(self.logit_bias)
+            or bool(self.sequence_bias)
+            or bool(self.scoped_bias)
+            or bool(self.bias_rules)
+        )
 
     def active_biases(self, history, boundaries=None) -> dict[int, float]:
-        """Sum unconditional biases and rules whose prefix matches the context tail."""
-        result = dict(self.logit_bias)
-        if self.sequence_bias and history is None:
-            raise EditorError("sequence biases require exact context token IDs")
-        for tokens, bias in self.sequence_bias:
-            prefix = tokens[:-1]
-            if len(history) >= len(prefix) and tuple(history[-len(prefix):]) == prefix:
-                result[tokens[-1]] = result.get(tokens[-1], 0.0) + bias
-        if self.scoped_bias:
-            from .scoped_bias import active_scoped_biases
-            for token, bias in active_scoped_biases(self.scoped_bias, history, boundaries).items():
-                result[token] = result.get(token, 0.0) + bias
-        return result
+        """Sum legacy and logical rules through the same route matcher."""
+        from .bias_rules import BiasMatcher, BiasRule
+
+        rules = [
+            BiasRule(routes=((token,),), bias=bias, mode="path")
+            for token, bias in self.logit_bias
+        ]
+        rules.extend(
+            BiasRule(routes=(tokens,), bias=bias, mode="tail")
+            for tokens, bias in self.sequence_bias
+        )
+        rules.extend(
+            BiasRule(
+                routes=(rule.target,),
+                bias=rule.bias,
+                mode="tail",
+                triggers=rule.triggers,
+                until=rule.until,
+            )
+            for rule in self.scoped_bias
+        )
+        rules.extend(self.bias_rules)
+        return BiasMatcher(rules).active_biases(history, boundaries)
 
     @property
     def history_penalties_active(self) -> bool:
@@ -176,6 +207,7 @@ class SamplingConfig:
             sequence_bias=value.get("sequence_bias", ()),
             scoped_bias=value.get("scoped_bias", ()),
             bias_step=value.get("bias_step", defaults.bias_step),
+            bias_rules=value.get("bias_rules", ()),
         )
 
     @classmethod
@@ -194,6 +226,7 @@ class SamplingConfig:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            **({"bias_rules": [rule.to_dict() for rule in self.bias_rules]} if self.bias_rules else {}),
             **({"scoped_bias": [rule.to_dict() for rule in self.scoped_bias]} if self.scoped_bias else {}),
             **({"sequence_bias": [[list(tokens), bias] for tokens, bias in self.sequence_bias]} if self.sequence_bias else {}),
             **({"logit_bias": [list(pair) for pair in self.logit_bias]} if self.logit_bias else {}),

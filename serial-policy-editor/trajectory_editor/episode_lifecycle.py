@@ -7,7 +7,7 @@ from .episode_engine import EpisodeEngine
 from .episode_store import EpisodeStore
 from .episode_policy import TapeStep, ReplayPlan
 
-SAMPLER_FIELDS = ("temperature", "top_k", "top_p", "min_p", "repeat_penalty", "repeat_last_n", "presence_penalty", "frequency_penalty", "seed", "logit_bias", "bias_step", "sequence_bias", "scoped_bias")
+SAMPLER_FIELDS = ("temperature", "top_k", "top_p", "min_p", "repeat_penalty", "repeat_last_n", "presence_penalty", "frequency_penalty", "seed", "logit_bias", "bias_step", "sequence_bias", "scoped_bias", "bias_rules")
 
 def _inherit_budget(store, episode_id, engine, boundary, *, rebase=False, notice=print):
     state = store.budget_at(episode_id, boundary)

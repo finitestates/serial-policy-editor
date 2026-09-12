@@ -317,7 +317,7 @@ def project_procedure(store: EpisodeStore, episode_id: str) -> str:
     backend = episode["backend"]
     model = backend.get("filename") or backend.get("model_path") or backend.get("model") or "unknown"
     model = PurePosixPath(str(model).replace(chr(92), "/")).name
-    fields = {key: getattr(initial, key) for key in initial.__dataclass_fields__ if key not in {"logit_bias", "sequence_bias", "scoped_bias"}}
+    fields = {key: getattr(initial, key) for key in initial.__dataclass_fields__ if key not in {"logit_bias", "sequence_bias", "scoped_bias", "bias_rules"}}
     lines = [
         f"MODEL   : {_procedure_text(model)}",
         f"BACKEND : {_procedure_text(str(backend.get('backend', 'unknown')))}",
@@ -348,6 +348,8 @@ def project_procedure(store: EpisodeStore, episode_id: str) -> str:
             rows.append((at, f"# Set sequence biases to {config.sequence_bias!r}", None))
         if config.scoped_bias != current.scoped_bias:
             rows.append((at, f"# Set scoped biases to {[r.to_dict() for r in config.scoped_bias]!r}", None))
+        if config.bias_rules != current.bias_rules:
+            rows.append((at, f"# Set logical bias rules to {[r.to_dict() for r in config.bias_rules]!r}", None))
         current = config
 
     if initial.scoped_bias:
@@ -356,6 +358,8 @@ def project_procedure(store: EpisodeStore, episode_id: str) -> str:
         lines.insert(3, f"SEQUENCES: {initial.sequence_bias!r}")
     if initial.logit_bias:
         lines.insert(3, f"BIASES  : token-ID/value pairs {initial.logit_bias!r}")
+    if initial.bias_rules:
+        lines.insert(3, f"RULES   : logical bias rules {[r.to_dict() for r in initial.bias_rules]!r}")
 
     for step in steps:
         boundary = step["boundary"]

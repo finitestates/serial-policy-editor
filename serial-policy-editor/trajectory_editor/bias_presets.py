@@ -5,11 +5,13 @@ import json
 from pathlib import Path
 
 from .domain import EditorError, SamplingConfig
+from .bias_rules import BiasRule
 from .scoped_bias import ScopedBias
 
 FORMAT = "spe-logit-bias-v1"
 SEQUENCE_FORMAT = "spe-logit-bias-v2"
 SCOPED_FORMAT = "spe-logit-bias-v3"
+LOGICAL_FORMAT = "spe-logit-bias-v4"
 IDENTITY_FIELDS = ("backend", "filename", "file_size_bytes", "vocabulary_size")
 
 
@@ -18,10 +20,15 @@ def load_bias_preset(path: Path, backend, provenance: dict) -> SamplingConfig:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise EditorError(f"Could not read bias preset: {exc}") from exc
-    if not isinstance(value, dict) or value.get("format") not in {FORMAT, SEQUENCE_FORMAT, SCOPED_FORMAT}:
-        raise EditorError(f"Bias preset must use format {FORMAT} or {SEQUENCE_FORMAT} or {SCOPED_FORMAT}")
+    if not isinstance(value, dict) or value.get("format") not in {
+        FORMAT, SEQUENCE_FORMAT, SCOPED_FORMAT, LOGICAL_FORMAT
+    }:
+        raise EditorError(
+            f"Bias preset must use format {FORMAT}, {SEQUENCE_FORMAT}, {SCOPED_FORMAT}, or {LOGICAL_FORMAT}"
+        )
     model = value.get("model")
-    rows = value.get("biases")
+    format_name = value["format"]
+    rows = value.get("biases", [] if format_name == LOGICAL_FORMAT else None)
     if not isinstance(model, dict) or not isinstance(rows, list):
         raise EditorError("Bias preset requires model metadata and a biases list")
     if type(model.get("vocabulary_size")) is not int or model["vocabulary_size"] != backend.vocabulary_size():
@@ -35,7 +42,7 @@ def load_bias_preset(path: Path, backend, provenance: dict) -> SamplingConfig:
     for row in rows:
         if not isinstance(row, dict) or "bias" not in row:
             raise EditorError("Each bias requires token IDs and bias")
-        if value["format"] in {SEQUENCE_FORMAT, SCOPED_FORMAT}:
+        if format_name in {SEQUENCE_FORMAT, SCOPED_FORMAT, LOGICAL_FORMAT}:
             tokens = row.get("token_ids")
             if not isinstance(tokens, list) or not tokens:
                 raise EditorError("Each v2 bias requires a nonempty token_ids list")
@@ -47,8 +54,10 @@ def load_bias_preset(path: Path, backend, provenance: dict) -> SamplingConfig:
             pairs.append((tokens[0], row["bias"]))
         addressed.append((tokens, row))
     scoped_rows = value.get("scoped_biases", [])
-    if not isinstance(scoped_rows, list) or ("scoped_biases" in value and value["format"] != SCOPED_FORMAT):
-        raise EditorError("Scoped biases require a v3 preset and a scoped_biases list")
+    if not isinstance(scoped_rows, list) or (
+        "scoped_biases" in value and format_name not in {SCOPED_FORMAT, LOGICAL_FORMAT}
+    ):
+        raise EditorError("Scoped biases require a v3 or v4 preset and a scoped_biases list")
     rules = []
     for row in scoped_rows:
         if not isinstance(row, dict):
@@ -67,7 +76,35 @@ def load_bias_preset(path: Path, backend, provenance: dict) -> SamplingConfig:
             raise EditorError("Scoped bias trigger text mismatch")
         if "until_text" in row and (type(rule.until) is not int or row["until_text"] != backend.token_text(rule.until)):
             raise EditorError("Scoped bias stop-token text mismatch")
-    result = SamplingConfig(logit_bias=pairs, sequence_bias=sequences, scoped_bias=rules)
+    logical_rows = value.get("bias_rules", [])
+    if not isinstance(logical_rows, list) or (
+        "bias_rules" in value and format_name != LOGICAL_FORMAT
+    ):
+        raise EditorError("Logical bias rules require a v4 preset and a bias_rules list")
+    logical_rules = tuple(BiasRule.from_record(row) for row in logical_rows)
+    logical_tokens = [
+        token
+        for rule in logical_rules
+        for route in rule.routes
+        for token in route
+    ]
+    logical_tokens.extend(
+        token
+        for rule in logical_rules
+        for trigger in rule.triggers
+        for token in trigger
+    )
+    logical_tokens.extend(
+        rule.until for rule in logical_rules if type(rule.until) is int
+    )
+    if any(token >= backend.vocabulary_size() for token in logical_tokens):
+        raise EditorError("Logical bias rule token ID is outside the loaded vocabulary")
+    result = SamplingConfig(
+        logit_bias=pairs,
+        sequence_bias=sequences,
+        scoped_bias=rules,
+        bias_rules=logical_rules,
+    )
     for tokens, row in addressed:
         if any(token >= backend.vocabulary_size() for token in tokens):
             raise EditorError("Bias token ID is outside the loaded vocabulary")
@@ -101,8 +138,8 @@ def project_biases(store, episode_id: str) -> str:
              **({"text": labels[token]} if token in labels else {})}
             for token, bias in config.logit_bias]
     format_name = FORMAT
-    if config.sequence_bias or config.scoped_bias:
-        format_name = SEQUENCE_FORMAT
+    if config.sequence_bias or config.scoped_bias or config.bias_rules:
+        format_name = LOGICAL_FORMAT if config.bias_rules else SEQUENCE_FORMAT
         rows = [{"token_ids": [row["token_id"]], "bias": row["bias"],
                  **({"texts": [row["text"]]} if "text" in row else {})} for row in rows]
         rows.extend({"token_ids": list(tokens), "bias": bias,
@@ -110,8 +147,9 @@ def project_biases(store, episode_id: str) -> str:
                     for tokens, bias in config.sequence_bias)
     scoped = {}
     if config.scoped_bias:
-        format_name = SCOPED_FORMAT
+        format_name = LOGICAL_FORMAT if config.bias_rules else SCOPED_FORMAT
         scoped = {"scoped_biases": [{**rule.to_dict(), **scoped_labels.get(rule.key, {})}
                                     for rule in config.scoped_bias]}
-    return json.dumps({"format": format_name, "model": model, "biases": rows, **scoped},
+    logical = {"bias_rules": [rule.to_dict() for rule in config.bias_rules]} if config.bias_rules else {}
+    return json.dumps({"format": format_name, "model": model, "biases": rows, **scoped, **logical},
                       ensure_ascii=False, indent=2, allow_nan=False)

@@ -23,6 +23,19 @@ def parse(text):
     return parse_command(text, menu_size=3, vocabulary_size=8, default_hold_tokens=10)
 
 
+class LexicalBackend(NoEogBackend):
+    pieces = {
+        **NoEogBackend.pieces,
+        8: " velo",
+        9: "ciraptor",
+    }
+
+    def tokenize(self, text, *, add_bos=False, special=False):
+        if not add_bos and text in {" velociraptor", "velociraptor"}:
+            return [8, 9]
+        return super().tokenize(text, add_bos=add_bos, special=special)
+
+
 @pytest.mark.parametrize('text,phrase,last,prefix,rank', [
     ('b " A B" +0.5', ' A B', None, None, None),
     ('bl 1 -', None, 1, None, None),
@@ -57,6 +70,22 @@ def test_matching_sums_overlaps_only_at_context_tail():
     assert stats.policy_rank(2) == 2
     with pytest.raises(EditorError, match='exact context'):
         config.active_biases(None)
+
+
+def test_plain_lexical_multi_token_bias_uses_telescoping_rule():
+    backend = LexicalBackend()
+    runtime = EpisodeEngine(backend, initial_token_ids=[7], sampling=SamplingConfig())
+    with pytest.raises(EdgeRequested):
+        InteractivePolicy(io=ScriptedIO(['b velociraptor +2', 'q'])).choose(
+            runtime, runtime.observe()
+        )
+
+    assert runtime.sampling.sequence_bias == ()
+    assert len(runtime.sampling.bias_rules) == 1
+    rule = runtime.sampling.bias_rules[0]
+    assert rule.routes == ((8, 9),) and rule.mode == "path" and rule.bias == 2
+    assert runtime.sampling.active_biases([]) == {8: 2}
+    assert runtime.sampling.active_biases([8]) == {9: 2}
 
 
 @pytest.mark.parametrize('io_type', [ScriptedIO, LiveScriptedIO])

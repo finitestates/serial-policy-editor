@@ -225,6 +225,11 @@ class EpisodeEngine:
         for rule in value.scoped_bias:
             bias_tokens.extend(rule.target)
             bias_tokens.extend(token for trigger in rule.triggers for token in trigger)
+        for rule in value.bias_rules:
+            bias_tokens.extend(token for route in rule.routes for token in route)
+            bias_tokens.extend(token for trigger in rule.triggers for token in trigger)
+            if type(rule.until) is int:
+                bias_tokens.append(rule.until)
         if any(token >= self.backend.vocabulary_size() for token in bias_tokens):
             raise EditorError("bias token id is outside the model vocabulary")
         self._sampling = value

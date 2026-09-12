@@ -726,6 +726,63 @@ Replay follows the recorded bias states unless explicitly overridden; in-place
 SPR keeps the destination sampler, including its biases. Switching models clears
 inherited token-ID biases.
 
+### Experimental bias catalog compiler
+
+The standalone `policy-editor-bias` tool can compile human-readable YAML
+terms against a local model tokenizer. It currently produces a model-specific,
+bias-free catalog for inspection and for the logical bias-rule runtime. A
+simple YAML list becomes the automatic `global` group:
+
+```yaml
+- sky
+- cloud
+- fog
+- aardvark
+```
+
+Named groups use the expanded mapping form:
+
+```yaml
+terms:
+  - sky
+  - mango
+groups:
+  nautical:
+    - anchor
+    - steamship
+    - port of call
+```
+
+Compile the catalog with the normal tokenizer route search:
+
+```bash
+policy-editor-bias \
+  --model /path/to/model.gguf \
+  --input terms.yaml \
+  --output catalog.json
+```
+
+Use `--level minimal`, `--level standard`, or `--level exhaustive` to select
+canonical routes, bounded alternate routes, or a larger bounded exact-route
+search. `--term TEXT` may be repeated for one-off compilation without a YAML
+file. YAML quoting is only YAML syntax: quoted, unquoted, and single-quoted
+semantic terms receive the same spacing and case expansion. The compiler adds
+leading-space variants automatically, so users do not need to write them.
+
+The runtime matcher now has one logical route engine. A plain lexical target
+that tokenizes into multiple pieces uses telescoping path semantics: `b
+velociraptor +1` biases a viable starting token and then the next route token
+after each matching prefix. Whitespace phrases retain tail semantics by
+default, so a phrase continues to mean “bias the completion after this prefix.”
+Alternate routes sharing an edge contribute once per logical rule rather than
+once per route. Logical rules can be saved in the v4 JSON preset format.
+
+Load a compiled catalog into an interactive episode with
+`--bias-catalog catalog.json`. A bare bias target uses a matching catalog entry
+when one exists and otherwise falls back to one-shot tokenizer resolution;
+`b @name +1` requires that catalog entry. Quoted runtime text bypasses catalog
+lookup and remains an exact text target.
+
 Export the current surviving bias set as a JSON preset:
 
 ```bash

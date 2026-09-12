@@ -306,6 +306,7 @@ class TeacherCommand:
     bias_operator: str | None = None
     bias_amount: float | None = None
     bias_targets: tuple[str, ...] | None = None
+    bias_target_bare: tuple[bool, ...] | None = None
     bias_prefix: str | None = None
     bias_last: int | None = None
     bias_triggers: tuple[str, ...] | None = None
@@ -515,7 +516,7 @@ def _split_human_bias_group(raw: str) -> tuple[str, ...]:
     return tuple(items)
 
 
-def _parse_bias_text(raw: str, *, label: str) -> tuple[str, ...]:
+def _parse_bias_text(raw: str, *, label: str, return_bare: bool = False):
     """Decode exact JSON text or friendlier bare/braced text.
 
     Bare text is continuation-oriented: surrounding whitespace is stripped and a
@@ -525,6 +526,7 @@ def _parse_bias_text(raw: str, *, label: str) -> tuple[str, ...]:
     value = raw.strip()
     if not value:
         raise EditorError(f"{label} cannot be empty")
+    bare_flags: tuple[bool, ...]
     if value.startswith('['):
         try:
             decoded = json.loads(value)
@@ -533,10 +535,12 @@ def _parse_bias_text(raw: str, *, label: str) -> tuple[str, ...]:
         if not isinstance(decoded, list) or any(not isinstance(item, str) for item in decoded):
             raise EditorError(f"{label} JSON form must be a list of strings")
         result = tuple(decoded)
+        bare_flags = tuple(False for _ in result)
     elif value.startswith('{'):
         if not value.endswith('}'):
             raise EditorError(f"unterminated {label} group")
         result_list = []
+        bare_list = []
         for item in _split_human_bias_group(value):
             item = item.strip()
             if item.startswith('"'):
@@ -547,11 +551,14 @@ def _parse_bias_text(raw: str, *, label: str) -> tuple[str, ...]:
                 if not isinstance(decoded, str):
                     raise EditorError(f"quoted {label} must be a JSON string")
                 result_list.append(decoded)
+                bare_list.append(False)
             else:
                 if '"' in item or any(character in item for character in '{}[]'):
                     raise EditorError(f"invalid bare {label}: {item!r}")
                 result_list.append(' ' + item)
+                bare_list.append(True)
         result = tuple(result_list)
+        bare_flags = tuple(bare_list)
     elif value.startswith('"'):
         try:
             decoded = json.loads(value)
@@ -560,13 +567,15 @@ def _parse_bias_text(raw: str, *, label: str) -> tuple[str, ...]:
         if not isinstance(decoded, str):
             raise EditorError(f"{label} must be a JSON string")
         result = (decoded,)
+        bare_flags = (False,)
     else:
         if any(character in value for character in '{}[]"'):
             raise EditorError(f"invalid bare {label}")
         result = (' ' + value.strip(),)
+        bare_flags = (True,)
     if not result or any(not item for item in result):
         raise EditorError(f"{label} alternatives cannot be empty")
-    return result
+    return (result, bare_flags) if return_bare else result
 
 
 def _parse_bias_stop(raw: str, *, vocabulary_size: int) -> tuple[str | None, str | None, int | None]:
@@ -625,8 +634,11 @@ def parse_bias_command(raw: str, *, vocabulary_size: int) -> TeacherCommand | No
             raise EditorError("bias adjustment must be finite and positive")
 
         targets = None
+        target_bare = None
         if fields.get("text") is not None:
-            targets = _parse_bias_text(fields["text"], label="bias target")
+            targets, target_bare = _parse_bias_text(
+                fields["text"], label="bias target", return_bare=True
+            )
             if len(set(targets)) != len(targets):
                 raise EditorError("bias target alternatives cannot contain duplicates")
 
@@ -652,7 +664,8 @@ def parse_bias_command(raw: str, *, vocabulary_size: int) -> TeacherCommand | No
 
         return TeacherCommand(CommandKind.BIAS, search_rank=rank,
             bias_operator=operator, bias_amount=value, bias_last=last,
-            bias_targets=targets, bias_prefix=prefix, bias_triggers=triggers,
+            bias_targets=targets, bias_target_bare=target_bare,
+            bias_prefix=prefix, bias_triggers=triggers,
             bias_until=until, bias_stop_text=stop_text, bias_stop_token=stop_token)
     return None
 

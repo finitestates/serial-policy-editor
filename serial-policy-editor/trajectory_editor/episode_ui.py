@@ -13,6 +13,8 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from .domain import Candidate, ChoiceSet, EditorError
+from .bias_catalog import BiasCatalog
+from .bias_rules import BiasRule, routes_for_catalog_entry
 from .episode_actions import (
     EndGeneration,
     Finish,
@@ -54,6 +56,13 @@ class SearchLens:
     target_rank: int
     lower_rank: int
     upper_rank: int
+
+
+def _default_bias_mode(text: str) -> str:
+    """Use telescoping semantics for one lexical term, tail semantics for phrases."""
+
+    semantic = text[1:] if text.startswith(" ") else text
+    return "tail" if any(character.isspace() for character in semantic) else "path"
 
 
 def _choice_from_observation(
@@ -99,6 +108,7 @@ class InteractivePolicy:
         store: EpisodeStore | None = None,
         episode_id: str | None = None,
         seamless: bool = False,
+        catalog: BiasCatalog | None = None,
     ) -> None:
         if min(menu_size, search_radius, default_hold_tokens) < 1:
             raise EditorError("menu, search, and hold sizes must be positive")
@@ -112,6 +122,7 @@ class InteractivePolicy:
         self.store = store
         self.episode_id = episode_id
         self.seamless = bool(seamless)
+        self.catalog = catalog
         self.choice_serial = 0
 
     def _interaction(
@@ -494,27 +505,53 @@ class InteractivePolicy:
                 continue
             if command.kind == CommandKind.BIAS:
                 try:
-                    targets = []
+                    specs = []
                     if command.bias_targets is not None:
-                        for target_text in command.bias_targets:
+                        bare_flags = command.bias_target_bare or tuple(
+                            True for _ in command.bias_targets
+                        )
+                        direct_targets = []
+                        for target_text, is_bare in zip(command.bias_targets, bare_flags):
+                            semantic = (
+                                target_text[1:]
+                                if is_bare and target_text.startswith(" ")
+                                else target_text
+                            )
+                            entry = None
+                            if is_bare and semantic.startswith("@"):
+                                if self.catalog is None:
+                                    raise EditorError(
+                                        f"catalog reference {semantic!r} requires --bias-catalog"
+                                    )
+                                if not semantic[1:]:
+                                    raise EditorError("catalog reference cannot be empty")
+                                entry = self.catalog.require(semantic[1:])
+                            elif is_bare and self.catalog is not None:
+                                entry = self.catalog.resolve(semantic)
+                            if entry is not None:
+                                specs.append(("catalog", entry))
+                                continue
                             tokens = tuple(engine.backend.tokenize(
                                 target_text, add_bos=False, special=False))
                             if not tokens:
                                 raise EditorError("bias phrase produced no tokens")
-                            targets.append(tokens)
+                            direct_targets.append(tokens)
+                            specs.append(("tokens", (tokens, _default_bias_mode(target_text))))
+                        if len(set(direct_targets)) != len(direct_targets):
+                            raise EditorError("bias targets resolve to duplicate token sequences")
                     elif command.bias_last is not None:
                         if command.bias_last > len(observation.prefix_token_ids):
                             raise EditorError("bl requests more tokens than the current context contains")
-                        targets.append(observation.prefix_token_ids[-command.bias_last:])
+                        specs.append(("tokens", (
+                            observation.prefix_token_ids[-command.bias_last:], "tail"
+                        )))
                     else:
                         candidate = resolve_candidate(command.search_rank)
                         prefix = () if command.bias_prefix is None else tuple(
                             engine.backend.tokenize(command.bias_prefix, add_bos=False, special=False))
                         if command.bias_prefix is not None and not prefix:
                             raise EditorError("bias prefix produced no tokens")
-                        targets.append((*prefix, candidate.token_id))
-                    if len(set(targets)) != len(targets):
-                        raise EditorError("bias targets resolve to duplicate token sequences")
+                        specs.append(("tokens", ((*prefix, candidate.token_id), "tail")))
 
                     triggers = None
                     trigger_texts = None
@@ -543,9 +580,60 @@ class InteractivePolicy:
                     logit_biases = dict(engine.sampling.logit_bias)
                     sequence_biases = dict(engine.sampling.sequence_bias)
                     scoped_biases = {rule.key: rule for rule in engine.sampling.scoped_bias}
+                    logical_biases = {rule.key: rule for rule in engine.sampling.bias_rules}
                     step = command.bias_amount if command.bias_amount is not None else engine.sampling.bias_step
                     updates = []
-                    for tokens in targets:
+                    logical_specs = []
+                    legacy_specs = []
+                    for kind, value in specs:
+                        if kind == "catalog":
+                            entry = value
+                            for template in routes_for_catalog_entry(entry, 0):
+                                if triggers is not None:
+                                    template = replace(
+                                        template, triggers=triggers, until=lifetime
+                                    )
+                                logical_specs.append((
+                                    template,
+                                    f"Catalog {entry.name!r} · {template.mode} "
+                                    f"({len(template.routes)} routes)",
+                                ))
+                            continue
+                        tokens, default_mode = value
+                        use_logical = default_mode == "path" and len(tokens) > 1
+                        if use_logical:
+                            template = BiasRule(
+                                routes=(tokens,), bias=0, mode=default_mode,
+                                triggers=triggers or (),
+                                until=lifetime if triggers is not None else None,
+                            )
+                            texts = [engine.backend.token_text(token) for token in tokens]
+                            logical_specs.append((template, f"Path {texts!r} (ids={list(tokens)})"))
+                        else:
+                            legacy_specs.append((tokens, default_mode))
+
+                    logical_keys = set()
+                    for template, label in logical_specs:
+                        if template.key in logical_keys:
+                            raise EditorError("bias targets resolve to duplicate logical rules")
+                        logical_keys.add(template.key)
+                        key = template.key
+                        old = logical_biases[key].bias if key in logical_biases else 0.0
+                        value = 0.0 if command.bias_operator == "=" else old + (
+                            step if command.bias_operator == "+" else -step)
+                        logical_biases[key] = replace(template, bias=value)
+                        if template.triggers:
+                            label += f" after any of {trigger_texts!r}"
+                            label += f" until {lifetime}" if type(lifetime) is not int else (
+                                f" until {engine.backend.token_text(lifetime)!r} (id={lifetime})"
+                            )
+                        payload = {
+                            "previous": old, "bias": value,
+                            "rule": logical_biases[key].to_dict(),
+                        }
+                        updates.append(("bias-rule", payload, label, value))
+
+                    for tokens, _default_mode in legacy_specs:
                         texts = [engine.backend.token_text(token) for token in tokens]
                         if triggers is not None:
                             scoped_rule = ScopedBias(triggers, tokens, lifetime, 0)
@@ -592,7 +680,8 @@ class InteractivePolicy:
                     updated = replace(engine.sampling,
                         logit_bias=tuple(logit_biases.items()),
                         sequence_bias=tuple(sequence_biases.items()),
-                        scoped_bias=tuple(scoped_biases.values()))
+                        scoped_bias=tuple(scoped_biases.values()),
+                        bias_rules=tuple(logical_biases.values()))
                 except EditorError as exc:
                     feedback = ChoiceFeedback("error", "INVALID BIAS", (str(exc),))
                     if not live:
