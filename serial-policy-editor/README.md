@@ -786,6 +786,9 @@ Alternate routes sharing an edge contribute once per logical rule rather than
 once per route. Logical rules and named groups can be saved in the
 `spe-bias-rules-v2` JSON preset format.
 
+For the complete accepted YAML schema, including list, mapping, per-term,
+defaults, group, and reference forms, see the [bias catalog YAML reference](BIAS_CATALOG_YAML.md).
+
 Load a compiled catalog into an interactive episode with
 `--bias-catalog catalog.json`. A bare bias target uses a matching catalog entry
 when one exists and otherwise falls back to one-shot tokenizer resolution;
