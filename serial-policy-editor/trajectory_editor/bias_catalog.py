@@ -606,6 +606,11 @@ def compile_term(
             token_texts = tuple(str(backend.token_text(token)) for token in route)
             existing = route_map.get(route)
             if existing is None:
+                if len(route_map) >= options.max_routes:
+                    raise EditorError(
+                        f"route compilation for term {name!r} exceeded "
+                        f"max_routes={options.max_routes}"
+                    )
                 route_map[route] = CompiledRoute(
                     token_ids=route,
                     texts=(form,),

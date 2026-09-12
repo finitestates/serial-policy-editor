@@ -169,6 +169,19 @@ def test_standard_and_exhaustive_levels_find_bounded_alternate_routes(backend):
     assert (9, 10, 8) in exhaustive_routes
 
 
+def test_max_routes_applies_across_all_generated_forms(backend):
+    with pytest.raises(EditorError, match="term 'Shadow'.*max_routes=1"):
+        compile_term(
+            "Shadow",
+            "Shadow",
+            backend,
+            options=CompileOptions(
+                level="minimal", cases=("original", "lower"),
+                leading_space=False, plural=False, max_routes=1,
+            ),
+        )
+
+
 def test_explicit_forms_and_per_term_levels(backend):
     catalog = compile_catalog(
         {
