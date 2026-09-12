@@ -775,7 +775,8 @@ velociraptor +1` biases a viable starting token and then the next route token
 after each matching prefix. Whitespace phrases retain tail semantics by
 default, so a phrase continues to mean “bias the completion after this prefix.”
 Alternate routes sharing an edge contribute once per logical rule rather than
-once per route. Logical rules can be saved in the v4 JSON preset format.
+once per route. Logical rules can be saved in the `spe-bias-rules-v1` JSON
+preset format.
 
 Load a compiled catalog into an interactive episode with
 `--bias-catalog catalog.json`. A bare bias target uses a matching catalog entry
