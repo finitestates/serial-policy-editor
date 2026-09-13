@@ -61,8 +61,10 @@ class SamplingConfig:
         if len({group.name for group in groups}) != len(groups):
             raise EditorError("duplicate bias group")
         object.__setattr__(self, "bias_groups", tuple(sorted(groups, key=lambda group: group.name)))
-        if self.reference_prior_scope not in {"active", "global"}:
-            raise EditorError("reference_prior_scope must be active or global")
+        if self.reference_prior_scope not in {"active", "global", "ballistic-global"}:
+            raise EditorError(
+                "reference_prior_scope must be active, global, or ballistic-global"
+            )
         prior_routes = []
         try:
             for index, raw_route in enumerate(self.reference_prior_routes):

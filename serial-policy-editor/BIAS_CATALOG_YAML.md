@@ -208,6 +208,10 @@ reference prefix is entered, unrelated root routes do not restart their
 contribution at every position. `--reference-prior-attraction` adds a separate
 commitment bonus to valid children inside a lexical prefix; it defaults to
 `0`, preserving purely contrastive branch preference unless enabled.
+Use `--reference-prior ballistic-global` to apply that attraction at the root
+as well, allowing the reference universe to exert entry pressure. When a node
+is both terminal and a prefix of a longer entry, terminal mass proportionally
+dampens continuation attraction.
 
 For a phrase whose first token is common but whose continuation is distinctive,
 force path mode and make the head gentler:

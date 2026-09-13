@@ -2,6 +2,7 @@ import math
 
 import pytest
 
+from trajectory_editor.domain import SamplingConfig
 from trajectory_editor.sampling import ReferencePriorTrie, reference_prior_snapshot
 
 
@@ -51,6 +52,46 @@ def test_singleton_continuation_gets_attraction_but_not_branch_bias():
     assert attracted.biases[2] > 0.0
     assert attracted.outgoing[0][2] == pytest.approx(0.0)
     assert attracted.outgoing[0][3] == pytest.approx(0.5)
+
+
+def test_ballistic_global_applies_attraction_at_the_root():
+    routes = _routes(((1,), 100))
+    contrastive = reference_prior_snapshot(
+        routes, [], strength=1.0, attraction=0.5, scope="global"
+    )
+    ballistic = reference_prior_snapshot(
+        routes, [], strength=1.0, attraction=0.5, scope="ballistic-global"
+    )
+
+    assert contrastive.biases == {1: pytest.approx(0.0)}
+    assert ballistic.biases == {1: pytest.approx(0.5)}
+
+
+def test_sampling_config_preserves_ballistic_global_scope():
+    config = SamplingConfig(
+        reference_prior_routes=(((1,), 100.0),),
+        reference_prior_scope="ballistic-global",
+        reference_prior_strength=1.0,
+        reference_prior_attraction=0.5,
+    )
+
+    snapshot = config.active_reference_prior_snapshot([])
+
+    assert snapshot.scope == "ballistic-global"
+    assert snapshot.biases == {1: pytest.approx(0.5)}
+
+
+def test_terminal_mass_dampens_longer_continuation_attraction():
+    snapshot = reference_prior_snapshot(
+        _routes(((1, 2), 100), ((1, 2, 3), 1)),
+        [1, 2],
+        strength=1.0,
+        attraction=1.0,
+    )
+
+    assert snapshot.terminal_mass == pytest.approx(100.0)
+    assert snapshot.outgoing[0][3] == pytest.approx(1.0 / 101.0)
+    assert snapshot.biases[3] == pytest.approx(1.0 / 101.0)
 
 
 def test_reference_weight_scaling_is_invariant():

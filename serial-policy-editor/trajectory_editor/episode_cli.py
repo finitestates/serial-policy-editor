@@ -188,7 +188,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--reference-prior",
-        choices=("off", "active", "global"),
+        choices=("off", "active", "global", "ballistic-global"),
         help="apply weighted catalog reference routes as a runtime prior (active by default)",
     )
     parser.add_argument(

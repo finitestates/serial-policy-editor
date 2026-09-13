@@ -205,12 +205,22 @@ def reference_prior_snapshot(
     log_masses = {token: math.log(mass) for token, mass in outgoing}
     center = sum(log_masses.values()) / len(log_masses)
     state_attraction = 0.0
-    if attraction > 0.0 and state:
+    root_attraction = scope == "ballistic-global"
+    if attraction > 0.0 and (state or root_attraction):
         # The constant term makes a singleton continuation attractive even
         # when it is the only route and therefore has no branch contrast.
         state_attraction = float(attraction) * (
             1.0 + math.log(trie.nodes[0].descendant_mass / node.descendant_mass)
         )
+        if node.terminal_mass > 0.0:
+            # A terminal entry is an implicit alternative to continuing the
+            # route. Since there is no token representing "stop here", let
+            # its mass damp the continuation bonus instead of encouraging a
+            # low-weight longer entry merely because it has one child.
+            continuation_mass = max(
+                0.0, node.descendant_mass - node.terminal_mass
+            )
+            state_attraction *= continuation_mass / node.descendant_mass
     rows = []
     biases = {}
     for token, mass in outgoing:
