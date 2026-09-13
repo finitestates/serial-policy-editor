@@ -310,6 +310,7 @@ class TeacherCommand:
     bias_prefix: str | None = None
     bias_last: int | None = None
     bias_triggers: tuple[str, ...] | None = None
+    bias_trigger_bare: tuple[bool, ...] | None = None
     bias_until: str | None = None
     bias_stop_text: str | None = None
     bias_stop_token: int | None = None
@@ -339,6 +340,7 @@ HELP_TEXT = """Commands:
   b {wings, scales, claws} +0.5          bias several targets at once
   b {wings, scales} + after {dragon, wyvern} until "."
                     braces are comma-separated human text; quoted items stay exact
+                    omit until ... to stop at the exact period token
   b nautical -> {anchor, steamship, wharf}
                     create or append a durable runtime bias group
   N- after dragon until "\n"            ranked target with an exact one-token stop
@@ -628,7 +630,7 @@ def parse_bias_command(raw: str, *, vocabulary_size: int) -> TeacherCommand | No
         )
     adjustment = r"(?P<op>[+\-=])\s*(?P<amount>\d+(?:\.\d*)?|\.\d+)?"
     stop = rf"(?:{quoted}|\#[0-9]+|[.|])"
-    scope = rf"(?:\s+after\s+(?P<triggers>.+?)\s+until\s+(?P<until>{stop}))?"
+    scope = rf"(?:\s+after\s+(?P<triggers>.+?)(?:\s+until\s+(?P<until>{stop}))?)?"
     patterns = (
         rf"b\s+(?P<text>.+?)\s*{adjustment}{scope}",
         rf"bl\s+(?P<last>\d+)\s*{adjustment}",
@@ -671,20 +673,30 @@ def parse_bias_command(raw: str, *, vocabulary_size: int) -> TeacherCommand | No
                 raise EditorError("bias prefix cannot be empty")
 
         triggers = None
+        trigger_bare = None
         until = None
         stop_text = None
         stop_token = None
         if fields.get("triggers") is not None:
             if prefix is not None:
                 raise EditorError("Use a b target for scoped multi-token rules")
-            triggers = _parse_bias_text(fields["triggers"], label="bias trigger")
-            until, stop_text, stop_token = _parse_bias_stop(
-                fields["until"], vocabulary_size=vocabulary_size)
+            triggers, trigger_bare = _parse_bias_text(
+                fields["triggers"], label="bias trigger", return_bare=True
+            )
+            if fields.get("until") is None:
+                # Scoped rules default to the exact period token.  The
+                # unquoted legacy `until .` spelling remains the sentence
+                # boundary heuristic.
+                stop_text = "."
+            else:
+                until, stop_text, stop_token = _parse_bias_stop(
+                    fields["until"], vocabulary_size=vocabulary_size)
 
         return TeacherCommand(CommandKind.BIAS, search_rank=rank,
             bias_operator=operator, bias_amount=value, bias_last=last,
             bias_targets=targets, bias_target_bare=target_bare,
             bias_prefix=prefix, bias_triggers=triggers,
+            bias_trigger_bare=trigger_bare,
             bias_until=until, bias_stop_text=stop_text, bias_stop_token=stop_token)
     return None
 

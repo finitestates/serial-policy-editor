@@ -955,6 +955,7 @@ stop token:
 ```text
 b wings +0.5 after dragon until "."
 b {scales, claws} + after {dragon, wyvern, winged serpent} until "."
+b @spooky +1 after @nautical
 12- after dragon until "\n"
 ```
 
@@ -964,10 +965,20 @@ Bare targets and triggers use the same continuation-friendly spelling as ordinar
 same edit is compiled into one ordinary scoped rule per target. Quoted items inside
 a brace group stay exact, for example `{hello, "Hello", "\n"}`.
 
+Targets and triggers can be bare catalog terms or groups, explicit `@name`
+catalog references, runtime groups, or one-shot plain text. Bare names resolve
+through the catalog or current runtime groups when available and otherwise use
+the normal one-shot tokenizer rules; `@name` must name a catalog entry. A
+multi-token catalog member becomes a trigger only after its complete compiled
+route has appeared, not after an early prefix. A trigger group is expanded into
+one trigger set, so matching several members does not multiply the target bias.
+
 The `until "TOKEN"` form names one exact stop token. SPE tokenizes the quoted text
 without a BOS token and requires it to resolve to exactly one token; if it does
 not, use `until #N` to name a token ID explicitly. `until .` and `until |` remain
-available as sentence and newline lifetime heuristics. Because activation is
+available as sentence and newline lifetime heuristics. If `until` is omitted,
+the rule defaults to the exact period token, equivalent to `until "."`.
+Because activation is
 derived from token history, rewind, fork, resume, and replay need no separate
 matcher state.
 
@@ -986,6 +997,6 @@ b {wings, scales, claws} +0.5
 b {wings, scales} = after {wyvern, dragon} until "."
 ```
 
-Scoped syntax supports human/quoted `b` targets and ranked targets. Use a `b` target
-for scoped multi-token rules rather than combining the rank-prefix `...` form with
-`after`.
+Scoped syntax supports human/quoted `b` targets, catalog/runtime group targets,
+and ranked targets. Use a `b` target for scoped multi-token rules rather than
+combining the rank-prefix `...` form with `after`.

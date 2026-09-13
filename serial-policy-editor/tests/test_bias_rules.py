@@ -17,6 +17,7 @@ from trajectory_editor.episode_lifecycle import _create_episode
 from trajectory_editor.episode_store import EpisodeStore
 from trajectory_editor.episode_policy import EdgeRequested
 from trajectory_editor.episode_ui import InteractivePolicy
+from trajectory_editor.tui import parse_bias_command
 from tests.fakes import ScriptedIO
 from tests.test_episode_runtime import NoEogBackend
 
@@ -88,6 +89,39 @@ def test_scoped_path_rule_telescopes_inside_trigger_scope():
     assert matcher.active_biases([7, 10], boundaries) == {11: 1}
     assert matcher.active_biases([7], boundaries) == {10: 1}
     assert matcher.active_biases([7, 9], boundaries) == {}
+
+
+def test_scoped_trigger_waits_for_the_complete_multi_token_route():
+    matcher = BiasMatcher((BiasRule(
+        routes=((20,),), bias=2, mode="path",
+        triggers=((7, 1, 2),), until=6),))
+
+    assert matcher.active_biases([7]) == {}
+    assert matcher.active_biases([7, 1]) == {}
+    assert matcher.active_biases([7, 1, 2]) == {20: 2}
+    assert matcher.active_biases([7, 1, 2, 6]) == {}
+
+
+def test_repeated_trigger_matches_do_not_add_a_scoped_rule_again():
+    matcher = BiasMatcher((BiasRule(
+        routes=((20,),), bias=2, mode="path",
+        triggers=((7,), (8,)), until=6),))
+
+    assert matcher.active_biases([7, 8]) == {20: 2}
+
+
+def test_scoped_bias_command_defaults_to_exact_period_and_preserves_catalog_names():
+    command = parse_bias_command(
+        "b @spooky +1 after @nautical", vocabulary_size=32
+    )
+
+    assert command is not None
+    assert command.bias_targets == (" @spooky",)
+    assert command.bias_target_bare == (True,)
+    assert command.bias_triggers == (" @nautical",)
+    assert command.bias_trigger_bare == (True,)
+    assert command.bias_stop_text == "."
+    assert command.bias_until is None
 
 
 def test_catalog_routes_group_by_mode_and_deduplicate():
@@ -404,6 +438,40 @@ def test_runtime_groups_are_append_only_and_share_one_bias():
     assert group.bias == 2.0
     assert runtime.sampling.active_biases([]) == {1: 2.0}
     assert runtime.sampling.active_biases([2]) == {1: 2.0, 3: 2.0}
+
+
+def test_scoped_runtime_group_target_and_catalog_trigger_use_one_logical_rule():
+    backend = CatalogBackend()
+    catalog = BiasCatalog(
+        model={},
+        compiler={},
+        entries={
+            "anchor": CatalogEntry(
+                name="anchor", kind="term",
+                routes=(CompiledRoute((1,), ("anchor",), ("anchor",), "path", ("canonical",)),),
+            ),
+        },
+    )
+    runtime = EpisodeEngine(backend, initial_token_ids=[7], sampling=SamplingConfig())
+    with pytest.raises(EdgeRequested):
+        InteractivePolicy(
+            io=ScriptedIO([
+                "b nautical -> {B}",
+                "b nautical +2 after anchor",
+                "q",
+            ]),
+            catalog=catalog,
+        ).choose(runtime, runtime.observe())
+
+    assert runtime.sampling.bias_groups[0].bias == 0.0
+    assert len(runtime.sampling.bias_rules) == 1
+    rule = runtime.sampling.bias_rules[0]
+    assert rule.routes == ((2,),)
+    assert rule.triggers == ((1,),)
+    assert rule.until == 6
+    assert runtime.sampling.active_biases([1]) == {2: 2.0}
+    assert runtime.sampling.active_biases([1, 1]) == {2: 2.0}
+    assert runtime.sampling.active_biases([1, 6]) == {}
 
 
 @pytest.mark.parametrize("value", [

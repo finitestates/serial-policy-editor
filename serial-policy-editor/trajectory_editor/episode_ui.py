@@ -675,15 +675,52 @@ class InteractivePolicy:
                         specs.append(("tokens", ((*prefix, candidate.token_id), "tail")))
 
                     triggers = None
+                    trigger_bare = command.bias_trigger_bare or tuple(
+                        True for _ in (command.bias_triggers or ())
+                    )
                     trigger_texts = None
                     lifetime = None
                     if command.bias_triggers is not None:
-                        triggers = tuple(tuple(engine.backend.tokenize(
-                            text, add_bos=False, special=False)) for text in command.bias_triggers)
-                        if any(not trigger for trigger in triggers):
-                            raise EditorError("bias trigger produced no tokens")
-                        trigger_texts = [[engine.backend.token_text(token) for token in trigger]
-                                         for trigger in triggers]
+                        trigger_routes = []
+                        trigger_texts = []
+                        for text, is_bare in zip(command.bias_triggers, trigger_bare):
+                            semantic = (
+                                text[1:] if is_bare and text.startswith(" ") else text
+                            )
+                            entry = None
+                            if is_bare and semantic.startswith("@"):
+                                if self.catalog is None:
+                                    raise EditorError(
+                                        f"catalog reference {semantic!r} requires --bias-catalog"
+                                    )
+                                if not semantic[1:]:
+                                    raise EditorError("catalog reference cannot be empty")
+                                entry = self.catalog.require(semantic[1:])
+                            elif is_bare and self.catalog is not None:
+                                entry = self.catalog.resolve(semantic)
+                            runtime_group = groups_by_name.get(semantic) if is_bare else None
+                            if runtime_group is not None:
+                                routes = tuple(
+                                    route
+                                    for rule in runtime_group.rules
+                                    for route in rule.routes
+                                )
+                            elif entry is not None:
+                                routes = tuple(route.token_ids for route in entry.routes)
+                            else:
+                                routes = (tuple(engine.backend.tokenize(
+                                    text, add_bos=False, special=False)),)
+                            routes = tuple(dict.fromkeys(routes))
+                            if any(not route for route in routes):
+                                raise EditorError("bias trigger produced no tokens")
+                            trigger_routes.extend(routes)
+                            trigger_texts.extend(
+                                [
+                                    [engine.backend.token_text(token) for token in route]
+                                    for route in routes
+                                ]
+                            )
+                        triggers = tuple(dict.fromkeys(trigger_routes))
                         lifetime = command.bias_until
                         if command.bias_stop_text is not None:
                             stop = tuple(engine.backend.tokenize(
@@ -704,14 +741,37 @@ class InteractivePolicy:
                     logical_specs = []
                     for kind, value in specs:
                         if kind == "group":
-                            if triggers is not None:
-                                raise EditorError(
-                                    "scoped updates to named bias groups are not supported"
-                                )
-                            logical_specs.append((
-                                value,
-                                f"Group {value.name!r} ({len(value.rules)} rules)",
-                            ))
+                            if triggers is None:
+                                logical_specs.append((
+                                    value,
+                                    f"Group {value.name!r} ({len(value.rules)} rules)",
+                                ))
+                            else:
+                                # A scoped group update is an ordinary logical
+                                # rule set that targets the group's current
+                                # route snapshot.  Keeping it out of the
+                                # group's single unscoped amount allows a
+                                # group to have both unconditional and
+                                # trigger-gated biases without accidentally
+                                # changing one when the other is edited.
+                                scoped_target = f"group:{value.name}"
+                                seen = set()
+                                for rule in value.rules:
+                                    template = replace(
+                                        rule,
+                                        bias=0,
+                                        triggers=triggers,
+                                        until=lifetime,
+                                        logical_target=scoped_target,
+                                    )
+                                    if template.key in seen:
+                                        continue
+                                    seen.add(template.key)
+                                    logical_specs.append((
+                                        template,
+                                        f"Group {value.name!r} · {template.mode} "
+                                        f"({len(template.routes)} routes)",
+                                    ))
                             continue
                         if kind == "catalog":
                             entry = value
