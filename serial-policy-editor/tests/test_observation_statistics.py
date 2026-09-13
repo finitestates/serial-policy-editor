@@ -100,6 +100,21 @@ def test_active_reference_prior_uses_only_routes_represented_by_active_biases():
     assert stats.reference_prior_biases[3] == pytest.approx(-half_log_ratio)
 
 
+def test_active_reference_prior_is_noop_before_a_bias_route_is_active():
+    values = np.zeros(8, dtype=np.float64)
+    config = SamplingConfig(
+        temperature=0.0,
+        reference_prior_routes=(((1, 2), 10.0),),
+        reference_prior_scope="active",
+        reference_prior_strength=1.0,
+    )
+
+    stats = ObservationStatistics(values, config, [])
+
+    assert stats.reference_prior_biases == {}
+    np.testing.assert_array_equal(stats.adjusted, values)
+
+
 def test_sampler_replacement_invalidates_even_when_restored():
     runtime = engine()
     observation = runtime.observe()

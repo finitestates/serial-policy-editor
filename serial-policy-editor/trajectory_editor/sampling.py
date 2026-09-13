@@ -111,6 +111,8 @@ def reference_prior_biases(
         for token, mass in masses.items()
         if mass > 0.0
     }
+    if not log_masses:
+        return {}
     center = sum(log_masses.values()) / len(log_masses)
     return {
         token: float(strength) * (log_mass - center)
