@@ -195,6 +195,15 @@ the user's bias. Every complete route conserves one unit of bias after the
 floor is applied. Route JSON includes `allocation_diagnostics` with each
 edge's token, remaining mass, information, Phi, and final edge weight.
 
+When `--reference` is supplied, the catalog also embeds model-tokenized
+reference routes for an experimental online lexical prior. The episode editor
+uses that prior in `active` scope by default: it affects only routes represented
+by currently active bias rules. Use `--reference-prior global` to let the whole
+reference universe shape every generation boundary, or `--reference-prior off`
+to disable it. `--reference-prior-strength` controls how strongly relative
+reference weights affect model logits; the default is `0.25`. A reference
+weight is a relative lexical importance, not a literal final probability.
+
 For a phrase whose first token is common but whose continuation is distinctive,
 force path mode and make the head gentler:
 

@@ -32,6 +32,9 @@ class SamplingConfig:
     bias_step: float = 0.5
     bias_rules: tuple = ()
     bias_groups: tuple = ()
+    reference_prior_routes: tuple = ()
+    reference_prior_scope: str = "active"
+    reference_prior_strength: float = 0.25
 
     def __post_init__(self) -> None:
         from .bias_rules import BiasGroup, BiasRule
@@ -54,6 +57,48 @@ class SamplingConfig:
         if len({group.name for group in groups}) != len(groups):
             raise EditorError("duplicate bias group")
         object.__setattr__(self, "bias_groups", tuple(sorted(groups, key=lambda group: group.name)))
+        if self.reference_prior_scope not in {"active", "global"}:
+            raise EditorError("reference_prior_scope must be active or global")
+        prior_routes = []
+        try:
+            for index, raw_route in enumerate(self.reference_prior_routes):
+                if isinstance(raw_route, Mapping):
+                    route = raw_route.get("route", raw_route.get("token_ids"))
+                    weight = raw_route.get("weight")
+                else:
+                    route, weight = raw_route
+                if not isinstance(route, (tuple, list)) or not route:
+                    raise EditorError(
+                        f"reference_prior_routes[{index}] must contain a nonempty route"
+                    )
+                route = tuple(route)
+                if any(type(token) is not int or token < 0 for token in route):
+                    raise EditorError(
+                        f"reference_prior_routes[{index}] has invalid token IDs"
+                    )
+                if (
+                    type(weight) not in (int, float)
+                    or not math.isfinite(float(weight))
+                    or float(weight) <= 0
+                ):
+                    raise EditorError(
+                        f"reference_prior_routes[{index}] has an invalid weight"
+                    )
+                prior_routes.append((route, float(weight)))
+        except TypeError as exc:
+            raise EditorError("reference_prior_routes must be a list of routes") from exc
+        object.__setattr__(self, "reference_prior_routes", tuple(prior_routes))
+        if (
+            type(self.reference_prior_strength) not in (int, float)
+            or not math.isfinite(float(self.reference_prior_strength))
+            or self.reference_prior_strength < 0.0
+        ):
+            raise EditorError(
+                "reference_prior_strength must be a finite nonnegative number"
+            )
+        object.__setattr__(
+            self, "reference_prior_strength", float(self.reference_prior_strength)
+        )
         if (
             type(self.temperature) not in {int, float}
             or not math.isfinite(float(self.temperature))
@@ -104,7 +149,12 @@ class SamplingConfig:
             self.history_penalties_active
             or bool(self.bias_rules)
             or any(group.bias != 0.0 for group in self.bias_groups)
+            or self.reference_prior_active
         )
+
+    @property
+    def reference_prior_active(self) -> bool:
+        return bool(self.reference_prior_routes) and self.reference_prior_strength > 0.0
 
     @property
     def effective_bias_rules(self) -> tuple:
@@ -118,6 +168,24 @@ class SamplingConfig:
         """Return the logical rules active for the current model-token tail."""
         from .bias_rules import BiasMatcher
         return BiasMatcher(self.effective_bias_rules).active_biases(history, boundaries)
+
+    def active_reference_prior(self, history, boundaries=None) -> dict[int, float]:
+        if not self.reference_prior_active:
+            return {}
+        active_routes = None
+        if self.reference_prior_scope == "active":
+            active_routes = {
+                route
+                for rule in self.effective_bias_rules
+                for route in rule.routes
+            }
+        from .sampling import reference_prior_biases
+        return reference_prior_biases(
+            self.reference_prior_routes,
+            history,
+            active_routes=active_routes,
+            strength=self.reference_prior_strength,
+        )
 
     @property
     def history_penalties_active(self) -> bool:
@@ -157,6 +225,15 @@ class SamplingConfig:
             bias_step=value.get("bias_step", defaults.bias_step),
             bias_rules=value.get("bias_rules", ()),
             bias_groups=value.get("bias_groups", ()),
+            reference_prior_routes=value.get(
+                "reference_prior_routes", defaults.reference_prior_routes
+            ),
+            reference_prior_scope=value.get(
+                "reference_prior_scope", defaults.reference_prior_scope
+            ),
+            reference_prior_strength=value.get(
+                "reference_prior_strength", defaults.reference_prior_strength
+            ),
         )
 
     @classmethod
@@ -196,6 +273,12 @@ class SamplingConfig:
             "policy_scheme": SAMPLING_POLICY_SCHEME,
             "seed": self.seed,
             "rng_scheme": RNG_SCHEME,
+            "reference_prior_routes": [
+                {"route": list(route), "weight": weight}
+                for route, weight in self.reference_prior_routes
+            ],
+            "reference_prior_scope": self.reference_prior_scope,
+            "reference_prior_strength": self.reference_prior_strength,
         }
 
 

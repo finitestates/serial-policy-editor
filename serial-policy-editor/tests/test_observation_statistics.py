@@ -10,6 +10,7 @@ from tests.sampling_reference import (
 )
 from tests.test_episode_runtime import engine
 from trajectory_editor.domain import EditorError, SamplingConfig
+from trajectory_editor.bias_rules import BiasRule
 from trajectory_editor.episode_actions import Accept, Write
 from trajectory_editor.sampling import (
     ObservationStatistics, raw_rank,
@@ -58,6 +59,45 @@ def test_menu_and_accept_prepare_once():
         assert outcome.evidence[0].raw_rank == observation.proposal_raw_rank
         runtime.observe()
         assert prepare.call_count == 2
+
+
+def test_global_reference_prior_shapes_conditional_next_token_logits():
+    values = np.zeros(8, dtype=np.float64)
+    config = SamplingConfig(
+        temperature=0.0,
+        reference_prior_routes=(((1, 2), 10.0), ((1, 3), 1.0)),
+        reference_prior_scope="global",
+        reference_prior_strength=1.0,
+    )
+
+    initial = ObservationStatistics(values, config, [])
+    after_head = ObservationStatistics(values, config, [1])
+
+    assert initial.reference_prior_biases[1] == pytest.approx(0.0)
+    half_log_ratio = np.log(10.0) / 2.0
+    assert after_head.reference_prior_biases[2] == pytest.approx(half_log_ratio)
+    assert after_head.reference_prior_biases[3] == pytest.approx(-half_log_ratio)
+    assert after_head.adjusted[2] > after_head.adjusted[3]
+
+
+def test_active_reference_prior_uses_only_routes_represented_by_active_biases():
+    values = np.zeros(8, dtype=np.float64)
+    config = SamplingConfig(
+        temperature=0.0,
+        bias_rules=(BiasRule(
+            routes=((1, 2), (1, 3)), bias=1.0, mode="path",
+            logical_target="catalog:hearth",
+        ),),
+        reference_prior_routes=(((1, 2), 10.0), ((1, 3), 1.0)),
+        reference_prior_scope="active",
+        reference_prior_strength=1.0,
+    )
+
+    stats = ObservationStatistics(values, config, [1])
+
+    half_log_ratio = np.log(10.0) / 2.0
+    assert stats.reference_prior_biases[2] == pytest.approx(half_log_ratio)
+    assert stats.reference_prior_biases[3] == pytest.approx(-half_log_ratio)
 
 
 def test_sampler_replacement_invalidates_even_when_restored():

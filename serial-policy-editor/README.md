@@ -790,6 +790,14 @@ the unfloored raw result, and `--reference` with a YAML list or
 surface-to-weight mapping to use an external reference lexicon. The generated
 route JSON includes diagnostics for remaining mass, information, Phi, and edge
 weight.
+When a reference file is supplied, its model-tokenized weighted routes are also
+embedded in the catalog for an experimental online lexical prior. The runtime
+default is `--reference-prior active`, which applies the prior only to routes
+represented by active bias rules. `--reference-prior global` applies the whole
+reference universe at every generation boundary; `--reference-prior off`
+disables it. `--reference-prior-strength` defaults to `0.25`. Reference
+weights are relative lexical importance rather than literal output
+probabilities.
 With the default legacy allocation, preferred direct, word-aligned, and
 cohesive routes are selected first, then deterministic remaining routes are
 selected round-robin across generated forms until the budget is full. The

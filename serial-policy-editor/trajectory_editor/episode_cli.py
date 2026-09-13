@@ -186,6 +186,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="load a model-matched human-readable bias catalog for b name and b @name",
     )
+    parser.add_argument(
+        "--reference-prior",
+        choices=("off", "active", "global"),
+        help="apply weighted catalog reference routes as a runtime prior (active by default)",
+    )
+    parser.add_argument(
+        "--reference-prior-strength",
+        type=float,
+        help="strength of the experimental online reference prior (default: 0.25)",
+    )
     parser.add_argument("--theme", choices=LIVE_THEME_NAMES)
     parser.add_argument(
         "--divergence-policy", choices=("handoff", "ballistic"), default="handoff"
@@ -296,13 +306,55 @@ def _sampling_from_args(
     args: argparse.Namespace, source: SamplingConfig | None = None
 ) -> SamplingConfig:
     base = source if source is not None else SamplingConfig()
-    return SamplingConfig(
-        **{
-            name: getattr(args, name)
-            if getattr(args, name) is not None
-            else getattr(base, name)
-            for name in SAMPLER_FIELDS
-        }
+    values = {
+        name: getattr(args, name)
+        if getattr(args, name) is not None
+        else getattr(base, name)
+        for name in SAMPLER_FIELDS
+    }
+    values.update({
+        "reference_prior_routes": base.reference_prior_routes,
+        "reference_prior_scope": base.reference_prior_scope,
+        "reference_prior_strength": base.reference_prior_strength,
+    })
+    return SamplingConfig(**values)
+
+
+def _apply_catalog_reference_prior(
+    sampling: SamplingConfig,
+    catalog,
+    args: argparse.Namespace,
+) -> SamplingConfig:
+    """Attach compiled reference routes to the episode's saved sampler state."""
+
+    requested = args.reference_prior
+    if requested is None:
+        if catalog is None or not catalog.reference_prior_routes:
+            return sampling
+        requested = "active"
+    if requested == "off":
+        return replace(
+            sampling,
+            reference_prior_routes=(),
+            reference_prior_scope="active",
+        )
+    if catalog is None or not catalog.reference_prior_routes:
+        raise EditorError(
+            "--reference-prior requires --bias-catalog compiled with --reference"
+        )
+    strength = (
+        sampling.reference_prior_strength
+        if args.reference_prior_strength is None
+        else args.reference_prior_strength
+    )
+    return replace(
+        sampling,
+        reference_prior_routes=tuple(
+            (route.token_ids, route.weight)
+            for route in catalog.reference_prior_routes
+        ),
+        reference_prior_scope=requested,
+        reference_prior_strength=strength,
     )
 
 
@@ -816,12 +868,15 @@ def main(argv: list[str] | None = None) -> int:
                     if explicit
                     else source_sampling
                 )
+                sampling = _apply_catalog_reference_prior(sampling, catalog, args)
                 io.write("Restoring saved context...")
                 if model_changed:
                     engine, episode_id = _model_continuation(store, args.resume, backend, provenance)
                     if args.max_tokens is not None:
                         engine.resume(max_tokens=args.max_tokens)
-                    if explicit:
+                    if explicit or args.reference_prior is not None or (
+                        catalog is not None and catalog.reference_prior_routes
+                    ):
                         engine.sampling = sampling
                         store.record_sampling_segment(episode_id, start_boundary=0, sampling=sampling,
                             stream_fingerprint=engine.stream_fingerprint, coordinate_offset=0)
@@ -837,9 +892,12 @@ def main(argv: list[str] | None = None) -> int:
                     if args.new_prompt is not None
                     else args.new_prompt_file.read_text(encoding="utf-8")
                 )
+                sampling = _apply_catalog_reference_prior(
+                    _sampling_from_args(args), catalog, args
+                )
                 engine = EpisodeEngine(
                     backend,
-                    sampling=_sampling_from_args(args),
+                    sampling=sampling,
                     max_tokens=args.max_tokens,
                     initial_text=initial_text,
                 )
@@ -856,7 +914,9 @@ def main(argv: list[str] | None = None) -> int:
                     name: getattr(args, name) for name in SAMPLER_FIELDS
                     if getattr(args, name) is not None
                 }
-                sampling = _sampling_from_args(args, source_sampling)
+                sampling = _apply_catalog_reference_prior(
+                    _sampling_from_args(args, source_sampling), catalog, args
+                )
                 replay_prefix = None
                 if model_changed:
                     replay_prefix = backend.tokenize(store.get_episode(args.replay)["initial_text"], add_bos=True, special=True)
@@ -898,7 +958,9 @@ def main(argv: list[str] | None = None) -> int:
                 segment = store.sampling_segment(args.fork_from, target)
                 source_sampling = SamplingConfig.from_record(segment["sampling"])
                 explicit = any(getattr(args, name) is not None for name in SAMPLER_FIELDS)
-                sampling = _sampling_from_args(args, source_sampling)
+                sampling = _apply_catalog_reference_prior(
+                    _sampling_from_args(args, source_sampling), catalog, args
+                )
                 engine = EpisodeEngine(
                     backend,
                     sampling=sampling,

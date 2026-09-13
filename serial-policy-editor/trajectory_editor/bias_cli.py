@@ -32,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reference",
         type=Path,
-        help="optional YAML list or surface-to-weight mapping for information allocation",
+        help="optional YAML list or surface-to-weight mapping for reference allocation and online priors",
     )
     parser.add_argument(
         "--term",

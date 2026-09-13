@@ -452,6 +452,31 @@ class PrefixReferenceStats:
         return self._prefix_masses.get(prefix, 0.0)
 
 
+@dataclass(frozen=True)
+class ReferencePriorRoute:
+    """One model-token route retained for the experimental online prior."""
+
+    text: str
+    token_ids: tuple[int, ...]
+    weight: float
+
+    def __post_init__(self) -> None:
+        if not self.text or not self.token_ids:
+            raise EditorError("reference prior routes require text and token IDs")
+        if any(type(token) is not int or token < 0 for token in self.token_ids):
+            raise EditorError("reference prior route token IDs must be nonnegative integers")
+        if type(self.weight) not in (int, float) or not math.isfinite(self.weight) or self.weight <= 0:
+            raise EditorError("reference prior route weights must be finite positive numbers")
+        object.__setattr__(self, "weight", float(self.weight))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "text": self.text,
+            "token_ids": list(self.token_ids),
+            "weight": self.weight,
+        }
+
+
 def build_prefix_reference_stats(
     references: Sequence[str] | Mapping[str, float],
 ) -> PrefixReferenceStats:
@@ -468,6 +493,58 @@ def build_prefix_reference_stats(
     else:
         raise EditorError("reference collection must be a list or mapping")
     return PrefixReferenceStats(values)
+
+
+def _reference_values(
+    reference: Sequence[str] | Mapping[str, float],
+) -> tuple[tuple[str, float], ...]:
+    if isinstance(reference, Mapping):
+        try:
+            return tuple((str(surface), float(weight))
+                         for surface, weight in reference.items())
+        except (TypeError, ValueError) as exc:
+            raise EditorError("reference weights must be numeric") from exc
+    if isinstance(reference, Sequence) and not isinstance(
+        reference, (str, bytes, bytearray)
+    ):
+        return tuple((str(surface), 1.0) for surface in reference)
+    raise EditorError("reference collection must be a list or mapping")
+
+
+def _compile_reference_prior_routes(
+    backend: Any,
+    reference: Sequence[str] | Mapping[str, float] | None,
+) -> tuple[ReferencePriorRoute, ...]:
+    """Compile explicit reference surfaces for the optional online prior.
+
+    The compiler keeps exact and leading-space forms as separate routes, but
+    splits a surface's weight between them so adding the automatic boundary
+    variant does not double its importance.
+    """
+
+    if reference is None:
+        return ()
+    routes: list[ReferencePriorRoute] = []
+    for surface, weight in _reference_values(reference):
+        if not surface.strip():
+            raise EditorError("reference surfaces must be nonempty strings")
+        candidates = (surface,) if surface.startswith(" ") else (surface, f" {surface}")
+        compiled: list[tuple[str, tuple[int, ...]]] = []
+        for candidate in candidates:
+            try:
+                token_ids = tuple(int(token) for token in backend.tokenize(
+                    candidate, add_bos=False, special=False
+                ))
+            except (RuntimeError, TypeError, ValueError):
+                continue
+            if token_ids:
+                compiled.append((candidate, token_ids))
+        if not compiled:
+            continue
+        route_weight = float(weight) / len(compiled)
+        for candidate, token_ids in compiled:
+            routes.append(ReferencePriorRoute(candidate, token_ids, route_weight))
+    return tuple(routes)
 
 
 @dataclass(frozen=True)
@@ -579,6 +656,7 @@ class BiasCatalog:
     model: Mapping[str, Any]
     compiler: Mapping[str, Any]
     entries: Mapping[str, CatalogEntry]
+    reference_prior_routes: tuple[ReferencePriorRoute, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, Mapping):
@@ -604,6 +682,11 @@ class BiasCatalog:
             "model": dict(self.model),
             "compiler": dict(self.compiler),
             "entries": {name: entry.to_dict() for name, entry in sorted(self.entries.items())},
+            **({
+                "reference_prior_routes": [
+                    route.to_dict() for route in self.reference_prior_routes
+                ]
+            } if self.reference_prior_routes else {}),
         }
 
     def to_json(self) -> str:
@@ -616,6 +699,30 @@ class BiasCatalog:
         raw_entries = value.get("entries")
         if not isinstance(raw_entries, Mapping):
             raise EditorError("catalog entries must be a mapping")
+        raw_prior_routes = value.get("reference_prior_routes", ())
+        if not isinstance(raw_prior_routes, Sequence) or isinstance(
+            raw_prior_routes, (str, bytes, bytearray)
+        ):
+            raise _error("reference_prior_routes", "must be a list")
+        prior_routes: list[ReferencePriorRoute] = []
+        for index, raw_route in enumerate(raw_prior_routes):
+            route_path = f"reference_prior_routes[{index}]"
+            if not isinstance(raw_route, Mapping):
+                raise _error(route_path, "must be a mapping")
+            raw_ids = raw_route.get("token_ids")
+            if not isinstance(raw_ids, Sequence) or isinstance(
+                raw_ids, (str, bytes, bytearray)
+            ):
+                raise _error(f"{route_path}.token_ids", "must be a list")
+            try:
+                token_ids = tuple(int(token) for token in raw_ids)
+            except (TypeError, ValueError) as exc:
+                raise _error(f"{route_path}.token_ids", "must contain integers") from exc
+            prior_routes.append(ReferencePriorRoute(
+                text=str(raw_route.get("text", "")),
+                token_ids=token_ids,
+                weight=float(raw_route.get("weight", 0.0)),
+            ))
         entries: dict[str, CatalogEntry] = {}
         for raw_name, raw_entry in raw_entries.items():
             if not isinstance(raw_entry, Mapping):
@@ -648,6 +755,7 @@ class BiasCatalog:
             model=dict(value.get("model", {})),
             compiler=dict(value.get("compiler", {})),
             entries=entries,
+            reference_prior_routes=tuple(prior_routes),
         )
 
     @classmethod
@@ -665,6 +773,7 @@ class BiasCatalog:
         first = catalogs[0]
         identity = _model_identity(first.model)
         entries: dict[str, CatalogEntry] = {}
+        prior_routes: list[ReferencePriorRoute] = []
         for catalog in catalogs:
             if _model_identity(catalog.model) != identity:
                 raise EditorError("cannot merge catalogs compiled for different tokenizers")
@@ -680,6 +789,19 @@ class BiasCatalog:
                 ):
                     raise EditorError(f"catalog term collision for {name!r}")
                 entries[name] = _merge_entries(existing, entry)
+            prior_routes.extend(catalog.reference_prior_routes)
+        unique_prior_routes: dict[tuple[str, tuple[int, ...]], ReferencePriorRoute] = {}
+        for route in prior_routes:
+            key = (route.text, route.token_ids)
+            existing = unique_prior_routes.get(key)
+            if existing is None:
+                unique_prior_routes[key] = route
+            else:
+                unique_prior_routes[key] = ReferencePriorRoute(
+                    text=route.text,
+                    token_ids=route.token_ids,
+                    weight=existing.weight + route.weight,
+                )
         return cls(
             model=first.model,
             compiler={
@@ -687,6 +809,7 @@ class BiasCatalog:
                 "merged_catalogs": len(catalogs),
             },
             entries=entries,
+            reference_prior_routes=tuple(unique_prior_routes.values()),
         )
 
 
@@ -967,22 +1090,7 @@ def _reference_stats_for_backend(
     # mix unweighted tokenizer vocabulary entries into a frequency-weighted
     # lexicon.  Add generated target forms only when absent so an omitted
     # target still has a finite terminal mass.
-    values: dict[str, float] = {}
-    if isinstance(reference, Mapping):
-        try:
-            additions = ((str(surface), float(weight))
-                         for surface, weight in reference.items())
-            for surface, weight in additions:
-                values[surface] = weight
-        except (TypeError, ValueError) as exc:
-            raise EditorError("reference weights must be numeric") from exc
-    elif isinstance(reference, Sequence) and not isinstance(
-        reference, (str, bytes, bytearray)
-    ):
-        for surface in reference:
-            values.setdefault(str(surface), 1.0)
-    else:
-        raise EditorError("reference collection must be a list or mapping")
+    values: dict[str, float] = dict(_reference_values(reference))
     for surface in extra:
         values.setdefault(surface, 1.0)
     return build_prefix_reference_stats(values)
@@ -1667,6 +1775,7 @@ def compile_catalog(
         reference_surfaces,
         reference,
     )
+    reference_prior_routes = _compile_reference_prior_routes(backend, reference)
 
     for name in tuple(terms):
         compile_entry(name)
@@ -1696,6 +1805,9 @@ def compile_catalog(
             "allocations": list(ALLOCATIONS),
             "route_policies": list(ROUTE_POLICIES),
             "route_classes": list(ROUTE_CLASSES),
+            "reference_prior": (
+                "compiled-token-routes-v1" if reference_prior_routes else "none"
+            ),
             "route_selection": (
                 "preferred-routes-first-v2"
                 if defaults.allocation == DEFAULT_ALLOCATION
@@ -1709,6 +1821,7 @@ def compile_catalog(
             },
         },
         entries=compiled_terms,
+        reference_prior_routes=reference_prior_routes,
     )
 
 

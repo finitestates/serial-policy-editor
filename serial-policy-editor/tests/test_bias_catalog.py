@@ -612,6 +612,30 @@ def test_external_weighted_reference_replaces_tokenizer_reference(backend):
     assert route.allocation_diagnostics[-1][0] == pytest.approx(1.0)
 
 
+def test_explicit_reference_routes_are_embedded_for_online_prior(backend):
+    catalog = compile_catalog(
+        {
+            "defaults": {
+                "cases": ["original"],
+                "leading_space": False,
+                "plural": False,
+            },
+            "terms": ["shadowing"],
+        },
+        backend,
+        reference={"shadowing": 10},
+    )
+
+    routes = {
+        (route.text, route.token_ids): route.weight
+        for route in catalog.reference_prior_routes
+    }
+    assert routes["shadowing", (6,)] == pytest.approx(5.0)
+    assert routes[" shadowing", (7,)] == pytest.approx(5.0)
+    restored = BiasCatalog.from_json(catalog.to_json())
+    assert restored.reference_prior_routes == catalog.reference_prior_routes
+
+
 def test_accumulated_information_amplifies_only_long_routes(backend):
     stats = build_prefix_reference_stats({
         "shadow": 100,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -65,6 +66,56 @@ def _validated_history(history_token_ids, vocabulary_size: int) -> np.ndarray:
     if history.ndim != 1 or np.any(history < 0) or np.any(history >= vocabulary_size):
         raise ValueError("history token ids must address the decoder vocabulary")
     return history
+
+
+def reference_prior_biases(
+    routes,
+    history_token_ids,
+    *,
+    active_routes=None,
+    strength: float,
+) -> dict[int, float]:
+    """Turn weighted lexical routes into conditional log-prior adjustments.
+
+    The weights are relative lexical importance, not probabilities.  At each
+    boundary, viable routes contribute their weight to the next token and the
+    sampler adds ``strength * log(mass)`` to that token's model logit.
+    ``active_routes`` restricts the prior to routes represented by currently
+    active bias rules; ``None`` means global scope.
+    """
+
+    if not routes or strength <= 0.0:
+        return {}
+    if history_token_ids is None:
+        if any(len(route) > 1 for route, _weight in routes):
+            raise ValueError("reference priors require exact context token IDs")
+        history = ()
+    else:
+        history = tuple(int(token) for token in history_token_ids)
+    masses: dict[int, float] = {}
+    for route, weight in routes:
+        if active_routes is not None and route not in active_routes:
+            continue
+        for prefix_length in range(min(len(route) - 1, len(history)), -1, -1):
+            prefix = route[:prefix_length]
+            if prefix and (
+                len(history) < len(prefix)
+                or tuple(history[-len(prefix):]) != prefix
+            ):
+                continue
+            token = route[prefix_length]
+            masses[token] = masses.get(token, 0.0) + float(weight)
+            break
+    log_masses = {
+        token: math.log(mass)
+        for token, mass in masses.items()
+        if mass > 0.0
+    }
+    center = sum(log_masses.values()) / len(log_masses)
+    return {
+        token: float(strength) * (log_mass - center)
+        for token, log_mass in log_masses.items()
+    }
 
 
 def _history_penalty_surface(
@@ -209,9 +260,15 @@ class ObservationStatistics:
             self.adjusted = self.logits
         active_biases = config.active_biases(history_token_ids, boundaries)
         self.active_biases = active_biases
-        if active_biases:
+        self.reference_prior_biases = config.active_reference_prior(
+            history_token_ids, boundaries
+        )
+        adjustments = dict(active_biases)
+        for token, bias in self.reference_prior_biases.items():
+            adjustments[token] = adjustments.get(token, 0.0) + bias
+        if adjustments:
             self.adjusted = self.adjusted.copy()
-            for token, bias in active_biases.items():
+            for token, bias in adjustments.items():
                 if token >= len(self.logits):
                     raise ValueError("bias token id is outside the decoder vocabulary")
                 self.adjusted[token] += bias
