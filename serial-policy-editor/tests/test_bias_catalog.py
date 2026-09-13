@@ -561,6 +561,68 @@ def test_information_allocation_floor_prevents_zero_head_weight(backend):
     assert diagnostics[0][3] == pytest.approx(weights[0])
 
 
+def test_external_weighted_reference_replaces_tokenizer_reference(backend):
+    catalog = compile_catalog(
+        {
+            "defaults": {
+                "cases": ["original"],
+                "leading_space": False,
+                "plural": False,
+                "allocation": "information",
+                "allocation_floor": 0,
+            },
+            "terms": ["shadowing"],
+        },
+        backend,
+        reference={"shadowing": 1, "unrelated": 100},
+    )
+
+    route = next(
+        route for route in catalog.require("shadowing").routes
+        if route.token_ids == (1, 8)
+    )
+    # The external lexicon contains only one surface beginning with shadow;
+    # tokenizer entries such as shadow and shadowing's vocabulary token are not
+    # silently added to the weighted universe.
+    assert route.allocation_diagnostics[0][0] == pytest.approx(1.0)
+    assert route.allocation_diagnostics[-1][0] == pytest.approx(1.0)
+
+
+def test_accumulated_information_amplifies_only_long_routes(backend):
+    stats = build_prefix_reference_stats({
+        "shadow": 100,
+        "shadowing": 1,
+        "shark": 25,
+    })
+    base_two, _ = allocate_route(
+        (1, 8), backend, strategy="information", reference_stats=stats,
+        allocation_floor=0,
+    )
+    amplified_two, _ = allocate_route(
+        (1, 8), backend, strategy="information_amplified", reference_stats=stats,
+        allocation_floor=0,
+    )
+    base_three, base_diagnostics = allocate_route(
+        (9, 10, 8), backend, strategy="information", reference_stats=stats,
+        allocation_floor=0,
+    )
+    amplified_three, amplified_diagnostics = allocate_route(
+        (9, 10, 8), backend, strategy="information_amplified",
+        reference_stats=stats, allocation_floor=0,
+    )
+
+    assert amplified_two == pytest.approx(base_two)
+    assert amplified_three == pytest.approx(tuple(
+        weight * (1.0 + diagnostic[2])
+        for weight, diagnostic in zip(base_three, base_diagnostics)
+    ))
+    assert tuple(row[2] for row in amplified_diagnostics) == pytest.approx(
+        tuple(row[2] for row in base_diagnostics)
+    )
+    assert sum(base_three) == pytest.approx(1.0)
+    assert sum(amplified_three) > 1.0
+
+
 def test_group_cycles_and_reserved_global_are_rejected(backend):
     with pytest.raises(EditorError, match="cycle"):
         compile_catalog({"groups": {"a": ["b"], "b": ["a"]}}, backend)

@@ -146,7 +146,7 @@ The recognized compiler options are:
 | --- | --- | --- |
 | `level` | `minimal`, `standard`, `exhaustive` | Controls how deeply alternate token routes are searched. |
 | `mode` | `auto`, `tail`, `path`, `beheaded` | `auto` uses beheaded path semantics for one- or two-letter route heads, then path for lexical terms and tail for phrases; the other values force the mode. |
-| `allocation` | `legacy`, `full`, `equal`, `information` | Selects how bias is distributed across route edges. `legacy` preserves the existing mode/head/continuation behavior; the other strategies store explicit per-edge weights. |
+| `allocation` | `legacy`, `full`, `equal`, `information`, `information_amplified` | Selects how bias is distributed across route edges. `legacy` preserves the existing mode/head/continuation behavior; the other strategies store explicit per-edge weights. `information_amplified` preserves information shape but amplifies routes of length 3 or more. |
 | `allocation_floor` | number from `0` to `1` | For `information`, reserves at least this fraction of a route's unit bias for every edge before renormalizing. The default `0.05` prevents a zero-weight head from dead-ending a route; set `0` for the raw information result. |
 | `head_scale` | finite nonnegative number | Scales the first edge of a path rule. |
 | `continuation_scale` | finite nonnegative number | Scales continuation edges after a matching path prefix. |
@@ -175,10 +175,14 @@ The experimental allocation strategies are applied uniformly to every
 accepted route; they do not privilege the tokenizer's default/canonical route.
 `full` puts unit weight on every edge, `equal` divides one unit evenly across
 the route, and `information` estimates prefix specificity from a compile-time
-reference surface universe. The default reference universe combines tokenizer
-vocabulary strings with generated catalog forms. A frequency-weighted YAML
-reference list or mapping can be supplied with `--reference`; a mapping such
-as `{shadow: 100, shadowing: 2}` contributes those relative masses.
+reference surface universe. `information_amplified` starts with the same
+information shape, then multiplies each edge on routes of length 3 or more by
+`1 + Phi(child)` without renormalizing; two-token routes are unchanged. The
+default reference universe combines tokenizer vocabulary strings with
+generated catalog forms. When `--reference` is supplied, it becomes the
+reference universe instead; generated catalog forms are added only when
+absent. A frequency-weighted YAML mapping such as
+`{shadow: 100, shadowing: 2}` supplies relative lexical mass.
 
 Information allocation is compiled into route `edge_weights`, so generation
 only performs the normal prefix match and multiplies the selected weight by

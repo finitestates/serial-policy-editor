@@ -25,7 +25,7 @@ CATALOG_FORMAT = "spe-bias-catalog-v1"
 LEVELS = ("minimal", "standard", "exhaustive")
 MODES = ("tail", "path", "beheaded")
 COMPILE_MODES = ("auto", *MODES)
-ALLOCATIONS = ("legacy", "full", "equal", "information")
+ALLOCATIONS = ("legacy", "full", "equal", "information", "information_amplified")
 DEFAULT_ALLOCATION = "legacy"
 ROUTE_POLICIES = ("all", "cohesive")
 ROUTE_CLASSES = ("direct", "word_aligned", "cohesive", "fragmented")
@@ -951,27 +951,33 @@ def _reference_stats_for_backend(
     extra: Sequence[str],
     reference: Sequence[str] | Mapping[str, float] | None = None,
 ) -> PrefixReferenceStats:
-    values: dict[str, float] = {
-        surface: 1.0
-        for surface in _default_reference_surfaces(backend, extra)
-    }
     if reference is None:
-        return build_prefix_reference_stats(values)
+        return build_prefix_reference_stats({
+            surface: 1.0
+            for surface in _default_reference_surfaces(backend, extra)
+        })
+    # An explicitly supplied lexicon defines the reference universe.  Do not
+    # mix unweighted tokenizer vocabulary entries into a frequency-weighted
+    # lexicon.  Add generated target forms only when absent so an omitted
+    # target still has a finite terminal mass.
+    values: dict[str, float] = {}
     if isinstance(reference, Mapping):
         try:
             additions = ((str(surface), float(weight))
                          for surface, weight in reference.items())
             for surface, weight in additions:
-                values[surface] = values.get(surface, 0.0) + weight
+                values[surface] = weight
         except (TypeError, ValueError) as exc:
             raise EditorError("reference weights must be numeric") from exc
     elif isinstance(reference, Sequence) and not isinstance(
         reference, (str, bytes, bytearray)
     ):
         for surface in reference:
-            values[str(surface)] = values.get(str(surface), 0.0) + 1.0
+            values.setdefault(str(surface), 1.0)
     else:
         raise EditorError("reference collection must be a list or mapping")
+    for surface in extra:
+        values.setdefault(surface, 1.0)
     return build_prefix_reference_stats(values)
 
 
@@ -1008,7 +1014,8 @@ def allocate_route(
         raise EditorError("allocation_floor must be between 0 and 1")
     if strategy == DEFAULT_ALLOCATION:
         return (), ()
-    if strategy == "information" and reference_stats is None:
+    information_strategy = strategy in {"information", "information_amplified"}
+    if information_strategy and reference_stats is None:
         raise EditorError("information allocation requires reference statistics")
 
     if reference_stats is None:
@@ -1050,7 +1057,7 @@ def allocate_route(
             weights = [1.0 / len(route)] * len(route)
         else:
             weights[-1] += 1.0 - total
-    if strategy == "information" and allocation_floor > 0:
+    if information_strategy and allocation_floor > 0:
         if len(route) * allocation_floor >= 1.0:
             weights = [1.0 / len(route)] * len(route)
         else:
@@ -1060,6 +1067,15 @@ def allocate_route(
                 allocation_floor + residual * (weight / total)
                 for weight in weights
             ]
+    if strategy == "information_amplified" and len(route) >= 3:
+        # Preserve the information allocation's shape, but let later edges
+        # benefit from specificity accumulated by the prefix.  This is
+        # intentionally not renormalized: the experiment should be able to
+        # exert more total pressure on a long, increasingly specific route.
+        weights = [
+            weight * (1.0 + phi[index + 1])
+            for index, weight in enumerate(weights)
+        ]
 
     diagnostics = tuple(
         (masses[index + 1], information[index + 1], phi[index + 1], weights[index])

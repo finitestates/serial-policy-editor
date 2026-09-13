@@ -775,14 +775,17 @@ and case expansion. The compiler adds leading-space variants automatically,
 so users do not need to write them.
 `max_routes` is a per-term cap across all generated case, spacing, plural, and
 suffix forms; increase it only for terms where the extra routes are useful.
-For an experimental allocation strategy, set `allocation: equal`, `full`, or
-`information` in YAML (or pass `--allocation`). Information allocation uses
-compile-time prefix ambiguity statistics and stores its edge weights in the
-catalog; `--allocation-floor` defaults to `0.05` so a weak early edge cannot
-dead-end a route. Use `--allocation-floor 0` for the unfloored raw result, and
-`--reference` with a YAML list or surface-to-weight mapping to provide an
-additional reference universe. The generated route JSON includes diagnostics
-for remaining mass, information, Phi, and edge weight.
+For an experimental allocation strategy, set `allocation: equal`, `full`,
+`information`, or `information_amplified` in YAML (or pass `--allocation`).
+Information allocation uses compile-time prefix ambiguity statistics and
+stores its edge weights in the catalog; `--allocation-floor` defaults to `0.05`
+so a weak early edge cannot dead-end a route. `information_amplified` leaves
+two-token routes unchanged, but amplifies later edges on routes of length 3+
+using accumulated Phi without renormalizing. Use `--allocation-floor 0` for
+the unfloored raw result, and `--reference` with a YAML list or
+surface-to-weight mapping to use an external reference lexicon. The generated
+route JSON includes diagnostics for remaining mass, information, Phi, and edge
+weight.
 With the default legacy allocation, preferred direct, word-aligned, and
 cohesive routes are selected first, then deterministic remaining routes are
 selected round-robin across generated forms until the budget is full. The
