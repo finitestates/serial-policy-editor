@@ -52,6 +52,7 @@ def test_singleton_continuation_gets_attraction_but_not_branch_bias():
     assert attracted.biases[2] > 0.0
     assert attracted.outgoing[0][2] == pytest.approx(0.0)
     assert attracted.outgoing[0][3] == pytest.approx(0.5)
+    assert attracted.outgoing[0][4] == pytest.approx(0.0)
 
 
 def test_ballistic_global_applies_attraction_at_the_root():
@@ -81,17 +82,35 @@ def test_sampling_config_preserves_ballistic_global_scope():
     assert snapshot.biases == {1: pytest.approx(0.5)}
 
 
-def test_terminal_mass_dampens_longer_continuation_attraction():
+def test_terminal_mass_creates_an_exit_vs_continue_gate():
     snapshot = reference_prior_snapshot(
         _routes(((1, 2), 100), ((1, 2, 3), 1)),
         [1, 2],
         strength=1.0,
         attraction=1.0,
+        exit_strength=1.0,
     )
 
     assert snapshot.terminal_mass == pytest.approx(100.0)
-    assert snapshot.outgoing[0][3] == pytest.approx(1.0 / 101.0)
-    assert snapshot.biases[3] == pytest.approx(1.0 / 101.0)
+    assert snapshot.outgoing[0][3] == pytest.approx(1.0)
+    assert snapshot.outgoing[0][4] == pytest.approx(math.log(1.0 / 100.0))
+    assert snapshot.biases[3] == pytest.approx(1.0 + math.log(1.0 / 100.0))
+
+
+def test_exit_gate_is_separate_from_attraction_and_child_branch_scoring():
+    snapshot = reference_prior_snapshot(
+        _routes(((1, 2), 100), ((1, 2, 3), 1), ((1, 2, 4), 1)),
+        [1, 2],
+        strength=1.0,
+        attraction=0.5,
+        exit_strength=1.0,
+    )
+
+    assert snapshot.outgoing[0][2] == pytest.approx(snapshot.outgoing[1][2])
+    assert snapshot.outgoing[0][3] == pytest.approx(0.5)
+    assert snapshot.outgoing[1][3] == pytest.approx(0.5)
+    assert snapshot.outgoing[0][4] == pytest.approx(math.log(2.0 / 100.0))
+    assert snapshot.outgoing[1][4] == pytest.approx(math.log(2.0 / 100.0))
 
 
 def test_reference_weight_scaling_is_invariant():
@@ -128,12 +147,12 @@ def test_failure_transitions_preserve_overlapping_suffix_prefixes():
 def test_terminal_prefix_keeps_terminal_and_continuation_mass_distinct():
     snapshot = reference_prior_snapshot(
         _routes(((1, 2), 10), ((1, 2, 3), 5)),
-        [1, 2], strength=1.0, attraction=0.0,
+        [1, 2], strength=1.0, attraction=0.0, exit_strength=0.0,
     )
 
     assert snapshot.state_prefix == (1, 2)
     assert snapshot.terminal_mass == pytest.approx(10.0)
-    assert snapshot.outgoing == ((3, 5.0, 0.0, 0.0, 0.0),)
+    assert snapshot.outgoing == ((3, 5.0, 0.0, 0.0, 0.0, 0.0),)
 
 
 def test_reference_state_is_reconstructed_deterministically():

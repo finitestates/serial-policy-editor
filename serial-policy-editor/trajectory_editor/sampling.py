@@ -162,7 +162,7 @@ class ReferencePriorSnapshot:
     root_mass: float
     state_mass: float
     terminal_mass: float
-    outgoing: tuple[tuple[int, float, float, float, float], ...]
+    outgoing: tuple[tuple[int, float, float, float, float, float], ...]
     biases: dict[int, float]
 
 
@@ -173,6 +173,7 @@ def reference_prior_snapshot(
     active_routes=None,
     strength: float,
     attraction: float,
+    exit_strength: float = 0.25,
     scope: str = "global",
     trie: ReferencePriorTrie | None = None,
 ) -> ReferencePriorSnapshot:
@@ -204,6 +205,17 @@ def reference_prior_snapshot(
 
     log_masses = {token: math.log(mass) for token, mass in outgoing}
     center = sum(log_masses.values()) / len(log_masses)
+    continuation_mass = max(0.0, node.descendant_mass - node.terminal_mass)
+    exit_continue = 0.0
+    if node.terminal_mass > 0.0 and continuation_mass > 0.0:
+        # Terminal mass is an implicit EXIT option. Since no decoder token
+        # represents EXIT, apply its log-odds against CONTINUE uniformly to
+        # all continuation children. This is separate from relative child
+        # scoring and from lexical commitment attraction.
+        exit_continue = float(exit_strength) * math.log(
+            continuation_mass / node.terminal_mass
+        )
+
     state_attraction = 0.0
     root_attraction = scope == "ballistic-global"
     if attraction > 0.0 and (state or root_attraction):
@@ -212,21 +224,12 @@ def reference_prior_snapshot(
         state_attraction = float(attraction) * (
             1.0 + math.log(trie.nodes[0].descendant_mass / node.descendant_mass)
         )
-        if node.terminal_mass > 0.0:
-            # A terminal entry is an implicit alternative to continuing the
-            # route. Since there is no token representing "stop here", let
-            # its mass damp the continuation bonus instead of encouraging a
-            # low-weight longer entry merely because it has one child.
-            continuation_mass = max(
-                0.0, node.descendant_mass - node.terminal_mass
-            )
-            state_attraction *= continuation_mass / node.descendant_mass
     rows = []
     biases = {}
     for token, mass in outgoing:
         branch = float(strength) * (log_masses[token] - center)
-        total = branch + state_attraction
-        rows.append((token, mass, branch, state_attraction, total))
+        total = branch + state_attraction + exit_continue
+        rows.append((token, mass, branch, state_attraction, exit_continue, total))
         biases[token] = total
     return ReferencePriorSnapshot(
         scope, node.prefix, trie.nodes[0].descendant_mass,
@@ -241,6 +244,7 @@ def reference_prior_biases(
     active_routes=None,
     strength: float,
     attraction: float = 0.0,
+    exit_strength: float = 0.25,
     scope: str = "global",
 ) -> dict[int, float]:
     """Compatibility wrapper returning only online prior logit adjustments."""
@@ -251,6 +255,7 @@ def reference_prior_biases(
         active_routes=active_routes,
         strength=strength,
         attraction=attraction,
+        exit_strength=exit_strength,
         scope=scope,
     ).biases
 

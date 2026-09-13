@@ -211,7 +211,9 @@ commitment bonus to valid children inside a lexical prefix; it defaults to
 Use `--reference-prior ballistic-global` to apply that attraction at the root
 as well, allowing the reference universe to exert entry pressure. When a node
 is both terminal and a prefix of a longer entry, terminal mass proportionally
-dampens continuation attraction.
+dampens continuation through a separate EXIT-vs-CONTINUE gate. Its strength
+is controlled by `--reference-prior-exit-strength` (default `0.25`) and does
+not alter root attraction or relative child branch scoring.
 
 For a phrase whose first token is common but whose continuation is distinctive,
 force path mode and make the head gentler:

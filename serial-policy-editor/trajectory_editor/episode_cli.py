@@ -201,6 +201,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help="additional commitment pressure inside a reference prefix (default: 0)",
     )
+    parser.add_argument(
+        "--reference-prior-exit-strength",
+        type=float,
+        help="strength of terminal EXIT-vs-CONTINUE decisions (default: 0.25)",
+    )
     parser.add_argument("--theme", choices=LIVE_THEME_NAMES)
     parser.add_argument(
         "--divergence-policy", choices=("handoff", "ballistic"), default="handoff"
@@ -322,6 +327,7 @@ def _sampling_from_args(
         "reference_prior_scope": base.reference_prior_scope,
         "reference_prior_strength": base.reference_prior_strength,
         "reference_prior_attraction": base.reference_prior_attraction,
+        "reference_prior_exit_strength": base.reference_prior_exit_strength,
     })
     return SamplingConfig(**values)
 
@@ -358,6 +364,11 @@ def _apply_catalog_reference_prior(
         if args.reference_prior_attraction is None
         else args.reference_prior_attraction
     )
+    exit_strength = (
+        sampling.reference_prior_exit_strength
+        if args.reference_prior_exit_strength is None
+        else args.reference_prior_exit_strength
+    )
     return replace(
         sampling,
         reference_prior_routes=tuple(
@@ -367,6 +378,7 @@ def _apply_catalog_reference_prior(
         reference_prior_scope=requested,
         reference_prior_strength=strength,
         reference_prior_attraction=attraction,
+        reference_prior_exit_strength=exit_strength,
     )
 
 

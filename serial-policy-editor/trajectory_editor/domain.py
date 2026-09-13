@@ -36,6 +36,7 @@ class SamplingConfig:
     reference_prior_scope: str = "active"
     reference_prior_strength: float = 0.25
     reference_prior_attraction: float = 0.0
+    reference_prior_exit_strength: float = 0.25
     _reference_prior_trie: Any = field(
         init=False, repr=False, compare=False, default=None
     )
@@ -116,6 +117,17 @@ class SamplingConfig:
         object.__setattr__(
             self, "reference_prior_attraction", float(self.reference_prior_attraction)
         )
+        if (
+            type(self.reference_prior_exit_strength) not in (int, float)
+            or not math.isfinite(float(self.reference_prior_exit_strength))
+            or self.reference_prior_exit_strength < 0.0
+        ):
+            raise EditorError(
+                "reference_prior_exit_strength must be a finite nonnegative number"
+            )
+        object.__setattr__(
+            self, "reference_prior_exit_strength", float(self.reference_prior_exit_strength)
+        )
         if prior_routes:
             from .sampling import ReferencePriorTrie
             object.__setattr__(self, "_reference_prior_trie", ReferencePriorTrie(prior_routes))
@@ -177,6 +189,7 @@ class SamplingConfig:
         return bool(self.reference_prior_routes) and (
             self.reference_prior_strength > 0.0
             or self.reference_prior_attraction > 0.0
+            or self.reference_prior_exit_strength > 0.0
         )
 
     @property
@@ -215,6 +228,7 @@ class SamplingConfig:
             active_routes=active_routes,
             strength=self.reference_prior_strength,
             attraction=self.reference_prior_attraction,
+            exit_strength=self.reference_prior_exit_strength,
             scope=self.reference_prior_scope,
             trie=self._reference_prior_trie,
         )
@@ -269,6 +283,9 @@ class SamplingConfig:
             reference_prior_attraction=value.get(
                 "reference_prior_attraction", defaults.reference_prior_attraction
             ),
+            reference_prior_exit_strength=value.get(
+                "reference_prior_exit_strength", defaults.reference_prior_exit_strength
+            ),
         )
 
     @classmethod
@@ -315,6 +332,7 @@ class SamplingConfig:
             "reference_prior_scope": self.reference_prior_scope,
             "reference_prior_strength": self.reference_prior_strength,
             "reference_prior_attraction": self.reference_prior_attraction,
+            "reference_prior_exit_strength": self.reference_prior_exit_strength,
         }
 
 

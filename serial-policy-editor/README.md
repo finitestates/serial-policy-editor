@@ -806,8 +806,11 @@ lexical prefix; it defaults to `0`, so the initial behavior is contrastive.
 Use `--reference-prior ballistic-global` to apply that attraction at the root
 as well, giving the uploaded reference universe entry pressure even when it
 has only one viable starting branch. Terminal reference mass dampens
-continuation attraction when a shorter entry is already complete, so a small
-`artist` continuation does not overpower a much heavier `art` entry.
+continuation through a separate EXIT-vs-CONTINUE gate. The gate uses
+`--reference-prior-exit-strength` (default `0.25`) times the log ratio of
+continuation mass to terminal mass; it is independent of both attraction and
+relative child branch scoring. Thus a small `artist` continuation does not
+overpower a much heavier `art` entry.
 With the default legacy allocation, preferred direct, word-aligned, and
 cohesive routes are selected first, then deterministic remaining routes are
 selected round-robin across generated forms until the budget is full. The
