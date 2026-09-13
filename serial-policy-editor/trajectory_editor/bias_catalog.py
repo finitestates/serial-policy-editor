@@ -13,9 +13,10 @@ import math
 import re
 import unicodedata
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
+from types import MappingProxyType
 
 from .domain import EditorError
 
@@ -24,6 +25,8 @@ CATALOG_FORMAT = "spe-bias-catalog-v1"
 LEVELS = ("minimal", "standard", "exhaustive")
 MODES = ("tail", "path", "beheaded")
 COMPILE_MODES = ("auto", *MODES)
+ALLOCATIONS = ("legacy", "full", "equal", "information")
+DEFAULT_ALLOCATION = "legacy"
 ROUTE_POLICIES = ("all", "cohesive")
 ROUTE_CLASSES = ("direct", "word_aligned", "cohesive", "fragmented")
 DEFAULT_LEVEL = "standard"
@@ -126,6 +129,13 @@ def _parse_mode(value: Any, *, path: str) -> str:
     result = str(value).strip().lower()
     if result not in COMPILE_MODES:
         raise _error(path, f"must be one of {', '.join(COMPILE_MODES)}")
+    return result
+
+
+def _parse_allocation(value: Any, *, path: str) -> str:
+    result = str(value).strip().lower()
+    if result not in ALLOCATIONS:
+        raise _error(path, f"must be one of {', '.join(ALLOCATIONS)}")
     return result
 
 
@@ -288,12 +298,23 @@ class CompileOptions:
     max_route_tokens: int | None = None
     route_policy: str = DEFAULT_ROUTE_POLICY
     min_route_piece_chars: int = DEFAULT_MIN_ROUTE_PIECE_CHARS
+    allocation: str = DEFAULT_ALLOCATION
+    allocation_floor: float = 0.05
 
     def __post_init__(self) -> None:
         if self.level not in LEVELS:
             raise EditorError(f"unknown compilation level {self.level!r}")
         if self.mode not in COMPILE_MODES:
             raise EditorError(f"unknown compilation mode {self.mode!r}")
+        if self.allocation not in ALLOCATIONS:
+            raise EditorError(f"unknown bias allocation {self.allocation!r}")
+        if (
+            type(self.allocation_floor) not in (int, float)
+            or not math.isfinite(self.allocation_floor)
+            or self.allocation_floor < 0
+            or self.allocation_floor > 1
+        ):
+            raise EditorError("allocation_floor must be between 0 and 1")
         for name in ("head_scale", "continuation_scale"):
             value = getattr(self, name)
             if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
@@ -337,6 +358,14 @@ class CompileOptions:
         return cls(
             level=_parse_level(value.get("level", current.level), path=f"{path}.level"),
             mode=_parse_mode(value.get("mode", current.mode), path=f"{path}.mode"),
+            allocation=_parse_allocation(
+                value.get("allocation", current.allocation),
+                path=f"{path}.allocation",
+            ),
+            allocation_floor=_as_scale(
+                value.get("allocation_floor", current.allocation_floor),
+                path=f"{path}.allocation_floor",
+            ),
             head_scale=_as_scale(
                 value.get("head_scale", current.head_scale),
                 path=f"{path}.head_scale",
@@ -374,6 +403,67 @@ class CompileOptions:
 
 
 @dataclass(frozen=True)
+class PrefixReferenceStats:
+    """Reference lexical mass used by experimental route allocation.
+
+    References are surface strings rather than model-generated continuations.
+    A prefix's mass is the sum of reference weights for surfaces beginning
+    with that prefix.  The compiler can therefore build these statistics once
+    and the runtime never needs to consult the reference universe.
+    """
+
+    references: tuple[tuple[str, float], ...]
+    _prefix_masses: Mapping[str, float] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        normalized: list[tuple[str, float]] = []
+        for surface, weight in self.references:
+            if not isinstance(surface, str) or not surface:
+                raise EditorError("reference surfaces must be nonempty strings")
+            if type(weight) not in (int, float) or not math.isfinite(weight) or weight <= 0:
+                raise EditorError("reference weights must be finite positive numbers")
+            normalized.append((surface, float(weight)))
+        if not normalized:
+            raise EditorError("reference collection must not be empty")
+        object.__setattr__(self, "references", tuple(normalized))
+        prefix_masses: dict[str, float] = {}
+        for surface, weight in normalized:
+            for index in range(len(surface) + 1):
+                prefix = surface[:index]
+                prefix_masses[prefix] = prefix_masses.get(prefix, 0.0) + weight
+        object.__setattr__(self, "_prefix_masses", MappingProxyType(prefix_masses))
+
+    @property
+    def root_mass(self) -> float:
+        return self._prefix_masses[""]
+
+    def mass(self, prefix: str) -> float:
+        return self._prefix_masses.get(prefix, 0.0)
+
+
+def build_prefix_reference_stats(
+    references: Sequence[str] | Mapping[str, float],
+) -> PrefixReferenceStats:
+    """Build raw- or frequency-weighted surface-prefix reference statistics."""
+
+    if isinstance(references, Mapping):
+        try:
+            values = tuple((str(surface), float(weight))
+                           for surface, weight in references.items())
+        except (TypeError, ValueError) as exc:
+            raise EditorError("reference weights must be numeric") from exc
+    elif isinstance(references, Sequence) and not isinstance(references, (str, bytes, bytearray)):
+        values = tuple((str(surface), 1.0) for surface in references)
+    else:
+        raise EditorError("reference collection must be a list or mapping")
+    return PrefixReferenceStats(values)
+
+
+@dataclass(frozen=True)
 class CompiledRoute:
     token_ids: tuple[int, ...]
     texts: tuple[str, ...]
@@ -384,10 +474,36 @@ class CompiledRoute:
     head_scale: float = 1.0
     continuation_scale: float = 1.0
     route_class: str = "fragmented"
+    allocation: str = DEFAULT_ALLOCATION
+    edge_weights: tuple[float, ...] = ()
+    allocation_diagnostics: tuple[tuple[float, float, float, float], ...] = ()
 
     def __post_init__(self) -> None:
         if self.route_class not in ROUTE_CLASSES:
             raise EditorError(f"unknown route class {self.route_class!r}")
+        if self.allocation not in ALLOCATIONS:
+            raise EditorError(f"unknown bias allocation {self.allocation!r}")
+        edge_weights = tuple(float(weight) for weight in self.edge_weights)
+        if edge_weights and len(edge_weights) != len(self.token_ids):
+            raise EditorError("route edge_weights must align with route token_ids")
+        if any(not math.isfinite(weight) or weight < 0 for weight in edge_weights):
+            raise EditorError("route edge_weights must be finite nonnegative numbers")
+        diagnostics = tuple(tuple(float(value) for value in row)
+                            for row in self.allocation_diagnostics)
+        if diagnostics and len(diagnostics) != len(self.token_ids):
+            raise EditorError("route allocation diagnostics must align with route token_ids")
+        if any(
+            len(row) != 4
+            or any(not math.isfinite(value) for value in row)
+            or row[0] < 0
+            or row[1] < 0
+            or not 0 <= row[2] <= 1
+            or row[3] < 0
+            for row in diagnostics
+        ):
+            raise EditorError("invalid route allocation diagnostics")
+        object.__setattr__(self, "edge_weights", edge_weights)
+        object.__setattr__(self, "allocation_diagnostics", diagnostics)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -401,6 +517,24 @@ class CompiledRoute:
             **({"head_scale": self.head_scale} if self.head_scale != 1.0 else {}),
             **({"continuation_scale": self.continuation_scale}
                if self.continuation_scale != 1.0 else {}),
+            **({"allocation": self.allocation} if self.allocation != DEFAULT_ALLOCATION else {}),
+            **({"edge_weights": list(self.edge_weights)} if self.edge_weights else {}),
+            **({
+                "allocation_diagnostics": [
+                    {
+                        "token_id": self.token_ids[index],
+                        "token": (
+                            self.token_texts[index]
+                            if index < len(self.token_texts) else ""
+                        ),
+                        "remaining_mass": row[0],
+                        "information": row[1],
+                        "phi": row[2],
+                        "edge_weight": row[3],
+                    }
+                    for index, row in enumerate(self.allocation_diagnostics)
+                ]
+            } if self.allocation_diagnostics else {}),
         }
 
 
@@ -558,7 +692,10 @@ def _model_identity(model: Mapping[str, Any]) -> tuple[Any, ...]:
 
 
 def _merge_routes(left: Sequence[CompiledRoute], right: Sequence[CompiledRoute]) -> tuple[CompiledRoute, ...]:
-    merged: dict[tuple[tuple[int, ...], str, float, float, str], CompiledRoute] = {}
+    merged: dict[
+        tuple[tuple[int, ...], str, float, float, str, str, tuple[float, ...]],
+        CompiledRoute,
+    ] = {}
     for route in (*left, *right):
         key = (
             route.token_ids,
@@ -566,6 +703,8 @@ def _merge_routes(left: Sequence[CompiledRoute], right: Sequence[CompiledRoute])
             route.head_scale,
             route.continuation_scale,
             route.route_class,
+            route.allocation,
+            route.edge_weights,
         )
         current = merged.get(key)
         if current is None:
@@ -581,6 +720,9 @@ def _merge_routes(left: Sequence[CompiledRoute], right: Sequence[CompiledRoute])
             head_scale=current.head_scale,
             continuation_scale=current.continuation_scale,
             route_class=current.route_class,
+            allocation=current.allocation,
+            edge_weights=current.edge_weights,
+            allocation_diagnostics=current.allocation_diagnostics,
         )
     return tuple(merged.values())
 
@@ -626,6 +768,32 @@ def _routes_from_dict(value: Any, *, path: str) -> tuple[CompiledRoute, ...]:
                 f"{route_path}.route_class",
                 f"must be one of {', '.join(ROUTE_CLASSES)}",
             )
+        raw_diagnostics = raw.get("allocation_diagnostics", ())
+        diagnostics: list[tuple[float, float, float, float]] = []
+        if raw_diagnostics:
+            if not isinstance(raw_diagnostics, Sequence) or isinstance(
+                raw_diagnostics, (str, bytes, bytearray)
+            ):
+                raise _error(f"{route_path}.allocation_diagnostics", "must be a list")
+            for diagnostic_index, diagnostic in enumerate(raw_diagnostics):
+                if not isinstance(diagnostic, Mapping):
+                    raise _error(
+                        f"{route_path}.allocation_diagnostics[{diagnostic_index}]",
+                        "must be a mapping",
+                    )
+                diagnostics.append((
+                    float(diagnostic.get("remaining_mass", 0.0)),
+                    float(diagnostic.get("information", 0.0)),
+                    float(diagnostic.get("phi", 0.0)),
+                    float(diagnostic.get("edge_weight", 0.0)),
+                ))
+        edge_weights = raw.get("edge_weights", ())
+        if edge_weights is None:
+            edge_weights = ()
+        if not isinstance(edge_weights, Sequence) or isinstance(
+            edge_weights, (str, bytes, bytearray)
+        ):
+            raise _error(f"{route_path}.edge_weights", "must be a list")
         routes.append(CompiledRoute(
             ids,
             texts,
@@ -639,6 +807,10 @@ def _routes_from_dict(value: Any, *, path: str) -> tuple[CompiledRoute, ...]:
                 path=f"{route_path}.continuation_scale",
             ),
             route_class,
+            _parse_allocation(raw.get("allocation", DEFAULT_ALLOCATION),
+                              path=f"{route_path}.allocation"),
+            tuple(float(weight) for weight in edge_weights),
+            tuple(diagnostics),
         ))
     return tuple(routes)
 
@@ -755,6 +927,145 @@ def generate_forms(source: str, options: CompileOptions, explicit_forms: Sequenc
                 seen.add(candidate)
                 result.append(candidate)
     return tuple(result)
+
+
+def _default_reference_surfaces(backend: Any, extra: Sequence[str]) -> tuple[str, ...]:
+    """Return a tokenizer-local reference universe for the raw baseline."""
+
+    surfaces: dict[str, None] = {}
+    for token_id in range(int(backend.vocabulary_size())):
+        if bool(getattr(backend, "is_eog", lambda _token: False)(token_id)):
+            continue
+        text = str(backend.token_text(token_id))
+        if not text or (text.startswith("<") and text.endswith(">")):
+            continue
+        surfaces.setdefault(text, None)
+    for surface in extra:
+        if surface:
+            surfaces.setdefault(surface, None)
+    return tuple(surfaces)
+
+
+def _reference_stats_for_backend(
+    backend: Any,
+    extra: Sequence[str],
+    reference: Sequence[str] | Mapping[str, float] | None = None,
+) -> PrefixReferenceStats:
+    values: dict[str, float] = {
+        surface: 1.0
+        for surface in _default_reference_surfaces(backend, extra)
+    }
+    if reference is None:
+        return build_prefix_reference_stats(values)
+    if isinstance(reference, Mapping):
+        try:
+            additions = ((str(surface), float(weight))
+                         for surface, weight in reference.items())
+            for surface, weight in additions:
+                values[surface] = values.get(surface, 0.0) + weight
+        except (TypeError, ValueError) as exc:
+            raise EditorError("reference weights must be numeric") from exc
+    elif isinstance(reference, Sequence) and not isinstance(
+        reference, (str, bytes, bytearray)
+    ):
+        for surface in reference:
+            values[str(surface)] = values.get(str(surface), 0.0) + 1.0
+    else:
+        raise EditorError("reference collection must be a list or mapping")
+    return build_prefix_reference_stats(values)
+
+
+def _render_route_prefix(route: Sequence[int], backend: Any) -> str:
+    try:
+        return str(backend.render(list(route), special=False))
+    except (RuntimeError, TypeError, ValueError):
+        return "".join(str(backend.token_text(token)) for token in route)
+
+
+def allocate_route(
+    route: Sequence[int],
+    backend: Any,
+    *,
+    strategy: str,
+    reference_stats: PrefixReferenceStats | None = None,
+    allocation_floor: float = 0.05,
+) -> tuple[tuple[float, ...], tuple[tuple[float, float, float, float], ...]]:
+    """Allocate one unit of bias across a route and return debug diagnostics.
+
+    ``legacy`` deliberately returns no weights so the existing mode and
+    head/continuation behavior remains authoritative at runtime.  The other
+    strategies produce explicit edge weights that are consumed by the same
+    runtime matcher.
+    """
+
+    if strategy not in ALLOCATIONS:
+        raise EditorError(f"unknown bias allocation {strategy!r}")
+    if not route:
+        raise EditorError("cannot allocate bias across an empty route")
+    if type(allocation_floor) not in (int, float) or not math.isfinite(allocation_floor):
+        raise EditorError("allocation_floor must be a finite number")
+    if allocation_floor < 0 or allocation_floor > 1:
+        raise EditorError("allocation_floor must be between 0 and 1")
+    if strategy == DEFAULT_ALLOCATION:
+        return (), ()
+    if strategy == "information" and reference_stats is None:
+        raise EditorError("information allocation requires reference statistics")
+
+    if reference_stats is None:
+        masses = [0.0] * (len(route) + 1)
+    else:
+        prefix_texts = [""] + [
+            _render_route_prefix(route[:index], backend)
+            for index in range(1, len(route) + 1)
+        ]
+        root_mass = reference_stats.root_mass
+        masses = [reference_stats.mass(prefix) for prefix in prefix_texts]
+    information = [0.0]
+    for mass in masses[1:]:
+        if mass <= 0:
+            value = information[-1]
+        else:
+            value = -math.log(mass / root_mass)
+        information.append(max(information[-1], value))
+
+    terminal_information = information[-1]
+    if terminal_information <= 1e-12:
+        phi = [index / len(route) for index in range(len(route) + 1)]
+    else:
+        phi = [min(1.0, max(0.0, value / terminal_information))
+               for value in information]
+        for index in range(1, len(phi)):
+            phi[index] = max(phi[index], phi[index - 1])
+        phi[-1] = 1.0
+
+    if strategy == "full":
+        weights = [1.0] * len(route)
+    elif strategy == "equal":
+        weights = [1.0 / len(route)] * len(route)
+    else:
+        weights = [max(0.0, phi[index + 1] - phi[index])
+                   for index in range(len(route))]
+        total = sum(weights)
+        if total <= 1e-12:
+            weights = [1.0 / len(route)] * len(route)
+        else:
+            weights[-1] += 1.0 - total
+    if strategy == "information" and allocation_floor > 0:
+        if len(route) * allocation_floor >= 1.0:
+            weights = [1.0 / len(route)] * len(route)
+        else:
+            total = sum(weights)
+            residual = 1.0 - len(route) * allocation_floor
+            weights = [
+                allocation_floor + residual * (weight / total)
+                for weight in weights
+            ]
+
+    diagnostics = tuple(
+        (masses[index + 1], information[index + 1], phi[index + 1], weights[index])
+        for index in range(len(route))
+    )
+    return tuple(weights), diagnostics
 
 
 def _surface_index(backend: Any) -> SurfaceIndex:
@@ -892,6 +1203,7 @@ def compile_term(
     options: CompileOptions,
     explicit_forms: Sequence[str] = (),
     surface_index: SurfaceIndex | None = None,
+    reference_stats: PrefixReferenceStats | None = None,
 ) -> CatalogEntry:
     name = normalize_scalar(name, path="term name")
     source = normalize_scalar(source, path=f"term {name!r}")
@@ -900,6 +1212,8 @@ def compile_term(
         mode = "tail" if any(character.isspace() for character in source) else "path"
     forms = generate_forms(source, options, explicit_forms)
     index = surface_index if surface_index is not None else _surface_index(backend)
+    if reference_stats is None:
+        reference_stats = _reference_stats_for_backend(backend, forms)
     form_specs = tuple((form, _canonical_route(form, backend)) for form in forms)
 
     def candidates_for(
@@ -980,6 +1294,14 @@ def compile_term(
                 allow_beheaded=options.mode in {"auto", "beheaded"},
             )
             head_scale = 0.0 if route_mode == "beheaded" else options.head_scale
+            allocation = DEFAULT_ALLOCATION if fallback_tail else options.allocation
+            edge_weights, allocation_diagnostics = allocate_route(
+                route,
+                backend,
+                strategy=allocation,
+                reference_stats=reference_stats,
+                allocation_floor=options.allocation_floor,
+            )
             strategy = "fallback" if fallback_tail else (
                 "preferred" if _is_preferred_route(route_class) else "derived"
             )
@@ -995,6 +1317,9 @@ def compile_term(
                     head_scale=head_scale,
                     continuation_scale=options.continuation_scale,
                     route_class=route_class,
+                    allocation=allocation,
+                    edge_weights=edge_weights,
+                    allocation_diagnostics=allocation_diagnostics,
                 )
             else:
                 route_map[route] = CompiledRoute(
@@ -1007,6 +1332,9 @@ def compile_term(
                     head_scale=existing.head_scale,
                     continuation_scale=existing.continuation_scale,
                     route_class=existing.route_class,
+                    allocation=existing.allocation,
+                    edge_weights=existing.edge_weights,
+                    allocation_diagnostics=existing.allocation_diagnostics,
                 )
 
     def select_buckets(
@@ -1038,8 +1366,10 @@ def compile_term(
 
     preferred_buckets: list[list[tuple[int, ...]]] = []
     derived_buckets: list[list[tuple[int, ...]]] = []
+    all_buckets: list[list[tuple[int, ...]]] = []
     for form, routes in form_routes:
         del form
+        all_buckets.append(list(routes))
         preferred_buckets.append([
             route for route in routes
             if _is_preferred_route(route_classes[route])
@@ -1051,8 +1381,14 @@ def compile_term(
 
     selected_order: list[tuple[int, ...]] = []
     selected: set[tuple[int, ...]] = set()
-    select_buckets(preferred_buckets, selected_order, selected)
-    select_buckets(derived_buckets, selected_order, selected)
+    if options.allocation == DEFAULT_ALLOCATION:
+        select_buckets(preferred_buckets, selected_order, selected)
+        select_buckets(derived_buckets, selected_order, selected)
+    else:
+        # Experimental allocation evaluates every accepted route by the same
+        # edge-scoring rule; do not spend the route budget on a preferred
+        # bucket before considering derived alternatives.
+        select_buckets(all_buckets, selected_order, selected)
 
     return CatalogEntry(
         name=name,
@@ -1177,6 +1513,7 @@ def compile_catalog(
     provenance: Mapping[str, Any] | None = None,
     default_level: str | None = None,
     options_override: Mapping[str, Any] | None = None,
+    reference: Sequence[str] | Mapping[str, float] | None = None,
 ) -> BiasCatalog:
     """Compile a YAML-shaped source object against one tokenizer/backend."""
 
@@ -1228,6 +1565,7 @@ def compile_catalog(
                 options=spec.options,
                 explicit_forms=spec.explicit_forms,
                 surface_index=index,
+                reference_stats=reference_stats,
             )
             compiled_terms[name] = entry
             return entry
@@ -1252,6 +1590,9 @@ def compile_catalog(
                     head_scale=route.head_scale,
                     continuation_scale=route.continuation_scale,
                     route_class=route.route_class,
+                    allocation=route.allocation,
+                    edge_weights=route.edge_weights,
+                    allocation_diagnostics=route.allocation_diagnostics,
                 )
                 for route in child.routes
             )
@@ -1281,6 +1622,22 @@ def compile_catalog(
     elif ungrouped:
         groups["global"] = _GroupSpec("global", ungrouped)
 
+    # Resolve implicit group terms before building the shared reference
+    # universe, so every generated form can contribute to prefix ambiguity.
+    for group in tuple(groups.values()):
+        for member in group.members:
+            ensure_implicit(member, level=group.level)
+    reference_surfaces = tuple(
+        form
+        for spec in terms.values()
+        for form in generate_forms(spec.source, spec.options, spec.explicit_forms)
+    )
+    reference_stats = _reference_stats_for_backend(
+        backend,
+        reference_surfaces,
+        reference,
+    )
+
     for name in tuple(terms):
         compile_entry(name)
     for name in tuple(groups):
@@ -1298,15 +1655,22 @@ def compile_catalog(
             "format_version": 1,
             "default_level": defaults.level,
             "default_mode": defaults.mode,
+            "default_allocation": defaults.allocation,
+            "default_allocation_floor": defaults.allocation_floor,
             "default_head_scale": defaults.head_scale,
             "default_continuation_scale": defaults.continuation_scale,
             "default_route_policy": defaults.route_policy,
             "default_min_route_piece_chars": defaults.min_route_piece_chars,
             "levels": list(LEVELS),
             "modes": list(COMPILE_MODES),
+            "allocations": list(ALLOCATIONS),
             "route_policies": list(ROUTE_POLICIES),
             "route_classes": list(ROUTE_CLASSES),
-            "route_selection": "preferred-routes-first-v2",
+            "route_selection": (
+                "preferred-routes-first-v2"
+                if defaults.allocation == DEFAULT_ALLOCATION
+                else "all-routes-round-robin-v1"
+            ),
             **({"warnings": list(warnings)} if warnings else {}),
             "default_route_limits": {
                 "standard_max_route_tokens": DEFAULT_STANDARD_MAX_ROUTE_TOKENS,

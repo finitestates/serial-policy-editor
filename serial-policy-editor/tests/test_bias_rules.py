@@ -141,6 +141,27 @@ def test_named_group_route_modes_apply_one_group_bias():
     assert SamplingConfig(bias_groups=(group,)).active_biases([20]) == {10: -2.0}
 
 
+def test_precomputed_route_weights_drive_the_same_runtime_matcher():
+    entry = CatalogEntry(
+        name="ajar",
+        kind="term",
+        routes=(CompiledRoute(
+            token_ids=(10, 11),
+            texts=("ajar",),
+            token_texts=(" aj", "ar"),
+            mode="path",
+            strategies=("derived",),
+            allocation="information",
+            edge_weights=(0.25, 0.75),
+        ),),
+    )
+    rules = routes_for_catalog_entry(entry, 4.0)
+    matcher = BiasMatcher(rules)
+
+    assert matcher.active_biases([]) == {10: 1.0}
+    assert matcher.active_biases([10]) == {11: 3.0}
+
+
 def test_sampling_config_round_trips_logical_rules():
     config = SamplingConfig(bias_rules=(BiasRule(
         routes=((1, 2), (1, 3)), bias=-1.25, mode="path"),))

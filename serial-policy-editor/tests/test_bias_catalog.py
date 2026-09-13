@@ -5,8 +5,11 @@ from unittest.mock import patch
 import pytest
 
 from trajectory_editor.bias_catalog import (
+    ALLOCATIONS,
     BiasCatalog,
     CompileOptions,
+    allocate_route,
+    build_prefix_reference_stats,
     compile_catalog,
     compile_term,
     generate_forms,
@@ -500,6 +503,64 @@ def test_per_term_mode_and_edge_scales_override_auto(backend):
     assert restored_route.continuation_scale == 0.75
 
 
+def test_information_allocation_is_precomputed_and_route_conserving(backend):
+    entry = compile_term(
+        "shadowing",
+        "shadowing",
+        backend,
+        options=CompileOptions(
+            level="exhaustive",
+            cases=("original",),
+            leading_space=False,
+            plural=False,
+            allocation="information",
+            max_route_tokens=3,
+        ),
+    )
+
+    assert "information" in ALLOCATIONS
+    assert entry.routes
+    for route in entry.routes:
+        assert route.allocation == "information"
+        assert len(route.edge_weights) == len(route.token_ids)
+        assert sum(route.edge_weights) == pytest.approx(1.0)
+        assert len(route.allocation_diagnostics) == len(route.token_ids)
+        assert route.allocation_diagnostics[-1][2] == pytest.approx(1.0)
+        assert min(route.edge_weights) >= 0.05
+
+    restored = BiasCatalog.from_json(
+        compile_catalog(
+            {
+                "defaults": {
+                    "cases": ["original"],
+                    "leading_space": False,
+                    "plural": False,
+                },
+                "terms": [{"shadowing": {"allocation": "information"}}],
+            },
+            backend,
+        ).to_json()
+    )
+    restored_route = restored.require("shadowing").routes[0]
+    assert restored_route.allocation == "information"
+    assert restored_route.edge_weights
+
+
+def test_information_allocation_floor_prevents_zero_head_weight(backend):
+    stats = build_prefix_reference_stats({"shadow": 100.0, "shadowing": 1.0})
+    weights, diagnostics = allocate_route(
+        (1, 8),
+        backend,
+        strategy="information",
+        reference_stats=stats,
+        allocation_floor=0.05,
+    )
+
+    assert min(weights) >= 0.05
+    assert sum(weights) == pytest.approx(1.0)
+    assert diagnostics[0][3] == pytest.approx(weights[0])
+
+
 def test_group_cycles_and_reserved_global_are_rejected(backend):
     with pytest.raises(EditorError, match="cycle"):
         compile_catalog({"groups": {"a": ["b"], "b": ["a"]}}, backend)
@@ -548,6 +609,36 @@ def test_catalog_cli_exposes_route_policy_override(tmp_path, backend):
     value = json.loads(output.read_text(encoding="utf-8"))
     assert value["compiler"]["default_route_policy"] == "cohesive"
     assert value["compiler"]["default_min_route_piece_chars"] == 4
+
+
+def test_catalog_cli_exposes_information_allocation_diagnostics(tmp_path, backend, capsys):
+    output = tmp_path / "catalog.json"
+    source = tmp_path / "terms.yaml"
+    source.write_text(
+        "defaults:\n"
+        "  cases: [original]\n"
+        "  leading_space: false\n"
+        "  plural: false\n"
+        "terms: [shadowing]\n",
+        encoding="utf-8",
+    )
+    reference = tmp_path / "reference.yaml"
+    reference.write_text("shadow: 100\nshadowing: 2\n", encoding="utf-8")
+    with patch("trajectory_editor.bias_cli._load_backend", return_value=backend):
+        assert bias_main([
+            "--input", str(source),
+            "--level", "exhaustive",
+            "--allocation", "information",
+            "--reference", str(reference),
+            "--diagnostics",
+            "--output", str(output),
+        ]) == 0
+
+    value = json.loads(output.read_text(encoding="utf-8"))
+    captured = capsys.readouterr()
+    assert value["compiler"]["default_allocation"] == "information"
+    assert "remaining_mass" in captured.err
+    assert "edge_weight" in captured.err
 
 
 def test_catalog_cli_reports_cohesive_tail_fallback(tmp_path, capsys):

@@ -48,6 +48,8 @@ The expanded source shape is:
 defaults:
   level: standard
   mode: auto
+  allocation: legacy
+  allocation_floor: 0.05
   head_scale: 1.0
   continuation_scale: 1.0
   cases: [original, lower, title, sentence]
@@ -144,6 +146,8 @@ The recognized compiler options are:
 | --- | --- | --- |
 | `level` | `minimal`, `standard`, `exhaustive` | Controls how deeply alternate token routes are searched. |
 | `mode` | `auto`, `tail`, `path`, `beheaded` | `auto` uses beheaded path semantics for one- or two-letter route heads, then path for lexical terms and tail for phrases; the other values force the mode. |
+| `allocation` | `legacy`, `full`, `equal`, `information` | Selects how bias is distributed across route edges. `legacy` preserves the existing mode/head/continuation behavior; the other strategies store explicit per-edge weights. |
+| `allocation_floor` | number from `0` to `1` | For `information`, reserves at least this fraction of a route's unit bias for every edge before renormalizing. The default `0.05` prevents a zero-weight head from dead-ending a route; set `0` for the raw information result. |
 | `head_scale` | finite nonnegative number | Scales the first edge of a path rule. |
 | `continuation_scale` | finite nonnegative number | Scales continuation edges after a matching path prefix. |
 | `cases` | list of `original`, `lower`, `title`, `sentence`, `upper` | Case variants to search. A scalar is also accepted. `sentence` turns `my favorite chair` into `My favorite chair`. |
@@ -156,12 +160,31 @@ The recognized compiler options are:
 | `min_route_piece_chars` | positive integer | In `cohesive` mode, minimum alphanumeric characters for a non-whole-word-like piece. |
 
 Defaults are `standard`, `original/lower/title/sentence`, leading-space variants,
-automatic mode, unit head/continuation scales, pluralization enabled, no extra
+automatic mode, `legacy` allocation, an information floor of `0.05`, unit
+head/continuation scales, pluralization enabled, no extra
 suffixes, `max_routes: 4096`, `route_policy: all`,
 `min_route_piece_chars: 3`, and the level-dependent default route depth. The
-command-line options `--level`, `--max-routes`, `--max-route-tokens`,
-`--route-policy`, and `--min-route-piece-chars`
+command-line options `--level`, `--allocation`, `--allocation-floor`,
+`--max-routes`, `--max-route-tokens`, `--route-policy`, and
+`--min-route-piece-chars`
 override the YAML options for the whole compilation.
+
+### Experimental edge allocation
+
+The experimental allocation strategies are applied uniformly to every
+accepted route; they do not privilege the tokenizer's default/canonical route.
+`full` puts unit weight on every edge, `equal` divides one unit evenly across
+the route, and `information` estimates prefix specificity from a compile-time
+reference surface universe. The default reference universe combines tokenizer
+vocabulary strings with generated catalog forms. A frequency-weighted YAML
+reference list or mapping can be supplied with `--reference`; a mapping such
+as `{shadow: 100, shadowing: 2}` contributes those relative masses.
+
+Information allocation is compiled into route `edge_weights`, so generation
+only performs the normal prefix match and multiplies the selected weight by
+the user's bias. Every complete route conserves one unit of bias after the
+floor is applied. Route JSON includes `allocation_diagnostics` with each
+edge's token, remaining mass, information, Phi, and final edge weight.
 
 For a phrase whose first token is common but whose continuation is distinctive,
 force path mode and make the head gentler:
@@ -189,10 +212,11 @@ Routes are classified as `direct`, `word_aligned`, `cohesive`, or
 `fragmented`. Direct routes contain one token; word-aligned routes are
 sequences of direct word pieces such as `port` + ` of` + ` call`; cohesive
 routes use sizeable subword chunks; fragmented routes contain tiny internal
-pieces. Preferred routes are selected first, then remaining routes are chosen
-deterministically, round-robin across generated forms, until `max_routes` is
-reached. The tokenizer's default route is only one candidate and is not
-automatically privileged.
+pieces. With `allocation: legacy`, preferred routes are selected first, then
+remaining routes are chosen deterministically, round-robin across generated
+forms, until `max_routes` is reached. Experimental allocations consider all
+accepted routes under the same allocation strategy. The tokenizer's default
+route is only one candidate and is not automatically privileged.
 
 Set `route_policy: cohesive` to remove fragmented routes before selection.
 Cohesive mode accepts pieces that align with whitespace/word boundaries or

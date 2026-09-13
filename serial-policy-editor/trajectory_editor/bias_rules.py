@@ -79,6 +79,7 @@ class BiasRule:
     head_scale: float = 1.0
     continuation_scale: float = 1.0
     logical_target: str | None = None
+    route_weights: tuple[tuple[float, ...], ...] = ()
 
     def __post_init__(self) -> None:
         routes = _routes(self.routes, path="bias rule routes")
@@ -109,13 +110,32 @@ class BiasRule:
             not isinstance(self.logical_target, str) or not self.logical_target
         ):
             raise EditorError("bias rule logical_target must be a nonempty string")
+        route_weights = tuple(
+            tuple(float(weight) for weight in weights)
+            for weights in self.route_weights
+        )
+        if route_weights and len(route_weights) != len(routes):
+            raise EditorError("bias rule route_weights must align with routes")
+        if any(
+            len(weights) != len(route)
+            or any(not math.isfinite(weight) or weight < 0 for weight in weights)
+            for route, weights in zip(routes, route_weights)
+        ):
+            raise EditorError("bias rule route_weights must be finite and route-aligned")
+        if route_weights:
+            ordered = sorted(zip(routes, route_weights), key=lambda item: item[0])
+            routes = tuple(route for route, _weights in ordered)
+            route_weights = tuple(weights for _route, weights in ordered)
+        else:
+            routes = tuple(sorted(routes))
         if self.mode == "beheaded":
             head_scale = 0.0
-        object.__setattr__(self, "routes", tuple(sorted(routes)))
+        object.__setattr__(self, "routes", routes)
         object.__setattr__(self, "triggers", tuple(sorted(triggers)))
         object.__setattr__(self, "bias", float(self.bias))
         object.__setattr__(self, "head_scale", head_scale)
         object.__setattr__(self, "continuation_scale", continuation_scale)
+        object.__setattr__(self, "route_weights", route_weights)
 
     @property
     def key(self) -> tuple[Any, ...]:
@@ -127,6 +147,7 @@ class BiasRule:
             self.head_scale,
             self.continuation_scale,
             self.logical_target,
+            self.route_weights,
         )
 
     @property
@@ -140,6 +161,7 @@ class BiasRule:
             self.head_scale,
             self.continuation_scale,
             self.logical_target,
+            self.route_weights,
         )
 
     @classmethod
@@ -153,7 +175,7 @@ class BiasRule:
             routes = [value["target"]]
         allowed = {
             "routes", "target", "bias", "mode", "triggers", "until",
-            "head_scale", "continuation_scale", "logical_target",
+            "head_scale", "continuation_scale", "logical_target", "route_weights",
         }
         unknown = set(value) - allowed
         if unknown:
@@ -169,6 +191,7 @@ class BiasRule:
             head_scale=value.get("head_scale", 1.0),
             continuation_scale=value.get("continuation_scale", 1.0),
             logical_target=value.get("logical_target"),
+            route_weights=value.get("route_weights", ()),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -187,6 +210,8 @@ class BiasRule:
             result["continuation_scale"] = self.continuation_scale
         if self.logical_target is not None:
             result["logical_target"] = self.logical_target
+        if self.route_weights:
+            result["route_weights"] = [list(weights) for weights in self.route_weights]
         return result
 
 
@@ -370,10 +395,32 @@ def _path_tokens(
     return result
 
 
+def _weighted_path_tokens(
+    routes: Sequence[Sequence[int]],
+    route_weights: Sequence[Sequence[float]],
+    history: Sequence[int],
+) -> dict[int, float]:
+    """Return precomputed edge weights for the currently viable route edges."""
+
+    result: dict[int, float] = {}
+    for route, weights in zip(routes, route_weights):
+        for prefix_length in range(min(len(route) - 1, len(history)), -1, -1):
+            prefix = route[:prefix_length]
+            if _endswith(history, prefix):
+                weight = weights[prefix_length]
+                if weight > 0:
+                    token = route[prefix_length]
+                    result[token] = max(result.get(token, 0.0), weight)
+                break
+    return result
+
+
 def _rule_tokens(rule: BiasRule, history: Sequence[int], boundaries: Any) -> dict[int, float]:
     span = _scoped_span(rule, history, boundaries)
     if rule.triggers and not _trigger_matches(rule, span):
         return {}
+    if rule.route_weights:
+        return _weighted_path_tokens(rule.routes, rule.route_weights, span)
     if rule.mode in {"path", "beheaded"}:
         return _path_tokens(
             rule.routes,
@@ -448,25 +495,37 @@ def routes_for_catalog_entry(
         raise EditorError("catalog entry must expose compiled routes")
     if logical_target is None:
         logical_target = f"catalog:{entry.name}"
-    grouped: dict[tuple[str, float, float], list[tuple[int, ...]]] = {}
+    grouped: dict[
+        tuple[str, float, float, bool],
+        list[tuple[tuple[int, ...], tuple[float, ...]]],
+    ] = {}
     for route in entry.routes:
         selected = mode or route.mode
         if selected not in BIAS_MODES:
             raise EditorError(f"catalog route has unsupported bias mode {selected!r}")
         head_scale = 0.0 if selected == "beheaded" else route.head_scale
         grouped.setdefault(
-            (selected, head_scale, route.continuation_scale),
+            (
+                selected,
+                head_scale,
+                route.continuation_scale,
+                bool(route.edge_weights),
+            ),
             [],
-        ).append(tuple(route.token_ids))
+        ).append((tuple(route.token_ids), tuple(route.edge_weights)))
     return tuple(
         BiasRule(
-            routes=tuple(routes),
+            routes=tuple(route for route, _weights in routes),
             bias=bias,
             mode=selected,
             head_scale=head_scale,
             continuation_scale=continuation_scale,
             logical_target=logical_target,
+            route_weights=(
+                tuple(weights for _route, weights in routes)
+                if weighted else ()
+            ),
         )
-        for (selected, head_scale, continuation_scale), routes
+        for (selected, head_scale, continuation_scale, weighted), routes
         in sorted(grouped.items())
     )

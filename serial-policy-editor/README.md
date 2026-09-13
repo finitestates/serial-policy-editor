@@ -775,10 +775,20 @@ and case expansion. The compiler adds leading-space variants automatically,
 so users do not need to write them.
 `max_routes` is a per-term cap across all generated case, spacing, plural, and
 suffix forms; increase it only for terms where the extra routes are useful.
-Preferred direct, word-aligned, and cohesive routes are selected first, then
-deterministic remaining routes are selected round-robin across generated forms
-until the budget is full. The tokenizer's default decomposition is only one
-candidate and is not automatically privileged. Use `--route-policy cohesive`
+For an experimental allocation strategy, set `allocation: equal`, `full`, or
+`information` in YAML (or pass `--allocation`). Information allocation uses
+compile-time prefix ambiguity statistics and stores its edge weights in the
+catalog; `--allocation-floor` defaults to `0.05` so a weak early edge cannot
+dead-end a route. Use `--allocation-floor 0` for the unfloored raw result, and
+`--reference` with a YAML list or surface-to-weight mapping to provide an
+additional reference universe. The generated route JSON includes diagnostics
+for remaining mass, information, Phi, and edge weight.
+With the default legacy allocation, preferred direct, word-aligned, and
+cohesive routes are selected first, then deterministic remaining routes are
+selected round-robin across generated forms until the budget is full. The
+experimental allocation strategies use the same route scoring for every
+accepted route. The tokenizer's default decomposition is only one candidate
+and is not automatically privileged. Use `--route-policy cohesive`
 (or the corresponding YAML option) to remove fragmented routes made from tiny
 internal subword pieces. Cohesive mode preserves whitespace-separated pieces
 such as `port` + `of` + `call`, but does not surface routes such as `o` + `f`,
