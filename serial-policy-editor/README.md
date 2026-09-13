@@ -776,7 +776,11 @@ so users do not need to write them.
 `max_routes` is a per-term cap across all generated case, spacing, plural, and
 suffix forms; increase it only for terms where the extra routes are useful.
 For an experimental allocation strategy, set `allocation: equal`, `full`,
-`information`, or `information_amplified` in YAML (or pass `--allocation`).
+`information`, `information_amplified`, or `naive_chaining` in YAML (or pass
+`--allocation`). `naive_chaining` is a deliberately simple null-hypothesis
+strategy for multi-token routes: it assigns successive edges `0`, `0.5`,
+`1.0`, `1.5`, and so on, and only applies each edge after the preceding route
+prefix has been entered. Single-token routes retain weight `1.0`.
 Information allocation uses compile-time prefix ambiguity statistics and
 stores its edge weights in the catalog; `--allocation-floor` defaults to `0.05`
 so a weak early edge cannot dead-end a route. `information_amplified` leaves

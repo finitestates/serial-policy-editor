@@ -25,7 +25,14 @@ CATALOG_FORMAT = "spe-bias-catalog-v1"
 LEVELS = ("minimal", "standard", "exhaustive")
 MODES = ("tail", "path", "beheaded")
 COMPILE_MODES = ("auto", *MODES)
-ALLOCATIONS = ("legacy", "full", "equal", "information", "information_amplified")
+ALLOCATIONS = (
+    "legacy",
+    "full",
+    "equal",
+    "information",
+    "information_amplified",
+    "naive_chaining",
+)
 DEFAULT_ALLOCATION = "legacy"
 ROUTE_POLICIES = ("all", "cohesive")
 ROUTE_CLASSES = ("direct", "word_aligned", "cohesive", "fragmented")
@@ -1014,6 +1021,13 @@ def allocate_route(
         raise EditorError("allocation_floor must be between 0 and 1")
     if strategy == DEFAULT_ALLOCATION:
         return (), ()
+    if strategy == "naive_chaining":
+        weights = (1.0,) if len(route) == 1 else tuple(
+            0.5 * index for index in range(len(route))
+        )
+        return weights, tuple(
+            (0.0, 0.0, 0.0, weight) for weight in weights
+        )
     information_strategy = strategy in {"information", "information_amplified"}
     if information_strategy and reference_stats is None:
         raise EditorError("information allocation requires reference statistics")

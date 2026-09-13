@@ -162,6 +162,29 @@ def test_precomputed_route_weights_drive_the_same_runtime_matcher():
     assert matcher.active_biases([10]) == {11: 3.0}
 
 
+def test_naive_chaining_is_an_entered_immediate_route_chain():
+    entry = CatalogEntry(
+        name="port of call",
+        kind="term",
+        routes=(CompiledRoute(
+            token_ids=(17, 18, 19),
+            texts=("port of call",),
+            token_texts=("port", " of", " call"),
+            mode="path",
+            strategies=("canonical",),
+            allocation="naive_chaining",
+            edge_weights=(0.0, 0.5, 1.0),
+        ),),
+    )
+    matcher = BiasMatcher(routes_for_catalog_entry(entry, 2.0))
+
+    assert matcher.active_biases([]) == {}
+    assert matcher.active_biases([17]) == {18: 1.0}
+    assert matcher.active_biases([17, 18]) == {19: 2.0}
+    assert matcher.active_biases([99, 17]) == {18: 1.0}
+    assert matcher.active_biases([18]) == {}
+
+
 def test_sampling_config_round_trips_logical_rules():
     config = SamplingConfig(bias_rules=(BiasRule(
         routes=((1, 2), (1, 3)), bias=-1.25, mode="path"),))

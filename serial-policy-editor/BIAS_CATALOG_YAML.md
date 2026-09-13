@@ -146,7 +146,7 @@ The recognized compiler options are:
 | --- | --- | --- |
 | `level` | `minimal`, `standard`, `exhaustive` | Controls how deeply alternate token routes are searched. |
 | `mode` | `auto`, `tail`, `path`, `beheaded` | `auto` uses beheaded path semantics for one- or two-letter route heads, then path for lexical terms and tail for phrases; the other values force the mode. |
-| `allocation` | `legacy`, `full`, `equal`, `information`, `information_amplified` | Selects how bias is distributed across route edges. `legacy` preserves the existing mode/head/continuation behavior; the other strategies store explicit per-edge weights. `information_amplified` preserves information shape but amplifies routes of length 3 or more. |
+| `allocation` | `legacy`, `full`, `equal`, `information`, `information_amplified`, `naive_chaining` | Selects how bias is distributed across route edges. `legacy` preserves the existing mode/head/continuation behavior; the other strategies store explicit per-edge weights. `information_amplified` preserves information shape but amplifies routes of length 3 or more. `naive_chaining` assigns `0`, `0.5`, `1.0`, `1.5`, ... to successive edges of multi-token routes. |
 | `allocation_floor` | number from `0` to `1` | For `information`, reserves at least this fraction of a route's unit bias for every edge before renormalizing. The default `0.05` prevents a zero-weight head from dead-ending a route; set `0` for the raw information result. |
 | `head_scale` | finite nonnegative number | Scales the first edge of a path rule. |
 | `continuation_scale` | finite nonnegative number | Scales continuation edges after a matching path prefix. |
@@ -178,6 +178,11 @@ the route, and `information` estimates prefix specificity from a compile-time
 reference surface universe. `information_amplified` starts with the same
 information shape, then multiplies each edge on routes of length 3 or more by
 `1 + Phi(child)` without renormalizing; two-token routes are unchanged. The
+`naive_chaining` experiment uses direct compositional chaining instead: a
+multi-token route receives `0`, `0.5`, `1.0`, `1.5`, ... on successive edges,
+while a single-token route remains at `1.0`. Its route is entered only after
+the preceding token sequence matches, so a phrase such as `port of call` can
+advance from `port` to `of` to `call` without applying later weights early.
 default reference universe combines tokenizer vocabulary strings with
 generated catalog forms. When `--reference` is supplied, it becomes the
 reference universe instead; generated catalog forms are added only when

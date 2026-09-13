@@ -561,6 +561,30 @@ def test_information_allocation_floor_prevents_zero_head_weight(backend):
     assert diagnostics[0][3] == pytest.approx(weights[0])
 
 
+def test_naive_chaining_allocates_deterministic_route_steps(backend):
+    entry = compile_term(
+        "port of call",
+        "port of call",
+        backend,
+        options=CompileOptions(
+            cases=("original",),
+            leading_space=False,
+            plural=False,
+            allocation="naive_chaining",
+            max_route_tokens=3,
+        ),
+    )
+
+    route = next(route for route in entry.routes if route.token_ids == (17, 18, 19))
+    assert "naive_chaining" in ALLOCATIONS
+    assert route.allocation == "naive_chaining"
+    assert route.edge_weights == pytest.approx((0.0, 0.5, 1.0))
+    assert sum(route.edge_weights) == pytest.approx(1.5)
+    assert tuple(row[3] for row in route.allocation_diagnostics) == pytest.approx(
+        route.edge_weights
+    )
+
+
 def test_external_weighted_reference_replaces_tokenizer_reference(backend):
     catalog = compile_catalog(
         {
