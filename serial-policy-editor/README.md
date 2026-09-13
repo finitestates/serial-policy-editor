@@ -797,7 +797,12 @@ represented by active bias rules. `--reference-prior global` applies the whole
 reference universe at every generation boundary; `--reference-prior off`
 disables it. `--reference-prior-strength` defaults to `0.25`. Reference
 weights are relative lexical importance rather than literal output
-probabilities.
+probabilities. The online prior uses one history-reconstructed weighted token
+trie rather than independently restarting every reference route. Once a route
+prefix is entered, unrelated root branches stop contributing until normal
+failure/suffix transitions return to them. `--reference-prior-attraction`
+provides a separate optional commitment bonus for valid children inside a
+lexical prefix; it defaults to `0`, so the initial behavior is contrastive.
 With the default legacy allocation, preferred direct, word-aligned, and
 cohesive routes are selected first, then deterministic remaining routes are
 selected round-robin across generated forms until the budget is full. The

@@ -203,6 +203,11 @@ reference universe shape every generation boundary, or `--reference-prior off`
 to disable it. `--reference-prior-strength` controls how strongly relative
 reference weights affect model logits; the default is `0.25`. A reference
 weight is a relative lexical importance, not a literal final probability.
+Global mode maintains one history-reconstructed token-trie state: after a
+reference prefix is entered, unrelated root routes do not restart their
+contribution at every position. `--reference-prior-attraction` adds a separate
+commitment bonus to valid children inside a lexical prefix; it defaults to
+`0`, preserving purely contrastive branch preference unless enabled.
 
 For a phrase whose first token is common but whose continuation is distinctive,
 force path mode and make the head gentler:

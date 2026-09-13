@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -68,56 +69,180 @@ def _validated_history(history_token_ids, vocabulary_size: int) -> np.ndarray:
     return history
 
 
+@dataclass
+class _ReferenceTrieNode:
+    children: dict[int, int]
+    failure: int = 0
+    descendant_mass: float = 0.0
+    terminal_mass: float = 0.0
+    prefix: tuple[int, ...] = ()
+
+
+class ReferencePriorTrie:
+    """Weighted token trie with deterministic suffix/failure transitions."""
+
+    def __init__(self, routes) -> None:
+        self.nodes = [_ReferenceTrieNode(children={})]
+        for route, weight in routes:
+            self._insert(tuple(route), float(weight))
+        self._build_failure_links()
+
+    def _insert(self, route: tuple[int, ...], weight: float) -> None:
+        node_index = 0
+        self.nodes[node_index].descendant_mass += weight
+        prefix: list[int] = []
+        for token in route:
+            prefix.append(int(token))
+            child = self.nodes[node_index].children.get(int(token))
+            if child is None:
+                child = len(self.nodes)
+                self.nodes[node_index].children[int(token)] = child
+                self.nodes.append(_ReferenceTrieNode(
+                    children={}, prefix=tuple(prefix)
+                ))
+            node_index = child
+            self.nodes[node_index].descendant_mass += weight
+        self.nodes[node_index].terminal_mass += weight
+
+    def _build_failure_links(self) -> None:
+        queue: deque[int] = deque()
+        for child in self.nodes[0].children.values():
+            self.nodes[child].failure = 0
+            queue.append(child)
+        while queue:
+            node_index = queue.popleft()
+            node = self.nodes[node_index]
+            for token, child in node.children.items():
+                failure = node.failure
+                while failure and token not in self.nodes[failure].children:
+                    failure = self.nodes[failure].failure
+                self.nodes[child].failure = self.nodes[failure].children.get(token, 0)
+                queue.append(child)
+
+    def transition(self, state: int, token: int) -> int:
+        token = int(token)
+        while state and token not in self.nodes[state].children:
+            state = self.nodes[state].failure
+        return self.nodes[state].children.get(token, 0)
+
+    def state_for_history(self, history) -> int:
+        state = 0
+        for token in history:
+            state = self.transition(state, int(token))
+        # A completed terminal route releases the state unless it is also a
+        # prefix of a longer route.  Failure preserves overlapping suffixes.
+        while state and not self.nodes[state].children:
+            state = self.nodes[state].failure
+        return state
+
+    def outgoing(self, state: int) -> tuple[tuple[int, float], ...]:
+        node = self.nodes[state]
+        return tuple(
+            (token, self.nodes[child].descendant_mass)
+            for token, child in sorted(node.children.items())
+        )
+
+    def diagnostics(self, state: int) -> dict[str, object]:
+        node = self.nodes[state]
+        return {
+            "state_prefix": list(node.prefix),
+            "root_mass": self.nodes[0].descendant_mass,
+            "state_mass": node.descendant_mass,
+            "terminal_mass": node.terminal_mass,
+            "outgoing": {
+                token: mass for token, mass in self.outgoing(state)
+            },
+        }
+
+
+@dataclass(frozen=True)
+class ReferencePriorSnapshot:
+    scope: str
+    state_prefix: tuple[int, ...]
+    root_mass: float
+    state_mass: float
+    terminal_mass: float
+    outgoing: tuple[tuple[int, float, float, float, float], ...]
+    biases: dict[int, float]
+
+
+def reference_prior_snapshot(
+    routes,
+    history_token_ids,
+    *,
+    active_routes=None,
+    strength: float,
+    attraction: float,
+    scope: str = "global",
+    trie: ReferencePriorTrie | None = None,
+) -> ReferencePriorSnapshot:
+    """Evaluate one stateful lexical prior from model-visible token history."""
+
+    selected_routes = routes
+    if active_routes is not None:
+        selected_routes = tuple(
+            (route, weight) for route, weight in routes if route in active_routes
+        )
+    if not selected_routes:
+        return ReferencePriorSnapshot(scope, (), 0.0, 0.0, 0.0, (), {})
+    if history_token_ids is None:
+        if any(len(route) > 1 for route, _weight in selected_routes):
+            raise ValueError("reference priors require exact context token IDs")
+        history = ()
+    else:
+        history = tuple(int(token) for token in history_token_ids)
+    if trie is None or active_routes is not None:
+        trie = ReferencePriorTrie(selected_routes)
+    state = trie.state_for_history(history)
+    node = trie.nodes[state]
+    outgoing = trie.outgoing(state)
+    if not outgoing:
+        return ReferencePriorSnapshot(
+            scope, node.prefix, trie.nodes[0].descendant_mass,
+            node.descendant_mass, node.terminal_mass, (), {},
+        )
+
+    log_masses = {token: math.log(mass) for token, mass in outgoing}
+    center = sum(log_masses.values()) / len(log_masses)
+    state_attraction = 0.0
+    if attraction > 0.0 and state:
+        # The constant term makes a singleton continuation attractive even
+        # when it is the only route and therefore has no branch contrast.
+        state_attraction = float(attraction) * (
+            1.0 + math.log(trie.nodes[0].descendant_mass / node.descendant_mass)
+        )
+    rows = []
+    biases = {}
+    for token, mass in outgoing:
+        branch = float(strength) * (log_masses[token] - center)
+        total = branch + state_attraction
+        rows.append((token, mass, branch, state_attraction, total))
+        biases[token] = total
+    return ReferencePriorSnapshot(
+        scope, node.prefix, trie.nodes[0].descendant_mass,
+        node.descendant_mass, node.terminal_mass, tuple(rows), biases,
+    )
+
+
 def reference_prior_biases(
     routes,
     history_token_ids,
     *,
     active_routes=None,
     strength: float,
+    attraction: float = 0.0,
+    scope: str = "global",
 ) -> dict[int, float]:
-    """Turn weighted lexical routes into conditional log-prior adjustments.
+    """Compatibility wrapper returning only online prior logit adjustments."""
 
-    The weights are relative lexical importance, not probabilities.  At each
-    boundary, viable routes contribute their weight to the next token and the
-    sampler adds ``strength * log(mass)`` to that token's model logit.
-    ``active_routes`` restricts the prior to routes represented by currently
-    active bias rules; ``None`` means global scope.
-    """
-
-    if not routes or strength <= 0.0:
-        return {}
-    if history_token_ids is None:
-        if any(len(route) > 1 for route, _weight in routes):
-            raise ValueError("reference priors require exact context token IDs")
-        history = ()
-    else:
-        history = tuple(int(token) for token in history_token_ids)
-    masses: dict[int, float] = {}
-    for route, weight in routes:
-        if active_routes is not None and route not in active_routes:
-            continue
-        for prefix_length in range(min(len(route) - 1, len(history)), -1, -1):
-            prefix = route[:prefix_length]
-            if prefix and (
-                len(history) < len(prefix)
-                or tuple(history[-len(prefix):]) != prefix
-            ):
-                continue
-            token = route[prefix_length]
-            masses[token] = masses.get(token, 0.0) + float(weight)
-            break
-    log_masses = {
-        token: math.log(mass)
-        for token, mass in masses.items()
-        if mass > 0.0
-    }
-    if not log_masses:
-        return {}
-    center = sum(log_masses.values()) / len(log_masses)
-    return {
-        token: float(strength) * (log_mass - center)
-        for token, log_mass in log_masses.items()
-    }
+    return reference_prior_snapshot(
+        routes,
+        history_token_ids,
+        active_routes=active_routes,
+        strength=strength,
+        attraction=attraction,
+        scope=scope,
+    ).biases
 
 
 def _history_penalty_surface(
@@ -262,9 +387,10 @@ class ObservationStatistics:
             self.adjusted = self.logits
         active_biases = config.active_biases(history_token_ids, boundaries)
         self.active_biases = active_biases
-        self.reference_prior_biases = config.active_reference_prior(
+        self.reference_prior_snapshot = config.active_reference_prior_snapshot(
             history_token_ids, boundaries
         )
+        self.reference_prior_biases = self.reference_prior_snapshot.biases
         adjustments = dict(active_biases)
         for token, bias in self.reference_prior_biases.items():
             adjustments[token] = adjustments.get(token, 0.0) + bias

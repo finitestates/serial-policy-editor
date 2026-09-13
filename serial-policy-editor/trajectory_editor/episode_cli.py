@@ -196,6 +196,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help="strength of the experimental online reference prior (default: 0.25)",
     )
+    parser.add_argument(
+        "--reference-prior-attraction",
+        type=float,
+        help="additional commitment pressure inside a reference prefix (default: 0)",
+    )
     parser.add_argument("--theme", choices=LIVE_THEME_NAMES)
     parser.add_argument(
         "--divergence-policy", choices=("handoff", "ballistic"), default="handoff"
@@ -316,6 +321,7 @@ def _sampling_from_args(
         "reference_prior_routes": base.reference_prior_routes,
         "reference_prior_scope": base.reference_prior_scope,
         "reference_prior_strength": base.reference_prior_strength,
+        "reference_prior_attraction": base.reference_prior_attraction,
     })
     return SamplingConfig(**values)
 
@@ -347,6 +353,11 @@ def _apply_catalog_reference_prior(
         if args.reference_prior_strength is None
         else args.reference_prior_strength
     )
+    attraction = (
+        sampling.reference_prior_attraction
+        if args.reference_prior_attraction is None
+        else args.reference_prior_attraction
+    )
     return replace(
         sampling,
         reference_prior_routes=tuple(
@@ -355,6 +366,7 @@ def _apply_catalog_reference_prior(
         ),
         reference_prior_scope=requested,
         reference_prior_strength=strength,
+        reference_prior_attraction=attraction,
     )
 
 

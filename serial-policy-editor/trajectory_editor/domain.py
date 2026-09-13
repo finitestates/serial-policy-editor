@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping
 
@@ -35,6 +35,10 @@ class SamplingConfig:
     reference_prior_routes: tuple = ()
     reference_prior_scope: str = "active"
     reference_prior_strength: float = 0.25
+    reference_prior_attraction: float = 0.0
+    _reference_prior_trie: Any = field(
+        init=False, repr=False, compare=False, default=None
+    )
 
     def __post_init__(self) -> None:
         from .bias_rules import BiasGroup, BiasRule
@@ -100,6 +104,20 @@ class SamplingConfig:
             self, "reference_prior_strength", float(self.reference_prior_strength)
         )
         if (
+            type(self.reference_prior_attraction) not in (int, float)
+            or not math.isfinite(float(self.reference_prior_attraction))
+            or self.reference_prior_attraction < 0.0
+        ):
+            raise EditorError(
+                "reference_prior_attraction must be a finite nonnegative number"
+            )
+        object.__setattr__(
+            self, "reference_prior_attraction", float(self.reference_prior_attraction)
+        )
+        if prior_routes:
+            from .sampling import ReferencePriorTrie
+            object.__setattr__(self, "_reference_prior_trie", ReferencePriorTrie(prior_routes))
+        if (
             type(self.temperature) not in {int, float}
             or not math.isfinite(float(self.temperature))
         ):
@@ -154,7 +172,10 @@ class SamplingConfig:
 
     @property
     def reference_prior_active(self) -> bool:
-        return bool(self.reference_prior_routes) and self.reference_prior_strength > 0.0
+        return bool(self.reference_prior_routes) and (
+            self.reference_prior_strength > 0.0
+            or self.reference_prior_attraction > 0.0
+        )
 
     @property
     def effective_bias_rules(self) -> tuple:
@@ -170,8 +191,14 @@ class SamplingConfig:
         return BiasMatcher(self.effective_bias_rules).active_biases(history, boundaries)
 
     def active_reference_prior(self, history, boundaries=None) -> dict[int, float]:
+        return self.active_reference_prior_snapshot(history, boundaries).biases
+
+    def active_reference_prior_snapshot(self, history, boundaries=None):
         if not self.reference_prior_active:
-            return {}
+            from .sampling import ReferencePriorSnapshot
+            return ReferencePriorSnapshot(
+                self.reference_prior_scope, (), 0.0, 0.0, 0.0, (), {}
+            )
         active_routes = None
         if self.reference_prior_scope == "active":
             active_routes = {
@@ -179,12 +206,15 @@ class SamplingConfig:
                 for rule in self.effective_bias_rules
                 for route in rule.routes
             }
-        from .sampling import reference_prior_biases
-        return reference_prior_biases(
+        from .sampling import reference_prior_snapshot
+        return reference_prior_snapshot(
             self.reference_prior_routes,
             history,
             active_routes=active_routes,
             strength=self.reference_prior_strength,
+            attraction=self.reference_prior_attraction,
+            scope=self.reference_prior_scope,
+            trie=self._reference_prior_trie,
         )
 
     @property
@@ -234,6 +264,9 @@ class SamplingConfig:
             reference_prior_strength=value.get(
                 "reference_prior_strength", defaults.reference_prior_strength
             ),
+            reference_prior_attraction=value.get(
+                "reference_prior_attraction", defaults.reference_prior_attraction
+            ),
         )
 
     @classmethod
@@ -279,6 +312,7 @@ class SamplingConfig:
             ],
             "reference_prior_scope": self.reference_prior_scope,
             "reference_prior_strength": self.reference_prior_strength,
+            "reference_prior_attraction": self.reference_prior_attraction,
         }
 
 
