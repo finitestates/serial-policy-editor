@@ -793,24 +793,29 @@ weight.
 When a reference file is supplied, its model-tokenized weighted routes are also
 embedded in the catalog for an experimental online lexical prior. The runtime
 default is `--reference-prior active`, which applies the prior only to routes
-represented by active bias rules. `--reference-prior global` applies the whole
-reference universe at every generation boundary; `--reference-prior off`
-disables it. `--reference-prior-strength` defaults to `0.25`. Reference
-weights are relative lexical importance rather than literal output
-probabilities. The online prior uses one history-reconstructed weighted token
-trie rather than independently restarting every reference route. Once a route
-prefix is entered, unrelated root branches stop contributing until normal
-failure/suffix transitions return to them. `--reference-prior-attraction`
-provides a separate optional commitment bonus for valid children inside a
-lexical prefix; it defaults to `0`, so the initial behavior is contrastive.
-Use `--reference-prior ballistic-global` to apply that attraction at the root
-as well, giving the uploaded reference universe entry pressure even when it
-has only one viable starting branch. Terminal reference mass dampens
-continuation through a separate EXIT-vs-CONTINUE gate. The gate uses
-`--reference-prior-exit-strength` (default `0.25`) times the log ratio of
-continuation mass to terminal mass; it is independent of both attraction and
-relative child branch scoring. Thus a small `artist` continuation does not
-overpower a much heavier `art` entry.
+represented by active bias rules. `global` uses the complete reference
+universe. The mode presets are:
+
+* `active` / `global`: contrastive branch preference only.
+* `active-exit` / `global-exit`: contrastive preference plus an
+  EXIT-vs-CONTINUE gate.
+* `ballistic-active` / `ballistic-global`: adds root entry attraction.
+* `ballistic-active-exit` / `ballistic-global-exit`: adds both root attraction
+  and the EXIT-vs-CONTINUE gate.
+
+`off` disables the prior. `--reference-prior-strength` defaults to `0.25`.
+Reference weights are relative lexical importance rather than literal output
+probabilities. `--reference-prior-attraction` adds commitment pressure inside
+a lexical prefix and defaults to `0`; `--reference-prior-exit-strength`
+defaults to `0.25` in `*-exit` modes. The exit gate uses that value times the
+log ratio of continuation mass to terminal mass, independently of attraction
+and relative child branch scoring. The online prior uses one
+history-reconstructed weighted token trie rather than independently restarting
+every reference route. Once a route prefix is entered, unrelated root branches
+stop contributing until normal failure/suffix transitions return to them.
+These are runtime presets, not compiler YAML fields; the compiler YAML still
+controls terms, groups, forms, route policy, allocation, and per-term scales,
+while the separate `--reference` YAML supplies the weighted lexical universe.
 With the default legacy allocation, preferred direct, word-aligned, and
 cohesive routes are selected first, then deterministic remaining routes are
 selected round-robin across generated forms until the budget is full. The

@@ -3,11 +3,25 @@ import math
 import pytest
 
 from trajectory_editor.domain import SamplingConfig
+from trajectory_editor.episode_cli import REFERENCE_PRIOR_PRESETS
 from trajectory_editor.sampling import ReferencePriorTrie, reference_prior_snapshot
 
 
 def _routes(*items):
     return tuple(((tuple(route)), float(weight)) for route, weight in items)
+
+
+def test_reference_prior_presets_cover_scope_and_behavior_matrix():
+    assert REFERENCE_PRIOR_PRESETS == {
+        "active": ("active", "contrastive"),
+        "active-exit": ("active", "contrastive-exit"),
+        "ballistic-active": ("active", "ballistic"),
+        "ballistic-active-exit": ("active", "ballistic-exit"),
+        "global": ("global", "contrastive"),
+        "global-exit": ("global", "contrastive-exit"),
+        "ballistic-global": ("global", "ballistic"),
+        "ballistic-global-exit": ("global", "ballistic-exit"),
+    }
 
 
 def test_global_reference_state_drops_unrelated_root_branches_after_entry():
@@ -61,7 +75,8 @@ def test_ballistic_global_applies_attraction_at_the_root():
         routes, [], strength=1.0, attraction=0.5, scope="global"
     )
     ballistic = reference_prior_snapshot(
-        routes, [], strength=1.0, attraction=0.5, scope="ballistic-global"
+        routes, [], strength=1.0, attraction=0.5,
+        scope="global", mode="ballistic"
     )
 
     assert contrastive.biases == {1: pytest.approx(0.0)}
@@ -71,14 +86,16 @@ def test_ballistic_global_applies_attraction_at_the_root():
 def test_sampling_config_preserves_ballistic_global_scope():
     config = SamplingConfig(
         reference_prior_routes=(((1,), 100.0),),
-        reference_prior_scope="ballistic-global",
+        reference_prior_scope="global",
+        reference_prior_mode="ballistic",
         reference_prior_strength=1.0,
         reference_prior_attraction=0.5,
     )
 
     snapshot = config.active_reference_prior_snapshot([])
 
-    assert snapshot.scope == "ballistic-global"
+    assert snapshot.scope == "global"
+    assert snapshot.mode == "ballistic"
     assert snapshot.biases == {1: pytest.approx(0.5)}
 
 
@@ -89,6 +106,7 @@ def test_terminal_mass_creates_an_exit_vs_continue_gate():
         strength=1.0,
         attraction=1.0,
         exit_strength=1.0,
+        mode="contrastive-exit",
     )
 
     assert snapshot.terminal_mass == pytest.approx(100.0)
@@ -104,6 +122,7 @@ def test_exit_gate_is_separate_from_attraction_and_child_branch_scoring():
         strength=1.0,
         attraction=0.5,
         exit_strength=1.0,
+        mode="contrastive-exit",
     )
 
     assert snapshot.outgoing[0][2] == pytest.approx(snapshot.outgoing[1][2])

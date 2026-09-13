@@ -197,23 +197,32 @@ edge's token, remaining mass, information, Phi, and final edge weight.
 
 When `--reference` is supplied, the catalog also embeds model-tokenized
 reference routes for an experimental online lexical prior. The episode editor
-uses that prior in `active` scope by default: it affects only routes represented
-by currently active bias rules. Use `--reference-prior global` to let the whole
-reference universe shape every generation boundary, or `--reference-prior off`
-to disable it. `--reference-prior-strength` controls how strongly relative
-reference weights affect model logits; the default is `0.25`. A reference
-weight is a relative lexical importance, not a literal final probability.
-Global mode maintains one history-reconstructed token-trie state: after a
-reference prefix is entered, unrelated root routes do not restart their
-contribution at every position. `--reference-prior-attraction` adds a separate
-commitment bonus to valid children inside a lexical prefix; it defaults to
-`0`, preserving purely contrastive branch preference unless enabled.
-Use `--reference-prior ballistic-global` to apply that attraction at the root
-as well, allowing the reference universe to exert entry pressure. When a node
-is both terminal and a prefix of a longer entry, terminal mass proportionally
-dampens continuation through a separate EXIT-vs-CONTINUE gate. Its strength
-is controlled by `--reference-prior-exit-strength` (default `0.25`) and does
-not alter root attraction or relative child branch scoring.
+uses `active` scope by default, so it affects only routes represented by
+currently active bias rules. `global` uses the complete reference universe.
+The `--reference-prior` presets are:
+
+* `active` / `global`: contrastive branch preference only.
+* `active-exit` / `global-exit`: contrastive preference plus an
+  EXIT-vs-CONTINUE gate.
+* `ballistic-active` / `ballistic-global`: root entry attraction.
+* `ballistic-active-exit` / `ballistic-global-exit`: root attraction plus the
+  EXIT-vs-CONTINUE gate.
+
+Use `off` to disable the prior. `--reference-prior-strength` controls relative
+branch preference and defaults to `0.25`. A reference weight is a relative
+lexical importance, not a literal final probability.
+`--reference-prior-attraction` adds commitment pressure inside a lexical prefix
+and defaults to `0`; `--reference-prior-exit-strength` defaults to `0.25` in
+`*-exit` modes. The exit gate uses that value times the log ratio of
+continuation mass to terminal mass and does not alter root attraction or
+relative child branch scoring.
+
+Every mode uses one history-reconstructed token trie. After a reference prefix
+is entered, unrelated root routes do not restart their contribution at every
+position; normal failure/suffix transitions return to them.
+These are runtime presets rather than compiler YAML fields. The compiler YAML
+controls terms, groups, forms, route policy, allocation, and per-term scales;
+the separate `--reference` YAML supplies the weighted lexical universe.
 
 For a phrase whose first token is common but whose continuation is distinctive,
 force path mode and make the head gentler:

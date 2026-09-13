@@ -158,6 +158,7 @@ class ReferencePriorTrie:
 @dataclass(frozen=True)
 class ReferencePriorSnapshot:
     scope: str
+    mode: str
     state_prefix: tuple[int, ...]
     root_mass: float
     state_mass: float
@@ -175,9 +176,22 @@ def reference_prior_snapshot(
     attraction: float,
     exit_strength: float = 0.25,
     scope: str = "global",
+    mode: str = "contrastive",
     trie: ReferencePriorTrie | None = None,
 ) -> ReferencePriorSnapshot:
     """Evaluate one stateful lexical prior from model-visible token history."""
+
+    # Accept the pre-mode scope names at this low-level boundary so catalogs
+    # or callers created by the previous experimental interface remain easy
+    # to inspect while the saved runtime representation stays normalized.
+    if scope == "ballistic-global":
+        scope, mode = "global", "ballistic"
+    elif scope == "ballistic-global-exit":
+        scope, mode = "global", "ballistic-exit"
+    if scope not in {"active", "global"}:
+        raise ValueError("reference prior scope must be active or global")
+    if mode not in {"contrastive", "contrastive-exit", "ballistic", "ballistic-exit"}:
+        raise ValueError("unknown reference prior mode")
 
     selected_routes = routes
     if active_routes is not None:
@@ -185,7 +199,7 @@ def reference_prior_snapshot(
             (route, weight) for route, weight in routes if route in active_routes
         )
     if not selected_routes:
-        return ReferencePriorSnapshot(scope, (), 0.0, 0.0, 0.0, (), {})
+        return ReferencePriorSnapshot(scope, mode, (), 0.0, 0.0, 0.0, (), {})
     if history_token_ids is None:
         if any(len(route) > 1 for route, _weight in selected_routes):
             raise ValueError("reference priors require exact context token IDs")
@@ -199,7 +213,7 @@ def reference_prior_snapshot(
     outgoing = trie.outgoing(state)
     if not outgoing:
         return ReferencePriorSnapshot(
-            scope, node.prefix, trie.nodes[0].descendant_mass,
+            scope, mode, node.prefix, trie.nodes[0].descendant_mass,
             node.descendant_mass, node.terminal_mass, (), {},
         )
 
@@ -207,7 +221,7 @@ def reference_prior_snapshot(
     center = sum(log_masses.values()) / len(log_masses)
     continuation_mass = max(0.0, node.descendant_mass - node.terminal_mass)
     exit_continue = 0.0
-    if node.terminal_mass > 0.0 and continuation_mass > 0.0:
+    if mode.endswith("-exit") and node.terminal_mass > 0.0 and continuation_mass > 0.0:
         # Terminal mass is an implicit EXIT option. Since no decoder token
         # represents EXIT, apply its log-odds against CONTINUE uniformly to
         # all continuation children. This is separate from relative child
@@ -217,7 +231,7 @@ def reference_prior_snapshot(
         )
 
     state_attraction = 0.0
-    root_attraction = scope == "ballistic-global"
+    root_attraction = mode.startswith("ballistic")
     if attraction > 0.0 and (state or root_attraction):
         # The constant term makes a singleton continuation attractive even
         # when it is the only route and therefore has no branch contrast.
@@ -232,7 +246,7 @@ def reference_prior_snapshot(
         rows.append((token, mass, branch, state_attraction, exit_continue, total))
         biases[token] = total
     return ReferencePriorSnapshot(
-        scope, node.prefix, trie.nodes[0].descendant_mass,
+        scope, mode, node.prefix, trie.nodes[0].descendant_mass,
         node.descendant_mass, node.terminal_mass, tuple(rows), biases,
     )
 
@@ -246,6 +260,7 @@ def reference_prior_biases(
     attraction: float = 0.0,
     exit_strength: float = 0.25,
     scope: str = "global",
+    mode: str = "contrastive",
 ) -> dict[int, float]:
     """Compatibility wrapper returning only online prior logit adjustments."""
 
@@ -257,6 +272,7 @@ def reference_prior_biases(
         attraction=attraction,
         exit_strength=exit_strength,
         scope=scope,
+        mode=mode,
     ).biases
 
 

@@ -71,6 +71,16 @@ SAMPLER_ALIASES = {
     "presence": "presence_penalty",
     "frequency": "frequency_penalty",
 }
+REFERENCE_PRIOR_PRESETS = {
+    "active": ("active", "contrastive"),
+    "active-exit": ("active", "contrastive-exit"),
+    "ballistic-active": ("active", "ballistic"),
+    "ballistic-active-exit": ("active", "ballistic-exit"),
+    "global": ("global", "contrastive"),
+    "global-exit": ("global", "contrastive-exit"),
+    "ballistic-global": ("global", "ballistic"),
+    "ballistic-global-exit": ("global", "ballistic-exit"),
+}
 
 
 def _random_seed() -> int:
@@ -188,7 +198,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--reference-prior",
-        choices=("off", "active", "global", "ballistic-global"),
+        choices=(
+            "off",
+            "active", "active-exit",
+            "ballistic-active", "ballistic-active-exit",
+            "global", "global-exit",
+            "ballistic-global", "ballistic-global-exit",
+        ),
         help="apply weighted catalog reference routes as a runtime prior (active by default)",
     )
     parser.add_argument(
@@ -325,6 +341,7 @@ def _sampling_from_args(
     values.update({
         "reference_prior_routes": base.reference_prior_routes,
         "reference_prior_scope": base.reference_prior_scope,
+        "reference_prior_mode": base.reference_prior_mode,
         "reference_prior_strength": base.reference_prior_strength,
         "reference_prior_attraction": base.reference_prior_attraction,
         "reference_prior_exit_strength": base.reference_prior_exit_strength,
@@ -349,6 +366,7 @@ def _apply_catalog_reference_prior(
             sampling,
             reference_prior_routes=(),
             reference_prior_scope="active",
+            reference_prior_mode="contrastive",
         )
     if catalog is None or not catalog.reference_prior_routes:
         raise EditorError(
@@ -375,7 +393,8 @@ def _apply_catalog_reference_prior(
             (route.token_ids, route.weight)
             for route in catalog.reference_prior_routes
         ),
-        reference_prior_scope=requested,
+        reference_prior_scope=REFERENCE_PRIOR_PRESETS[requested][0],
+        reference_prior_mode=REFERENCE_PRIOR_PRESETS[requested][1],
         reference_prior_strength=strength,
         reference_prior_attraction=attraction,
         reference_prior_exit_strength=exit_strength,

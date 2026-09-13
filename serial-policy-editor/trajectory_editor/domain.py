@@ -34,6 +34,7 @@ class SamplingConfig:
     bias_groups: tuple = ()
     reference_prior_routes: tuple = ()
     reference_prior_scope: str = "active"
+    reference_prior_mode: str = "contrastive"
     reference_prior_strength: float = 0.25
     reference_prior_attraction: float = 0.0
     reference_prior_exit_strength: float = 0.25
@@ -62,9 +63,14 @@ class SamplingConfig:
         if len({group.name for group in groups}) != len(groups):
             raise EditorError("duplicate bias group")
         object.__setattr__(self, "bias_groups", tuple(sorted(groups, key=lambda group: group.name)))
-        if self.reference_prior_scope not in {"active", "global", "ballistic-global"}:
+        if self.reference_prior_scope not in {"active", "global"}:
+            raise EditorError("reference_prior_scope must be active or global")
+        if self.reference_prior_mode not in {
+            "contrastive", "contrastive-exit", "ballistic", "ballistic-exit"
+        }:
             raise EditorError(
-                "reference_prior_scope must be active, global, or ballistic-global"
+                "reference_prior_mode must be contrastive, contrastive-exit, "
+                "ballistic, or ballistic-exit"
             )
         prior_routes = []
         try:
@@ -189,7 +195,10 @@ class SamplingConfig:
         return bool(self.reference_prior_routes) and (
             self.reference_prior_strength > 0.0
             or self.reference_prior_attraction > 0.0
-            or self.reference_prior_exit_strength > 0.0
+            or (
+                self.reference_prior_mode.endswith("-exit")
+                and self.reference_prior_exit_strength > 0.0
+            )
         )
 
     @property
@@ -212,7 +221,8 @@ class SamplingConfig:
         if not self.reference_prior_active:
             from .sampling import ReferencePriorSnapshot
             return ReferencePriorSnapshot(
-                self.reference_prior_scope, (), 0.0, 0.0, 0.0, (), {}
+                self.reference_prior_scope, self.reference_prior_mode,
+                (), 0.0, 0.0, 0.0, (), {}
             )
         active_routes = None
         if self.reference_prior_scope == "active":
@@ -230,6 +240,7 @@ class SamplingConfig:
             attraction=self.reference_prior_attraction,
             exit_strength=self.reference_prior_exit_strength,
             scope=self.reference_prior_scope,
+            mode=self.reference_prior_mode,
             trie=self._reference_prior_trie,
         )
 
@@ -254,6 +265,36 @@ class SamplingConfig:
                 "unsupported bias fields: " + ", ".join(sorted(removed))
             )
         defaults = cls()
+        raw_scope = value.get("reference_prior_scope", defaults.reference_prior_scope)
+        raw_mode = value.get("reference_prior_mode")
+        raw_exit_strength = value.get(
+            "reference_prior_exit_strength", defaults.reference_prior_exit_strength
+        )
+        legacy_exit = value.get("reference_prior_exit_strength", 0.0)
+        if raw_mode is None:
+            # Normalize records written before scope and behavior mode were
+            # separated. A completely partial mapping should retain the
+            # current defaults rather than infer a legacy mode from them.
+            if not ({
+                "reference_prior_scope", "reference_prior_exit_strength"
+            } & set(value)):
+                raw_mode = defaults.reference_prior_mode
+            if raw_mode is None and raw_scope == "ballistic-global":
+                raw_scope = "global"
+                raw_mode = (
+                    "ballistic-exit"
+                    if float(legacy_exit) > 0.0
+                    else "ballistic"
+                )
+            elif raw_mode is None and raw_scope == "ballistic-global-exit":
+                raw_scope = "global"
+                raw_mode = "ballistic-exit"
+            elif raw_mode is None:
+                raw_mode = (
+                    "contrastive-exit"
+                    if float(legacy_exit) > 0.0
+                    else "contrastive"
+                )
         return cls(
             temperature=value.get("temperature", defaults.temperature),
             top_k=value.get("top_k", defaults.top_k),
@@ -275,8 +316,9 @@ class SamplingConfig:
                 "reference_prior_routes", defaults.reference_prior_routes
             ),
             reference_prior_scope=value.get(
-                "reference_prior_scope", defaults.reference_prior_scope
+                "reference_prior_scope", raw_scope
             ),
+            reference_prior_mode=raw_mode,
             reference_prior_strength=value.get(
                 "reference_prior_strength", defaults.reference_prior_strength
             ),
@@ -293,6 +335,27 @@ class SamplingConfig:
         """Restore a complete saved configuration without filling defaults."""
         if not isinstance(value, Mapping):
             raise EditorError("saved sampler settings must be an object")
+        value = dict(value)
+        if "reference_prior_mode" not in value:
+            # Older saved segments used ballistic-global as a scope and had
+            # no separate mode field. Fill the new fields before checking
+            # completeness so replay remains reconstructable.
+            legacy_scope = value.get("reference_prior_scope", "active")
+            legacy_exit = value.get("reference_prior_exit_strength", 0.0)
+            if legacy_scope == "ballistic-global":
+                value["reference_prior_scope"] = "global"
+                value["reference_prior_mode"] = (
+                    "ballistic-exit" if float(legacy_exit) > 0.0 else "ballistic"
+                )
+            elif legacy_scope == "ballistic-global-exit":
+                value["reference_prior_scope"] = "global"
+                value["reference_prior_mode"] = "ballistic-exit"
+            else:
+                value["reference_prior_mode"] = (
+                    "contrastive-exit" if float(legacy_exit) > 0.0 else "contrastive"
+                )
+        if "reference_prior_exit_strength" not in value:
+            value["reference_prior_exit_strength"] = 0.0
         removed = {"logit_bias", "sequence_bias", "scoped_bias"} & set(value)
         if removed:
             raise EditorError(
@@ -330,6 +393,7 @@ class SamplingConfig:
                 for route, weight in self.reference_prior_routes
             ],
             "reference_prior_scope": self.reference_prior_scope,
+            "reference_prior_mode": self.reference_prior_mode,
             "reference_prior_strength": self.reference_prior_strength,
             "reference_prior_attraction": self.reference_prior_attraction,
             "reference_prior_exit_strength": self.reference_prior_exit_strength,
