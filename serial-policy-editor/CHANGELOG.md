@@ -7,6 +7,13 @@
   multi-word terms.
 - Add per-term `auto`/`tail`/`path` mode selection with optional head and
   continuation scales for path rules.
+- Add automatic `beheaded` path handling for bare boundary and short
+  one- or two-letter route heads, while preserving explicit ordinary path mode.
+- Add opt-in `cohesive` route selection for retaining useful whole-word-like
+  decompositions while filtering tiny alternate subword fragments.
+- Rank direct, word-aligned, and cohesive routes ahead of fragmented tokenizer
+  routes instead of automatically reserving the tokenizer's default path.
+- Add tail-only warning fallbacks when cohesive compilation finds no safe route.
 - Replace the experimental bias representations with unified logical rules,
   including telescoping path semantics for lexical multi-token terms.
 - Add durable runtime groups with append-only membership, shared bias amounts,

@@ -8,7 +8,8 @@ edges are only biased once.
 ``tail`` preserves the existing ``prefix -> final token`` behavior.  ``path``
 is the telescoping form used for lexical terms that are split into multiple
 tokens: it biases the first viable edge and then the next edge after each
-matching prefix.
+matching prefix.  ``beheaded`` uses the same telescoping matcher but suppresses
+the first edge entirely.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from typing import Any
 from .domain import EditorError
 
 
-BIAS_MODES = ("tail", "path")
+BIAS_MODES = ("tail", "path", "beheaded")
 LEGACY_LIFETIMES = ("sentence", "newline")
 GROUP_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 
@@ -103,6 +104,8 @@ class BiasRule:
             self.continuation_scale,
             path="bias rule continuation_scale",
         )
+        if self.mode == "beheaded":
+            head_scale = 0.0
         object.__setattr__(self, "routes", tuple(sorted(routes)))
         object.__setattr__(self, "triggers", tuple(sorted(triggers)))
         object.__setattr__(self, "bias", float(self.bias))
@@ -329,6 +332,8 @@ def _path_tokens(
             if _endswith(history, prefix):
                 token = route[prefix_length]
                 scale = head_scale if prefix_length == 0 else continuation_scale
+                if scale == 0:
+                    break
                 result[token] = max(result.get(token, 0.0), scale)
                 break
     return result
@@ -338,11 +343,11 @@ def _rule_tokens(rule: BiasRule, history: Sequence[int], boundaries: Any) -> dic
     span = _scoped_span(rule, history, boundaries)
     if rule.triggers and not _trigger_matches(rule, span):
         return {}
-    if rule.mode == "path":
+    if rule.mode in {"path", "beheaded"}:
         return _path_tokens(
             rule.routes,
             span,
-            head_scale=rule.head_scale,
+            head_scale=0.0 if rule.mode == "beheaded" else rule.head_scale,
             continuation_scale=rule.continuation_scale,
         )
     return _tail_tokens(rule.routes, span)
@@ -391,8 +396,9 @@ def routes_for_catalog_entry(entry: Any, bias: float, *, mode: str | None = None
         selected = mode or route.mode
         if selected not in BIAS_MODES:
             raise EditorError(f"catalog route has unsupported bias mode {selected!r}")
+        head_scale = 0.0 if selected == "beheaded" else route.head_scale
         grouped.setdefault(
-            (selected, route.head_scale, route.continuation_scale),
+            (selected, head_scale, route.continuation_scale),
             [],
         ).append(tuple(route.token_ids))
     return tuple(

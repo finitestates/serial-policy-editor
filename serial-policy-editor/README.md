@@ -764,8 +764,9 @@ policy-editor-bias \
   --output catalog.json
 ```
 
-Use `--level minimal`, `--level standard`, or `--level exhaustive` to select
-canonical routes, bounded alternate routes, or a broader exact-route search.
+Use `--level minimal`, `--level standard`, or `--level exhaustive` to select a
+single best route per generated form, bounded route candidates, or a broader
+exact-route search.
 `--max-route-tokens` controls decomposition depth, while `--max-routes`
 controls how many routes are retained. `--term TEXT` may be repeated for
 one-off compilation without a YAML file. YAML quoting is only YAML syntax:
@@ -774,10 +775,21 @@ and case expansion. The compiler adds leading-space variants automatically,
 so users do not need to write them.
 `max_routes` is a per-term cap across all generated case, spacing, plural, and
 suffix forms; increase it only for terms where the extra routes are useful.
-Canonical routes are reserved first, then deterministic alternate routes are
-selected round-robin across generated forms until the budget is full.
-Per-term YAML may set `mode: auto`, `tail`, or `path`; `auto` preserves the
-default lexical-term/phrase distinction. Case controls include sentence case,
+Preferred direct, word-aligned, and cohesive routes are selected first, then
+deterministic remaining routes are selected round-robin across generated forms
+until the budget is full. The tokenizer's default decomposition is only one
+candidate and is not automatically privileged. Use `--route-policy cohesive`
+(or the corresponding YAML option) to remove fragmented routes made from tiny
+internal subword pieces. Cohesive mode preserves whitespace-separated pieces
+such as `port` + `of` + `call`, but does not surface routes such as `o` + `f`,
+`m` + `y`, or `an` + `other`. `--min-route-piece-chars` changes the default
+three-character threshold for non-whole-word-like pieces. If no cohesive route
+exists for a term, the compiler uses the best exact route as a tail-only
+fallback and emits a warning.
+Per-term YAML may set `mode: auto`, `tail`, `path`, or `beheaded`; `auto` uses
+beheaded path semantics for bare boundary heads and one- or two-letter route
+heads, then preserves the ordinary lexical-term/phrase distinction. Case
+controls include sentence case,
 so a phrase such as `my favorite chair` can also search `My favorite chair`.
 Path terms may also set
 `head_scale` and `continuation_scale` to make a common head gentler while the

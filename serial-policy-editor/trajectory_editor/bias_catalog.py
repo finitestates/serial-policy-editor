@@ -22,12 +22,16 @@ from .domain import EditorError
 
 CATALOG_FORMAT = "spe-bias-catalog-v1"
 LEVELS = ("minimal", "standard", "exhaustive")
-MODES = ("tail", "path")
+MODES = ("tail", "path", "beheaded")
 COMPILE_MODES = ("auto", *MODES)
+ROUTE_POLICIES = ("all", "cohesive")
+ROUTE_CLASSES = ("direct", "word_aligned", "cohesive", "fragmented")
 DEFAULT_LEVEL = "standard"
 DEFAULT_MAX_ROUTES = 4096
 DEFAULT_STANDARD_MAX_ROUTE_TOKENS = 2
 DEFAULT_EXHAUSTIVE_MAX_ROUTE_TOKENS = 8
+DEFAULT_ROUTE_POLICY = "all"
+DEFAULT_MIN_ROUTE_PIECE_CHARS = 3
 GROUP_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 SurfaceIndex = Mapping[str, Sequence[tuple[str, Sequence[int]]]]
 
@@ -125,6 +129,151 @@ def _parse_mode(value: Any, *, path: str) -> str:
     return result
 
 
+def _parse_route_policy(value: Any, *, path: str) -> str:
+    result = str(value).strip().lower()
+    if result not in ROUTE_POLICIES:
+        raise _error(path, f"must be one of {', '.join(ROUTE_POLICIES)}")
+    return result
+
+
+_WORD_BOUNDARY_MARKERS = frozenset(("▁", "Ġ"))
+
+
+def _token_content(token_text: str) -> str:
+    content = str(token_text).strip()
+    while content and content[0] in _WORD_BOUNDARY_MARKERS:
+        content = content[1:].lstrip()
+    return content
+
+
+def _starts_word_boundary(token_text: str) -> bool:
+    text = str(token_text)
+    return bool(text and (text[0].isspace() or text[0] in _WORD_BOUNDARY_MARKERS))
+
+
+def _ends_word_boundary(token_text: str) -> bool:
+    text = str(token_text)
+    return bool(text and text[-1].isspace())
+
+
+def _is_possessive_suffix(token_text: str) -> bool:
+    return _token_content(token_text).lower() in {"'s", "’s"}
+
+
+def _has_short_head(token_text: str) -> bool:
+    """Recognize a bare boundary or one- or two-letter route head."""
+
+    content = _token_content(token_text)
+    if not content:
+        return True
+    return 1 <= len(content) <= 2 and all(character.isalpha() for character in content)
+
+
+def _route_is_cohesive(token_texts: Sequence[str], *, min_piece_chars: int) -> bool:
+    """Keep whole-word-like pieces and sufficiently informative subword chunks.
+
+    A token is whole-word-like when it begins and ends at a word boundary in
+    the route.  This keeps decompositions such as ``port`` + `` of`` +
+    `` call`` while rejecting alternatives such as ``o`` + ``f`` or a run of
+    tiny subword fragments.  Punctuation-only pieces do not make a route less
+    cohesive.
+    """
+
+    for index, raw_text in enumerate(token_texts):
+        content = _token_content(raw_text)
+        if not content or not any(character.isalnum() for character in content):
+            continue
+        content_chars = sum(character.isalnum() for character in content)
+        whole_word = (
+            (index == 0 or _starts_word_boundary(raw_text))
+            and (
+                index == len(token_texts) - 1
+                or _starts_word_boundary(token_texts[index + 1])
+                or _ends_word_boundary(raw_text)
+            )
+        )
+        if (
+            content_chars < min_piece_chars
+            and not whole_word
+            and not _is_possessive_suffix(raw_text)
+        ):
+            return False
+    return True
+
+
+def _route_prefix_is_cohesive(
+    token_texts: Sequence[str],
+    *,
+    min_piece_chars: int,
+) -> bool:
+    """Reject a cohesive route as soon as a completed tiny piece is invalid."""
+
+    for index, raw_text in enumerate(token_texts[:-1]):
+        content = _token_content(raw_text)
+        if not content or not any(character.isalnum() for character in content):
+            continue
+        content_chars = sum(character.isalnum() for character in content)
+        if content_chars >= min_piece_chars:
+            continue
+        whole_word = (
+            (index == 0 or _starts_word_boundary(raw_text))
+            and (
+                _starts_word_boundary(token_texts[index + 1])
+                or _ends_word_boundary(raw_text)
+            )
+        )
+        if not whole_word and not _is_possessive_suffix(raw_text):
+            return False
+    return True
+
+
+def _is_word_aligned_route(token_texts: Sequence[str]) -> bool:
+    """Return whether each token occupies one whitespace-delimited word."""
+
+    for index, raw_text in enumerate(token_texts):
+        content = _token_content(raw_text)
+        if any(character.isspace() for character in content):
+            return False
+        if index == 0:
+            continue
+        previous = token_texts[index - 1]
+        if not (_starts_word_boundary(raw_text) or _ends_word_boundary(previous)):
+            return False
+    return True
+
+
+def _route_class(token_texts: Sequence[str], *, min_piece_chars: int) -> str:
+    if len(token_texts) == 1:
+        return "direct"
+    if _is_word_aligned_route(token_texts):
+        return "word_aligned"
+    if _route_is_cohesive(token_texts, min_piece_chars=min_piece_chars):
+        return "cohesive"
+    return "fragmented"
+
+
+def _is_preferred_route(route_class: str) -> bool:
+    return route_class != "fragmented"
+
+
+def _route_mode(
+    default_mode: str,
+    token_texts: Sequence[str],
+    *,
+    allow_beheaded: bool,
+) -> str:
+    if allow_beheaded and token_texts and _has_short_head(token_texts[0]):
+        return "beheaded"
+    return default_mode
+
+
+def _title_case(value: str) -> str:
+    """Title-case a surface while keeping terminal possessive ``'s`` lower-case."""
+
+    titled = value.title()
+    return re.sub(r"(['’])S(?=\b)", r"\1s", titled)
+
+
 @dataclass(frozen=True)
 class CompileOptions:
     level: str = DEFAULT_LEVEL
@@ -137,6 +286,8 @@ class CompileOptions:
     suffixes: tuple[str, ...] = ()
     max_routes: int = DEFAULT_MAX_ROUTES
     max_route_tokens: int | None = None
+    route_policy: str = DEFAULT_ROUTE_POLICY
+    min_route_piece_chars: int = DEFAULT_MIN_ROUTE_PIECE_CHARS
 
     def __post_init__(self) -> None:
         if self.level not in LEVELS:
@@ -154,6 +305,10 @@ class CompileOptions:
             raise EditorError("max_routes must be positive")
         if self.max_route_tokens is not None and self.max_route_tokens < 1:
             raise EditorError("max_route_tokens must be positive")
+        if self.route_policy not in ROUTE_POLICIES:
+            raise EditorError(f"unknown route policy {self.route_policy!r}")
+        if self.min_route_piece_chars < 1:
+            raise EditorError("min_route_piece_chars must be positive")
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any] | None, *, base: "CompileOptions" | None = None,
@@ -197,6 +352,15 @@ class CompileOptions:
             max_routes=_as_int(value.get("max_routes", current.max_routes),
                                path=f"{path}.max_routes", minimum=1),
             max_route_tokens=max_route_tokens,
+            route_policy=_parse_route_policy(
+                value.get("route_policy", current.route_policy),
+                path=f"{path}.route_policy",
+            ),
+            min_route_piece_chars=_as_int(
+                value.get("min_route_piece_chars", current.min_route_piece_chars),
+                path=f"{path}.min_route_piece_chars",
+                minimum=1,
+            ),
         )
 
     def route_limit(self) -> int:
@@ -219,6 +383,11 @@ class CompiledRoute:
     sources: tuple[str, ...] = ()
     head_scale: float = 1.0
     continuation_scale: float = 1.0
+    route_class: str = "fragmented"
+
+    def __post_init__(self) -> None:
+        if self.route_class not in ROUTE_CLASSES:
+            raise EditorError(f"unknown route class {self.route_class!r}")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -227,6 +396,7 @@ class CompiledRoute:
             "token_texts": list(self.token_texts),
             "mode": self.mode,
             "strategies": list(self.strategies),
+            "route_class": self.route_class,
             **({"sources": list(self.sources)} if self.sources else {}),
             **({"head_scale": self.head_scale} if self.head_scale != 1.0 else {}),
             **({"continuation_scale": self.continuation_scale}
@@ -243,6 +413,7 @@ class CatalogEntry:
     source: str | None = None
     members: tuple[str, ...] = ()
     level: str | None = None
+    warnings: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -257,6 +428,8 @@ class CatalogEntry:
             result["level"] = self.level
         if self.members:
             result["members"] = list(self.members)
+        if self.warnings:
+            result["warnings"] = list(self.warnings)
         return result
 
 
@@ -313,9 +486,13 @@ class BiasCatalog:
                     if kind == "group" else normalize_scalar(str(raw_name), path="entries.name"))
             routes = _routes_from_dict(raw_entry.get("routes", ()), path=f"entries.{name}.routes")
             members = tuple(str(item) for item in raw_entry.get("members", ()))
+            warnings = tuple(str(item) for item in raw_entry.get("warnings", ()))
             mode = raw_entry.get("default_mode")
             if mode is not None and mode not in MODES:
-                raise _error(f"entries.{name}.default_mode", "must be tail or path")
+                raise _error(
+                    f"entries.{name}.default_mode",
+                    f"must be one of {', '.join(MODES)}",
+                )
             entries[name] = CatalogEntry(
                 name=name,
                 kind=kind,
@@ -324,6 +501,7 @@ class BiasCatalog:
                 source=raw_entry.get("source"),
                 members=members,
                 level=raw_entry.get("level"),
+                warnings=warnings,
             )
         return cls(
             model=dict(value.get("model", {})),
@@ -380,13 +558,14 @@ def _model_identity(model: Mapping[str, Any]) -> tuple[Any, ...]:
 
 
 def _merge_routes(left: Sequence[CompiledRoute], right: Sequence[CompiledRoute]) -> tuple[CompiledRoute, ...]:
-    merged: dict[tuple[tuple[int, ...], str, float, float], CompiledRoute] = {}
+    merged: dict[tuple[tuple[int, ...], str, float, float, str], CompiledRoute] = {}
     for route in (*left, *right):
         key = (
             route.token_ids,
             route.mode,
             route.head_scale,
             route.continuation_scale,
+            route.route_class,
         )
         current = merged.get(key)
         if current is None:
@@ -401,6 +580,7 @@ def _merge_routes(left: Sequence[CompiledRoute], right: Sequence[CompiledRoute])
             sources=tuple(dict.fromkeys((*current.sources, *route.sources))),
             head_scale=current.head_scale,
             continuation_scale=current.continuation_scale,
+            route_class=current.route_class,
         )
     return tuple(merged.values())
 
@@ -414,6 +594,7 @@ def _merge_entries(left: CatalogEntry, right: CatalogEntry) -> CatalogEntry:
         source=left.source,
         members=tuple(dict.fromkeys((*left.members, *right.members))),
         level=left.level,
+        warnings=tuple(dict.fromkeys((*left.warnings, *right.warnings))),
     )
 
 
@@ -434,11 +615,17 @@ def _routes_from_dict(value: Any, *, path: str) -> tuple[CompiledRoute, ...]:
             raise _error(f"{route_path}.token_ids", "must contain integers") from exc
         mode = raw.get("mode", "tail")
         if mode not in MODES:
-            raise _error(f"{route_path}.mode", "must be tail or path")
+            raise _error(f"{route_path}.mode", f"must be one of {', '.join(MODES)}")
         texts = tuple(str(text) for text in raw.get("texts", ()))
         token_texts = tuple(str(text) for text in raw.get("token_texts", ()))
         strategies = tuple(str(strategy) for strategy in raw.get("strategies", ()))
         sources = tuple(str(source) for source in raw.get("sources", ()))
+        route_class = str(raw.get("route_class", "fragmented"))
+        if route_class not in ROUTE_CLASSES:
+            raise _error(
+                f"{route_path}.route_class",
+                f"must be one of {', '.join(ROUTE_CLASSES)}",
+            )
         routes.append(CompiledRoute(
             ids,
             texts,
@@ -451,6 +638,7 @@ def _routes_from_dict(value: Any, *, path: str) -> tuple[CompiledRoute, ...]:
                 raw.get("continuation_scale", 1.0),
                 path=f"{route_path}.continuation_scale",
             ),
+            route_class,
         ))
     return tuple(routes)
 
@@ -548,7 +736,7 @@ def generate_forms(source: str, options: CompileOptions, explicit_forms: Sequenc
             elif case == "lower":
                 value = base.lower()
             elif case == "title":
-                value = base.title()
+                value = _title_case(base)
             elif case == "sentence":
                 value = base.capitalize()
             else:
@@ -594,6 +782,8 @@ def _enumerate_routes(
     index: SurfaceIndex,
     *,
     max_tokens: int,
+    route_policy: str = DEFAULT_ROUTE_POLICY,
+    min_route_piece_chars: int = DEFAULT_MIN_ROUTE_PIECE_CHARS,
 ) -> tuple[tuple[int, ...], ...]:
     routes: list[tuple[int, ...]] = []
     frontier: list[tuple[int, tuple[int, ...]]] = [(0, ())]
@@ -605,6 +795,15 @@ def _enumerate_routes(
             except (RuntimeError, TypeError, ValueError):
                 rendered = None
             if rendered == surface:
+                if route_policy == "cohesive":
+                    token_texts = tuple(
+                        str(backend.token_text(token)) for token in tokens
+                    )
+                    if not _route_is_cohesive(
+                        token_texts,
+                        min_piece_chars=min_route_piece_chars,
+                    ):
+                        continue
                 routes.append(tokens)
             continue
         if len(tokens) >= max_tokens:
@@ -614,7 +813,17 @@ def _enumerate_routes(
                 continue
             next_position = position + len(piece)
             for token_id in reversed(token_ids):
-                frontier.append((next_position, (*tokens, int(token_id))))
+                candidate = (*tokens, int(token_id))
+                if route_policy == "cohesive":
+                    token_texts = tuple(
+                        str(backend.token_text(token)) for token in candidate
+                    )
+                    if not _route_prefix_is_cohesive(
+                        token_texts,
+                        min_piece_chars=min_route_piece_chars,
+                    ):
+                        continue
+                frontier.append((next_position, candidate))
     return tuple(dict.fromkeys(routes))
 
 
@@ -622,26 +831,40 @@ def _route_quality(
     route: Sequence[int],
     token_texts: Sequence[str],
     all_routes: Sequence[Sequence[int]],
+    *,
+    route_class: str,
+    min_piece_chars: int,
 ) -> tuple[Any, ...]:
-    """Return a deterministic, tokenizer-local quality key for an alternate route.
+    """Return a deterministic, tokenizer-local quality key for a route.
 
-    Lower keys are preferred.  The route count and tiny-piece penalties favor
-    cohesive decompositions; the leading-piece and local fan-out terms prefer
-    routes whose first edge carries more of the term and is less ambiguous.
-    Token IDs only break otherwise identical ties.
+    Lower keys are preferred. Direct and word-aligned routes outrank cohesive
+    subword routes, which outrank fragmented routes. Token count, piece size,
+    local fan-out, and token IDs provide deterministic tie breakers without
+    requiring corpus or model-probability information.
     """
 
-    content_lengths = tuple(len(text.replace(" ", "")) for text in token_texts)
-    tiny_piece_count = sum(length <= 1 for length in content_lengths)
+    content_lengths = tuple(
+        sum(character.isalnum() for character in _token_content(text))
+        for text in token_texts
+    )
+    tiny_piece_count = sum(length < min_piece_chars for length in content_lengths)
+    boundary_breaks = sum(
+        index > 0
+        and not _starts_word_boundary(token_texts[index])
+        and not _ends_word_boundary(token_texts[index - 1])
+        for index in range(len(token_texts))
+    )
     head = route[0]
     head_fanout = sum(
         1 for candidate in all_routes if candidate and candidate[0] == head
     )
     return (
+        ROUTE_CLASSES.index(route_class),
         len(route),
+        boundary_breaks,
         tiny_piece_count,
-        -content_lengths[0],
-        -min(content_lengths),
+        -max(content_lengths, default=0),
+        -content_lengths[0] if content_lengths else 0,
         head_fanout,
         tuple(route),
     )
@@ -677,43 +900,101 @@ def compile_term(
         mode = "tail" if any(character.isspace() for character in source) else "path"
     forms = generate_forms(source, options, explicit_forms)
     index = surface_index if surface_index is not None else _surface_index(backend)
-    route_map: dict[tuple[int, ...], CompiledRoute] = {}
-    canonical_order: list[tuple[int, ...]] = []
-    canonical_routes: set[tuple[int, ...]] = set()
-    alternate_buckets: list[list[tuple[int, ...]]] = []
+    form_specs = tuple((form, _canonical_route(form, backend)) for form in forms)
 
-    for form in forms:
-        canonical = _canonical_route(form, backend)
-        if canonical not in canonical_routes:
-            canonical_routes.add(canonical)
-            canonical_order.append(canonical)
-
-        candidates: list[tuple[tuple[int, ...], str]] = [(canonical, "canonical")]
-        form_alternates: list[tuple[int, ...]] = []
-        if options.level != "minimal":
-            for route in _enumerate_routes(
+    def candidates_for(
+        route_policy: str,
+    ) -> list[tuple[str, tuple[tuple[int, ...], ...]]]:
+        result: list[tuple[str, tuple[tuple[int, ...], ...]]] = []
+        for form, tokenizer_route in form_specs:
+            max_tokens = max(options.route_limit(), len(tokenizer_route))
+            enumerated = _enumerate_routes(
                 form,
                 backend,
                 index,
-                max_tokens=options.route_limit(),
-            ):
-                if route != canonical:
-                    candidates.append((route, "alternate"))
-                    form_alternates.append(route)
+                max_tokens=max_tokens,
+                route_policy=route_policy,
+                min_route_piece_chars=options.min_route_piece_chars,
+            )
+            candidates = tuple(dict.fromkeys((tokenizer_route, *enumerated)))
+            classified = {
+                route: _route_class(
+                    tuple(str(backend.token_text(token)) for token in route),
+                    min_piece_chars=options.min_route_piece_chars,
+                )
+                for route in candidates
+            }
+            if route_policy == "cohesive":
+                candidates = tuple(
+                    route for route in candidates
+                    if _is_preferred_route(classified[route])
+                )
+            if not candidates:
+                result.append((form, ()))
+                continue
+            all_candidates = tuple(candidates)
+            ordered = sorted(
+                candidates,
+                key=lambda route: _route_quality(
+                    route,
+                    tuple(str(backend.token_text(token)) for token in route),
+                    all_candidates,
+                    route_class=classified[route],
+                    min_piece_chars=options.min_route_piece_chars,
+                ),
+            )
+            if options.level == "minimal":
+                ordered = ordered[:1]
+            result.append((form, tuple(ordered)))
+        return result
 
-        for route, strategy in candidates:
+    form_routes = candidates_for(options.route_policy)
+    fallback_tail = (
+        options.route_policy == "cohesive"
+        and not any(routes for _, routes in form_routes)
+    )
+    warning: str | None = None
+    if fallback_tail:
+        warning = (
+            f"term {name!r} has no cohesive routes; "
+            "using a tail-only fallback"
+        )
+        form_routes = [
+            (form, routes[:1])
+            for form, routes in candidates_for("all")
+        ]
+
+    route_map: dict[tuple[int, ...], CompiledRoute] = {}
+    route_classes: dict[tuple[int, ...], str] = {}
+    for form, routes in form_routes:
+        for route in routes:
             token_texts = tuple(str(backend.token_text(token)) for token in route)
+            route_class = _route_class(
+                token_texts,
+                min_piece_chars=options.min_route_piece_chars,
+            )
+            route_classes[route] = route_class
+            route_mode = "tail" if fallback_tail else _route_mode(
+                "path" if options.mode == "beheaded" else mode,
+                token_texts,
+                allow_beheaded=options.mode in {"auto", "beheaded"},
+            )
+            head_scale = 0.0 if route_mode == "beheaded" else options.head_scale
+            strategy = "fallback" if fallback_tail else (
+                "preferred" if _is_preferred_route(route_class) else "derived"
+            )
             existing = route_map.get(route)
             if existing is None:
                 route_map[route] = CompiledRoute(
                     token_ids=route,
                     texts=(form,),
                     token_texts=token_texts,
-                    mode=mode,
+                    mode=route_mode,
                     strategies=(strategy,),
                     sources=(name,),
-                    head_scale=options.head_scale,
+                    head_scale=head_scale,
                     continuation_scale=options.continuation_scale,
+                    route_class=route_class,
                 )
             else:
                 route_map[route] = CompiledRoute(
@@ -725,55 +1006,62 @@ def compile_term(
                     sources=existing.sources,
                     head_scale=existing.head_scale,
                     continuation_scale=existing.continuation_scale,
+                    route_class=existing.route_class,
                 )
 
-        if form_alternates:
-            unique = tuple(dict.fromkeys(form_alternates))
-            alternate_buckets.append(sorted(
-                unique,
-                key=lambda route: _route_quality(
-                    route,
-                    route_map[route].token_texts,
-                    tuple(candidate for candidate, _ in candidates),
-                ),
-            ))
-
-    if len(canonical_order) > options.max_routes:
-        raise EditorError(
-            f"canonical routes for term {name!r} exceed "
-            f"max_routes={options.max_routes}"
-        )
-
-    selected_order = list(canonical_order)
-    selected = set(selected_order)
-    while len(selected_order) < options.max_routes and alternate_buckets:
-        progressed = False
-        remaining_buckets: list[list[tuple[int, ...]]] = []
-        for bucket in alternate_buckets:
-            while bucket and bucket[0] in selected:
-                bucket.pop(0)
-            if not bucket:
-                continue
-            route = bucket.pop(0)
-            progressed = True
-            if route not in selected:
-                selected.add(route)
-                selected_order.append(route)
-            if bucket:
-                remaining_buckets.append(bucket)
-            if len(selected_order) >= options.max_routes:
+    def select_buckets(
+        buckets: Sequence[Sequence[tuple[int, ...]]],
+        selected_order: list[tuple[int, ...]],
+        selected: set[tuple[int, ...]],
+    ) -> None:
+        remaining = [list(bucket) for bucket in buckets if bucket]
+        while len(selected_order) < options.max_routes and remaining:
+            progressed = False
+            next_remaining: list[list[tuple[int, ...]]] = []
+            for bucket in remaining:
+                while bucket and bucket[0] in selected:
+                    bucket.pop(0)
+                if not bucket:
+                    continue
+                route = bucket.pop(0)
+                progressed = True
+                if route not in selected:
+                    selected.add(route)
+                    selected_order.append(route)
+                if bucket:
+                    next_remaining.append(bucket)
+                if len(selected_order) >= options.max_routes:
+                    break
+            remaining = next_remaining
+            if not progressed:
                 break
-        alternate_buckets = remaining_buckets
-        if not progressed:
-            break
+
+    preferred_buckets: list[list[tuple[int, ...]]] = []
+    derived_buckets: list[list[tuple[int, ...]]] = []
+    for form, routes in form_routes:
+        del form
+        preferred_buckets.append([
+            route for route in routes
+            if _is_preferred_route(route_classes[route])
+        ])
+        derived_buckets.append([
+            route for route in routes
+            if not _is_preferred_route(route_classes[route])
+        ])
+
+    selected_order: list[tuple[int, ...]] = []
+    selected: set[tuple[int, ...]] = set()
+    select_buckets(preferred_buckets, selected_order, selected)
+    select_buckets(derived_buckets, selected_order, selected)
 
     return CatalogEntry(
         name=name,
         kind="term",
         routes=tuple(route_map[route] for route in selected_order),
-        mode=mode,
+        mode="tail" if fallback_tail else mode,
         source=source,
         level=options.level,
+        warnings=(warning,) if warning else (),
     )
 
 
@@ -963,6 +1251,7 @@ def compile_catalog(
                     sources=tuple(dict.fromkeys((*route.sources, target))),
                     head_scale=route.head_scale,
                     continuation_scale=route.continuation_scale,
+                    route_class=route.route_class,
                 )
                 for route in child.routes
             )
@@ -972,6 +1261,11 @@ def compile_catalog(
             routes=_merge_routes((), routes),
             members=tuple(members),
             level=group.level,
+            warnings=tuple(dict.fromkeys(
+                warning
+                for member in members
+                for warning in compile_entry(member).warnings
+            )),
         )
         compiled_terms[name] = entry
         return entry
@@ -993,6 +1287,11 @@ def compile_catalog(
         compile_entry(name)
 
     model = catalog_model_metadata(backend, provenance)
+    warnings = tuple(dict.fromkeys(
+        warning
+        for entry in compiled_terms.values()
+        for warning in entry.warnings
+    ))
     return BiasCatalog(
         model=model,
         compiler={
@@ -1001,8 +1300,14 @@ def compile_catalog(
             "default_mode": defaults.mode,
             "default_head_scale": defaults.head_scale,
             "default_continuation_scale": defaults.continuation_scale,
+            "default_route_policy": defaults.route_policy,
+            "default_min_route_piece_chars": defaults.min_route_piece_chars,
             "levels": list(LEVELS),
             "modes": list(COMPILE_MODES),
+            "route_policies": list(ROUTE_POLICIES),
+            "route_classes": list(ROUTE_CLASSES),
+            "route_selection": "preferred-routes-first-v2",
+            **({"warnings": list(warnings)} if warnings else {}),
             "default_route_limits": {
                 "standard_max_route_tokens": DEFAULT_STANDARD_MAX_ROUTE_TOKENS,
                 "exhaustive_max_route_tokens": DEFAULT_EXHAUSTIVE_MAX_ROUTE_TOKENS,

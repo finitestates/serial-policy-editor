@@ -47,6 +47,20 @@ def test_path_rule_can_scale_head_and_continuation_edges():
     assert matcher.active_biases([10, 11]) == {12: 3.0}
 
 
+def test_beheaded_path_skips_short_head_and_biases_continuations():
+    rule = BiasRule(
+        routes=((10, 11, 12),),
+        bias=4.0,
+        mode="beheaded",
+        continuation_scale=0.75,
+    )
+    matcher = BiasMatcher((rule,))
+
+    assert matcher.active_biases([]) == {}
+    assert matcher.active_biases([10]) == {11: 3.0}
+    assert matcher.active_biases([10, 11]) == {12: 3.0}
+
+
 def test_alternate_routes_share_one_logical_bias_amount():
     matcher = BiasMatcher((BiasRule(
         routes=((10, 11), (10, 12), (20, 21)), bias=2, mode="path"),))

@@ -10,6 +10,7 @@ from typing import Any
 from .backend_factory import BACKEND_NAMES, create_backend
 from .bias_catalog import (
     BiasCatalog,
+    ROUTE_POLICIES,
     compile_catalog,
     load_catalog,
     load_yaml_source,
@@ -38,13 +39,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-routes",
         type=int,
         default=None,
-        help="maximum unique routes retained per term; canonical routes are reserved first",
+        help="maximum unique routes retained per term; preferred routes are selected first",
     )
     parser.add_argument(
         "--max-route-tokens",
         type=int,
         default=None,
         help="maximum tokens in one route",
+    )
+    parser.add_argument(
+        "--route-policy",
+        choices=ROUTE_POLICIES,
+        default=None,
+        help="alternate route selection policy",
+    )
+    parser.add_argument(
+        "--min-route-piece-chars",
+        type=int,
+        default=None,
+        help="minimum content characters for a non-whole-word cohesive piece",
     )
     parser.add_argument(
         "--merge",
@@ -119,9 +132,15 @@ def main(argv: list[str] | None = None) -> int:
             overrides["max_routes"] = args.max_routes
         if args.max_route_tokens is not None:
             overrides["max_route_tokens"] = args.max_route_tokens
+        if args.route_policy is not None:
+            overrides["route_policy"] = args.route_policy
+        if args.min_route_piece_chars is not None:
+            overrides["min_route_piece_chars"] = args.min_route_piece_chars
         if args.level is not None:
             overrides["level"] = args.level
         catalog = compile_catalog(source, backend, options_override=overrides or None)
+        for warning in catalog.compiler.get("warnings", ()):
+            print(f"policy-editor-bias: warning: {warning}", file=sys.stderr)
         _write_output(catalog, args.output)
         close = getattr(getattr(backend, "_model", None), "close", None)
         if callable(close):

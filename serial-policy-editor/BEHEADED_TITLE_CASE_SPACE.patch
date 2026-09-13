@@ -1,0 +1,323 @@
+Failed to create stream fd: Operation not permitted
+Failed to create stream fd: Operation not permitted
+Failed to create stream fd: Operation not permitted
+diff --git a/BIAS_CATALOG_YAML.md b/BIAS_CATALOG_YAML.md
+index e5ef80b..6e899ac 100644
+--- a/BIAS_CATALOG_YAML.md
++++ b/BIAS_CATALOG_YAML.md
+@@ -139,7 +139,7 @@ The recognized compiler options are:
+ | Option | Values | Meaning |
+ | --- | --- | --- |
+ | `level` | `minimal`, `standard`, `exhaustive` | Controls how deeply alternate token routes are searched. |
+-| `mode` | `auto`, `tail`, `path` | `auto` uses path for single lexical terms and tail for phrases; the other values force the mode. |
++| `mode` | `auto`, `tail`, `path`, `beheaded` | `auto` uses beheaded path semantics for one- or two-letter route heads, then path for lexical terms and tail for phrases; the other values force the mode. |
+ | `head_scale` | finite nonnegative number | Scales the first edge of a path rule. |
+ | `continuation_scale` | finite nonnegative number | Scales continuation edges after a matching path prefix. |
+ | `cases` | list of `original`, `lower`, `title`, `sentence`, `upper` | Case variants to search. A scalar is also accepted. `sentence` turns `my favorite chair` into `My favorite chair`. |
+@@ -170,6 +170,13 @@ Scales affect path rules. Tail rules continue to apply their full bias only to
+ the matching completion edge. When alternate routes share a token at different
+ positions, the strongest applicable scale is used once for that logical rule.
+ 
++`beheaded` is a path-like mode for routes whose first token is a bare boundary
++(such as a whitespace-only token) or, after leading whitespace or a tokenizer
++word-boundary marker, consists of one or two letters. The first edge receives
++zero bias and continuation edges use `continuation_scale`. In `auto` mode this
++behavior is selected automatically; routes without a qualifying head retain
++the ordinary path-or-tail behavior.
++
+ Canonical routes are retained first. Remaining routes are selected
+ deterministically, round-robin across generated forms, until `max_routes` is
+ reached. This keeps exhaustive terms bounded and reproducible.
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 3ce47b0..519a757 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -7,6 +7,8 @@
+   multi-word terms.
+ - Add per-term `auto`/`tail`/`path` mode selection with optional head and
+   continuation scales for path rules.
++- Add automatic `beheaded` path handling for bare boundary and short
++  one- or two-letter route heads, while preserving explicit ordinary path mode.
+ - Replace the experimental bias representations with unified logical rules,
+   including telescoping path semantics for lexical multi-token terms.
+ - Add durable runtime groups with append-only membership, shared bias amounts,
+diff --git a/README.md b/README.md
+index e2ba719..26a37f2 100644
+--- a/README.md
++++ b/README.md
+@@ -776,8 +776,10 @@ so users do not need to write them.
+ suffix forms; increase it only for terms where the extra routes are useful.
+ Canonical routes are reserved first, then deterministic alternate routes are
+ selected round-robin across generated forms until the budget is full.
+-Per-term YAML may set `mode: auto`, `tail`, or `path`; `auto` preserves the
+-default lexical-term/phrase distinction. Case controls include sentence case,
++Per-term YAML may set `mode: auto`, `tail`, `path`, or `beheaded`; `auto` uses
++beheaded path semantics for bare boundary heads and one- or two-letter route
++heads, then preserves the ordinary lexical-term/phrase distinction. Case
++controls include sentence case,
+ so a phrase such as `my favorite chair` can also search `My favorite chair`.
+ Path terms may also set
+ `head_scale` and `continuation_scale` to make a common head gentler while the
+diff --git a/tests/test_bias_catalog.py b/tests/test_bias_catalog.py
+index c9bb0c8..e279baf 100644
+--- a/tests/test_bias_catalog.py
++++ b/tests/test_bias_catalog.py
+@@ -139,6 +139,60 @@ def test_sentence_case_generates_natural_multiword_capitalization():
+     )
+ 
+ 
++def test_title_case_keeps_possessive_suffix_lowercase():
++    assert generate_forms(
++        "my friend's couch",
++        CompileOptions(cases=("title",), leading_space=False, plural=False),
++    ) == ("My Friend's Couch",)
++    assert generate_forms(
++        "my friend's couch",
++        CompileOptions(cases=("upper",), leading_space=False, plural=False),
++    ) == ("MY FRIEND'S COUCH",)
++
++
++def test_auto_beheads_short_alternate_route_heads(backend):
++    entry = compile_term(
++        "shadow",
++        "shadow",
++        backend,
++        options=CompileOptions(
++            cases=("original",), leading_space=False, plural=False
++        ),
++    )
++
++    modes = {route.token_ids: route.mode for route in entry.routes}
++    assert modes[(1,)] == "path"
++    assert modes[(9, 10)] == "beheaded"
++
++    explicit_path = compile_term(
++        "shadow",
++        "shadow",
++        backend,
++        options=CompileOptions(
++            mode="path", cases=("original",), leading_space=False, plural=False
++        ),
++    )
++    assert {route.mode for route in explicit_path.routes} == {"path"}
++
++
++def test_auto_beheads_whitespace_only_route_heads():
++    class SpaceHeadBackend(CatalogBackend):
++        pieces = {**CatalogBackend.pieces, 25: " ", 26: "window"}
++        canonical = {**CatalogBackend.canonical, "window": (26,), " window": (25, 26)}
++
++    entry = compile_term(
++        "window",
++        "window",
++        SpaceHeadBackend(),
++        options=CompileOptions(
++            cases=("original",), leading_space=True, plural=False
++        ),
++    )
++
++    modes = {route.token_ids: route.mode for route in entry.routes}
++    assert modes[(25, 26)] == "beheaded"
++
++
+ def test_named_group_includes_implicit_terms_and_preserves_word_phrase_modes(backend):
+     catalog = compile_catalog(
+         {
+diff --git a/tests/test_bias_rules.py b/tests/test_bias_rules.py
+index 13d125f..e812db1 100644
+--- a/tests/test_bias_rules.py
++++ b/tests/test_bias_rules.py
+@@ -47,6 +47,20 @@ def test_path_rule_can_scale_head_and_continuation_edges():
+     assert matcher.active_biases([10, 11]) == {12: 3.0}
+ 
+ 
++def test_beheaded_path_skips_short_head_and_biases_continuations():
++    rule = BiasRule(
++        routes=((10, 11, 12),),
++        bias=4.0,
++        mode="beheaded",
++        continuation_scale=0.75,
++    )
++    matcher = BiasMatcher((rule,))
++
++    assert matcher.active_biases([]) == {}
++    assert matcher.active_biases([10]) == {11: 3.0}
++    assert matcher.active_biases([10, 11]) == {12: 3.0}
++
++
+ def test_alternate_routes_share_one_logical_bias_amount():
+     matcher = BiasMatcher((BiasRule(
+         routes=((10, 11), (10, 12), (20, 21)), bias=2, mode="path"),))
+diff --git a/trajectory_editor/bias_catalog.py b/trajectory_editor/bias_catalog.py
+index d308a2a..2b1a863 100644
+--- a/trajectory_editor/bias_catalog.py
++++ b/trajectory_editor/bias_catalog.py
+@@ -22,7 +22,7 @@ from .domain import EditorError
+ 
+ CATALOG_FORMAT = "spe-bias-catalog-v1"
+ LEVELS = ("minimal", "standard", "exhaustive")
+-MODES = ("tail", "path")
++MODES = ("tail", "path", "beheaded")
+ COMPILE_MODES = ("auto", *MODES)
+ DEFAULT_LEVEL = "standard"
+ DEFAULT_MAX_ROUTES = 4096
+@@ -125,6 +125,38 @@ def _parse_mode(value: Any, *, path: str) -> str:
+     return result
+ 
+ 
++_WORD_BOUNDARY_MARKERS = frozenset(("▁", "Ġ"))
++
++
++def _has_short_head(token_text: str) -> bool:
++    """Recognize a bare boundary or one- or two-letter route head."""
++
++    content = str(token_text).lstrip()
++    while content and content[0] in _WORD_BOUNDARY_MARKERS:
++        content = content[1:].lstrip()
++    if not content:
++        return True
++    return 1 <= len(content) <= 2 and all(character.isalpha() for character in content)
++
++
++def _route_mode(
++    default_mode: str,
++    token_texts: Sequence[str],
++    *,
++    allow_beheaded: bool,
++) -> str:
++    if allow_beheaded and token_texts and _has_short_head(token_texts[0]):
++        return "beheaded"
++    return default_mode
++
++
++def _title_case(value: str) -> str:
++    """Title-case a surface while keeping terminal possessive ``'s`` lower-case."""
++
++    titled = value.title()
++    return re.sub(r"(['’])S(?=\b)", r"\1s", titled)
++
++
+ @dataclass(frozen=True)
+ class CompileOptions:
+     level: str = DEFAULT_LEVEL
+@@ -315,7 +347,10 @@ class BiasCatalog:
+             members = tuple(str(item) for item in raw_entry.get("members", ()))
+             mode = raw_entry.get("default_mode")
+             if mode is not None and mode not in MODES:
+-                raise _error(f"entries.{name}.default_mode", "must be tail or path")
++                raise _error(
++                    f"entries.{name}.default_mode",
++                    f"must be one of {', '.join(MODES)}",
++                )
+             entries[name] = CatalogEntry(
+                 name=name,
+                 kind=kind,
+@@ -434,7 +469,7 @@ def _routes_from_dict(value: Any, *, path: str) -> tuple[CompiledRoute, ...]:
+             raise _error(f"{route_path}.token_ids", "must contain integers") from exc
+         mode = raw.get("mode", "tail")
+         if mode not in MODES:
+-            raise _error(f"{route_path}.mode", "must be tail or path")
++            raise _error(f"{route_path}.mode", f"must be one of {', '.join(MODES)}")
+         texts = tuple(str(text) for text in raw.get("texts", ()))
+         token_texts = tuple(str(text) for text in raw.get("token_texts", ()))
+         strategies = tuple(str(strategy) for strategy in raw.get("strategies", ()))
+@@ -548,7 +583,7 @@ def generate_forms(source: str, options: CompileOptions, explicit_forms: Sequenc
+             elif case == "lower":
+                 value = base.lower()
+             elif case == "title":
+-                value = base.title()
++                value = _title_case(base)
+             elif case == "sentence":
+                 value = base.capitalize()
+             else:
+@@ -703,16 +738,22 @@ def compile_term(
+ 
+         for route, strategy in candidates:
+             token_texts = tuple(str(backend.token_text(token)) for token in route)
++            route_mode = _route_mode(
++                "path" if options.mode == "beheaded" else mode,
++                token_texts,
++                allow_beheaded=options.mode in {"auto", "beheaded"},
++            )
++            head_scale = 0.0 if route_mode == "beheaded" else options.head_scale
+             existing = route_map.get(route)
+             if existing is None:
+                 route_map[route] = CompiledRoute(
+                     token_ids=route,
+                     texts=(form,),
+                     token_texts=token_texts,
+-                    mode=mode,
++                    mode=route_mode,
+                     strategies=(strategy,),
+                     sources=(name,),
+-                    head_scale=options.head_scale,
++                    head_scale=head_scale,
+                     continuation_scale=options.continuation_scale,
+                 )
+             else:
+diff --git a/trajectory_editor/bias_rules.py b/trajectory_editor/bias_rules.py
+index 25fc003..54c4946 100644
+--- a/trajectory_editor/bias_rules.py
++++ b/trajectory_editor/bias_rules.py
+@@ -8,7 +8,8 @@ edges are only biased once.
+ ``tail`` preserves the existing ``prefix -> final token`` behavior.  ``path``
+ is the telescoping form used for lexical terms that are split into multiple
+ tokens: it biases the first viable edge and then the next edge after each
+-matching prefix.
++matching prefix.  ``beheaded`` uses the same telescoping matcher but suppresses
++the first edge entirely.
+ """
+ 
+ from __future__ import annotations
+@@ -22,7 +23,7 @@ from typing import Any
+ from .domain import EditorError
+ 
+ 
+-BIAS_MODES = ("tail", "path")
++BIAS_MODES = ("tail", "path", "beheaded")
+ LEGACY_LIFETIMES = ("sentence", "newline")
+ GROUP_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
+ 
+@@ -103,6 +104,8 @@ class BiasRule:
+             self.continuation_scale,
+             path="bias rule continuation_scale",
+         )
++        if self.mode == "beheaded":
++            head_scale = 0.0
+         object.__setattr__(self, "routes", tuple(sorted(routes)))
+         object.__setattr__(self, "triggers", tuple(sorted(triggers)))
+         object.__setattr__(self, "bias", float(self.bias))
+@@ -329,6 +332,8 @@ def _path_tokens(
+             if _endswith(history, prefix):
+                 token = route[prefix_length]
+                 scale = head_scale if prefix_length == 0 else continuation_scale
++                if scale == 0:
++                    break
+                 result[token] = max(result.get(token, 0.0), scale)
+                 break
+     return result
+@@ -338,11 +343,11 @@ def _rule_tokens(rule: BiasRule, history: Sequence[int], boundaries: Any) -> dic
+     span = _scoped_span(rule, history, boundaries)
+     if rule.triggers and not _trigger_matches(rule, span):
+         return {}
+-    if rule.mode == "path":
++    if rule.mode in {"path", "beheaded"}:
+         return _path_tokens(
+             rule.routes,
+             span,
+-            head_scale=rule.head_scale,
++            head_scale=0.0 if rule.mode == "beheaded" else rule.head_scale,
+             continuation_scale=rule.continuation_scale,
+         )
+     return _tail_tokens(rule.routes, span)
+@@ -391,8 +396,9 @@ def routes_for_catalog_entry(entry: Any, bias: float, *, mode: str | None = None
+         selected = mode or route.mode
+         if selected not in BIAS_MODES:
+             raise EditorError(f"catalog route has unsupported bias mode {selected!r}")
++        head_scale = 0.0 if selected == "beheaded" else route.head_scale
+         grouped.setdefault(
+-            (selected, route.head_scale, route.continuation_scale),
++            (selected, head_scale, route.continuation_scale),
+             [],
+         ).append(tuple(route.token_ids))
+     return tuple(

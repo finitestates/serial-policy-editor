@@ -57,6 +57,8 @@ defaults:
     - ing
     - ed
   max_routes: 4096
+  route_policy: all
+  min_route_piece_chars: 3
   # Omit max_route_tokens to use the level-dependent default depth.
 
 terms:
@@ -73,6 +75,8 @@ terms:
       suffixes: [ing, ed, ly]
       max_routes: 32
       max_route_tokens: 3
+      route_policy: cohesive
+      min_route_piece_chars: 3
       forms:
         - shadow
         - shadowing
@@ -139,7 +143,7 @@ The recognized compiler options are:
 | Option | Values | Meaning |
 | --- | --- | --- |
 | `level` | `minimal`, `standard`, `exhaustive` | Controls how deeply alternate token routes are searched. |
-| `mode` | `auto`, `tail`, `path` | `auto` uses path for single lexical terms and tail for phrases; the other values force the mode. |
+| `mode` | `auto`, `tail`, `path`, `beheaded` | `auto` uses beheaded path semantics for one- or two-letter route heads, then path for lexical terms and tail for phrases; the other values force the mode. |
 | `head_scale` | finite nonnegative number | Scales the first edge of a path rule. |
 | `continuation_scale` | finite nonnegative number | Scales continuation edges after a matching path prefix. |
 | `cases` | list of `original`, `lower`, `title`, `sentence`, `upper` | Case variants to search. A scalar is also accepted. `sentence` turns `my favorite chair` into `My favorite chair`. |
@@ -148,11 +152,15 @@ The recognized compiler options are:
 | `suffixes` | string or list of strings | Additional suffixes to search, such as `ing`, `ed`, or `ly`. |
 | `max_routes` | positive integer | Maximum routes retained for each term across all generated forms. |
 | `max_route_tokens` | positive integer | Maximum number of tokens in one route. Omit it for the normal level-dependent depth. |
+| `route_policy` | `all`, `cohesive` | `all` makes every exact route eligible and ranks preferred routes first; `cohesive` removes fragmented routes and uses a tail-only fallback if none survive. |
+| `min_route_piece_chars` | positive integer | In `cohesive` mode, minimum alphanumeric characters for a non-whole-word-like piece. |
 
 Defaults are `standard`, `original/lower/title/sentence`, leading-space variants,
 automatic mode, unit head/continuation scales, pluralization enabled, no extra
-suffixes, `max_routes: 4096`, and the level-dependent default route depth. The
-command-line options `--level`, `--max-routes`, and `--max-route-tokens`
+suffixes, `max_routes: 4096`, `route_policy: all`,
+`min_route_piece_chars: 3`, and the level-dependent default route depth. The
+command-line options `--level`, `--max-routes`, `--max-route-tokens`,
+`--route-policy`, and `--min-route-piece-chars`
 override the YAML options for the whole compilation.
 
 For a phrase whose first token is common but whose continuation is distinctive,
@@ -170,9 +178,29 @@ Scales affect path rules. Tail rules continue to apply their full bias only to
 the matching completion edge. When alternate routes share a token at different
 positions, the strongest applicable scale is used once for that logical rule.
 
-Canonical routes are retained first. Remaining routes are selected
+`beheaded` is a path-like mode for routes whose first token is a bare boundary
+(such as a whitespace-only token) or, after leading whitespace or a tokenizer
+word-boundary marker, consists of one or two letters. The first edge receives
+zero bias and continuation edges use `continuation_scale`. In `auto` mode this
+behavior is selected automatically; routes without a qualifying head retain
+the ordinary path-or-tail behavior.
+
+Routes are classified as `direct`, `word_aligned`, `cohesive`, or
+`fragmented`. Direct routes contain one token; word-aligned routes are
+sequences of direct word pieces such as `port` + ` of` + ` call`; cohesive
+routes use sizeable subword chunks; fragmented routes contain tiny internal
+pieces. Preferred routes are selected first, then remaining routes are chosen
 deterministically, round-robin across generated forms, until `max_routes` is
-reached. This keeps exhaustive terms bounded and reproducible.
+reached. The tokenizer's default route is only one candidate and is not
+automatically privileged.
+
+Set `route_policy: cohesive` to remove fragmented routes before selection.
+Cohesive mode accepts pieces that align with whitespace/word boundaries or
+contain at least `min_route_piece_chars` alphanumeric characters. Thus
+`port` + ` of` + ` call` can remain visible, while decompositions such as
+`o` + `f`, `m` + `y`, or `an` + `other` are omitted. If a term has no cohesive
+route at all, the compiler retains its best exact fallback as a tail-only
+route and emits a warning. The default policy remains `all`.
 
 ## Groups and references
 

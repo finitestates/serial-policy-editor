@@ -92,6 +92,42 @@ def backend():
     return CatalogBackend()
 
 
+class RouteRankingBackend:
+    pieces = {
+        0: "<EOG>",
+        1: "an",
+        2: "other",
+        3: "another",
+        4: "aj",
+        5: "ar",
+    }
+    canonical = {
+        "another": (1, 2),
+        "ajar": (4, 5),
+    }
+
+    def vocabulary_size(self):
+        return len(self.pieces)
+
+    def token_text(self, token_id):
+        return self.pieces[int(token_id)]
+
+    def is_eog(self, token_id):
+        return int(token_id) == 0
+
+    def tokenize(self, text, *, add_bos=False, special=False):
+        assert not add_bos and not special
+        return list(self.canonical.get(text, ()))
+
+    def render(self, token_ids, *, special=False):
+        assert not special
+        return "".join(self.pieces[int(token)] for token in token_ids)
+
+    def provenance(self, *, include_model_sha256=False):
+        del include_model_sha256
+        return {"backend": "route-ranking-test", "vocabulary_size": self.vocabulary_size()}
+
+
 def test_yaml_scalar_quotes_and_implicit_global_group(tmp_path, backend):
     path = tmp_path / "terms.yaml"
     path.write_text(
@@ -136,6 +172,175 @@ def test_sentence_case_generates_natural_multiword_capitalization():
     assert "My favorite chair" in generate_forms(
         "my favorite chair",
         CompileOptions(leading_space=False, plural=False),
+    )
+
+
+def test_title_case_keeps_possessive_suffix_lowercase():
+    assert generate_forms(
+        "my friend's couch",
+        CompileOptions(cases=("title",), leading_space=False, plural=False),
+    ) == ("My Friend's Couch",)
+    assert generate_forms(
+        "my friend's couch",
+        CompileOptions(cases=("upper",), leading_space=False, plural=False),
+    ) == ("MY FRIEND'S COUCH",)
+
+
+def test_auto_beheads_short_alternate_route_heads(backend):
+    entry = compile_term(
+        "shadow",
+        "shadow",
+        backend,
+        options=CompileOptions(
+            cases=("original",), leading_space=False, plural=False
+        ),
+    )
+
+    modes = {route.token_ids: route.mode for route in entry.routes}
+    assert modes[(1,)] == "path"
+    assert modes[(9, 10)] == "beheaded"
+
+    explicit_path = compile_term(
+        "shadow",
+        "shadow",
+        backend,
+        options=CompileOptions(
+            mode="path", cases=("original",), leading_space=False, plural=False
+        ),
+    )
+    assert {route.mode for route in explicit_path.routes} == {"path"}
+
+
+def test_auto_beheads_whitespace_only_route_heads():
+    class SpaceHeadBackend(CatalogBackend):
+        pieces = {**CatalogBackend.pieces, 25: " ", 26: "window"}
+        canonical = {**CatalogBackend.canonical, "window": (26,), " window": (25, 26)}
+
+    entry = compile_term(
+        "window",
+        "window",
+        SpaceHeadBackend(),
+        options=CompileOptions(
+            cases=("original",), leading_space=True, plural=False
+        ),
+    )
+
+    modes = {route.token_ids: route.mode for route in entry.routes}
+    assert modes[(25, 26)] == "beheaded"
+
+
+def test_cohesive_route_policy_filters_tiny_subword_alternates(backend):
+    all_routes = compile_term(
+        "shadow",
+        "shadow",
+        backend,
+        options=CompileOptions(
+            level="exhaustive",
+            cases=("original",),
+            leading_space=False,
+            plural=False,
+            route_policy="all",
+        ),
+    )
+    cohesive = compile_term(
+        "shadow",
+        "shadow",
+        backend,
+        options=CompileOptions(
+            level="exhaustive",
+            cases=("original",),
+            leading_space=False,
+            plural=False,
+            route_policy="cohesive",
+        ),
+    )
+
+    assert (1,) in {route.token_ids for route in all_routes.routes}
+    assert (9, 10) in {route.token_ids for route in all_routes.routes}
+    assert (1,) in {route.token_ids for route in cohesive.routes}
+    assert (9, 10) not in {route.token_ids for route in cohesive.routes}
+
+
+def test_cohesive_route_policy_keeps_whitespace_separated_phrase_pieces(backend):
+    entry = compile_term(
+        "port of call",
+        "port of call",
+        backend,
+        options=CompileOptions(
+            level="exhaustive",
+            cases=("original",),
+            leading_space=False,
+            plural=False,
+            route_policy="cohesive",
+        ),
+    )
+
+    routes = {route.token_ids for route in entry.routes}
+    assert (17, 18, 19) in routes
+    assert (21,) in routes
+    assert {route.route_class for route in entry.routes if route.token_ids == (17, 18, 19)} == {"word_aligned"}
+    assert {route.route_class for route in entry.routes if route.token_ids == (21,)} == {"direct"}
+
+
+def test_tokenizer_default_route_is_not_automatically_preferred():
+    entry = compile_term(
+        "another",
+        "another",
+        RouteRankingBackend(),
+        options=CompileOptions(
+            level="exhaustive",
+            cases=("original",),
+            leading_space=False,
+            plural=False,
+            max_routes=2,
+        ),
+    )
+
+    assert [route.token_ids for route in entry.routes] == [(3,), (1, 2)]
+    assert entry.routes[0].route_class == "direct"
+    assert entry.routes[0].strategies == ("preferred",)
+    assert entry.routes[1].route_class == "fragmented"
+    assert entry.routes[1].strategies == ("derived",)
+
+
+def test_cohesive_policy_omits_fragmented_default_route_when_clean_route_exists():
+    entry = compile_term(
+        "another",
+        "another",
+        RouteRankingBackend(),
+        options=CompileOptions(
+            level="exhaustive",
+            cases=("original",),
+            leading_space=False,
+            plural=False,
+            route_policy="cohesive",
+        ),
+    )
+
+    assert [route.token_ids for route in entry.routes] == [(3,)]
+    assert not entry.warnings
+
+
+def test_cohesive_policy_uses_tail_only_fallback_when_no_clean_route_exists():
+    entry = compile_term(
+        "ajar",
+        "ajar",
+        RouteRankingBackend(),
+        options=CompileOptions(
+            level="exhaustive",
+            cases=("original",),
+            leading_space=False,
+            plural=False,
+            route_policy="cohesive",
+        ),
+    )
+
+    assert [route.token_ids for route in entry.routes] == [(4, 5)]
+    assert entry.mode == "tail"
+    assert entry.routes[0].mode == "tail"
+    assert entry.routes[0].strategies == ("fallback",)
+    assert entry.warnings == (
+        "term 'ajar' has no cohesive routes; using a tail-only fallback",
     )
 
 
@@ -238,16 +443,16 @@ def test_route_budget_round_robins_alternates_across_forms():
 
 
 def test_max_routes_applies_across_all_generated_forms(backend):
-    with pytest.raises(EditorError, match="term 'Shadow'.*max_routes=1"):
-        compile_term(
-            "Shadow",
-            "Shadow",
-            backend,
-            options=CompileOptions(
-                level="minimal", cases=("original", "lower"),
-                leading_space=False, plural=False, max_routes=1,
-            ),
-        )
+    entry = compile_term(
+        "Shadow",
+        "Shadow",
+        backend,
+        options=CompileOptions(
+            level="minimal", cases=("original", "lower"),
+            leading_space=False, plural=False, max_routes=1,
+        ),
+    )
+    assert len(entry.routes) == 1
 
 
 def test_explicit_forms_and_per_term_levels(backend):
@@ -328,3 +533,44 @@ def test_catalog_cli_can_compile_an_inline_term(tmp_path, backend):
     value = json.loads(output.read_text(encoding="utf-8"))
     assert value["format"] == "spe-bias-catalog-v1"
     assert "shadow" in value["entries"]
+
+
+def test_catalog_cli_exposes_route_policy_override(tmp_path, backend):
+    output = tmp_path / "catalog.json"
+    with patch("trajectory_editor.bias_cli._load_backend", return_value=backend):
+        assert bias_main([
+            "--term", "shadow",
+            "--level", "exhaustive",
+            "--route-policy", "cohesive",
+            "--min-route-piece-chars", "4",
+            "--output", str(output),
+        ]) == 0
+    value = json.loads(output.read_text(encoding="utf-8"))
+    assert value["compiler"]["default_route_policy"] == "cohesive"
+    assert value["compiler"]["default_min_route_piece_chars"] == 4
+
+
+def test_catalog_cli_reports_cohesive_tail_fallback(tmp_path, capsys):
+    output = tmp_path / "catalog.json"
+    source = tmp_path / "terms.yaml"
+    source.write_text(
+        "defaults:\n"
+        "  cases: [original]\n"
+        "  leading_space: false\n"
+        "  plural: false\n"
+        "terms: [ajar]\n",
+        encoding="utf-8",
+    )
+    with patch("trajectory_editor.bias_cli._load_backend", return_value=RouteRankingBackend()):
+        assert bias_main([
+            "--input", str(source),
+            "--level", "exhaustive",
+            "--route-policy", "cohesive",
+            "--output", str(output),
+        ]) == 0
+    captured = capsys.readouterr()
+    assert "no cohesive routes" in captured.err
+    value = json.loads(output.read_text(encoding="utf-8"))
+    assert value["compiler"]["warnings"] == [
+        "term 'ajar' has no cohesive routes; using a tail-only fallback",
+    ]
