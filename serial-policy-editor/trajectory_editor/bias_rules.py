@@ -78,6 +78,7 @@ class BiasRule:
     until: int | str | None = None
     head_scale: float = 1.0
     continuation_scale: float = 1.0
+    logical_target: str | None = None
 
     def __post_init__(self) -> None:
         routes = _routes(self.routes, path="bias rule routes")
@@ -104,6 +105,10 @@ class BiasRule:
             self.continuation_scale,
             path="bias rule continuation_scale",
         )
+        if self.logical_target is not None and (
+            not isinstance(self.logical_target, str) or not self.logical_target
+        ):
+            raise EditorError("bias rule logical_target must be a nonempty string")
         if self.mode == "beheaded":
             head_scale = 0.0
         object.__setattr__(self, "routes", tuple(sorted(routes)))
@@ -121,6 +126,7 @@ class BiasRule:
             self.until,
             self.head_scale,
             self.continuation_scale,
+            self.logical_target,
         )
 
     @property
@@ -133,6 +139,7 @@ class BiasRule:
             lifetime,
             self.head_scale,
             self.continuation_scale,
+            self.logical_target,
         )
 
     @classmethod
@@ -146,7 +153,7 @@ class BiasRule:
             routes = [value["target"]]
         allowed = {
             "routes", "target", "bias", "mode", "triggers", "until",
-            "head_scale", "continuation_scale",
+            "head_scale", "continuation_scale", "logical_target",
         }
         unknown = set(value) - allowed
         if unknown:
@@ -161,6 +168,7 @@ class BiasRule:
             until=value.get("until"),
             head_scale=value.get("head_scale", 1.0),
             continuation_scale=value.get("continuation_scale", 1.0),
+            logical_target=value.get("logical_target"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -177,6 +185,8 @@ class BiasRule:
             result["head_scale"] = self.head_scale
         if self.continuation_scale != 1.0:
             result["continuation_scale"] = self.continuation_scale
+        if self.logical_target is not None:
+            result["logical_target"] = self.logical_target
         return result
 
 
@@ -219,7 +229,18 @@ class BiasGroup:
         return self.name
 
     def effective_rules(self) -> tuple[BiasRule, ...]:
-        return tuple(replace(rule, bias=self.bias) for rule in self.rules if self.bias != 0.0)
+        # All routes in a named group are one logical request.  In particular,
+        # a group's path and beheaded routes must not multiply the group's
+        # amount when they converge on the same next token.
+        return tuple(
+            replace(
+                rule,
+                bias=self.bias,
+                logical_target=f"group:{self.name}",
+            )
+            for rule in self.rules
+            if self.bias != 0.0
+        )
 
     @classmethod
     def from_record(cls, value: Any) -> "BiasGroup":
@@ -250,7 +271,13 @@ class BiasGroup:
 
 
 def merge_bias_rules(rules: Sequence[BiasRule]) -> tuple[BiasRule, ...]:
-    """Combine rules with identical logical routes by adding their amounts."""
+    """Combine exact rules while preserving logical-target boundaries.
+
+    Unidentified rules retain the historical additive behavior.  Identified
+    rules with the same exact route are duplicate representations of one
+    logical target (for example, duplicate group members), so they are kept
+    once and the matcher can deduplicate the remaining route-mode overlap.
+    """
 
     merged: dict[tuple[Any, ...], BiasRule] = {}
     for rule in rules:
@@ -258,6 +285,10 @@ def merge_bias_rules(rules: Sequence[BiasRule]) -> tuple[BiasRule, ...]:
         existing = merged.get(normalized.key)
         if existing is None:
             merged[normalized.key] = normalized
+        elif normalized.logical_target is not None:
+            # The same identified rule can arrive through multiple group
+            # members.  Its bias is already the group's single amount.
+            continue
         else:
             merged[normalized.key] = replace(
                 existing, bias=existing.bias + normalized.bias
@@ -375,14 +406,38 @@ class BiasMatcher:
             if needs_history:
                 raise EditorError("route bias rules require exact context token IDs")
             history = ()
-        result: dict[int, float] = {}
-        for rule in self.rules:
+        # A catalog entry may expose several route modes for one target.  The
+        # modes are evaluated independently, but their overlapping next-token
+        # contributions are one application of the target's bias, not one per
+        # route mode.  Rules without an identity remain independent for
+        # compatibility with hand-authored runtime rules.
+        target_scales: dict[tuple[Any, ...], dict[int, float]] = {}
+        for index, rule in enumerate(self.rules):
+            target = rule.logical_target
+            target_key = (
+                target if target is not None else ("rule", index),
+                rule.bias,
+                rule.triggers,
+                rule.until,
+            )
+            scales = target_scales.setdefault(target_key, {})
             for token, scale in _rule_tokens(rule, history, boundaries).items():
-                result[token] = result.get(token, 0.0) + rule.bias * scale
+                scales[token] = max(scales.get(token, 0.0), scale)
+
+        result: dict[int, float] = {}
+        for (_target, bias, _triggers, _until), scales in target_scales.items():
+            for token, scale in scales.items():
+                result[token] = result.get(token, 0.0) + bias * scale
         return result
 
 
-def routes_for_catalog_entry(entry: Any, bias: float, *, mode: str | None = None) -> tuple[BiasRule, ...]:
+def routes_for_catalog_entry(
+    entry: Any,
+    bias: float,
+    *,
+    mode: str | None = None,
+    logical_target: str | None = None,
+) -> tuple[BiasRule, ...]:
     """Turn a compiled catalog entry into one rule per route mode.
 
     This is deliberately separate from command parsing: catalog resolution is
@@ -391,6 +446,8 @@ def routes_for_catalog_entry(entry: Any, bias: float, *, mode: str | None = None
 
     if not hasattr(entry, "routes"):
         raise EditorError("catalog entry must expose compiled routes")
+    if logical_target is None:
+        logical_target = f"catalog:{entry.name}"
     grouped: dict[tuple[str, float, float], list[tuple[int, ...]]] = {}
     for route in entry.routes:
         selected = mode or route.mode
@@ -408,6 +465,7 @@ def routes_for_catalog_entry(entry: Any, bias: float, *, mode: str | None = None
             mode=selected,
             head_scale=head_scale,
             continuation_scale=continuation_scale,
+            logical_target=logical_target,
         )
         for (selected, head_scale, continuation_scale), routes
         in sorted(grouped.items())

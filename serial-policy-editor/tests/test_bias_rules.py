@@ -108,6 +108,39 @@ def test_catalog_routes_group_by_mode_and_deduplicate():
     assert rules[1].mode == "tail"
 
 
+def test_catalog_route_modes_apply_one_bias_per_logical_target():
+    entry = CatalogEntry(
+        name="window",
+        kind="term",
+        routes=(
+            CompiledRoute((10,), ("window",), ("window",), "path", ("canonical",)),
+            CompiledRoute((20, 10), (" window",), (" ", "window"), "beheaded", ("alternate",)),
+        ),
+    )
+    rules = routes_for_catalog_entry(entry, 2.0)
+
+    # Both route modes identify token 10 after token 20, but they are two
+    # constructions of the same catalog target and must apply +2 only once.
+    assert BiasMatcher(rules).active_biases([20]) == {10: 2.0}
+    assert BiasMatcher(tuple(
+        routes_for_catalog_entry(entry, 2.0, logical_target="request-a")
+        + routes_for_catalog_entry(entry, 2.0, logical_target="request-b")
+    )).active_biases([20]) == {10: 4.0}
+
+
+def test_named_group_route_modes_apply_one_group_bias():
+    group = BiasGroup(
+        name="windows",
+        rules=(
+            BiasRule(routes=((10,),), bias=0, mode="path"),
+            BiasRule(routes=((20, 10),), bias=0, mode="beheaded"),
+        ),
+        bias=-2.0,
+    )
+
+    assert SamplingConfig(bias_groups=(group,)).active_biases([20]) == {10: -2.0}
+
+
 def test_sampling_config_round_trips_logical_rules():
     config = SamplingConfig(bias_rules=(BiasRule(
         routes=((1, 2), (1, 3)), bias=-1.25, mode="path"),))
@@ -187,6 +220,7 @@ def test_projected_named_groups_can_be_exported_full_or_flattened(tmp_path):
     assert "bias_groups" not in flat
     assert flat["bias_rules"] == [{
         "routes": [[1, 2]], "mode": "path", "bias": 2.0,
+        "logical_target": "group:nautical",
     }]
 
 
