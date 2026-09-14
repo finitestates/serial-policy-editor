@@ -43,6 +43,7 @@ from .episode_projector import project_episode, project_fork_map, project_lineag
 from .episode_store import EpisodeStore
 from .episode_recovery import recover_sampler_record
 from .episode_ui import InteractivePolicy
+from .online_learning import LearningResult, OnlineLearner
 from .transformers_backend import TransformersSettings
 from .tui import TerminalIO
 from .ui_themes import LIVE_THEME_NAMES
@@ -221,6 +222,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--reference-prior-exit-strength",
         type=float,
         help="strength of terminal EXIT-vs-CONTINUE decisions (default: 0.25)",
+    )
+    learning = parser.add_argument_group("online learning")
+    learning.add_argument(
+        "--online-learning",
+        "--online-learning-enabled",
+        dest="online_learning",
+        action="store_true",
+        help="learn named bias-group strengths from live raw-rank selections (off by default)",
+    )
+    learning.add_argument("--learning-rate", type=float, default=0.05)
+    learning.add_argument(
+        "--epsilon", "--learning-epsilon", dest="learning_epsilon",
+        type=float, default=0.05,
+    )
+    learning.add_argument(
+        "--max-step", "--learning-max-step", dest="learning_max_step",
+        type=float, default=0.25,
+    )
+    learning.add_argument(
+        "--min-bias", "--learning-min-bias", dest="learning_min_bias",
+        type=float, default=-4.0,
+    )
+    learning.add_argument(
+        "--max-bias", "--learning-max-bias", dest="learning_max_bias",
+        type=float, default=4.0,
+    )
+    learning.add_argument(
+        "--learnable-groups",
+        nargs="+",
+        metavar="GROUP",
+        help="restrict online learning to these named bias groups",
     )
     parser.add_argument("--theme", choices=LIVE_THEME_NAMES)
     parser.add_argument(
@@ -560,11 +592,28 @@ def _interactive_policy(
 
 
 def _sampler_summary(config: SamplingConfig) -> str:
-    return (
+    summary = (
         f"temp={config.temperature:g} top_k={config.top_k} top_p={config.top_p:g} "
         f"min_p={config.min_p:g} rep={config.repeat_penalty:g}/{config.repeat_last_n} "
         f"presence={config.presence_penalty:g} frequency={config.frequency_penalty:g} "
         f"seed={config.seed}"
+    )
+    if config.bias_groups:
+        summary += " groups=" + ",".join(
+            f"{group.name}:{group.bias:g}" for group in config.bias_groups
+        )
+    return summary
+
+
+def _online_learning_notice(io: TerminalIO, result: LearningResult) -> None:
+    weights = ", ".join(
+        f"{name}={value:g}" for name, value in result.new_group_weights.items()
+    )
+    io.write(
+        f"Online learning @ boundary {result.observation_boundary + 1}: "
+        f"selected token {result.chosen_token_id}, "
+        f"rank {result.old_policy_rank}, "
+        f"update norm {result.update_norm:.4g} · groups {weights}"
     )
 
 
@@ -898,6 +947,15 @@ def main(argv: list[str] | None = None) -> int:
             parent_id: str | None = None
             fork_boundary: int | None = None
             pending_tape: ReplayPlan | None = None
+            learner = OnlineLearner(
+                enabled=args.online_learning,
+                learning_rate=args.learning_rate,
+                epsilon=args.learning_epsilon,
+                max_step=args.learning_max_step,
+                min_bias=args.learning_min_bias,
+                max_bias=args.learning_max_bias,
+                learnable_groups=args.learnable_groups,
+            )
 
             if args.resume is not None:
                 # Only explicit CLI sampler flags override the stored segment.
@@ -1036,6 +1094,10 @@ def main(argv: list[str] | None = None) -> int:
                     store,
                     episode_id,
                     divergence_policy=args.divergence_policy,
+                    learner=learner,
+                    on_learning_update=lambda result: _online_learning_notice(
+                        io, result
+                    ),
                 )
                 try:
                     if enter_edge:

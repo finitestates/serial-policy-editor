@@ -21,6 +21,7 @@ from .episode_engine import (
 from .episode_policy import EpisodeRunner, RunResult, TapeStep
 from .episode_projector import EpisodeProjection, project_episode
 from .episode_store import EpisodeStore
+from .online_learning import LearningResult, OnlineLearner, OnlineLearningConfig
 from .version import VERSION
 
 __all__ = [
@@ -41,6 +42,9 @@ __all__ = [
     "ReplayExpectation",
     "RunResult",
     "SamplingConfig",
+    "LearningResult",
+    "OnlineLearner",
+    "OnlineLearningConfig",
     "SelectRawRank",
     "TapeStep",
     "TokenEvidence",

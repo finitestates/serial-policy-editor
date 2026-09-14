@@ -871,6 +871,26 @@ their bias changes are sampler state: replay, fork, and rewind restore them at
 the relevant boundary. Runtime groups are included in the normal `--biases-only`
 export.
 
+### Experimental online group learning
+
+The optional learner updates only the scalar strengths of existing named bias
+groups. It never stores a token-to-preference map and never changes group rules,
+the model, or sampler exploration settings. Enable it explicitly for a live
+session:
+
+```bash
+policy-editor --model /path/to/model.gguf --biases groups.json \
+  --online-learning --learning-rate 0.05 --max-step 0.25
+```
+
+It learns from live `SelectRawRank` choices only; `Accept`, `Write`, EOG, and
+replay do not update it. Each correction uses finite differences over the
+existing group biases, is bounded by `--min-bias` and `--max-bias`, and is
+stored as the next normal sampler segment. The `online-learning-update`
+interaction records the selected token as diagnostic context plus the old and
+new group weights, gradients, and update norm. Use `--learnable-groups` to
+restrict which named groups may move. Learning is off by default.
+
 Export the current surviving bias set as a JSON preset:
 
 ```bash

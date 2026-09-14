@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
 from .domain import SamplingConfig
-from .episode_actions import PolicyAction
+from .episode_actions import PolicyAction, SelectRawRank
 from .episode_engine import ActionOutcome, EpisodeEngine, Observation, ReplayExpectation, InstructionRejected
 from .episode_store import EpisodeStore
+from .online_learning import LearningResult, OnlineLearner
 
 
 class EdgeRequested(Exception):
@@ -95,11 +96,57 @@ class EpisodeRunner:
         episode_id: str,
         *,
         divergence_policy: str = "handoff",
+        learner: OnlineLearner | None = None,
+        on_learning_update: Callable[[LearningResult], None] | None = None,
     ) -> None:
         self.engine = engine
         self.store = store
         self.episode_id = episode_id
         self.divergence_policy = divergence_policy
+        self.learner = learner
+        self.on_learning_update = on_learning_update
+
+    def _learn_live_selection(
+        self,
+        observation: Observation,
+        action: PolicyAction,
+        outcome: ActionOutcome,
+    ) -> LearningResult | None:
+        """Learn after a committed live raw-rank selection only."""
+        if (
+            self.learner is None
+            or not self.learner.enabled
+            or not isinstance(action, SelectRawRank)
+            or outcome.status != "completed"
+            or len(outcome.evidence) != 1
+            or outcome.evidence[0].is_eog
+        ):
+            return None
+        evidence = outcome.evidence[0]
+        result = self.learner.update(
+            observation, evidence.token_id, self.engine.sampling
+        )
+        if result.sampling != self.engine.sampling:
+            self.engine.sampling = result.sampling
+            self.store.record_sampling_segment(
+                self.episode_id,
+                start_boundary=self.engine.boundary,
+                sampling=result.sampling,
+                stream_fingerprint=self.engine.stream_fingerprint,
+                coordinate_offset=self.engine.coordinate_offset,
+            )
+        payload = result.to_dict()
+        payload["boundary"] = self.engine.boundary
+        payload["observation_boundary"] = result.observation_boundary
+        self.store.record_interaction(
+            self.episode_id,
+            self.engine.boundary,
+            "online-learning-update",
+            payload,
+        )
+        if self.on_learning_update is not None:
+            self.on_learning_update(result)
+        return result
 
     def run(
         self,
@@ -200,6 +247,7 @@ class EpisodeRunner:
                 executing_replay = False
                 outcome = self.engine.apply(action)
                 live_actions += 1
+                self._learn_live_selection(observation, action, outcome)
                 self.store.record_action(self.episode_id, ordinal, outcome)
                 outcomes.append(outcome)
                 ordinal += 1

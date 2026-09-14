@@ -407,6 +407,7 @@ class ObservationStatistics:
 
     def __init__(self, logits, config, history_token_ids, boundaries=None):
         self.logits = _validated_logits(logits).copy()
+        self.boundaries = boundaries
         penalties_active = config.history_penalties_active
         if penalties_active:
             self.adjusted, _, _ = _history_penalty_surface(
