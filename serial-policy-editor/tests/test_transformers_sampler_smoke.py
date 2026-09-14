@@ -148,7 +148,7 @@ def run(path, model, commands, expected, *flags, first_edge=None, cache='auto'):
         pending['oracle_logits'] = oracle
         return actual
 
-    def statistics(logits, config, history):
+    def statistics(logits, config, history, boundaries=None):
         assert config == io.expected, 'Actual sampler configuration disagrees with scenario/UI'
         assert len(logits) > 100 and np.isfinite(logits).all()
         assert tuple(history) == pending['engine_prefix'], 'Sampler history disagrees with episode prefix'
@@ -162,7 +162,7 @@ def run(path, model, commands, expected, *flags, first_edge=None, cache='auto'):
         np.testing.assert_allclose(actual_probabilities, oracle_probabilities, rtol=2e-4, atol=2e-6)
 
         # Then prove SPE's sampler agrees with the independent reference.
-        result = original_statistics(logits, config, history)
+        result = original_statistics(logits, config, history, boundaries)
         np.testing.assert_array_equal(result.distribution.ids, actual_ids)
         np.testing.assert_allclose(result.distribution.probabilities, actual_probabilities, rtol=1e-11, atol=1e-14)
         pending.update(ids=actual_ids, probabilities=actual_probabilities,
@@ -204,7 +204,7 @@ def run(path, model, commands, expected, *flags, first_edge=None, cache='auto'):
 
 def initial_flags():
     flags = ['--new-prompt', 'Continue this numbered list of animals: 1. cat 2. dog 3.', '--episode-id', 'source']
-    for field in INITIAL.__dataclass_fields__:
+    for field in ("temperature", "top_k", "top_p", "min_p", "repeat_penalty", "repeat_last_n", "presence_penalty", "frequency_penalty", "seed"):
         flags.extend(['--' + field.replace('_', '-'), str(getattr(INITIAL, field))])
     return flags
 

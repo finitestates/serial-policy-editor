@@ -177,13 +177,27 @@ def _is_possessive_suffix(token_text: str) -> bool:
     return _token_content(token_text).lower() in {"'s", "’s"}
 
 
-def _has_short_head(token_text: str) -> bool:
-    """Recognize a bare boundary or one- or two-letter route head."""
+def _has_short_head(token_texts: Sequence[str]) -> bool:
+    """Recognize a partial short head, but not a complete short word.
 
+    A complete one-token term has no head to behead.  For a multi-token route,
+    a short alphabetic first piece is only considered partial when the next
+    piece continues the same word; a following word boundary means the first
+    piece is already a complete term.
+    """
+
+    if len(token_texts) <= 1:
+        return False
+    token_text = token_texts[0]
     content = _token_content(token_text)
     if not content:
         return True
-    return 1 <= len(content) <= 2 and all(character.isalpha() for character in content)
+    if not (1 <= len(content) <= 2 and all(character.isalpha() for character in content)):
+        return False
+    return not (
+        _ends_word_boundary(token_text)
+        or _starts_word_boundary(token_texts[1])
+    )
 
 
 def _route_is_cohesive(token_texts: Sequence[str], *, min_piece_chars: int) -> bool:
@@ -279,7 +293,7 @@ def _route_mode(
     *,
     allow_beheaded: bool,
 ) -> str:
-    if allow_beheaded and token_texts and _has_short_head(token_texts[0]):
+    if allow_beheaded and _has_short_head(token_texts):
         return "beheaded"
     return default_mode
 

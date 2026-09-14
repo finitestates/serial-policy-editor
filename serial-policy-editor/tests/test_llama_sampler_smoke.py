@@ -100,10 +100,10 @@ def run(path, model, commands, expected, *flags, first_edge=None):
     calls = []
     pending = {}
 
-    def statistics(logits, config, history):
+    def statistics(logits, config, history, boundaries=None):
         assert config == io.expected, 'Actual sampler configuration disagrees with scenario/UI'
         assert len(logits) > 10000 and np.isfinite(logits).all()
-        result = original_statistics(logits, config, history)
+        result = original_statistics(logits, config, history, boundaries)
         ids, probabilities = reference(logits, io.expected, list(history))
         np.testing.assert_array_equal(result.distribution.ids, ids)
         np.testing.assert_allclose(result.distribution.probabilities, probabilities, rtol=1e-11, atol=1e-14)
@@ -135,7 +135,7 @@ def run(path, model, commands, expected, *flags, first_edge=None):
 
 def initial_flags():
     flags = ['--new-prompt', 'Continue this numbered list of animals: 1. cat 2. dog 3.', '--episode-id', 'source']
-    for field in INITIAL.__dataclass_fields__:
+    for field in ("temperature", "top_k", "top_p", "min_p", "repeat_penalty", "repeat_last_n", "presence_penalty", "frequency_penalty", "seed"):
         flags.extend(['--' + field.replace('_', '-'), str(getattr(INITIAL, field))])
     return flags
 

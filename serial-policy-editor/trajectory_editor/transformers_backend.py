@@ -150,6 +150,16 @@ class _CacheUnavailable(RuntimeError):
     """The model cannot provide the optional incremental evaluation path."""
 
 
+def _supports_logits_to_keep(model: Any) -> bool:
+    """Return whether the model explicitly exposes final-row projection."""
+
+    try:
+        parameters = inspect.signature(model.forward).parameters
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return "logits_to_keep" in parameters
+
+
 def _cache_length(cache: Any) -> int:
     get_length = getattr(cache, "get_seq_length", None)
     if callable(get_length):
@@ -259,6 +269,10 @@ class TransformersBackend:
             str(self.model_path), **model_kwargs
         )
         self._model.eval()
+        # Some Transformers model families can apply the output head only to
+        # the final position.  Detect the capability once and retain the
+        # existing full-output path for models that do not expose it.
+        self._supports_logits_to_keep = _supports_logits_to_keep(self._model)
 
         self._device = self._resolve_device(settings.device)
         if settings.device_map is None:
@@ -403,13 +417,16 @@ class TransformersBackend:
             [self._tokens], dtype=torch.long, device=self._input_device
         )
         attention_mask = torch.ones_like(input_ids)
+        kwargs: dict[str, Any] = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "use_cache": use_cache,
+            "return_dict": True,
+        }
+        if self._supports_logits_to_keep:
+            kwargs["logits_to_keep"] = 1
         with torch.inference_mode():
-            outputs = self._model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                use_cache=use_cache,
-                return_dict=True,
-            )
+            outputs = self._model(**kwargs)
         if use_cache:
             past_key_values = getattr(outputs, "past_key_values", None)
             if past_key_values is None:
@@ -440,6 +457,8 @@ class TransformersBackend:
             "use_cache": True,
             "return_dict": True,
         }
+        if self._supports_logits_to_keep:
+            kwargs["logits_to_keep"] = 1
         cache_position = torch.arange(
             old_length, new_length, dtype=torch.long, device=self._input_device
         )

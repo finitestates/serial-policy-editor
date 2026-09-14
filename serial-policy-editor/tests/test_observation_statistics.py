@@ -115,6 +115,28 @@ def test_active_reference_prior_is_noop_before_a_bias_route_is_active():
     np.testing.assert_array_equal(stats.adjusted, values)
 
 
+def test_active_reference_prior_obeys_trigger_and_stop_scope():
+    values = np.zeros(12, dtype=np.float64)
+    config = SamplingConfig(
+        temperature=0.0,
+        bias_rules=(BiasRule(
+            routes=((1, 2), (1, 3)), bias=1.0, mode="path",
+            triggers=((9,),), until=8,
+        ),),
+        reference_prior_routes=(((1, 2), 10.0), ((1, 3), 1.0)),
+        reference_prior_scope="active",
+        reference_prior_strength=1.0,
+    )
+
+    before = ObservationStatistics(values, config, [1])
+    inside = ObservationStatistics(values, config, [9, 1])
+    after = ObservationStatistics(values, config, [9, 8, 1])
+
+    assert before.reference_prior_biases == {}
+    assert inside.reference_prior_biases[2] > inside.reference_prior_biases[3]
+    assert after.reference_prior_biases == {}
+
+
 def test_sampler_replacement_invalidates_even_when_restored():
     runtime = engine()
     observation = runtime.observe()

@@ -226,11 +226,10 @@ class SamplingConfig:
             )
         active_routes = None
         if self.reference_prior_scope == "active":
-            active_routes = {
-                route
-                for rule in self.effective_bias_rules
-                for route in rule.routes
-            }
+            from .bias_rules import BiasMatcher
+            active_routes = BiasMatcher(self.effective_bias_rules).active_routes(
+                history, boundaries
+            )
         from .sampling import reference_prior_snapshot
         return reference_prior_snapshot(
             self.reference_prior_routes,

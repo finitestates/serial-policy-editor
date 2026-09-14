@@ -232,6 +232,41 @@ def test_auto_beheads_whitespace_only_route_heads():
     assert modes[(25, 26)] == "beheaded"
 
 
+def test_auto_does_not_behead_complete_short_terms_or_word_aligned_heads():
+    class ShortWordBackend(CatalogBackend):
+        pieces = {
+            **CatalogBackend.pieces,
+            25: "go",
+            26: " there",
+        }
+        canonical = {
+            **CatalogBackend.canonical,
+            "go": (25,),
+            "go there": (25, 26),
+        }
+
+    backend = ShortWordBackend()
+    direct = compile_term(
+        "go",
+        "go",
+        backend,
+        options=CompileOptions(
+            cases=("original",), leading_space=False, plural=False
+        ),
+    )
+    phrase = compile_term(
+        "go there",
+        "go there",
+        backend,
+        options=CompileOptions(
+            cases=("original",), leading_space=False, plural=False
+        ),
+    )
+
+    assert {route.mode for route in direct.routes if route.token_ids == (25,)} == {"path"}
+    assert {route.mode for route in phrase.routes if route.token_ids == (25, 26)} == {"tail"}
+
+
 def test_cohesive_route_policy_filters_tiny_subword_alternates(backend):
     all_routes = compile_term(
         "shadow",

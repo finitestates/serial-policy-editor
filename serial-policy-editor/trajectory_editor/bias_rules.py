@@ -399,19 +399,44 @@ def _weighted_path_tokens(
     routes: Sequence[Sequence[int]],
     route_weights: Sequence[Sequence[float]],
     history: Sequence[int],
+    *,
+    mode: str,
+    head_scale: float,
+    continuation_scale: float,
 ) -> dict[int, float]:
-    """Return precomputed edge weights for the currently viable route edges."""
+    """Return weighted edges that are eligible under the rule's mode.
+
+    Route allocation supplies the edge shape, but it does not replace the
+    route-mode contract.  In particular, a weighted tail rule still waits for
+    the complete route prefix, and a weighted beheaded rule never emits its
+    first edge.
+    """
 
     result: dict[int, float] = {}
     for route, weights in zip(routes, route_weights):
-        for prefix_length in range(min(len(route) - 1, len(history)), -1, -1):
-            prefix = route[:prefix_length]
-            if _endswith(history, prefix):
-                weight = weights[prefix_length]
-                if weight > 0:
-                    token = route[prefix_length]
-                    result[token] = max(result.get(token, 0.0), weight)
-                break
+        if mode == "tail":
+            prefix_length = len(route) - 1
+            if not _endswith(history, route[:prefix_length]):
+                continue
+        else:
+            first_prefix = 1 if mode == "beheaded" else 0
+            max_prefix = min(len(route) - 1, len(history))
+            prefix_length = None
+            for candidate in range(max_prefix, first_prefix - 1, -1):
+                if _endswith(history, route[:candidate]):
+                    prefix_length = candidate
+                    break
+            if prefix_length is None:
+                continue
+
+        weight = weights[prefix_length]
+        scale = (
+            head_scale if prefix_length == 0 else continuation_scale
+        )
+        weight *= scale
+        if weight > 0:
+            token = route[prefix_length]
+            result[token] = max(result.get(token, 0.0), weight)
     return result
 
 
@@ -420,7 +445,14 @@ def _rule_tokens(rule: BiasRule, history: Sequence[int], boundaries: Any) -> dic
     if rule.triggers and not _trigger_matches(rule, span):
         return {}
     if rule.route_weights:
-        return _weighted_path_tokens(rule.routes, rule.route_weights, span)
+        return _weighted_path_tokens(
+            rule.routes,
+            rule.route_weights,
+            span,
+            mode=rule.mode,
+            head_scale=rule.head_scale,
+            continuation_scale=rule.continuation_scale,
+        )
     if rule.mode in {"path", "beheaded"}:
         return _path_tokens(
             rule.routes,
@@ -443,7 +475,7 @@ class BiasMatcher:
             key=lambda rule: rule.sort_key,
         ))
 
-    def active_biases(self, history, boundaries=None) -> dict[int, float]:
+    def _normalized_history(self, history):
         needs_history = any(
             rule.until is not None
             or any(len(route) > 1 for route in rule.routes)
@@ -453,6 +485,28 @@ class BiasMatcher:
             if needs_history:
                 raise EditorError("route bias rules require exact context token IDs")
             history = ()
+        return history
+
+    def active_routes(self, history, boundaries=None) -> set[tuple[int, ...]]:
+        """Return routes whose rule-level scope gate is currently enabled.
+
+        This deliberately checks trigger/lifetime activation separately from
+        whether a route mode has an outgoing edge at this exact position.  The
+        result is used to scope a reference prior without changing the direct
+        matcher semantics.
+        """
+
+        history = self._normalized_history(history)
+        result: set[tuple[int, ...]] = set()
+        for rule in self.rules:
+            span = _scoped_span(rule, history, boundaries)
+            if rule.triggers and not _trigger_matches(rule, span):
+                continue
+            result.update(rule.routes)
+        return result
+
+    def active_biases(self, history, boundaries=None) -> dict[int, float]:
+        history = self._normalized_history(history)
         # A catalog entry may expose several route modes for one target.  The
         # modes are evaluated independently, but their overlapping next-token
         # contributions are one application of the target's bias, not one per

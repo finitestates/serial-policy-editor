@@ -196,6 +196,31 @@ def test_precomputed_route_weights_drive_the_same_runtime_matcher():
     assert matcher.active_biases([10]) == {11: 3.0}
 
 
+def test_weighted_routes_preserve_mode_and_edge_scales():
+    path = BiasMatcher((BiasRule(
+        routes=((10, 11),), bias=2.0, mode="path",
+        head_scale=0.1, continuation_scale=0.2,
+        route_weights=((0.5, 0.5),),
+    ),))
+    tail = BiasMatcher((BiasRule(
+        routes=((10, 11),), bias=2.0, mode="tail",
+        head_scale=0.1, continuation_scale=0.2,
+        route_weights=((0.5, 0.5),),
+    ),))
+    beheaded = BiasMatcher((BiasRule(
+        routes=((10, 11),), bias=2.0, mode="beheaded",
+        continuation_scale=0.2,
+        route_weights=((0.5, 0.5),),
+    ),))
+
+    assert path.active_biases([]) == {10: 0.1}
+    assert path.active_biases([10]) == {11: 0.2}
+    assert tail.active_biases([]) == {}
+    assert tail.active_biases([10]) == {11: 0.2}
+    assert beheaded.active_biases([]) == {}
+    assert beheaded.active_biases([10]) == {11: 0.2}
+
+
 def test_naive_chaining_is_an_entered_immediate_route_chain():
     entry = CatalogEntry(
         name="port of call",
