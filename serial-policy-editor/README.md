@@ -950,6 +950,12 @@ learner. If the model changes, its latent state is discarded because the
 fixed feature space is model-specific. `--latent-dimension` can reduce the
 projection size for a small experiment; 64 is the default.
 
+Feature construction is chunked by default to cap its temporary projection
+buffer. Use `--latent-projection-chunk-size` to lower the peak further (at the
+cost of slower initialization) or raise it when startup speed matters more
+than peak memory. The setting does not change the learned feature space and is
+not persisted in presets.
+
 Typed answers can optionally provide the same kind of live supervision. Add
 `--learn-from-write` alongside `--online-learning` and/or
 `--latent-preference` to let the enabled learners consume a live `Write`

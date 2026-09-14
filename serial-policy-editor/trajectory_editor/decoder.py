@@ -16,6 +16,7 @@ from .episode_backend import CacheMode, EpisodeBackend, validate_cache_mode
 from .latent_features import (
     DEFAULT_LATENT_DIMENSION,
     DEFAULT_PROJECTION_SEED,
+    DEFAULT_PROJECTION_CHUNK_SIZE,
     project_token_embeddings,
 )
 
@@ -238,6 +239,7 @@ class LlamaCppDecoder:
         *,
         feature_dimension: int = DEFAULT_LATENT_DIMENSION,
         projection_seed: int = DEFAULT_PROJECTION_SEED,
+        projection_chunk_size: int = DEFAULT_PROJECTION_CHUNK_SIZE,
     ) -> np.ndarray:
         """Return fixed projected token embeddings for the loaded GGUF model."""
         key = (int(feature_dimension), int(projection_seed))
@@ -269,6 +271,7 @@ class LlamaCppDecoder:
             embeddings,
             feature_dimension=feature_dimension,
             projection_seed=projection_seed,
+            projection_chunk_size=projection_chunk_size,
         )
         self._latent_feature_cache[key] = features
         return features

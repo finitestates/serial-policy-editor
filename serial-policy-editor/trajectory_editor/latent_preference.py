@@ -194,7 +194,18 @@ class LatentPreferenceLearner:
                     "observation latent features do not match learner dimension"
                 )
         probabilities = np.asarray(statistics.policy_probabilities, dtype=np.float64)
-        weighted_mean = probabilities @ features.astype(np.float64)
+        weighted_mean = np.empty(self.config.dimension, dtype=np.float64)
+        # Accumulate in float64 without first materializing a float64 copy of
+        # the full float32 feature matrix.  Keep optimization off so this
+        # remains a direct two-operand reduction with bounded workspace.
+        np.einsum(
+            "v,vd->d",
+            probabilities,
+            features,
+            out=weighted_mean,
+            dtype=np.float64,
+            optimize=False,
+        )
         raw_delta = self.config.learning_rate * severity * (
             features[chosen_token_id].astype(np.float64) - weighted_mean
         )

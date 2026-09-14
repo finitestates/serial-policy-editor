@@ -44,6 +44,7 @@ from .episode_projector import project_episode, project_fork_map, project_lineag
 from .episode_store import EpisodeStore
 from .episode_recovery import recover_sampler_record
 from .episode_ui import InteractivePolicy
+from .latent_features import DEFAULT_PROJECTION_CHUNK_SIZE
 from .latent_preference import LatentPreferenceLearner, LatentPreferenceResult
 from .online_learning import LearningResult, OnlineLearner
 from .transformers_backend import TransformersSettings
@@ -90,6 +91,16 @@ def _random_seed() -> int:
     """Return a uniformly chosen seed from the supported signed 64-bit range."""
 
     return secrets.randbelow(MAX_SEED - MIN_SEED + 1) + MIN_SEED
+
+
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
 
 
 def _read_initial_prompt() -> str:
@@ -274,6 +285,15 @@ def build_parser() -> argparse.ArgumentParser:
     latent.add_argument("--latent-strength", type=float, default=1.0)
     latent.add_argument("--latent-max-step", type=float, default=0.25)
     latent.add_argument("--latent-max-norm", type=float, default=4.0)
+    latent.add_argument(
+        "--latent-projection-chunk-size",
+        type=_positive_int,
+        default=DEFAULT_PROJECTION_CHUNK_SIZE,
+        help=(
+            "rows projected at once when building latent features; lower this "
+            "to reduce peak memory at the cost of slower initialization"
+        ),
+    )
     parser.add_argument("--theme", choices=LIVE_THEME_NAMES)
     parser.add_argument(
         "--divergence-policy", choices=("handoff", "ballistic"), default="handoff"
@@ -1042,6 +1062,7 @@ def main(argv: list[str] | None = None) -> int:
                     feature_provider=lambda *, feature_dimension, projection_seed: backend.latent_token_features(
                         feature_dimension=feature_dimension,
                         projection_seed=projection_seed,
+                        projection_chunk_size=args.latent_projection_chunk_size,
                     ),
                     enabled=True,
                     dimension=args.latent_dimension,
