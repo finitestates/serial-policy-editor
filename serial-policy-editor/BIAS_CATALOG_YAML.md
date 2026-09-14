@@ -8,6 +8,44 @@ single-quoted, or double-quoted. YAML quoting is not runtime bias syntax.
 The output is a model-specific JSON catalog. Compile it against the same model
 and tokenizer that will load it at runtime.
 
+## Which structured file is which?
+
+SPE uses several related but non-interchangeable files:
+
+| File | Used by | Meaning |
+| --- | --- | --- |
+| Catalog YAML | `policy-editor-bias --input` | Human-readable terms, compiler options, and named groups. |
+| Reference YAML | `policy-editor-bias --reference` | Optional lexical reference surfaces, either unweighted or surface-to-weighted. |
+| Catalog JSON | `policy-editor --bias-catalog` | Generated model-specific token routes. It is not a runtime bias preset. |
+| Runtime preset JSON | `policy-editor --biases` | Saved token rules, named runtime groups, model identity, and optional latent state. |
+| Editor-friendly YAML | `--biases-only --editor-friendly` output | Recompilable `groups:` membership only; it does not contain active amounts or token routes. |
+
+The compiler inputs are YAML because they describe semantic text. The compiler
+outputs JSON because token IDs, routes, weights, and model metadata are exact
+machine data. Do not copy token IDs from a catalog into a different model or
+tokenizer. Do not pass a runtime preset to `--bias-catalog`, or a compiled
+catalog to `--biases`.
+
+The optional reference file is also separate from the catalog file. A reference
+list gives every surface equal weight:
+
+```yaml
+- shadow
+- shadowing
+- silhouette
+```
+
+A reference mapping gives relative lexical weights:
+
+```yaml
+shadow: 100
+shadowing: 2
+silhouette: 1
+```
+
+Reference mappings use numeric values. They are not catalog group mappings and
+cannot contain `members`, `defaults`, or term compiler options.
+
 ## Smallest valid inputs
 
 A top-level YAML list is a list of terms. It becomes the automatic `global`
@@ -106,6 +144,12 @@ The top-level keys are:
 - `term_options`: optional per-term compiler options applied after `defaults`
   and after any inline term options.
 
+The four keys have distinct jobs: `defaults` changes compilation defaults,
+`terms` defines named surfaces, `groups` collects terms into reusable catalog
+entries, and `term_options` overrides compilation for a named term. A group is
+not a bias amount and does not become active until the editor applies a runtime
+command such as `b nautical +1`.
+
 `terms` may be written as a list or mapping. These forms are equivalent:
 
 ```yaml
@@ -137,6 +181,20 @@ terms:
 `forms` is an explicit list of source forms for that term. It is useful when a
 term needs particular derivatives or spellings beyond the generated case,
 spacing, plural, and suffix variants.
+
+For a mapping-form term, the key is the catalog name and `text` is the source
+text sent to the tokenizer. For example, this creates an entry named
+`display_name` whose routes are compiled from `port of call`:
+
+```yaml
+terms:
+  display_name:
+    text: port of call
+    mode: path
+    forms:
+      - port of call
+      - Port of Call
+```
 
 ## Compiler options
 
@@ -293,6 +351,41 @@ unless they are also listed under `terms`. `global` is reserved for the
 automatic group and cannot be declared as an ordinary term. An explicit
 `groups.global` definition is allowed and is combined with the top-level terms.
 
+These two examples are equivalent ways to define a simple catalog group:
+
+```yaml
+groups:
+  nautical:
+    - anchor
+    - steamship
+    - port of call
+```
+
+```yaml
+groups:
+  nautical:
+    members: [anchor, steamship, port of call]
+```
+
+The object form is required when the group itself needs a compiler override,
+currently `level`:
+
+```yaml
+groups:
+  nautical:
+    level: exhaustive
+    members:
+      - anchor
+      - steamship
+      - port of call
+```
+
+Group members may be existing terms, other groups, or new implicit terms. An
+unprefixed member such as `anchor` may be introduced automatically; `@anchor`
+requires `anchor` to have been declared already as a term or group. Group
+cycles are rejected. Catalog groups are compile-time collections; runtime
+groups created with `b name -> {...}` are a separate sampler-state feature.
+
 ## Compile examples
 
 Compile a YAML source against a GGUF model:
@@ -320,6 +413,37 @@ The resulting catalog is loaded by the editor with:
 ```bash
 policy-editor --model /path/to/model.gguf --bias-catalog catalog.json
 ```
+
+The generated JSON has the following top-level shape:
+
+```json
+{
+  "format": "spe-bias-catalog-v1",
+  "model": {"backend": "llama.cpp", "vocabulary_size": 32000},
+  "compiler": {"format_version": 1, "modes": ["auto", "tail", "path", "beheaded"]},
+  "entries": {
+    "nautical": {
+      "kind": "group",
+      "members": ["anchor", "steamship"],
+      "routes": [
+        {
+          "token_ids": [101],
+          "texts": [" anchor"],
+          "token_texts": [" anchor"],
+          "mode": "tail",
+          "strategies": ["direct"],
+          "route_class": "direct"
+        }
+      ]
+    }
+  }
+}
+```
+
+The real `routes` arrays contain model token IDs, token text, route modes, and
+optional edge weights. A reference-enabled catalog may also contain
+`reference_prior_routes`. The catalog is generated data: edit the YAML and
+recompile instead of hand-editing its route arrays.
 
 At runtime, a bare name resolves to its catalog entry when present and falls
 back to one-shot plain-text resolution otherwise. `@name` always requires a

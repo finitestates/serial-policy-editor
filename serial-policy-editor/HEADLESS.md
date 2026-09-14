@@ -1,8 +1,9 @@
-# SPE 0.3.6 headless preview
+# SPE 0.3.8 headless preview
 
-This branch adds a local browser editor and a small HTTP API over SPE's existing
-episode engine, runner, and SQLite workspace. The service owns one loaded model
-and one active episode. Opening or forking an episode switches that active state.
+The 0.3.8 package includes a local browser editor and a small HTTP API over
+SPE's existing episode engine, runner, and SQLite workspace. The service owns
+one loaded model and one active episode. Opening or forking an episode switches
+that active state.
 
 ## Run
 

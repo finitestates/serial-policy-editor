@@ -1,14 +1,17 @@
-# Serial Policy Editor 0.3.7
+# Serial Policy Editor 0.3.8
 
 Serial Policy Editor (SPE) is a terminal editor for steering a local language
 model one token, text insertion, or delegated span at a time. Save your choices,
 rewind or fork a continuation, and replay the recorded editing procedure in a
 new context.
 
-**0.3.7 adds model-specific bias catalogs, named runtime groups, and portable
-rules-only export.** It also includes the persistent full-screen editor,
+**0.3.8 adds a complete model-specific bias and learning layer.** It includes
+human-readable YAML catalogs, compiled JSON catalogs, durable named groups,
+stateful lexical reference priors, opt-in online group and latent preference
+learning, and optional learning from typed writes. It also includes the
+persistent full-screen editor,
 scrollable context, multiline input,
-Ctrl+E input expansion, and performance improvements.** The default hold is now
+Ctrl+E input expansion, and performance improvements. The default hold is now
 100 tokens; use `--hold-default` to choose another value. Transient busy feedback
 has been removed to prevent layout shifts. Experimental history replacement and
 fork-edit variations are excluded from this release.
@@ -17,7 +20,8 @@ Start with [installation](#install) and the [first-session walkthrough](#your-fi
 The rest of this guide covers the [editor](#the-editor), [live-edge menu](#live-edge-menu),
 [replay](#serial-policy-replay), [saved work](#persistence-and-plain-text),
 [projection](#projector), [troubleshooting](#troubleshooting), and [tests](#tests).
-See [the changelog](CHANGELOG.md) for release history.
+See [the changelog](CHANGELOG.md) and [the 0.3.8 release notes](RELEASE_NOTES_0.3.8.md)
+for release history and the structured-file formats.
 
 ## Core ideas
 
@@ -728,12 +732,12 @@ Replay follows the recorded bias states unless explicitly overridden; in-place
 SPR keeps the destination sampler, including its biases. Switching models clears
 inherited token-ID biases.
 
-### Experimental bias catalog compiler
+### Bias catalogs and structured policy files
 
-The standalone `policy-editor-bias` tool can compile human-readable YAML
-terms against a local model tokenizer. It currently produces a model-specific,
-bias-free catalog for inspection and for the logical bias-rule runtime. A
-simple YAML list becomes the automatic `global` group:
+The standalone `policy-editor-bias` tool compiles human-readable YAML terms
+against a local model tokenizer. It produces a model-specific, bias-free JSON
+catalog for inspection and for the logical bias-rule runtime. A simple YAML list
+becomes the automatic `global` group:
 
 ```yaml
 - sky
@@ -750,10 +754,35 @@ terms:
   - mango
 groups:
   nautical:
-    - anchor
-    - steamship
-    - port of call
+    members:
+      - anchor
+      - steamship
+      - port of call
 ```
+
+Catalog YAML, compiled catalog JSON, reference YAML, and runtime bias-preset
+JSON are different formats. Catalog YAML describes semantic terms and groups;
+compiled catalog JSON contains model-specific token routes; runtime preset JSON
+contains active rules and group amounts. The complete schemas and examples are
+in [BIAS_CATALOG_YAML.md](BIAS_CATALOG_YAML.md).
+
+The optional `--reference reference.yaml` input is a separate lexical universe,
+not another catalog. It accepts either a list of equally weighted surfaces:
+
+```yaml
+- shadow
+- shadowing
+```
+
+or a mapping of surfaces to positive relative weights:
+
+```yaml
+shadow: 100
+shadowing: 2
+```
+
+The mapping form must contain numeric weights; `groups:` and `members:` belong
+to catalog YAML, not reference YAML.
 
 Compile the catalog with the normal tokenizer route search:
 
@@ -863,15 +892,16 @@ b nautical -> {anchor, steamship, " port of call"}
 b nautical +1
 ```
 
-The arrow command creates or appends to a durable group. A later bare reference
-to that name uses the same compiled routes as a catalog group; `@name` remains
-strictly a catalog reference. The group has one shared bias amount, so adding a
-member immediately inherits the group's current amount. Group definitions and
-their bias changes are sampler state: replay, fork, and rewind restore them at
-the relevant boundary. Runtime groups are included in the normal `--biases-only`
-export.
+The arrow command creates or appends to a durable runtime group. A later bare
+reference to that name uses the same compiled routes as a catalog group;
+`@name` remains strictly a catalog reference. The group has one shared bias
+amount, so adding a member immediately inherits the group's current amount.
+Group definitions and their bias changes are sampler state: replay, fork, and
+rewind restore them at the relevant boundary. Runtime groups are included in
+the normal `--biases-only` export, while `--editor-friendly` exports only their
+recompilable YAML membership.
 
-### Experimental online group learning
+### Opt-in online group learning
 
 The optional learner updates only the scalar strengths of existing named bias
 groups. It never stores a token-to-preference map and never changes group rules,
@@ -891,7 +921,7 @@ interaction records the selected token as diagnostic context plus the old and
 new group weights, gradients, and update norm. Use `--learnable-groups` to
 restrict which named groups may move. Learning is off by default.
 
-### Experimental latent preference learning
+### Opt-in latent preference learning
 
 The independent latent learner is a second opt-in experiment. It derives a
 fixed 64-dimensional, unit-normalized feature vector for every vocabulary
@@ -936,6 +966,15 @@ policy-editor --workspace episodes.sqlite3 --project '#1' --biases-only --rules-
 policy-editor --workspace episodes.sqlite3 --project '#1' --biases-only --editor-friendly > groups.yaml
 policy-editor --model /path/to/model.gguf --biases biases.json --new-prompt 'Once upon a time'
 ```
+
+The loadable preset uses `"format": "spe-bias-rules-v2"`. Its top-level
+sections are `model` (identity checks), `bias_rules` (direct logical rules),
+and `bias_groups` (named groups with one shared `bias` and bias-free `rules`).
+Full presets may also contain `latent_preference_z` and `latent_strength`.
+`--rules-only` keeps the JSON preset format but replaces named groups with their
+effective ordinary rules. `--editor-friendly` instead emits YAML `groups:`
+membership and intentionally omits active amounts, compiled routes, direct
+rules, and latent state.
 
 `--biases` replaces the saved bias set, including on resume, fork, or replay.
 An empty `bias_rules` list explicitly clears direct rules. A full preset contains

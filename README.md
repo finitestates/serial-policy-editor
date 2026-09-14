@@ -1,4 +1,4 @@
-# Serial Policy Editor 0.3.6
+# Serial Policy Editor 0.3.8
 
 Steer a local language model in your terminal: choose individual tokens, insert
 text, delegate a span, and rewind or fork the result. Serial Policy Replay (SPR)
@@ -9,11 +9,12 @@ SPE supports **llama.cpp (GGUF)** and **Hugging Face Transformers (local model
 directories)**. A SQLite workspace keeps episodes, editing actions, and token
 evidence for resumption, replay, and text or evidence projection.
 
-**0.3.6 adds a persistent full-screen editor, scrollable context, multiline input,
-Ctrl+E input expansion, and performance improvements.** The default hold is now
-100 tokens; use `--hold-default` to choose another value. Transient busy feedback
-has been removed to prevent layout shifts. Experimental history replacement and
-fork-edit variations are excluded from this release.
+**0.3.8 adds model-specific bias catalogs, durable bias groups, stateful lexical
+priors, and opt-in learning from token choices and typed writes.** It retains
+the persistent full-screen editor, scrollable context, multiline input, and
+performance improvements from 0.3.6. The default hold is 100 tokens; use
+`--hold-default` to choose another value. Calibration and experimental history
+replacement/fork-edit work are not part of this release.
 
 ## Getting started
 
@@ -156,6 +157,7 @@ The user in this program is referred to as "Teacher" as a reference to Teacher-f
 - [Troubleshooting and backing up work](serial-policy-editor/README.md#troubleshooting)
 - [Testing and real-model smoke checks](serial-policy-editor/README.md#tests)
 - [Changelog](serial-policy-editor/CHANGELOG.md)
+- [0.3.8 release notes](serial-policy-editor/RELEASE_NOTES_0.3.8.md)
 - [0.3.6 release notes](serial-policy-editor/RELEASE_NOTES_0.3.6.md)
 - [Historical architecture overview (0.3.3)](serial-policy-editor/ARCHITECTURE_0.3.3.md)
 - [Scope of the reduced editor](serial-policy-editor/CUT_NOTES.md)

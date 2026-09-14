@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.3.8 — 2026-09-14
+
+This release carries the model-aware biasing work forward into a broader,
+opt-in learning layer. The default editor behavior remains conservative: the
+new reference prior, named-group learner, latent learner, and typed-write
+learning are all explicitly enabled features.
+
+- Add a documented `spe-bias-catalog-v1` compiler format. YAML catalog inputs
+  accept simple term lists, explicit `terms`/`groups` mappings, per-term
+  options, generated case/spacing/plural/suffix forms, and model-specific
+  deterministic token routes.
+- Add route modes for `tail`, telescoping `path`, and `beheaded` lexical
+  matching, with direct, word-aligned, cohesive, and fragmented route
+  classification. Add cohesive route filtering and exact tail fallbacks when
+  no safe decomposition remains.
+- Add legacy, full, equal, information, amplified-information, and
+  naive-chaining edge allocation strategies, including optional weighted
+  reference YAML input and allocation diagnostics in compiled catalogs.
+- Add one logical runtime matcher for direct rules, catalog terms, catalog
+  groups, runtime groups, multi-token targets, shared prefixes, conditional
+  triggers, and exact sentence/newline/stop-token lifetimes.
+- Add durable named bias groups with append-only membership, shared amounts,
+  sampler-state persistence, replay/fork/rewind behavior, and model-matched
+  JSON preset export. Add `--rules-only` flattening and
+  `--editor-friendly` YAML group export.
+- Add a stateful weighted lexical reference prior backed by one
+  history-reconstructed token trie. Support active/global scope, contrastive
+  and ballistic modes, optional EXIT-vs-CONTINUE gates, and configurable
+  attraction and strength.
+- Add an opt-in online learner for named bias-group strengths. Updates are
+  bounded, finite-difference based, restricted to live raw-rank selections by
+  default, persisted as sampler segments, and recorded as diagnostic
+  interactions.
+- Add an independent opt-in latent preference learner. It projects the model's
+  output embedding into a deterministic fixed feature space and learns only a
+  bounded anonymous preference vector, which is persisted and replayed without
+  rerunning the learner.
+- Add `--learn-from-write` so enabled learners may consume a live typed write.
+  Each token is observed before commit, updates are averaged, and one update is
+  installed after the write remains atomic.
+- Improve the Transformers backend's final-position logits path and expose
+  cached model features needed by latent preference learning.
+- Remove obsolete intermediate beheaded-route patch artifacts; their behavior
+  is represented by the refined compiler and runtime implementation.
+- Expand tests and user documentation for catalogs, references, route
+  allocation, online learning, latent learning, and typed-write learning.
+
 ## 0.3.7 — 2026-09-12
 
 - Add model-specific YAML bias catalogs with deterministic term decomposition,

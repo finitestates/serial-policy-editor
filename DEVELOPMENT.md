@@ -1,12 +1,16 @@
 # Development branches
 
-`main` contains the released 0.3.6 code. `dev/0.3.6` collected the reviewed
+`main` contains the released 0.3.8 code. `dev/0.3.6` collected the reviewed
 performance, multiline input, persistent terminal rendering, and 100-token
 hold improvements, including `567aaca`.
 
 `codex/history-edit` contains experimental history replacement, fork-edit and
 sibling variations, and token-preserving replacement replay. Those experiments
-are not part of 0.3.6. The 100-token hold default was promoted independently.
+are not part of 0.3.8. The 100-token hold default was promoted independently.
+
+The calibration snapshot under the ignored local `.worktrees/` directory was a
+negative experiment and is not part of 0.3.8. Model-specific catalogs and the
+runtime learners described in the release notes are the carried-forward work.
 
 `fix/persistent-fullscreen-tui` is superseded by the persistent terminal rendering
 refactor already incorporated into `dev/0.3.6`; it needs no separate release merge.
