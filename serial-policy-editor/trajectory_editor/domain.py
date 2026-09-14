@@ -32,6 +32,8 @@ class SamplingConfig:
     bias_step: float = 0.5
     bias_rules: tuple = ()
     bias_groups: tuple = ()
+    latent_preference_z: tuple = ()
+    latent_strength: float = 1.0
     reference_prior_routes: tuple = ()
     reference_prior_scope: str = "active"
     reference_prior_mode: str = "contrastive"
@@ -63,6 +65,22 @@ class SamplingConfig:
         if len({group.name for group in groups}) != len(groups):
             raise EditorError("duplicate bias group")
         object.__setattr__(self, "bias_groups", tuple(sorted(groups, key=lambda group: group.name)))
+        if isinstance(self.latent_preference_z, (str, bytes, bytearray)):
+            raise EditorError("latent_preference_z must be a numeric vector")
+        try:
+            latent_z = tuple(float(value) for value in self.latent_preference_z)
+        except (TypeError, ValueError) as exc:
+            raise EditorError("latent_preference_z must be a numeric vector") from exc
+        if any(not math.isfinite(value) for value in latent_z):
+            raise EditorError("latent_preference_z must contain finite numbers")
+        if (
+            type(self.latent_strength) not in (int, float)
+            or not math.isfinite(float(self.latent_strength))
+            or float(self.latent_strength) < 0.0
+        ):
+            raise EditorError("latent_strength must be a finite nonnegative number")
+        object.__setattr__(self, "latent_preference_z", latent_z)
+        object.__setattr__(self, "latent_strength", float(self.latent_strength))
         if self.reference_prior_scope not in {"active", "global"}:
             raise EditorError("reference_prior_scope must be active or global")
         if self.reference_prior_mode not in {
@@ -187,6 +205,7 @@ class SamplingConfig:
             self.history_penalties_active
             or bool(self.bias_rules)
             or any(group.bias != 0.0 for group in self.bias_groups)
+            or bool(self.latent_preference_z)
             or self.reference_prior_active
         )
 
@@ -311,6 +330,12 @@ class SamplingConfig:
             bias_step=value.get("bias_step", defaults.bias_step),
             bias_rules=value.get("bias_rules", ()),
             bias_groups=value.get("bias_groups", ()),
+            latent_preference_z=value.get(
+                "latent_preference_z", defaults.latent_preference_z
+            ),
+            latent_strength=value.get(
+                "latent_strength", defaults.latent_strength
+            ),
             reference_prior_routes=value.get(
                 "reference_prior_routes", defaults.reference_prior_routes
             ),
@@ -374,6 +399,14 @@ class SamplingConfig:
         return {
             **({"bias_rules": [rule.to_dict() for rule in self.bias_rules]} if self.bias_rules else {}),
             **({"bias_groups": [group.to_dict() for group in self.bias_groups]} if self.bias_groups else {}),
+            **(
+                {
+                    "latent_preference_z": list(self.latent_preference_z),
+                    "latent_strength": self.latent_strength,
+                }
+                if self.latent_preference_z or self.latent_strength != 1.0
+                else {}
+            ),
             **({"bias_step": self.bias_step} if self.bias_step != 0.5 else {}),
             "temperature": self.temperature,
             "top_k": self.top_k,

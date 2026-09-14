@@ -405,9 +405,17 @@ def top_raw_ids(logits: np.ndarray, count: int) -> list[int]:
 class ObservationStatistics:
     """Owned numeric snapshot, with selected-token ranks computed lazily."""
 
-    def __init__(self, logits, config, history_token_ids, boundaries=None):
+    def __init__(
+        self,
+        logits,
+        config,
+        history_token_ids,
+        boundaries=None,
+        latent_features=None,
+    ):
         self.logits = _validated_logits(logits).copy()
         self.boundaries = boundaries
+        self.latent_features = latent_features
         penalties_active = config.history_penalties_active
         if penalties_active:
             self.adjusted, _, _ = _history_penalty_surface(
@@ -434,6 +442,30 @@ class ObservationStatistics:
                 self.adjusted[token] += bias
             if not np.all(np.isfinite(self.adjusted)):
                 raise ValueError("biases produced non-finite policy logits")
+        latent_z = tuple(config.latent_preference_z)
+        if latent_z:
+            if latent_features is None:
+                raise ValueError(
+                    "latent token features are required when latent preference state is active"
+                )
+            features = np.asarray(latent_features, dtype=np.float32)
+            if features.shape != (len(self.logits), len(latent_z)):
+                raise ValueError(
+                    "latent token features do not match the policy vocabulary and state"
+                )
+            if not np.all(np.isfinite(features)):
+                raise ValueError("latent token features must be finite")
+            latent_adjustments = float(config.latent_strength) * (
+                features @ np.asarray(latent_z, dtype=np.float32)
+            )
+            if not np.all(np.isfinite(latent_adjustments)):
+                raise ValueError("latent preference produced non-finite policy logits")
+            self.latent_features = features
+            self.latent_logit_adjustments = latent_adjustments
+            self.adjusted = self.adjusted.copy()
+            self.adjusted += latent_adjustments
+        else:
+            self.latent_logit_adjustments = np.zeros_like(self.adjusted)
         penalties_active = config.policy_active
         self.maximum = float(np.max(self.logits))
         exponentials = np.exp(self.logits - self.maximum)

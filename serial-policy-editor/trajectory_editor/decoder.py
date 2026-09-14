@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import platform
 import sys
 from dataclasses import asdict, dataclass
@@ -12,6 +13,11 @@ import numpy as np
 
 from .domain import EditorError
 from .episode_backend import CacheMode, EpisodeBackend, validate_cache_mode
+from .latent_features import (
+    DEFAULT_LATENT_DIMENSION,
+    DEFAULT_PROJECTION_SEED,
+    project_token_embeddings,
+)
 
 
 # Public spelling retained because backend_factory and a few user scripts used it.
@@ -156,6 +162,7 @@ class LlamaCppDecoder:
                 if value >= 0:
                     self._fallback_eog_ids.add(value)
         self._tokens: list[int] = []
+        self._latent_feature_cache: dict[tuple[int, int], np.ndarray] = {}
 
     def vocabulary_size(self) -> int:
         return self._vocabulary_size
@@ -225,6 +232,46 @@ class LlamaCppDecoder:
         return np.ctypeslib.as_array(pointer, shape=(self._vocabulary_size,)).astype(
             np.float32, copy=True
         )
+
+    def latent_token_features(
+        self,
+        *,
+        feature_dimension: int = DEFAULT_LATENT_DIMENSION,
+        projection_seed: int = DEFAULT_PROJECTION_SEED,
+    ) -> np.ndarray:
+        """Return fixed projected token embeddings for the loaded GGUF model."""
+        key = (int(feature_dimension), int(projection_seed))
+        cached = self._latent_feature_cache.get(key)
+        if cached is not None:
+            return cached
+        binding = getattr(self._llama_cpp, "llama_cpp", self._llama_cpp)
+        library = getattr(binding, "_lib", None)
+        getter = getattr(
+            library,
+            "_Z24llama_model_get_tok_embdPK11llama_modelPf",
+            None,
+        )
+        if getter is None:
+            raise RuntimeError(
+                "installed llama.cpp binding does not expose token embeddings"
+            )
+        embedding_width = int(self._model.n_embd())
+        embeddings = np.empty(
+            (self._vocabulary_size, embedding_width), dtype=np.float32
+        )
+        getter.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float)]
+        getter.restype = None
+        getter(
+            self._model._model.model,
+            embeddings.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        )
+        features = project_token_embeddings(
+            embeddings,
+            feature_dimension=feature_dimension,
+            projection_seed=projection_seed,
+        )
+        self._latent_feature_cache[key] = features
+        return features
 
     def tokenize(
         self, text: str, *, add_bos: bool = False, special: bool = False

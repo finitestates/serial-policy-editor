@@ -14,6 +14,11 @@ import numpy as np
 
 from .domain import EditorError
 from .episode_backend import CacheMode, validate_cache_mode
+from .latent_features import (
+    DEFAULT_LATENT_DIMENSION,
+    DEFAULT_PROJECTION_SEED,
+    project_token_embeddings,
+)
 
 
 @dataclass(frozen=True)
@@ -297,6 +302,7 @@ class TransformersBackend:
         self._eog_ids, self._eog_source = self._discover_eog_ids()
         self._tokens: list[int] = []
         self._last_logits: np.ndarray | None = None
+        self._latent_feature_cache: dict[tuple[int, int], np.ndarray] = {}
 
     def _apply_execution_controls(self) -> None:
         if self.settings.torch_num_threads is not None:
@@ -524,6 +530,37 @@ class TransformersBackend:
         if self._last_logits is None:
             raise RuntimeError("decoder has not evaluated a prefix")
         return self._last_logits.copy()
+
+    def latent_token_features(
+        self,
+        *,
+        feature_dimension: int = DEFAULT_LATENT_DIMENSION,
+        projection_seed: int = DEFAULT_PROJECTION_SEED,
+    ) -> np.ndarray:
+        """Return fixed projected rows from the model output embedding."""
+        key = (int(feature_dimension), int(projection_seed))
+        cached = self._latent_feature_cache.get(key)
+        if cached is not None:
+            return cached
+        output_embeddings = self._model.get_output_embeddings()
+        if output_embeddings is None or getattr(output_embeddings, "weight", None) is None:
+            raise RuntimeError("Transformers model has no output embedding matrix")
+        weight = output_embeddings.weight
+        if getattr(weight, "ndim", None) != 2 or int(weight.shape[0]) < self._vocabulary_size:
+            raise RuntimeError("Transformers output embedding matrix does not cover the vocabulary")
+        matrix = (
+            weight[: self._vocabulary_size]
+            .detach()
+            .to(dtype=self._torch.float32, device="cpu")
+            .numpy()
+        )
+        features = project_token_embeddings(
+            matrix,
+            feature_dimension=feature_dimension,
+            projection_seed=projection_seed,
+        )
+        self._latent_feature_cache[key] = features
+        return features
 
     def tokenize(
         self, text: str, *, add_bos: bool = False, special: bool = False

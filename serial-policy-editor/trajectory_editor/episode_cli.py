@@ -43,6 +43,7 @@ from .episode_projector import project_episode, project_fork_map, project_lineag
 from .episode_store import EpisodeStore
 from .episode_recovery import recover_sampler_record
 from .episode_ui import InteractivePolicy
+from .latent_preference import LatentPreferenceLearner, LatentPreferenceResult
 from .online_learning import LearningResult, OnlineLearner
 from .transformers_backend import TransformersSettings
 from .tui import TerminalIO
@@ -254,6 +255,19 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="GROUP",
         help="restrict online learning to these named bias groups",
     )
+    latent = parser.add_argument_group("latent preference learning")
+    latent.add_argument(
+        "--latent-preference",
+        "--latent-preference-enabled",
+        dest="latent_preference",
+        action="store_true",
+        help="learn an anonymous latent preference vector from live raw-rank selections (off by default)",
+    )
+    latent.add_argument("--latent-dimension", type=int, default=64)
+    latent.add_argument("--latent-learning-rate", type=float, default=0.05)
+    latent.add_argument("--latent-strength", type=float, default=1.0)
+    latent.add_argument("--latent-max-step", type=float, default=0.25)
+    latent.add_argument("--latent-max-norm", type=float, default=4.0)
     parser.add_argument("--theme", choices=LIVE_THEME_NAMES)
     parser.add_argument(
         "--divergence-policy", choices=("handoff", "ballistic"), default="handoff"
@@ -371,6 +385,8 @@ def _sampling_from_args(
         for name in SAMPLER_FIELDS
     }
     values.update({
+        "latent_preference_z": base.latent_preference_z,
+        "latent_strength": base.latent_strength,
         "reference_prior_routes": base.reference_prior_routes,
         "reference_prior_scope": base.reference_prior_scope,
         "reference_prior_mode": base.reference_prior_mode,
@@ -379,6 +395,20 @@ def _sampling_from_args(
         "reference_prior_exit_strength": base.reference_prior_exit_strength,
     })
     return SamplingConfig(**values)
+
+
+def _apply_latent_preset(
+    sampling: SamplingConfig,
+    preset_latent: tuple[tuple[float, ...], float] | None,
+) -> SamplingConfig:
+    if preset_latent is None:
+        return sampling
+    z, strength = preset_latent
+    return replace(
+        sampling,
+        latent_preference_z=z,
+        latent_strength=strength,
+    )
 
 
 def _apply_catalog_reference_prior(
@@ -435,6 +465,10 @@ def _apply_catalog_reference_prior(
 
 def _sampler_override(current: SamplingConfig, raw: str) -> SamplingConfig:
     values = {name: getattr(current, name) for name in SAMPLER_FIELDS}
+    values.update({
+        "latent_preference_z": current.latent_preference_z,
+        "latent_strength": current.latent_strength,
+    })
     pieces = raw.replace(",", " ").split()
     if not pieces:
         return current
@@ -602,6 +636,9 @@ def _sampler_summary(config: SamplingConfig) -> str:
         summary += " groups=" + ",".join(
             f"{group.name}:{group.bias:g}" for group in config.bias_groups
         )
+    if config.latent_preference_z:
+        norm = sum(value * value for value in config.latent_preference_z) ** 0.5
+        summary += f" latent_norm={norm:g} latent_strength={config.latent_strength:g}"
     return summary
 
 
@@ -614,6 +651,17 @@ def _online_learning_notice(io: TerminalIO, result: LearningResult) -> None:
         f"selected token {result.chosen_token_id}, "
         f"rank {result.old_policy_rank}, "
         f"update norm {result.update_norm:.4g} · groups {weights}"
+    )
+
+
+def _latent_preference_notice(
+    io: TerminalIO, result: LatentPreferenceResult
+) -> None:
+    io.write(
+        f"Latent preference @ boundary {result.observation_boundary + 1}: "
+        f"selected token {result.chosen_token_id}, "
+        f"rank {result.old_policy_rank}, "
+        f"update norm {result.update_norm:.4g}, z norm {result.z_norm:.4g}"
     )
 
 
@@ -939,10 +987,15 @@ def main(argv: list[str] | None = None) -> int:
                 args.bias_rules = ()
                 args.bias_groups = ()
                 io.write("Model changed: token-ID biases reset; load a matching preset to apply biases.")
+            preset_latent = None
             if args.biases is not None:
                 preset = load_bias_preset(args.biases, backend, provenance)
                 args.bias_rules = preset.bias_rules
                 args.bias_groups = preset.bias_groups
+                preset_latent = (
+                    preset.latent_preference_z,
+                    preset.latent_strength,
+                )
             requested_id = args.episode_id
             parent_id: str | None = None
             fork_boundary: int | None = None
@@ -956,6 +1009,20 @@ def main(argv: list[str] | None = None) -> int:
                 max_bias=args.learning_max_bias,
                 learnable_groups=args.learnable_groups,
             )
+            latent_learner = None
+            if args.latent_preference:
+                latent_learner = LatentPreferenceLearner(
+                    feature_provider=lambda *, feature_dimension, projection_seed: backend.latent_token_features(
+                        feature_dimension=feature_dimension,
+                        projection_seed=projection_seed,
+                    ),
+                    enabled=True,
+                    dimension=args.latent_dimension,
+                    learning_rate=args.latent_learning_rate,
+                    latent_strength=args.latent_strength,
+                    max_step=args.latent_max_step,
+                    max_norm=args.latent_max_norm,
+                )
 
             if args.resume is not None:
                 # Only explicit CLI sampler flags override the stored segment.
@@ -970,6 +1037,7 @@ def main(argv: list[str] | None = None) -> int:
                     else source_sampling
                 )
                 sampling = _apply_catalog_reference_prior(sampling, catalog, args)
+                sampling = _apply_latent_preset(sampling, preset_latent)
                 io.write("Restoring saved context...")
                 if model_changed:
                     engine, episode_id = _model_continuation(store, args.resume, backend, provenance)
@@ -996,6 +1064,7 @@ def main(argv: list[str] | None = None) -> int:
                 sampling = _apply_catalog_reference_prior(
                     _sampling_from_args(args), catalog, args
                 )
+                sampling = _apply_latent_preset(sampling, preset_latent)
                 engine = EpisodeEngine(
                     backend,
                     sampling=sampling,
@@ -1018,6 +1087,7 @@ def main(argv: list[str] | None = None) -> int:
                 sampling = _apply_catalog_reference_prior(
                     _sampling_from_args(args, source_sampling), catalog, args
                 )
+                sampling = _apply_latent_preset(sampling, preset_latent)
                 replay_prefix = None
                 if model_changed:
                     replay_prefix = backend.tokenize(store.get_episode(args.replay)["initial_text"], add_bos=True, special=True)
@@ -1062,6 +1132,7 @@ def main(argv: list[str] | None = None) -> int:
                 sampling = _apply_catalog_reference_prior(
                     _sampling_from_args(args, source_sampling), catalog, args
                 )
+                sampling = _apply_latent_preset(sampling, preset_latent)
                 engine = EpisodeEngine(
                     backend,
                     sampling=sampling,
@@ -1096,6 +1167,10 @@ def main(argv: list[str] | None = None) -> int:
                     divergence_policy=args.divergence_policy,
                     learner=learner,
                     on_learning_update=lambda result: _online_learning_notice(
+                        io, result
+                    ),
+                    latent_learner=latent_learner,
+                    on_latent_learning_update=lambda result: _latent_preference_notice(
                         io, result
                     ),
                 )

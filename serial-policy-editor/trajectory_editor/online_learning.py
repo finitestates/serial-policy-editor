@@ -173,6 +173,7 @@ class OnlineLearner:
             sampling,
             observation.prefix_token_ids,
             observation.statistics.boundaries,
+            latent_features=getattr(observation.statistics, "latent_features", None),
         )
 
     def update(

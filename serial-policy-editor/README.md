@@ -891,6 +891,35 @@ interaction records the selected token as diagnostic context plus the old and
 new group weights, gradients, and update norm. Use `--learnable-groups` to
 restrict which named groups may move. Learning is off by default.
 
+### Experimental latent preference learning
+
+The independent latent learner is a second opt-in experiment. It derives a
+fixed 64-dimensional, unit-normalized feature vector for every vocabulary
+token from the loaded model's token/output embedding through a deterministic
+projection. It learns only an anonymous vector `z`; there are no named latent
+dimensions and no token-specific learned values:
+
+```text
+latent logit adjustment = latent strength * dot(z, token feature)
+```
+
+Enable it alongside or instead of group learning for a live session:
+
+```bash
+policy-editor --model /path/to/model.gguf --biases groups.json \
+  --latent-preference --latent-strength 1.0 \
+  --latent-learning-rate 0.05 --latent-max-step 0.25 --latent-max-norm 4.0
+```
+
+It updates only after live numeric `SelectRawRank` choices. The update moves
+`z` toward the chosen token's fixed feature and away from the current
+policy-weighted feature mean, using the same bounded rank severity as the
+named-group learner. The vector is stored in sampler segments, included in
+full `--biases-only` exports, and consumed during replay without rerunning the
+learner. If the model changes, its latent state is discarded because the
+fixed feature space is model-specific. `--latent-dimension` can reduce the
+projection size for a small experiment; 64 is the default.
+
 Export the current surviving bias set as a JSON preset:
 
 ```bash

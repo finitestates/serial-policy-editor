@@ -21,6 +21,11 @@ from .episode_engine import (
 from .episode_policy import EpisodeRunner, RunResult, TapeStep
 from .episode_projector import EpisodeProjection, project_episode
 from .episode_store import EpisodeStore
+from .latent_preference import (
+    LatentPreferenceConfig,
+    LatentPreferenceLearner,
+    LatentPreferenceResult,
+)
 from .online_learning import LearningResult, OnlineLearner, OnlineLearningConfig
 from .version import VERSION
 
@@ -43,6 +48,9 @@ __all__ = [
     "RunResult",
     "SamplingConfig",
     "LearningResult",
+    "LatentPreferenceConfig",
+    "LatentPreferenceLearner",
+    "LatentPreferenceResult",
     "OnlineLearner",
     "OnlineLearningConfig",
     "SelectRawRank",

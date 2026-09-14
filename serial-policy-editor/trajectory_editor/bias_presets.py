@@ -66,7 +66,12 @@ def load_bias_preset(path: Path, backend, provenance: dict) -> SamplingConfig:
         raise EditorError(f"Invalid bias group preset: {exc}") from exc
     _validate_rule_tokens(rules, backend)
     _validate_group_tokens(groups, backend)
-    return SamplingConfig(bias_rules=rules, bias_groups=groups)
+    return SamplingConfig(
+        bias_rules=rules,
+        bias_groups=groups,
+        latent_preference_z=value.get("latent_preference_z", ()),
+        latent_strength=value.get("latent_strength", 1.0),
+    )
 
 
 def project_biases_yaml(store, episode_id: str) -> str:
@@ -126,6 +131,9 @@ def project_biases(
     }
     if not rules_only:
         result["bias_groups"] = [group.to_dict() for group in config.bias_groups]
+        if config.latent_preference_z:
+            result["latent_preference_z"] = list(config.latent_preference_z)
+            result["latent_strength"] = config.latent_strength
     return json.dumps(
         result,
         ensure_ascii=False,

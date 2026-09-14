@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from .domain import SamplingConfig
 from .episode_actions import PolicyAction, SelectRawRank
 from .episode_engine import ActionOutcome, EpisodeEngine, Observation, ReplayExpectation, InstructionRejected
 from .episode_store import EpisodeStore
+from .latent_preference import LatentPreferenceLearner, LatentPreferenceResult
 from .online_learning import LearningResult, OnlineLearner
 
 
@@ -98,6 +99,8 @@ class EpisodeRunner:
         divergence_policy: str = "handoff",
         learner: OnlineLearner | None = None,
         on_learning_update: Callable[[LearningResult], None] | None = None,
+        latent_learner: LatentPreferenceLearner | None = None,
+        on_latent_learning_update: Callable[[LatentPreferenceResult], None] | None = None,
     ) -> None:
         self.engine = engine
         self.store = store
@@ -105,48 +108,79 @@ class EpisodeRunner:
         self.divergence_policy = divergence_policy
         self.learner = learner
         self.on_learning_update = on_learning_update
+        self.latent_learner = latent_learner
+        self.on_latent_learning_update = on_latent_learning_update
 
     def _learn_live_selection(
         self,
         observation: Observation,
         action: PolicyAction,
         outcome: ActionOutcome,
-    ) -> LearningResult | None:
+    ) -> LearningResult | LatentPreferenceResult | None:
         """Learn after a committed live raw-rank selection only."""
         if (
-            self.learner is None
-            or not self.learner.enabled
-            or not isinstance(action, SelectRawRank)
+            not isinstance(action, SelectRawRank)
             or outcome.status != "completed"
             or len(outcome.evidence) != 1
             or outcome.evidence[0].is_eog
         ):
             return None
         evidence = outcome.evidence[0]
-        result = self.learner.update(
-            observation, evidence.token_id, self.engine.sampling
-        )
-        if result.sampling != self.engine.sampling:
-            self.engine.sampling = result.sampling
+        old_sampling = self.engine.sampling
+        group_result = None
+        if self.learner is not None and self.learner.enabled:
+            group_result = self.learner.update(
+                observation, evidence.token_id, old_sampling
+            )
+        latent_result = None
+        if self.latent_learner is not None and self.latent_learner.enabled:
+            latent_result = self.latent_learner.update(
+                observation, evidence.token_id, old_sampling
+            )
+
+        updated_sampling = old_sampling
+        if group_result is not None:
+            updated_sampling = group_result.sampling
+        if latent_result is not None:
+            updated_sampling = replace(
+                updated_sampling,
+                latent_preference_z=latent_result.sampling.latent_preference_z,
+                latent_strength=latent_result.sampling.latent_strength,
+            )
+        if updated_sampling != old_sampling:
+            self.engine.sampling = updated_sampling
             self.store.record_sampling_segment(
                 self.episode_id,
                 start_boundary=self.engine.boundary,
-                sampling=result.sampling,
+                sampling=updated_sampling,
                 stream_fingerprint=self.engine.stream_fingerprint,
                 coordinate_offset=self.engine.coordinate_offset,
             )
-        payload = result.to_dict()
-        payload["boundary"] = self.engine.boundary
-        payload["observation_boundary"] = result.observation_boundary
-        self.store.record_interaction(
-            self.episode_id,
-            self.engine.boundary,
-            "online-learning-update",
-            payload,
-        )
-        if self.on_learning_update is not None:
-            self.on_learning_update(result)
-        return result
+        if group_result is not None:
+            payload = group_result.to_dict()
+            payload["boundary"] = self.engine.boundary
+            payload["observation_boundary"] = group_result.observation_boundary
+            self.store.record_interaction(
+                self.episode_id,
+                self.engine.boundary,
+                "online-learning-update",
+                payload,
+            )
+            if self.on_learning_update is not None:
+                self.on_learning_update(group_result)
+        if latent_result is not None:
+            payload = latent_result.to_dict()
+            payload["boundary"] = self.engine.boundary
+            payload["observation_boundary"] = latent_result.observation_boundary
+            self.store.record_interaction(
+                self.episode_id,
+                self.engine.boundary,
+                "latent-preference-update",
+                payload,
+            )
+            if self.on_latent_learning_update is not None:
+                self.on_latent_learning_update(latent_result)
+        return latent_result or group_result
 
     def run(
         self,

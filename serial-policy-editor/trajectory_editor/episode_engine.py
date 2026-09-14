@@ -22,6 +22,7 @@ from .episode_actions import (
 )
 from .episode_backend import EpisodeBackend, require_episode_backend
 from .episode_hash import token_prefix_sha256, validate_fingerprint
+from .latent_features import DEFAULT_PROJECTION_SEED
 from .sampling import (
     SparseDistribution,
     ObservationStatistics,
@@ -214,6 +215,23 @@ class EpisodeEngine:
         # do not change token spellings, so their classifications remain valid.
         self._token_boundaries: dict[int, frozenset[str]] = {}
 
+    def _latent_features(self) -> np.ndarray | None:
+        """Load fixed token features only when a saved latent state needs them."""
+        if not self.sampling.latent_preference_z:
+            return None
+        provider = getattr(self.backend, "latent_token_features", None)
+        if not callable(provider):
+            raise EditorError(
+                "the loaded backend does not expose token embeddings for latent preference"
+            )
+        try:
+            return provider(
+                feature_dimension=len(self.sampling.latent_preference_z),
+                projection_seed=DEFAULT_PROJECTION_SEED,
+            )
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise EditorError(f"could not load latent token features: {exc}") from exc
+
     @property
     def sampling(self) -> SamplingConfig:
         return self._sampling
@@ -346,7 +364,13 @@ class EpisodeEngine:
         logits = np.asarray(self.backend.last_logits(), dtype=np.float64)
         if logits.ndim != 1 or len(logits) != self.backend.vocabulary_size():
             raise RuntimeError("backend logits do not match its vocabulary")
-        statistics = ObservationStatistics(logits, self.sampling, key[0], self._classify_token_boundary)
+        statistics = ObservationStatistics(
+            logits,
+            self.sampling,
+            key[0],
+            self._classify_token_boundary,
+            latent_features=self._latent_features(),
+        )
         logits = statistics.logits
         distribution = statistics.distribution
         coordinate = self.coordinate_offset + self.boundary
