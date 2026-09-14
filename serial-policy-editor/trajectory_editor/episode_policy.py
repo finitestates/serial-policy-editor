@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+import math
 from typing import Protocol
 
 from .domain import SamplingConfig
-from .episode_actions import PolicyAction, SelectRawRank
+from .episode_actions import PolicyAction, SelectRawRank, Write
 from .episode_engine import ActionOutcome, EpisodeEngine, Observation, ReplayExpectation, InstructionRejected
 from .episode_store import EpisodeStore
 from .latent_preference import LatentPreferenceLearner, LatentPreferenceResult
@@ -87,6 +88,260 @@ class RunResult:
     handoff_reason: str | None = None
 
 
+@dataclass(frozen=True)
+class WriteTokenLearning:
+    """Small diagnostic for one token in a live teacher-written sequence."""
+
+    observation_boundary: int
+    token_id: int
+    policy_rank: int
+    policy_probability: float
+    severity: float
+    loss: float
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "observation_boundary": self.observation_boundary,
+            "chosen_token_id": self.token_id,
+            "old_policy_rank": self.policy_rank,
+            "old_policy_probability": self.policy_probability,
+            "severity": self.severity,
+            "loss": self.loss,
+        }
+
+
+@dataclass(frozen=True)
+class WriteLearningResult:
+    """One aggregate update produced by a live multi-token ``Write``."""
+
+    sampling: SamplingConfig
+    boundary_before: int
+    boundary_after: int
+    tokens: tuple[WriteTokenLearning, ...]
+    group_result: LearningResult | None
+    latent_result: LatentPreferenceResult | None
+
+    @property
+    def token_count(self) -> int:
+        return len(self.tokens)
+
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "boundary": self.boundary_after,
+            "boundary_before": self.boundary_before,
+            "token_count": self.token_count,
+            "tokens": [token.to_dict() for token in self.tokens],
+        }
+        if self.group_result is not None:
+            payload["group_update"] = self.group_result.to_dict()
+        if self.latent_result is not None:
+            payload["latent_update"] = self.latent_result.to_dict()
+        return payload
+
+
+class _WriteLearningAccumulator:
+    """Compute conservative per-token updates while a Write remains atomic."""
+
+    def __init__(
+        self,
+        backend,
+        sampling: SamplingConfig,
+        learner: OnlineLearner | None,
+        latent_learner: LatentPreferenceLearner | None,
+    ) -> None:
+        self.backend = backend
+        self.sampling = sampling
+        self.learner = learner if learner is not None and learner.enabled else None
+        self.latent_learner = (
+            latent_learner
+            if latent_learner is not None and latent_learner.enabled
+            else None
+        )
+        self.tokens: list[WriteTokenLearning] = []
+        self.group_results: list[LearningResult] = []
+        self.latent_results: list[LatentPreferenceResult] = []
+
+    @property
+    def enabled(self) -> bool:
+        return self.learner is not None or self.latent_learner is not None
+
+    def add(self, observation: Observation, token_id: int) -> None:
+        # Terminal selection is not a preference-bearing token in either v0
+        # learner, matching the SelectRawRank path.
+        if self.backend.is_eog(token_id):
+            return
+        group_result = (
+            self.learner.update(observation, token_id, self.sampling)
+            if self.learner is not None
+            else None
+        )
+        latent_result = (
+            self.latent_learner.update(observation, token_id, self.sampling)
+            if self.latent_learner is not None
+            else None
+        )
+        source = group_result or latent_result
+        if source is None:
+            return
+        self.tokens.append(
+            WriteTokenLearning(
+                observation_boundary=observation.boundary,
+                token_id=token_id,
+                policy_rank=source.old_policy_rank,
+                policy_probability=source.old_policy_probability,
+                severity=source.severity,
+                loss=source.loss,
+            )
+        )
+        if group_result is not None:
+            self.group_results.append(group_result)
+        if latent_result is not None:
+            self.latent_results.append(latent_result)
+
+    @staticmethod
+    def _mean(values: Sequence[float]) -> float:
+        return sum(values) / len(values)
+
+    @staticmethod
+    def _mean_int(values: Sequence[int]) -> int:
+        return max(1, int(round(sum(values) / len(values))))
+
+    def _aggregate_groups(self) -> LearningResult | None:
+        if not self.group_results:
+            return None
+        first = self.group_results[0]
+        learner = self.learner
+        assert learner is not None
+        old_weights = dict(first.old_group_weights)
+        new_weights: dict[str, float] = {}
+        gradients: dict[str, float] = {}
+        for group in self.sampling.bias_groups:
+            name = group.name
+            average_delta = self._mean(
+                [result.group_deltas[name] for result in self.group_results]
+            )
+            value = max(
+                learner.config.min_bias,
+                min(
+                    learner.config.max_bias,
+                    old_weights[name] + average_delta,
+                ),
+            )
+            new_weights[name] = float(value)
+            gradients[name] = self._mean(
+                [result.gradients[name] for result in self.group_results]
+            )
+        deltas = {
+            name: float(new_weights[name] - old_weights[name])
+            for name in old_weights
+        }
+        updated_groups = tuple(
+            replace(group, bias=new_weights[group.name])
+            for group in self.sampling.bias_groups
+        )
+        return LearningResult(
+            sampling=replace(self.sampling, bias_groups=updated_groups),
+            observation_boundary=self.tokens[0].observation_boundary,
+            chosen_token_id=self.tokens[0].token_id,
+            old_policy_rank=self._mean_int(
+                [token.policy_rank for token in self.tokens]
+            ),
+            old_policy_probability=self._mean(
+                [token.policy_probability for token in self.tokens]
+            ),
+            severity=self._mean([token.severity for token in self.tokens]),
+            loss=self._mean([token.loss for token in self.tokens]),
+            old_group_weights=old_weights,
+            new_group_weights=new_weights,
+            group_deltas=deltas,
+            gradients=gradients,
+            update_norm=math.sqrt(sum(delta * delta for delta in deltas.values())),
+            enabled=True,
+        )
+
+    def _aggregate_latent(self) -> LatentPreferenceResult | None:
+        if not self.latent_results:
+            return None
+        first = self.latent_results[0]
+        latent_learner = self.latent_learner
+        assert latent_learner is not None
+        old_z = tuple(first.old_z)
+        average_delta = tuple(
+            self._mean([result.delta[index] for result in self.latent_results])
+            for index in range(len(old_z))
+        )
+        new_values = [old_z[index] + average_delta[index] for index in range(len(old_z))]
+        new_norm = math.sqrt(sum(value * value for value in new_values))
+        max_norm = latent_learner.config.max_norm
+        if max_norm == 0.0:
+            new_values = [0.0 for _ in new_values]
+        elif new_norm > max_norm:
+            scale = max_norm / new_norm
+            new_values = [value * scale for value in new_values]
+        new_z = (
+            tuple(float(value) for value in new_values)
+            if self.sampling.latent_preference_z or any(new_values)
+            else ()
+        )
+        actual_delta = tuple(
+            float(new_values[index] - old_z[index]) for index in range(len(old_z))
+        )
+        weighted_mean = tuple(
+            self._mean(
+                [result.policy_weighted_mean_features[index] for result in self.latent_results]
+            )
+            for index in range(len(old_z))
+        )
+        updated = replace(
+            self.sampling,
+            latent_preference_z=new_z,
+            latent_strength=latent_learner.config.latent_strength,
+        )
+        return LatentPreferenceResult(
+            sampling=updated,
+            observation_boundary=self.tokens[0].observation_boundary,
+            chosen_token_id=self.tokens[0].token_id,
+            old_policy_rank=self._mean_int(
+                [token.policy_rank for token in self.tokens]
+            ),
+            old_policy_probability=self._mean(
+                [token.policy_probability for token in self.tokens]
+            ),
+            severity=self._mean([token.severity for token in self.tokens]),
+            loss=self._mean([token.loss for token in self.tokens]),
+            old_z=old_z,
+            new_z=new_z,
+            delta=actual_delta,
+            policy_weighted_mean_features=weighted_mean,
+            update_norm=math.sqrt(sum(delta * delta for delta in actual_delta)),
+            z_norm=math.sqrt(sum(value * value for value in new_values)),
+            enabled=True,
+        )
+
+    def finish(self, boundary_after: int) -> WriteLearningResult | None:
+        if not self.tokens:
+            return None
+        group_result = self._aggregate_groups()
+        latent_result = self._aggregate_latent()
+        updated = self.sampling
+        if group_result is not None:
+            updated = group_result.sampling
+        if latent_result is not None:
+            updated = replace(
+                updated,
+                latent_preference_z=latent_result.sampling.latent_preference_z,
+                latent_strength=latent_result.sampling.latent_strength,
+            )
+        return WriteLearningResult(
+            sampling=updated,
+            boundary_before=self.tokens[0].observation_boundary,
+            boundary_after=boundary_after,
+            tokens=tuple(self.tokens),
+            group_result=group_result,
+            latent_result=latent_result,
+        )
+
+
 class EpisodeRunner:
     """Feed replay and live policies into the same action interpreter."""
 
@@ -101,6 +356,8 @@ class EpisodeRunner:
         on_learning_update: Callable[[LearningResult], None] | None = None,
         latent_learner: LatentPreferenceLearner | None = None,
         on_latent_learning_update: Callable[[LatentPreferenceResult], None] | None = None,
+        learn_from_write: bool = False,
+        on_write_learning_update: Callable[[WriteLearningResult], None] | None = None,
     ) -> None:
         self.engine = engine
         self.store = store
@@ -110,6 +367,8 @@ class EpisodeRunner:
         self.on_learning_update = on_learning_update
         self.latent_learner = latent_learner
         self.on_latent_learning_update = on_latent_learning_update
+        self.learn_from_write = bool(learn_from_write)
+        self.on_write_learning_update = on_write_learning_update
 
     def _learn_live_selection(
         self,
@@ -181,6 +440,38 @@ class EpisodeRunner:
             if self.on_latent_learning_update is not None:
                 self.on_latent_learning_update(latent_result)
         return latent_result or group_result
+
+    def _learn_live_write(
+        self,
+        accumulator: _WriteLearningAccumulator,
+        outcome: ActionOutcome,
+    ) -> WriteLearningResult | None:
+        """Apply one aggregate update after an atomic live Write."""
+        if outcome.status != "completed" or any(
+            evidence.is_eog for evidence in outcome.evidence
+        ):
+            return None
+        result = accumulator.finish(outcome.boundary_after)
+        if result is None:
+            return None
+        if result.sampling != self.engine.sampling:
+            self.engine.sampling = result.sampling
+            self.store.record_sampling_segment(
+                self.episode_id,
+                start_boundary=outcome.boundary_after,
+                sampling=result.sampling,
+                stream_fingerprint=self.engine.stream_fingerprint,
+                coordinate_offset=self.engine.coordinate_offset,
+            )
+        self.store.record_interaction(
+            self.episode_id,
+            outcome.boundary_after,
+            "write-learning-update",
+            result.to_dict(),
+        )
+        if self.on_write_learning_update is not None:
+            self.on_write_learning_update(result)
+        return result
 
     def run(
         self,
@@ -279,9 +570,29 @@ class EpisodeRunner:
                 action = live_policy.choose(self.engine, observation)
                 active_action = action
                 executing_replay = False
-                outcome = self.engine.apply(action)
+                write_accumulator = (
+                    _WriteLearningAccumulator(
+                        self.engine.backend,
+                        self.engine.sampling,
+                        self.learner,
+                        self.latent_learner,
+                    )
+                    if self.learn_from_write and isinstance(action, Write)
+                    else None
+                )
+                outcome = self.engine.apply(
+                    action,
+                    on_precommit_observation=(
+                        write_accumulator.add
+                        if write_accumulator is not None and write_accumulator.enabled
+                        else None
+                    ),
+                )
                 live_actions += 1
-                self._learn_live_selection(observation, action, outcome)
+                if write_accumulator is not None:
+                    self._learn_live_write(write_accumulator, outcome)
+                else:
+                    self._learn_live_selection(observation, action, outcome)
                 self.store.record_action(self.episode_id, ordinal, outcome)
                 outcomes.append(outcome)
                 ordinal += 1

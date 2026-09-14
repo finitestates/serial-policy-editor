@@ -18,7 +18,7 @@ from .episode_engine import (
     ReplayExpectation,
     TokenEvidence,
 )
-from .episode_policy import EpisodeRunner, RunResult, TapeStep
+from .episode_policy import EpisodeRunner, RunResult, TapeStep, WriteLearningResult
 from .episode_projector import EpisodeProjection, project_episode
 from .episode_store import EpisodeStore
 from .latent_preference import (
@@ -57,6 +57,7 @@ __all__ = [
     "TapeStep",
     "TokenEvidence",
     "Write",
+    "WriteLearningResult",
     "project_episode",
     "VERSION",
 ]

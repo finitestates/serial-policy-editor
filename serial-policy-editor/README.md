@@ -920,6 +920,14 @@ learner. If the model changes, its latent state is discarded because the
 fixed feature space is model-specific. `--latent-dimension` can reduce the
 projection size for a small experiment; 64 is the default.
 
+Typed answers can optionally provide the same kind of live supervision. Add
+`--learn-from-write` alongside `--online-learning` and/or
+`--latent-preference` to let the enabled learners consume a live `Write`
+action. Each typed token is evaluated using the observation immediately before
+it, but the updates are averaged and installed once after the atomic write.
+This keeps long answers conservative and does not change the policy midway
+through the text. Accept, EOG, and replay remain non-learning paths.
+
 Export the current surviving bias set as a JSON preset:
 
 ```bash

@@ -525,6 +525,7 @@ class EpisodeEngine:
         expectation: ReplayExpectation | None = None,
         divergence_policy: str = "handoff",
         replay: bool = False,
+        on_precommit_observation: Callable[[Observation, int], None] | None = None,
     ) -> ActionOutcome:
         """Resolve and apply one action.
 
@@ -663,6 +664,8 @@ class EpisodeEngine:
                         divergence,
                     )
                 observation = self.observe()
+                if not replay and on_precommit_observation is not None:
+                    on_precommit_observation(observation, token_id)
                 item = self._commit_token(observation, token_id)
                 evidence.append(item)
                 resolved.append(token_id)

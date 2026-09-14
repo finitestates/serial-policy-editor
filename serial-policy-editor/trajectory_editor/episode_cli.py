@@ -38,6 +38,7 @@ from .episode_policy import (
     SeamlessRewindRequested,
     TapeStep,
     ReplayPlan,
+    WriteLearningResult,
 )
 from .episode_projector import project_episode, project_fork_map, project_lineage, project_procedure
 from .episode_store import EpisodeStore
@@ -254,6 +255,11 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         metavar="GROUP",
         help="restrict online learning to these named bias groups",
+    )
+    learning.add_argument(
+        "--learn-from-write",
+        action="store_true",
+        help="allow enabled learners to learn from live typed writes (off by default)",
     )
     latent = parser.add_argument_group("latent preference learning")
     latent.add_argument(
@@ -663,6 +669,27 @@ def _latent_preference_notice(
         f"rank {result.old_policy_rank}, "
         f"update norm {result.update_norm:.4g}, z norm {result.z_norm:.4g}"
     )
+
+
+def _write_learning_notice(io: TerminalIO, result: WriteLearningResult) -> None:
+    parts = [
+        f"Write learning @ boundary {result.boundary_after}: "
+        f"{result.token_count} typed tokens"
+    ]
+    if result.group_result is not None:
+        weights = ", ".join(
+            f"{name}={value:g}"
+            for name, value in result.group_result.new_group_weights.items()
+        )
+        parts.append(
+            f"group update norm {result.group_result.update_norm:.4g} · groups {weights}"
+        )
+    if result.latent_result is not None:
+        parts.append(
+            f"latent update norm {result.latent_result.update_norm:.4g}, "
+            f"z norm {result.latent_result.z_norm:.4g}"
+        )
+    io.write(" · ".join(parts))
 
 
 def _live_edge_menu(
@@ -1171,6 +1198,10 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     latent_learner=latent_learner,
                     on_latent_learning_update=lambda result: _latent_preference_notice(
+                        io, result
+                    ),
+                    learn_from_write=args.learn_from_write,
+                    on_write_learning_update=lambda result: _write_learning_notice(
                         io, result
                     ),
                 )
