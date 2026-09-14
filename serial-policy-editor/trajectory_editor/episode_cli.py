@@ -43,7 +43,7 @@ from .episode_policy import (
 from .episode_projector import project_episode, project_fork_map, project_lineage, project_procedure
 from .episode_store import EpisodeStore
 from .episode_recovery import recover_sampler_record
-from .episode_ui import InteractivePolicy
+from .episode_ui import InteractivePolicy, PolicyViewPreferences
 from .latent_features import DEFAULT_PROJECTION_CHUNK_SIZE, DEFAULT_PROJECTION_SEED
 from .latent_preference import LatentPreferenceConfig, LatentPreferenceLearner, LatentPreferenceResult
 from .online_learning import LearningResult, OnlineLearner
@@ -204,7 +204,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="leave each teacher command blank instead of prefilling the sampled proposal",
     )
-    parser.add_argument("--show-policy-rank", action="store_true")
+    policy_view = parser.add_mutually_exclusive_group()
+    policy_view.add_argument(
+        "--policy-view", "--show-policy-rank", dest="show_policy_rank", action="store_true",
+        default=None, help="show policy diagnostics without changing raw-rank ordering (default: automatic)",
+    )
+    policy_view.add_argument(
+        "--no-policy-view", dest="show_policy_rank", action="store_false",
+        help="hide automatic policy diagnostics; V can toggle them during the session",
+    )
     parser.add_argument(
         "--bias-catalog",
         type=Path,
@@ -287,6 +295,10 @@ def build_parser() -> argparse.ArgumentParser:
     latent.add_argument("--latent-max-norm", type=float, default=4.0)
     latent.add_argument("--latent-decay", type=float, default=0.0)
     latent.add_argument("--latent-severity-cap", type=_positive_int, default=1000)
+    latent.add_argument(
+        "--latent-no-severity-attenuation", action="store_true",
+        help="use severity 1 outside the dead zone; retain learning step and memory norm limits",
+    )
     latent.add_argument("--latent-dead-zone-rank", type=_positive_int, default=1)
     latent.add_argument("--latent-rejection-strength", type=float, default=0.0)
     latent.add_argument("--latent-fast-slow", action="store_true")
@@ -461,6 +473,7 @@ def _latent_config_from_args(args: argparse.Namespace) -> LatentPreferenceConfig
         learning_rate=args.latent_learning_rate, latent_strength=args.latent_strength,
         max_step=args.latent_max_step, max_norm=args.latent_max_norm,
         decay=args.latent_decay, severity_cap=args.latent_severity_cap,
+        no_severity_attenuation=args.latent_no_severity_attenuation,
         dead_zone_rank=args.latent_dead_zone_rank,
         rejection_strength=args.latent_rejection_strength, fast_slow=args.latent_fast_slow,
         fast_learning_rate=args.latent_fast_learning_rate, fast_decay=args.latent_fast_decay,
@@ -683,6 +696,10 @@ def _interactive_policy(
     args: argparse.Namespace, store: EpisodeStore, episode_id: str, io: TerminalIO,
     *, catalog=None,
 ) -> InteractivePolicy:
+    preferences = getattr(args, "_policy_view_preferences", None)
+    if preferences is None:
+        preferences = PolicyViewPreferences(show=args.show_policy_rank)
+        args._policy_view_preferences = preferences
     return InteractivePolicy(
         io=io,
         menu_size=args.table_depth,
@@ -690,7 +707,8 @@ def _interactive_policy(
         default_hold_tokens=args.hold_default,
         context_characters=args.context_chars,
         manual_acceptance=args.manual_acceptance,
-        show_policy_rank=args.show_policy_rank,
+        view_preferences=preferences,
+        learning_enabled=args.online_learning or args.latent_preference,
         store=store,
         episode_id=episode_id,
         seamless=io.supports_live_choices,

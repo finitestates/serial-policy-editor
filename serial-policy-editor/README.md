@@ -137,7 +137,9 @@ The familiar interaction UI is preserved. Important commands include:
 - `t TEXT` insert continuation text with automatic spacing
 - `x TEXT` insert exact text without automatic spacing
 - `/TERM` search the full vocabulary and display the target token's raw-rank neighborhood
-- `m N` reveal more raw-ranked candidates
+- `m N` reveal more candidates (raw top-N by default, policy top-N in policy order)
+- `V` toggle policy diagnostics without reordering
+- `v` toggle raw versus full-vocabulary policy top-N ordering
 - `h [N]` delegate N tokens
 - `h . [N]` delegate through the first token containing `.`, `!`, or `?`
 - `h | [N]` delegate through the first token containing a newline
@@ -161,6 +163,35 @@ within the engine, without additional decoding or rescanning the growing hold.
 By default, the sampled proposal's raw rank is prefilled at each teacher
 decision. Pressing Enter still explicitly commits that choice. Pass
 `--manual-acceptance` to leave each command blank instead.
+
+Policy diagnostics appear automatically when either learner is enabled, bias
+rules/groups are configured, or the restored sampler has active adjustments
+(including fast-only latent memory). They appear before the first learning
+update, even while the values are zero. Use `--policy-view` to show them
+explicitly or `--no-policy-view` to hide them. `--show-policy-rank` remains an
+alias for `--policy-view`.
+
+| Column | Meaning |
+| --- | --- |
+| `Δrank` | Raw rank minus policy rank: positive means promoted, negative means demoted. |
+| `Δlogit` | Adjusted logit minus raw logit, including penalties, biases, priors, and both latent memories. |
+| `pol-rank` | Full-vocabulary rank under the adjusted policy. |
+| `raw-p` | Raw-model probability before temperature and filtering. |
+| `pol-p` | Adjusted policy probability before temperature and filtering. |
+| `decode-p` | Final sampling probability after temperature and filtering. |
+
+The deltas compare the raw model with the **current policy at the same
+context**, not specifically the last learning update. A token can have a
+positive adjustment yet be removed by decoder filtering. Narrow terminals
+retain the two deltas and token text before secondary columns; plain mode
+shows the full table. The expanded writing view also retains the deltas.
+
+Ordering stays raw by default. In policy order, the table fetches the actual
+policy top-N across the whole vocabulary, so strongly promoted tokens outside
+the raw top-N become visible. Numeric selections always refer to absolute raw
+rank, and search neighborhoods retain raw ordering. `V` and `v` preferences
+persist across decisions and live edges for the session; they do not modify
+sampler state, replay, or learning.
 
 ## Live-edge menu
 
@@ -973,6 +1004,7 @@ Additional experimental latent controls are optional:
 | --- | --- | --- |
 | `--latent-decay` | `0` | Fraction of old memory forgotten per committed learning intervention, from 0 to 1. |
 | `--latent-severity-cap` | `1000` | Positive rank distance above the dead zone where severity reaches 1. |
+| `--latent-no-severity-attenuation` | off | Give every selection outside the dead zone severity 1, bypassing the logarithmic attenuation. |
 | `--latent-dead-zone-rank` | `1` | Policy ranks at or better than this rank produce no learning evidence. |
 | `--latent-rejection-strength` | `0` | Nonnegative pressure against the actual pre-action sampled proposal when it differs from the chosen token. |
 | `--latent-fast-slow` | off | Also learn an independent fast vector in the same feature space. |
@@ -984,6 +1016,13 @@ log1p(severity_cap))`. Rejection strength 1 gives a chosen-versus-proposal
 pairwise direction; values above 1 add stronger rejection pressure. Selecting
 the sampled proposal retains the expectation-based direction. The dead zone
 gates all learning evidence, but enabled learners still decay once per event.
+`--latent-no-severity-attenuation` sets severity to 1 outside the dead zone
+and leaves it zero inside. It applies to both latent channels and typed-write
+evidence; the severity cap is ignored in this mode. It does not remove the
+step or norm limits, alter decay, or change the named-group learner. Lowering
+the severity cap also strengthens smaller misses; cap 1 already gives full
+severity to every rank outside the dead zone. The explicit flag makes that
+experimental intent visible in the launch command and learning diagnostics.
 Disabled learners neither learn nor decay. Step clipping bounds new learning;
 norm clipping bounds the combined state after forgetting and learning. Net
 update norms include forgetting and any state clipping, so they can exceed

@@ -395,3 +395,40 @@ def test_live_eog_choice_does_not_learn_or_decay(tmp_path):
             live_policy=policy, max_live_actions=1)
         assert runtime.sampling == sampling
         assert not store.interactions(episode)
+
+
+def test_no_severity_attenuation_keeps_dead_zone_and_both_channel_limits():
+    sampling = SamplingConfig(latent_preference_z=(.2, .1), latent_preference_fast_z=(.1, .2))
+    model = learner(no_severity_attenuation=True, dead_zone_rank=2, severity_cap=1000,
+                    learning_rate=100, fast_slow=True, fast_learning_rate=200,
+                    rejection_strength=3, decay=.2, fast_decay=.5,
+                    max_step=.03, max_norm=.1, fast_max_step=.04, fast_max_norm=.08)
+    inside = model.update(_observation(sampling), 1, sampling)
+    assert inside.severity == inside.learning_step_norm == inside.fast_learning_step_norm == 0
+    for chosen in (3, 4, 5):
+        result = model.update(_observation(sampling), chosen, sampling)
+        assert result.severity == 1
+        assert result.learning_step_norm <= .03 + 1e-12
+        assert result.fast_learning_step_norm <= .04 + 1e-12
+        assert result.z_norm <= .1 + 1e-12
+        assert result.fast_z_norm <= .08 + 1e-12
+        assert result.to_dict()['no_severity_attenuation'] is True
+    config = _latent_config_from_args(build_parser().parse_args(['--latent-no-severity-attenuation']))
+    assert config.no_severity_attenuation
+    with pytest.raises(EditorError):
+        LatentPreferenceConfig(no_severity_attenuation=1)
+
+
+def test_unattenuated_write_accumulates_full_evidence_but_decays_once():
+    sampling = SamplingConfig(latent_preference_z=(.2, .1))
+    model = learner(no_severity_attenuation=True, learning_rate=.1, decay=.5)
+    accumulator = _WriteLearningAccumulator(LatentBackend(), sampling, None, model)
+    obs = _observation(sampling)
+    for token in (3, 5):
+        accumulator.add(obs, token)
+    result = accumulator.finish(2).latent_result
+    mean = obs.statistics.policy_probabilities @ FEATURES.astype(np.float64)
+    expected_step = .1 * (FEATURES[3] + FEATURES[5] - 2 * mean)
+    expected_step *= min(1, model.config.max_step / np.linalg.norm(expected_step))
+    assert result.severity == 1
+    assert result.new_z == pytest.approx(.5 * np.array(sampling.latent_preference_z) + expected_step)

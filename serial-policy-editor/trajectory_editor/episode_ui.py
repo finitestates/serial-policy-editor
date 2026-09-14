@@ -93,6 +93,14 @@ def _choice_from_observation(
     )
 
 
+@dataclass
+class PolicyViewPreferences:
+    """Session presentation preferences; never part of sampler/replay state."""
+
+    show: bool | None = None
+    sort_by_policy: bool = False
+
+
 class InteractivePolicy:
     def __init__(
         self,
@@ -103,7 +111,9 @@ class InteractivePolicy:
         default_hold_tokens: int = 100,
         context_characters: int = 0,
         manual_acceptance: bool = False,
-        show_policy_rank: bool = False,
+        show_policy_rank: bool | None = None,
+        view_preferences: PolicyViewPreferences | None = None,
+        learning_enabled: bool = False,
         store: EpisodeStore | None = None,
         episode_id: str | None = None,
         seamless: bool = False,
@@ -117,12 +127,23 @@ class InteractivePolicy:
         self.default_hold_tokens = default_hold_tokens
         self.context_characters = context_characters
         self.manual_acceptance = bool(manual_acceptance)
-        self.show_policy_rank = bool(show_policy_rank)
+        self.view_preferences = (
+            view_preferences if view_preferences is not None
+            else PolicyViewPreferences(show=show_policy_rank)
+        )
+        self.learning_enabled = learning_enabled
         self.store = store
         self.episode_id = episode_id
         self.seamless = bool(seamless)
         self.catalog = catalog
         self.choice_serial = 0
+
+    def _show_policy_diagnostics(self, engine: EpisodeEngine) -> bool:
+        explicit = self.view_preferences.show
+        if explicit is not None:
+            return explicit
+        return bool(self.learning_enabled or engine.sampling.policy_active
+                    or engine.sampling.bias_rules or engine.sampling.bias_groups)
 
     def _interaction(
         self, boundary: int, kind: str, payload: Mapping[str, Any]
@@ -279,7 +300,8 @@ class InteractivePolicy:
                 f"{len(observation.logits)} (absolute raw-model ordering)."
             )
             display_candidates(
-                self.io, candidates, heading=True, target_token_id=lens.token_id
+                self.io, candidates, heading=True, target_token_id=lens.token_id,
+                show_policy_rank=self._show_policy_diagnostics(engine),
             )
 
     def _review(
@@ -384,10 +406,7 @@ class InteractivePolicy:
         search: SearchLens | None = None
         search_lens_active = False
         feedback: ChoiceFeedback | None = None
-        policy_sort = False
-        policy_columns = bool(
-            self.show_policy_rank and engine.sampling.policy_active
-        )
+        policy_sort = self.view_preferences.sort_by_policy
         review_boundary: int | None = None
         seamless_targets = (
             self._seamless_targets(engine, observation.boundary)
@@ -399,14 +418,25 @@ class InteractivePolicy:
             getattr(self.io, "supports_live_choices", False)
             and callable(getattr(self.io, "read_choice", None))
         )
-        if not live:
-            display_choice(self.io, choice, remaining_tokens=engine.remaining)
+        plain_redraw = True
         while True:
+            policy_columns = self._show_policy_diagnostics(engine)
             displayed = (
                 self._lens_candidates(engine, observation, search)
                 if search_lens_active and search is not None
-                else choice.candidates
+                else (engine.policy_candidates(observation, count=len(choice.candidates))
+                      if policy_sort else choice.candidates)
             )
+            if policy_sort and not search_lens_active:
+                exposed.update((candidate.rank, candidate) for candidate in displayed)
+            if not live and plain_redraw:
+                display_choice(
+                    self.io, replace(choice, candidates=displayed), remaining_tokens=engine.remaining,
+                    policy_active=engine.sampling.policy_active,
+                    show_policy_rank=policy_columns,
+                    sort_by_policy=policy_sort and not search_lens_active,
+                )
+                plain_redraw = False
             if live:
                 raw = self.io.read_choice(  # type: ignore[attr-defined]
                     choice,
@@ -436,7 +466,7 @@ class InteractivePolicy:
                     search_lens_active=search_lens_active,
                     policy_active=engine.sampling.policy_active,
                     show_policy_rank=policy_columns,
-                    sort_by_policy=policy_sort,
+                    sort_by_policy=policy_sort and not search_lens_active,
                 )
             else:
                 raw = self.io.read("\nTeacher action> ")
@@ -500,7 +530,7 @@ class InteractivePolicy:
                     raise ForkRequested(review_boundary)
                 review_boundary = None
                 if not live:
-                    display_choice(self.io, choice, remaining_tokens=engine.remaining)
+                    plain_redraw = True
                 continue
             if command.kind == CommandKind.BIAS:
                 try:
@@ -606,7 +636,7 @@ class InteractivePolicy:
                             ))
                         if not live:
                             self.io.write(f"Bias {updates[0][2]}: {group.bias:+g}")
-                            display_choice(self.io, choice, remaining_tokens=engine.remaining)
+                            plain_redraw = True
                         continue
                     groups_by_name = {
                         group.name: group for group in engine.sampling.bias_groups
@@ -883,7 +913,7 @@ class InteractivePolicy:
                 if not live:
                     for line in lines:
                         self.io.write(f"Bias {line}")
-                    display_choice(self.io, choice, remaining_tokens=engine.remaining)
+                    plain_redraw = True
                 continue
             if command.kind == CommandKind.HELP:
                 self.io.write(HELP_TEXT, end="")
@@ -937,11 +967,12 @@ class InteractivePolicy:
                     {"visible_rows": len(candidates)},
                 )
                 if not live:
-                    display_choice(self.io, choice, remaining_tokens=engine.remaining)
+                    plain_redraw = True
                 continue
             if command.kind == CommandKind.MAIN_MENU:
                 search_lens_active = False
                 feedback = None
+                plain_redraw = True
                 continue
             if command.kind == CommandKind.TOKEN_SEARCH:
                 assert command.search_query is not None
@@ -1030,9 +1061,12 @@ class InteractivePolicy:
                 continue
             if command.kind == CommandKind.POLICY_VIEW:
                 policy_sort = not policy_sort
+                self.view_preferences.sort_by_policy = policy_sort
+                plain_redraw = True
                 continue
             if command.kind == CommandKind.POLICY_COLUMN:
-                policy_columns = not policy_columns
+                self.view_preferences.show = not policy_columns
+                plain_redraw = True
                 continue
             if command.kind == CommandKind.REVIEW_BACK:
                 if self.seamless:

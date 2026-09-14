@@ -17,6 +17,7 @@ from typing import Any, Callable, Iterator, Mapping, Protocol
 
 from .domain import Candidate, ChoiceSet, EditAction, EditorError, InsertMode
 from .ui_themes import resolve_live_theme
+from .candidate_columns import CandidateColumns
 
 
 # Internal result used by the live prompt only; it is never parsed as a user
@@ -367,8 +368,12 @@ HELP_TEXT = """Commands:
   ms + [N]           expand toward larger ranks / lower raw probability
   ms - [N]           expand toward smaller ranks / higher raw probability
   c [N|all]          page more of the current context (default: 2000 chars)
-  v                  toggle raw/policy ordering of disclosed rows
-  V                  toggle the policy-rank column independently
+  v                  toggle raw top-N / full-vocabulary policy top-N
+  V                  toggle policy diagnostics independently of ordering
+                     Δrank = raw rank - policy rank; positive means promoted.
+                     Δlogit = adjusted - raw logit (all current policy effects).
+                     These compare surfaces at this context, not the last update.
+                     pol-p is before temperature/filtering; decode-p is final.
                      numeric selections accept any raw rank in the vocabulary
   [ / ]              review the previous/next durable token boundary
                       bare f forks the reviewed boundary; Esc returns live
@@ -876,7 +881,7 @@ def parse_command(
         if characters < 1:
             raise EditorError("context extent must be at least 1 character")
         return TeacherCommand(CommandKind.CONTEXT, context_characters=characters)
-    if command == "V" or lower in {"policy-column", "policy-rank-column"}:
+    if command == "V" or lower in {"policy-column", "policy-columns", "policy-rank-column"}:
         return TeacherCommand(CommandKind.POLICY_COLUMN, invoked_as=command)
     if lower in {"v", "policy-view", "policy-sort"}:
         return TeacherCommand(CommandKind.POLICY_VIEW, invoked_as=lower)
@@ -961,28 +966,17 @@ def display_candidates(
                 ),
             )
         )
+    columns = CandidateColumns(policy=show_policy_rank)
     if heading:
-        policy = "  pol-rank" if show_policy_rank else ""
-        io.write(f"\n  rank{policy}   raw-p  decode-p  token-id  text")
+        io.write(f"\n  rank{columns.heading}  text")
     for candidate in ordered:
-        decoder = (
-            f"{candidate.decoder_probability:7.2%}"
-            if candidate.decoder_probability > 0.0
-            else "     --"
-        )
         suffix = " [END]" if candidate.is_eog else ""
         if candidate.bias:
             suffix += f" [bias {candidate.bias:+g}]"
         if target_token_id is not None and candidate.token_id == target_token_id:
             suffix += " [MATCH]"
-        policy = (
-            f"  {candidate.policy_rank:>8}"
-            if show_policy_rank and candidate.policy_rank is not None
-            else ""
-        )
         io.write(
-            f"  {candidate.rank:>4}{policy}  {candidate.raw_probability:6.2%}  "
-            f"{decoder}  {candidate.token_id:>8}  {candidate.text!r}{suffix}"
+            f"  {candidate.rank:>4}{columns.values(candidate)}  {candidate.text!r}{suffix}"
         )
 
 
@@ -990,6 +984,6 @@ def display_actions(io: IO) -> None:
     io.write(
         "\nActions: accept | rank | t TEXT | x TEXT | h [N] | h . [N] | h | [N] | "
         "[ / ] review | f [N|+N|-N] | m [N] | /TERM | "
-        "ms [+|- [N]] | c [N|all] | v order | V policy column | "
+        "ms [+|- [N]] | c [N|all] | v order | V policy columns | "
         "n [note-before] | p [note-after] | e | e! | q | ?"
     )

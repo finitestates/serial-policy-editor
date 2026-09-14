@@ -495,6 +495,7 @@ class ObservationStatistics:
             {} if penalties_active else self._raw_ranks
         )
         self._ordered: list[int] = []
+        self._policy_ordered: list[int] = []
 
     def raw_probabilities(self, token_ids):
         if self.adjusted is self.logits:
@@ -521,3 +522,14 @@ class ObservationStatistics:
                 (token_id, rank) for rank, token_id in enumerate(self._ordered, 1)
             )
         return self._ordered[:count]
+
+    def top_policy_ids(self, count: int) -> list[int]:
+        """Full-vocabulary policy ordering, with the same tie-break as raw rank."""
+        if self.adjusted is self.logits:
+            return self.top_raw_ids(count)
+        if count > len(self._policy_ordered):
+            self._policy_ordered = [int(value) for value in _top_ids(self.adjusted, count)]
+            self._policy_ranks.update(
+                (token_id, rank) for rank, token_id in enumerate(self._policy_ordered, 1)
+            )
+        return self._policy_ordered[:count]

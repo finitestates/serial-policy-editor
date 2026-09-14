@@ -39,6 +39,7 @@ class LatentPreferenceConfig:
     projection_seed: int = DEFAULT_PROJECTION_SEED
     decay: float = 0.0
     severity_cap: int = 1000
+    no_severity_attenuation: bool = False
     dead_zone_rank: int = 1
     rejection_strength: float = 0.0
     fast_slow: bool = False
@@ -60,6 +61,8 @@ class LatentPreferenceConfig:
         if (type(self.projection_seed) is not int
                 or not MIN_SEED <= self.projection_seed <= MAX_SEED):
             raise EditorError("latent projection seed must be a signed 64-bit integer")
+        if type(self.no_severity_attenuation) is not bool:
+            raise EditorError("latent no_severity_attenuation must be a boolean")
         if type(self.fast_slow) is not bool:
             raise EditorError("latent fast_slow must be a boolean")
         for name in ("severity_cap", "dead_zone_rank"):
@@ -98,6 +101,7 @@ class LatentPreferenceResult:
     z_norm: float
     enabled: bool
     severity_cap: int = 1000
+    no_severity_attenuation: bool = False
     dead_zone_rank: int = 1
     proposal_token_id: int | None = None
     proposal_rejected: bool = False
@@ -141,6 +145,7 @@ class LatentPreferenceResult:
             "z_norm": self.z_norm,
             "enabled": self.enabled,
             "severity_cap": self.severity_cap,
+            "no_severity_attenuation": self.no_severity_attenuation,
             "dead_zone_rank": self.dead_zone_rank,
             "proposal_token_id": self.proposal_token_id,
             "proposal_rejected": self.proposal_rejected,
@@ -215,6 +220,10 @@ class LatentPreferenceLearner:
         return values
 
     def _severity(self, policy_rank: int) -> float:
+        if policy_rank <= self.config.dead_zone_rank:
+            return 0.0
+        if self.config.no_severity_attenuation:
+            return 1.0
         return min(
             1.0,
             math.log1p(max(0, policy_rank - self.config.dead_zone_rank))
@@ -334,6 +343,7 @@ class LatentPreferenceLearner:
             z_norm=float(np.linalg.norm(new_z)),
             enabled=self.enabled,
             severity_cap=self.config.severity_cap,
+            no_severity_attenuation=self.config.no_severity_attenuation,
             dead_zone_rank=self.config.dead_zone_rank,
             proposal_token_id=proposal,
             proposal_rejected=rejected,

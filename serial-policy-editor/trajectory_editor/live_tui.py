@@ -22,6 +22,7 @@ from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.styles import Style
 
 from .tui import parse_bias_command
+from .candidate_columns import CandidateColumns
 from .domain import Candidate, ChoiceSet, EditorError, InsertMode
 from .tui import (
     BoundaryReview,
@@ -260,8 +261,9 @@ def action_preview(
         "v": "The table toggles between raw-model and policy ordering on Enter.",
         "policy-view": "The table toggles between raw-model and policy ordering on Enter.",
         "policy-sort": "The table toggles between raw-model and policy ordering on Enter.",
-        "policy-column": "The policy-rank column toggles on Enter without reordering.",
-        "policy-rank-column": "The policy-rank column toggles on Enter without reordering.",
+        "policy-column": "Policy diagnostics toggle on Enter without reordering.",
+        "policy-columns": "Policy diagnostics toggle on Enter without reordering.",
+        "policy-rank-column": "Policy diagnostics toggle on Enter without reordering.",
         "ms": "The active token-search neighborhood redraws on Enter.",
         "c": "The requested context view opens on Enter.",
         "context": "The requested context view opens on Enter.",
@@ -283,7 +285,7 @@ def action_preview(
     elif normalized_lower.startswith(("m ", "more ")):
         detail = "The main candidate table returns and expands on Enter."
     elif normalized == "V":
-        detail = "The policy-rank column toggles on Enter without reordering."
+        detail = "Policy diagnostics toggle on Enter without reordering."
     elif head in effects:
         detail = effects[head]
     else:
@@ -536,7 +538,8 @@ def _one_line(text: str, width: int) -> str:
 
 def _render_writing(choice: ChoiceSet, candidates: tuple[Candidate, ...],
                     preview: ActionPreview, width: int, height: int,
-                    offset: int, sort_by_policy: bool) -> StyleAndTextTuples:
+                    offset: int, sort_by_policy: bool,
+                    show_policy_rank: bool = False) -> StyleAndTextTuples:
     _, budget = _writing_sizes(height)
     rows = _context_rows(_safe_context_text(choice.context_text_tail),
                          _safe_rendered_text(preview.appended_text or ""), width - 1)
@@ -558,11 +561,17 @@ def _render_writing(choice: ChoiceSet, candidates: tuple[Candidate, ...],
         effect = f"{preview.label} · {preview.detail}"
     fragments.append(("class:effect" if preview.valid else "class:invalid", _one_line(effect, width) + "\n"))
     fragments.append(("class:rule", "─" * (width - 1) + "\n"))
-    fragments.append(("class:table-header", "Candidates · rank / raw probability / text\n"))
+    heading = ("Candidates · Δrank / Δlogit / text" if show_policy_rank
+               else "Candidates · rank / raw probability / text")
+    fragments.append(("class:table-header", _one_line(heading, width) + "\n"))
+    columns = CandidateColumns(policy=True, width=36)
     shown = _ordered_candidates(candidates, sort_by_policy=sort_by_policy)[:3]
     for candidate in shown:
         fragments.append(("class:table-row", _one_line(
-            f"{candidate.rank:>5}  {_probability(candidate.raw_probability)}  {candidate.text!r}"
+            f"{candidate.rank:>5}"
+            + (columns.values(candidate) if show_policy_rank
+               else f"  {_probability(candidate.raw_probability)}")
+            + f"  {candidate.text!r}"
             + (f" [bias {candidate.bias:+g}]" if candidate.bias else ""), width) + "\n"))
     fragments.append(("", "\n" * (3 - len(shown))))
     fragments.append(("class:muted", f"{max(0, len(candidates) - 3)} more candidate rows · Ctrl+E restores full table\n"))
@@ -599,7 +608,7 @@ def _render_choice(
     )
     if expanded_editor and _is_writing(command_text):
         return _render_writing(choice, tuple(candidates if display_candidates is None else display_candidates),
-                               preview, width, height, context_offset, sort_by_policy)
+                               preview, width, height, context_offset, sort_by_policy, show_policy_rank)
     context = _safe_context_text(choice.context_text_tail)
     proposal = (
         _safe_rendered_text(preview.appended_text)
@@ -731,22 +740,10 @@ def _render_choice(
         )
 
     fragments.extend([("class:rule", rule + "\n")])
-    show_token_id = width >= (88 if show_policy_rank else 78)
-    policy_heading = "  pol-rank" if show_policy_rank else ""
-    if show_token_id:
-        fragments.append(
-            (
-                "class:table-header",
-                f"    rank{policy_heading}     raw-p  decode-p  token-id  text\n",
-            )
-        )
-    else:
-        fragments.append(
-            (
-                "class:table-header",
-                f"    rank{policy_heading}     raw-p  decode-p  text\n",
-            )
-        )
+    columns = CandidateColumns(policy=show_policy_rank, width=width)
+    fragments.append((
+        "class:table-header", f"    rank{columns.heading}  text\n",
+    ))
     if hidden_before:
         fragments.append(
             ("class:muted", f"    … {hidden_before} earlier disclosed row(s) …\n")
@@ -754,26 +751,10 @@ def _render_choice(
     for candidate in shown:
         marker = "▶" if candidate.rank == preview.candidate_rank else " "
         target_suffix = " [MATCH]" if candidate.token_id == target_token_id else ""
-        decoder = _probability(candidate.decoder_probability)
-        raw_probability = _probability(candidate.raw_probability)
-        policy_column = (
-            f"  {candidate.policy_rank:>8}"
-            if show_policy_rank and candidate.policy_rank is not None
-            else ""
-        )
-        if show_token_id:
-            prefix = (
-                f"{marker} {candidate.rank:>5}{policy_column}  {raw_probability:>8}  "
-                f"{decoder:>8}  {candidate.token_id:>8}  "
-            )
-        else:
-            prefix = (
-                f"{marker} {candidate.rank:>5}{policy_column}  {raw_probability:>8}  "
-                f"{decoder:>8}  "
-            )
+        prefix = f"{marker} {candidate.rank:>5}{columns.values(candidate)}  "
         if candidate.bias:
             target_suffix += f" [bias {candidate.bias:+g}]"
-        text_width = max(8, width - len(prefix) - 1)
+        text_width = max(1, width - len(prefix) - 1)
         if candidate.rank == preview.candidate_rank:
             row_style = "class:selected-row"
         elif candidate.token_id == target_token_id:

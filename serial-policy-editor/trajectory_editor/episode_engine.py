@@ -409,24 +409,37 @@ class EpisodeEngine:
             return ()
         statistics = observation.statistics
         ordered = statistics.top_raw_ids(end)[start_rank - 1 : end]
+        return self._candidates_for_tokens(observation, ordered)
+
+    def policy_candidates(
+        self, observation: Observation, *, count: int = 12
+    ) -> tuple[Candidate, ...]:
+        """Full-vocabulary policy top-N; selections still use absolute raw rank."""
+        if count < 1:
+            raise EditorError("candidate count must be positive")
+        self._validate_observation(observation)
+        ordered = observation.statistics.top_policy_ids(min(count, len(observation.logits)))
+        return self._candidates_for_tokens(observation, ordered)
+
+    def _candidates_for_tokens(
+        self, observation: Observation, ordered: list[int]
+    ) -> tuple[Candidate, ...]:
+        statistics = observation.statistics
         probabilities = statistics.raw_probabilities(ordered)
-        biases = observation.statistics.active_biases
         return tuple(
             Candidate(
-                rank=rank,
+                rank=statistics.raw_rank(int(token_id)),
                 token_id=int(token_id),
                 text=self.backend.token_text(int(token_id)),
                 raw_probability=float(probability),
                 decoder_probability=observation.distribution.probability(int(token_id)),
                 is_eog=self.backend.is_eog(int(token_id)),
-                bias=biases.get(int(token_id), 0.0),
+                bias=statistics.active_biases.get(int(token_id), 0.0),
                 policy_rank=statistics.policy_rank(int(token_id)),
                 policy_probability=float(statistics.policy_probabilities[token_id]),
                 policy_logit_adjustment=float(statistics.adjusted[token_id] - statistics.logits[token_id]),
             )
-            for rank, (token_id, probability) in enumerate(
-                zip(ordered, probabilities), start_rank
-            )
+            for token_id, probability in zip(ordered, probabilities)
         )
 
     def _write_tokens(self, action: Write) -> tuple[list[int], str]:

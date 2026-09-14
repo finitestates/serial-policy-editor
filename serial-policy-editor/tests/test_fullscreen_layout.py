@@ -43,7 +43,8 @@ def paint(app, output):
 
 @pytest.mark.parametrize('width', [80, 120])
 @pytest.mark.parametrize('writing', [False, True])
-def test_fullscreen_resize_preserves_controls_and_uses_extra_height(writing, width):
+@pytest.mark.parametrize('diagnostics', [False, True])
+def test_fullscreen_resize_preserves_controls_and_uses_extra_height(writing, width, diagnostics):
     runtime = engine(max_tokens=3)
     observation = runtime.observe()
     candidates = runtime.candidates(observation, count=8)
@@ -66,6 +67,8 @@ def test_fullscreen_resize_preserves_controls_and_uses_extra_height(writing, wid
                 lines = paint(app, output)
                 text = '\n'.join(lines)
                 assert ('Candidates' if writing else 'decode-p') in text
+                if diagnostics:
+                    assert 'Δrank' in text and 'Δlogit' in text
                 assert any(line.startswith('›') for line in lines[-(height // 3 + 2):])
                 assert 'Enter commits' in '\n'.join(lines[-2:])
                 if not writing:
@@ -78,6 +81,7 @@ def test_fullscreen_resize_preserves_controls_and_uses_extra_height(writing, wid
 
     with create_pipe_input() as pipe, patch.object(Application, 'run', lambda app: asyncio.run(exercise(app))):
         read_live_choice(choice, remaining_tokens=3, candidates=candidates,
+                         show_policy_rank=diagnostics,
                          resolve_insertion=lambda text, mode: text,
                          feedback=None if writing else ChoiceFeedback(
                              'error', 'INVALID COMMAND', ('Choose a rank from 1 through 8.',)),
