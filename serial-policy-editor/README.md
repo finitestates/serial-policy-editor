@@ -960,9 +960,62 @@ Typed answers can optionally provide the same kind of live supervision. Add
 `--learn-from-write` alongside `--online-learning` and/or
 `--latent-preference` to let the enabled learners consume a live `Write`
 action. Each typed token is evaluated using the observation immediately before
-it, but the updates are averaged and installed once after the atomic write.
-This keeps long answers conservative and does not change the policy midway
-through the text. Accept, EOG, and replay remain non-learning paths.
+it. Latent learning sums the token evidence, then applies step clipping,
+decay, and state norm clipping once for the whole atomic Write. Consistent
+evidence can accumulate; opposing evidence can cancel. This replaces the old
+latent averaging behavior. Named-group learning still averages its updates.
+Neither learner changes the policy midway through the text. Accept, EOG,
+and replay remain non-learning paths.
+
+Additional experimental latent controls are optional:
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--latent-decay` | `0` | Fraction of old memory forgotten per committed learning intervention, from 0 to 1. |
+| `--latent-severity-cap` | `1000` | Positive rank distance above the dead zone where severity reaches 1. |
+| `--latent-dead-zone-rank` | `1` | Policy ranks at or better than this rank produce no learning evidence. |
+| `--latent-rejection-strength` | `0` | Nonnegative pressure against the actual pre-action sampled proposal when it differs from the chosen token. |
+| `--latent-fast-slow` | off | Also learn an independent fast vector in the same feature space. |
+| `--latent-seed` | `9137` for new episodes | Signed 64-bit projection seed; restored episodes keep their saved seed. |
+| `--latent-random-seed` | off | Draw and print one concrete latent seed at launch; mutually exclusive with `--latent-seed`. |
+
+Severity is `min(1, log1p(max(0, policy_rank - dead_zone_rank)) /
+log1p(severity_cap))`. Rejection strength 1 gives a chosen-versus-proposal
+pairwise direction; values above 1 add stronger rejection pressure. Selecting
+the sampled proposal retains the expectation-based direction. The dead zone
+gates all learning evidence, but enabled learners still decay once per event.
+Disabled learners neither learn nor decay. Step clipping bounds new learning;
+norm clipping bounds the combined state after forgetting and learning. Net
+update norms include forgetting and any state clipping, so they can exceed
+the learning step limit.
+
+With `--latent-fast-slow`, omitted fast controls resolve to:
+
+| Flag | Initial experimental default |
+| --- | --- |
+| `--latent-fast-learning-rate` | 4 times the slow learning rate |
+| `--latent-fast-decay` | `0.10` |
+| `--latent-fast-strength` | Half the slow strength |
+| `--latent-fast-max-step` | The slow max step |
+| `--latent-fast-max-norm` | The smaller of 1 and the slow max norm |
+
+The existing controls govern the slow vector, `latent_preference_z`. Fast
+memory uses `latent_preference_fast_z`; both contribute to sampler logits
+using their own strengths and share one projection. Restored fast state still
+contributes to inference when fast learning is off; it is then left unchanged.
+Saved nonempty vectors determine the feature dimension. Interaction payloads
+record forgetting, learning step, net update, and memory norms for each
+channel, plus per-token rejection information for Writes.
+
+The concrete projection seed is persisted with the vectors in sampler
+segments and full bias presets. Old records without a seed use 9137. Ordinary
+replay follows each original segment's seed and vectors and never rerolls a
+latent seed or performs fresh learning. Conflicting explicit seeds (including
+conflicts in later segments) are rejected; randomizing or replacing latent
+state during replay requires `--fixed-config`. Source-following replay keeps
+source latent state even when loading a bias preset. Changing the seed on
+resume, fork, or fixed-config replay clears both latent vectors and prints a
+reset notice, because their coordinates would otherwise have changed meaning.
 
 Export the current surviving bias set as a JSON preset:
 
@@ -976,7 +1029,8 @@ policy-editor --model /path/to/model.gguf --biases biases.json --new-prompt 'Onc
 The loadable preset uses `"format": "spe-bias-rules-v2"`. Its top-level
 sections are `model` (identity checks), `bias_rules` (direct logical rules),
 and `bias_groups` (named groups with one shared `bias` and bias-free `rules`).
-Full presets may also contain `latent_preference_z` and `latent_strength`.
+Full presets may also contain `latent_preference_z`, `latent_strength`,
+`latent_preference_fast_z`, `latent_fast_strength`, and `latent_projection_seed`.
 `--rules-only` keeps the JSON preset format but replaces named groups with their
 effective ordinary rules. `--editor-friendly` instead emits YAML `groups:`
 membership and intentionally omits active amounts, compiled routes, direct

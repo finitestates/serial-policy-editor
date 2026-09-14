@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping
 
+from .latent_features import DEFAULT_PROJECTION_SEED
+
 
 class EditorError(ValueError):
     """Raised when an editor command or configuration is invalid."""
@@ -34,6 +36,9 @@ class SamplingConfig:
     bias_groups: tuple = ()
     latent_preference_z: tuple = ()
     latent_strength: float = 1.0
+    latent_preference_fast_z: tuple = ()
+    latent_fast_strength: float = 0.0
+    latent_projection_seed: int = DEFAULT_PROJECTION_SEED
     reference_prior_routes: tuple = ()
     reference_prior_scope: str = "active"
     reference_prior_mode: str = "contrastive"
@@ -65,22 +70,29 @@ class SamplingConfig:
         if len({group.name for group in groups}) != len(groups):
             raise EditorError("duplicate bias group")
         object.__setattr__(self, "bias_groups", tuple(sorted(groups, key=lambda group: group.name)))
-        if isinstance(self.latent_preference_z, (str, bytes, bytearray)):
-            raise EditorError("latent_preference_z must be a numeric vector")
-        try:
-            latent_z = tuple(float(value) for value in self.latent_preference_z)
-        except (TypeError, ValueError) as exc:
-            raise EditorError("latent_preference_z must be a numeric vector") from exc
-        if any(not math.isfinite(value) for value in latent_z):
-            raise EditorError("latent_preference_z must contain finite numbers")
-        if (
-            type(self.latent_strength) not in (int, float)
-            or not math.isfinite(float(self.latent_strength))
-            or float(self.latent_strength) < 0.0
-        ):
-            raise EditorError("latent_strength must be a finite nonnegative number")
-        object.__setattr__(self, "latent_preference_z", latent_z)
-        object.__setattr__(self, "latent_strength", float(self.latent_strength))
+        for name in ("latent_preference_z", "latent_preference_fast_z"):
+            raw = getattr(self, name)
+            if isinstance(raw, (str, bytes, bytearray)):
+                raise EditorError(f"{name} must be a numeric vector")
+            try:
+                vector = tuple(float(value) for value in raw)
+            except (TypeError, ValueError) as exc:
+                raise EditorError(f"{name} must be a numeric vector") from exc
+            if any(not math.isfinite(value) for value in vector):
+                raise EditorError(f"{name} must contain finite numbers")
+            object.__setattr__(self, name, vector)
+        if (self.latent_preference_z and self.latent_preference_fast_z
+                and len(self.latent_preference_z) != len(self.latent_preference_fast_z)):
+            raise EditorError("slow and fast latent vectors must have the same dimension")
+        for name in ("latent_strength", "latent_fast_strength"):
+            value = getattr(self, name)
+            if (type(value) not in (int, float)
+                    or not math.isfinite(float(value)) or value < 0.0):
+                raise EditorError(f"{name} must be a finite nonnegative number")
+            object.__setattr__(self, name, float(value))
+        if (type(self.latent_projection_seed) is not int
+                or not MIN_SEED <= self.latent_projection_seed <= MAX_SEED):
+            raise EditorError("latent projection seed must be a signed 64-bit integer")
         if self.reference_prior_scope not in {"active", "global"}:
             raise EditorError("reference_prior_scope must be active or global")
         if self.reference_prior_mode not in {
@@ -206,6 +218,7 @@ class SamplingConfig:
             or bool(self.bias_rules)
             or any(group.bias != 0.0 for group in self.bias_groups)
             or bool(self.latent_preference_z)
+            or bool(self.latent_preference_fast_z)
             or self.reference_prior_active
         )
 
@@ -333,6 +346,9 @@ class SamplingConfig:
             latent_preference_z=value.get(
                 "latent_preference_z", defaults.latent_preference_z
             ),
+            latent_preference_fast_z=value.get("latent_preference_fast_z", ()),
+            latent_fast_strength=value.get("latent_fast_strength", 0.0),
+            latent_projection_seed=value.get("latent_projection_seed", DEFAULT_PROJECTION_SEED),
             latent_strength=value.get(
                 "latent_strength", defaults.latent_strength
             ),
@@ -403,8 +419,13 @@ class SamplingConfig:
                 {
                     "latent_preference_z": list(self.latent_preference_z),
                     "latent_strength": self.latent_strength,
+                    "latent_preference_fast_z": list(self.latent_preference_fast_z),
+                    "latent_fast_strength": self.latent_fast_strength,
+                    "latent_projection_seed": self.latent_projection_seed,
                 }
-                if self.latent_preference_z or self.latent_strength != 1.0
+                if (self.latent_preference_z or self.latent_strength != 1.0
+                    or self.latent_preference_fast_z or self.latent_fast_strength != 0.0
+                    or self.latent_projection_seed != DEFAULT_PROJECTION_SEED)
                 else {}
             ),
             **({"bias_step": self.bias_step} if self.bias_step != 0.5 else {}),

@@ -38,7 +38,7 @@ def project_token_embeddings(
     if not np.all(np.isfinite(values)):
         raise ValueError("token embeddings must be finite")
 
-    rng = np.random.default_rng(projection_seed)
+    rng = np.random.default_rng(projection_seed % (1 << 64))
     projection = rng.standard_normal(
         (values.shape[1], feature_dimension), dtype=np.float32
     )

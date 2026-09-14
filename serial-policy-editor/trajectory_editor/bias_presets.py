@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .bias_rules import BiasGroup, BiasRule
 from .domain import EditorError, SamplingConfig
+from .latent_features import DEFAULT_PROJECTION_SEED
 
 
 FORMAT = "spe-bias-rules-v2"
@@ -71,6 +72,9 @@ def load_bias_preset(path: Path, backend, provenance: dict) -> SamplingConfig:
         bias_groups=groups,
         latent_preference_z=value.get("latent_preference_z", ()),
         latent_strength=value.get("latent_strength", 1.0),
+        latent_preference_fast_z=value.get("latent_preference_fast_z", ()),
+        latent_fast_strength=value.get("latent_fast_strength", 0.0),
+        latent_projection_seed=value.get("latent_projection_seed", DEFAULT_PROJECTION_SEED),
     )
 
 
@@ -131,9 +135,8 @@ def project_biases(
     }
     if not rules_only:
         result["bias_groups"] = [group.to_dict() for group in config.bias_groups]
-        if config.latent_preference_z:
-            result["latent_preference_z"] = list(config.latent_preference_z)
-            result["latent_strength"] = config.latent_strength
+        result.update({key: value for key, value in config.to_dict().items()
+                       if key.startswith("latent_")})
     return json.dumps(
         result,
         ensure_ascii=False,

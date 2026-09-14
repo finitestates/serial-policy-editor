@@ -31,7 +31,7 @@ def _model_continuation(store, source_id, backend, provenance):
     engine = EpisodeEngine(
         backend, sampling=replace(
             SamplingConfig.from_record(segment["sampling"]),
-            bias_rules=(), bias_groups=(), latent_preference_z=(),
+            bias_rules=(), bias_groups=(), latent_preference_z=(), latent_preference_fast_z=(),
         ),
         initial_text=source["initial_text"] + source["visible_text"],
         max_tokens=source["max_tokens"],

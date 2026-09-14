@@ -45,7 +45,7 @@ class LatentBackend(ConformingFakeBackend):
         return FEATURES
 
 
-def _observation(sampling: SamplingConfig, logits=None):
+def _observation(sampling: SamplingConfig, logits=None, proposal_token_id=0):
     values = np.asarray(
         logits if logits is not None else [2.0, 1.0, 0.5, -1.0, -2.0, -3.0, -4.0, -5.0],
         dtype=np.float64,
@@ -54,10 +54,11 @@ def _observation(sampling: SamplingConfig, logits=None):
         values,
         sampling,
         [],
-        latent_features=FEATURES if sampling.latent_preference_z else None,
+        latent_features=FEATURES if sampling.latent_preference_z or sampling.latent_preference_fast_z else None,
     )
     return SimpleNamespace(
         boundary=0,
+        proposal_token_id=proposal_token_id,
         logits=values,
         statistics=statistics,
     )

@@ -44,8 +44,8 @@ from .episode_projector import project_episode, project_fork_map, project_lineag
 from .episode_store import EpisodeStore
 from .episode_recovery import recover_sampler_record
 from .episode_ui import InteractivePolicy
-from .latent_features import DEFAULT_PROJECTION_CHUNK_SIZE
-from .latent_preference import LatentPreferenceLearner, LatentPreferenceResult
+from .latent_features import DEFAULT_PROJECTION_CHUNK_SIZE, DEFAULT_PROJECTION_SEED
+from .latent_preference import LatentPreferenceConfig, LatentPreferenceLearner, LatentPreferenceResult
 from .online_learning import LearningResult, OnlineLearner
 from .transformers_backend import TransformersSettings
 from .tui import TerminalIO
@@ -285,6 +285,19 @@ def build_parser() -> argparse.ArgumentParser:
     latent.add_argument("--latent-strength", type=float, default=1.0)
     latent.add_argument("--latent-max-step", type=float, default=0.25)
     latent.add_argument("--latent-max-norm", type=float, default=4.0)
+    latent.add_argument("--latent-decay", type=float, default=0.0)
+    latent.add_argument("--latent-severity-cap", type=_positive_int, default=1000)
+    latent.add_argument("--latent-dead-zone-rank", type=_positive_int, default=1)
+    latent.add_argument("--latent-rejection-strength", type=float, default=0.0)
+    latent.add_argument("--latent-fast-slow", action="store_true")
+    latent.add_argument("--latent-fast-learning-rate", type=float)
+    latent.add_argument("--latent-fast-decay", type=float, default=0.10)
+    latent.add_argument("--latent-fast-strength", type=float)
+    latent.add_argument("--latent-fast-max-step", type=float)
+    latent.add_argument("--latent-fast-max-norm", type=float)
+    latent_seeds = latent.add_mutually_exclusive_group()
+    latent_seeds.add_argument("--latent-seed", type=int)
+    latent_seeds.add_argument("--latent-random-seed", action="store_true")
     latent.add_argument(
         "--latent-projection-chunk-size",
         type=_positive_int,
@@ -413,6 +426,9 @@ def _sampling_from_args(
     values.update({
         "latent_preference_z": base.latent_preference_z,
         "latent_strength": base.latent_strength,
+        "latent_preference_fast_z": base.latent_preference_fast_z,
+        "latent_fast_strength": base.latent_fast_strength,
+        "latent_projection_seed": base.latent_projection_seed,
         "reference_prior_routes": base.reference_prior_routes,
         "reference_prior_scope": base.reference_prior_scope,
         "reference_prior_mode": base.reference_prior_mode,
@@ -425,16 +441,44 @@ def _sampling_from_args(
 
 def _apply_latent_preset(
     sampling: SamplingConfig,
-    preset_latent: tuple[tuple[float, ...], float] | None,
+    preset_latent: SamplingConfig | None,
 ) -> SamplingConfig:
     if preset_latent is None:
         return sampling
-    z, strength = preset_latent
     return replace(
         sampling,
-        latent_preference_z=z,
-        latent_strength=strength,
+        latent_preference_z=preset_latent.latent_preference_z,
+        latent_strength=preset_latent.latent_strength,
+        latent_preference_fast_z=preset_latent.latent_preference_fast_z,
+        latent_fast_strength=preset_latent.latent_fast_strength,
+        latent_projection_seed=preset_latent.latent_projection_seed,
     )
+
+
+def _latent_config_from_args(args: argparse.Namespace) -> LatentPreferenceConfig:
+    return LatentPreferenceConfig(
+        enabled=args.latent_preference, dimension=args.latent_dimension,
+        learning_rate=args.latent_learning_rate, latent_strength=args.latent_strength,
+        max_step=args.latent_max_step, max_norm=args.latent_max_norm,
+        decay=args.latent_decay, severity_cap=args.latent_severity_cap,
+        dead_zone_rank=args.latent_dead_zone_rank,
+        rejection_strength=args.latent_rejection_strength, fast_slow=args.latent_fast_slow,
+        fast_learning_rate=args.latent_fast_learning_rate, fast_decay=args.latent_fast_decay,
+        fast_strength=args.latent_fast_strength, fast_max_step=args.latent_fast_max_step,
+        fast_max_norm=args.latent_fast_max_norm,
+    )
+
+
+def _apply_latent_seed(sampling: SamplingConfig, seed: int | None, io: TerminalIO,
+                       *, replay: bool = False) -> SamplingConfig:
+    if seed is None or seed == sampling.latent_projection_seed:
+        return sampling
+    if replay:
+        raise EditorError("explicit latent seed conflicts with saved replay seed")
+    if sampling.latent_preference_z or sampling.latent_preference_fast_z:
+        io.write("Latent projection coordinate system changed: latent preference memory reset (slow and fast).")
+    return replace(sampling, latent_projection_seed=seed,
+                   latent_preference_z=(), latent_preference_fast_z=())
 
 
 def _apply_catalog_reference_prior(
@@ -494,6 +538,9 @@ def _sampler_override(current: SamplingConfig, raw: str) -> SamplingConfig:
     values.update({
         "latent_preference_z": current.latent_preference_z,
         "latent_strength": current.latent_strength,
+        "latent_preference_fast_z": current.latent_preference_fast_z,
+        "latent_fast_strength": current.latent_fast_strength,
+        "latent_projection_seed": current.latent_projection_seed,
     })
     pieces = raw.replace(",", " ").split()
     if not pieces:
@@ -662,9 +709,13 @@ def _sampler_summary(config: SamplingConfig) -> str:
         summary += " groups=" + ",".join(
             f"{group.name}:{group.bias:g}" for group in config.bias_groups
         )
-    if config.latent_preference_z:
+    if (config.latent_preference_z or config.latent_preference_fast_z
+            or config.latent_projection_seed != DEFAULT_PROJECTION_SEED):
         norm = sum(value * value for value in config.latent_preference_z) ** 0.5
-        summary += f" latent_norm={norm:g} latent_strength={config.latent_strength:g}"
+        fast_norm = sum(value * value for value in config.latent_preference_fast_z) ** 0.5
+        summary += (f" latent_norm={norm:g} latent_strength={config.latent_strength:g}"
+                    f" latent_fast_norm={fast_norm:g} latent_fast_strength={config.latent_fast_strength:g}"
+                    f" latent_seed={config.latent_projection_seed}")
     return summary
 
 
@@ -688,6 +739,8 @@ def _latent_preference_notice(
         f"selected token {result.chosen_token_id}, "
         f"rank {result.old_policy_rank}, "
         f"update norm {result.update_norm:.4g}, z norm {result.z_norm:.4g}"
+        + (f", fast update {result.fast_update_norm:.4g}, fast norm {result.fast_z_norm:.4g}"
+           if result.old_fast_z else "")
     )
 
 
@@ -1014,6 +1067,16 @@ def main(argv: list[str] | None = None) -> int:
 
                 args.new_prompt = _read_initial_prompt()
 
+            latent_config = _latent_config_from_args(args)
+            if args.latent_random_seed:
+                if args.replay is not None and not args.fixed_config:
+                    raise EditorError("source-following replay restores saved latent seeds; --latent-random-seed requires --fixed-config")
+                args.latent_seed = _random_seed()
+                print(f"Random latent seed: {args.latent_seed}", flush=True)
+            if args.latent_seed is not None:
+                # Validate even if learning is disabled and before creating records.
+                SamplingConfig(latent_projection_seed=args.latent_seed)
+
             if args.random_seed:
                 args.seed = _random_seed()
                 print(f"Random seed: {args.seed}", flush=True)
@@ -1039,10 +1102,7 @@ def main(argv: list[str] | None = None) -> int:
                 preset = load_bias_preset(args.biases, backend, provenance)
                 args.bias_rules = preset.bias_rules
                 args.bias_groups = preset.bias_groups
-                preset_latent = (
-                    preset.latent_preference_z,
-                    preset.latent_strength,
-                )
+                preset_latent = preset
             requested_id = args.episode_id
             parent_id: str | None = None
             fork_boundary: int | None = None
@@ -1056,21 +1116,6 @@ def main(argv: list[str] | None = None) -> int:
                 max_bias=args.learning_max_bias,
                 learnable_groups=args.learnable_groups,
             )
-            latent_learner = None
-            if args.latent_preference:
-                latent_learner = LatentPreferenceLearner(
-                    feature_provider=lambda *, feature_dimension, projection_seed: backend.latent_token_features(
-                        feature_dimension=feature_dimension,
-                        projection_seed=projection_seed,
-                        projection_chunk_size=args.latent_projection_chunk_size,
-                    ),
-                    enabled=True,
-                    dimension=args.latent_dimension,
-                    learning_rate=args.latent_learning_rate,
-                    latent_strength=args.latent_strength,
-                    max_step=args.latent_max_step,
-                    max_norm=args.latent_max_norm,
-                )
 
             if args.resume is not None:
                 # Only explicit CLI sampler flags override the stored segment.
@@ -1086,6 +1131,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 sampling = _apply_catalog_reference_prior(sampling, catalog, args)
                 sampling = _apply_latent_preset(sampling, preset_latent)
+                sampling = _apply_latent_seed(
+                    sampling, args.latent_seed, io,
+                    replay=args.replay is not None and not args.fixed_config,
+                )
+                explicit = sampling != source_sampling
                 io.write("Restoring saved context...")
                 if model_changed:
                     engine, episode_id = _model_continuation(store, args.resume, backend, provenance)
@@ -1113,6 +1163,10 @@ def main(argv: list[str] | None = None) -> int:
                     _sampling_from_args(args), catalog, args
                 )
                 sampling = _apply_latent_preset(sampling, preset_latent)
+                sampling = _apply_latent_seed(
+                    sampling, args.latent_seed, io,
+                    replay=args.replay is not None and not args.fixed_config,
+                )
                 engine = EpisodeEngine(
                     backend,
                     sampling=sampling,
@@ -1135,7 +1189,12 @@ def main(argv: list[str] | None = None) -> int:
                 sampling = _apply_catalog_reference_prior(
                     _sampling_from_args(args, source_sampling), catalog, args
                 )
-                sampling = _apply_latent_preset(sampling, preset_latent)
+                if args.fixed_config:
+                    sampling = _apply_latent_preset(sampling, preset_latent)
+                sampling = _apply_latent_seed(
+                    sampling, args.latent_seed, io,
+                    replay=args.replay is not None and not args.fixed_config,
+                )
                 replay_prefix = None
                 if model_changed:
                     replay_prefix = backend.tokenize(store.get_episode(args.replay)["initial_text"], add_bos=True, special=True)
@@ -1152,6 +1211,12 @@ def main(argv: list[str] | None = None) -> int:
                     stream_fingerprint=source_segment["stream_fingerprint"] if model_changed else None,
                     coordinate_offset=source_segment["coordinate_offset"] if model_changed else None,
                 )
+                if args.latent_seed is not None and pending_tape.follow_source_sampling:
+                    states = [step.sampling for step in pending_tape]
+                    states.append(pending_tape.final_sampling)
+                    if any(state is not None and state.latent_projection_seed != args.latent_seed
+                           for state in states):
+                        raise EditorError("explicit latent seed conflicts with a saved replay segment")
                 episode_id = _create_episode(
                     store,
                     engine,
@@ -1181,6 +1246,10 @@ def main(argv: list[str] | None = None) -> int:
                     _sampling_from_args(args, source_sampling), catalog, args
                 )
                 sampling = _apply_latent_preset(sampling, preset_latent)
+                sampling = _apply_latent_seed(
+                    sampling, args.latent_seed, io,
+                    replay=args.replay is not None and not args.fixed_config,
+                )
                 engine = EpisodeEngine(
                     backend,
                     sampling=sampling,
@@ -1200,6 +1269,18 @@ def main(argv: list[str] | None = None) -> int:
                     parent_episode_id=args.fork_from,
                     fork_boundary=target,
                     mode="fork",
+                )
+
+            latent_learner = None
+            if args.latent_preference:
+                latent_learner = LatentPreferenceLearner(
+                    feature_provider=lambda *, feature_dimension, projection_seed: backend.latent_token_features(
+                        feature_dimension=feature_dimension,
+                        projection_seed=projection_seed,
+                        projection_chunk_size=args.latent_projection_chunk_size,
+                    ),
+                    config=replace(latent_config,
+                                   projection_seed=engine.sampling.latent_projection_seed),
                 )
 
             open_live_session = getattr(io, "live_session", None)

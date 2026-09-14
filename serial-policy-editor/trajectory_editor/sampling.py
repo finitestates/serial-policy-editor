@@ -443,21 +443,27 @@ class ObservationStatistics:
             if not np.all(np.isfinite(self.adjusted)):
                 raise ValueError("biases produced non-finite policy logits")
         latent_z = tuple(config.latent_preference_z)
-        if latent_z:
+        fast_z = tuple(config.latent_preference_fast_z)
+        if latent_z or fast_z:
             if latent_features is None:
                 raise ValueError(
                     "latent token features are required when latent preference state is active"
                 )
             features = np.asarray(latent_features, dtype=np.float32)
-            if features.shape != (len(self.logits), len(latent_z)):
+            if features.shape != (len(self.logits), len(latent_z or fast_z)):
                 raise ValueError(
                     "latent token features do not match the policy vocabulary and state"
                 )
             if not np.all(np.isfinite(features)):
                 raise ValueError("latent token features must be finite")
-            latent_adjustments = float(config.latent_strength) * (
-                features @ np.asarray(latent_z, dtype=np.float32)
+            latent_adjustments = (
+                float(config.latent_strength) * (features @ np.asarray(latent_z, dtype=np.float32))
+                if latent_z else np.zeros(len(self.logits), dtype=np.float32)
             )
+            if fast_z:
+                latent_adjustments += float(config.latent_fast_strength) * (
+                    features @ np.asarray(fast_z, dtype=np.float32)
+                )
             if not np.all(np.isfinite(latent_adjustments)):
                 raise ValueError("latent preference produced non-finite policy logits")
             self.latent_features = features

@@ -120,6 +120,7 @@ class WriteLearningResult:
     tokens: tuple[WriteTokenLearning, ...]
     group_result: LearningResult | None
     latent_result: LatentPreferenceResult | None
+    latent_token_results: tuple[LatentPreferenceResult, ...] = ()
 
     @property
     def token_count(self) -> int:
@@ -136,6 +137,12 @@ class WriteLearningResult:
             payload["group_update"] = self.group_result.to_dict()
         if self.latent_result is not None:
             payload["latent_update"] = self.latent_result.to_dict()
+            payload["latent_token_observations"] = [
+                {key: getattr(result, key) for key in (
+                    "observation_boundary", "chosen_token_id", "proposal_token_id",
+                    "proposal_rejected", "severity", "rejection_strength")}
+                for result in self.latent_token_results
+            ]
         return payload
 
 
@@ -262,60 +269,15 @@ class _WriteLearningAccumulator:
     def _aggregate_latent(self) -> LatentPreferenceResult | None:
         if not self.latent_results:
             return None
-        first = self.latent_results[0]
         latent_learner = self.latent_learner
         assert latent_learner is not None
-        old_z = tuple(first.old_z)
-        average_delta = tuple(
-            self._mean([result.delta[index] for result in self.latent_results])
-            for index in range(len(old_z))
-        )
-        new_values = [old_z[index] + average_delta[index] for index in range(len(old_z))]
-        new_norm = math.sqrt(sum(value * value for value in new_values))
-        max_norm = latent_learner.config.max_norm
-        if max_norm == 0.0:
-            new_values = [0.0 for _ in new_values]
-        elif new_norm > max_norm:
-            scale = max_norm / new_norm
-            new_values = [value * scale for value in new_values]
-        new_z = (
-            tuple(float(value) for value in new_values)
-            if self.sampling.latent_preference_z or any(new_values)
-            else ()
-        )
-        actual_delta = tuple(
-            float(new_values[index] - old_z[index]) for index in range(len(old_z))
-        )
-        weighted_mean = tuple(
-            self._mean(
-                [result.policy_weighted_mean_features[index] for result in self.latent_results]
-            )
-            for index in range(len(old_z))
-        )
-        updated = replace(
-            self.sampling,
-            latent_preference_z=new_z,
-            latent_strength=latent_learner.config.latent_strength,
-        )
-        return LatentPreferenceResult(
-            sampling=updated,
-            observation_boundary=self.tokens[0].observation_boundary,
-            chosen_token_id=self.tokens[0].token_id,
-            old_policy_rank=self._mean_int(
-                [token.policy_rank for token in self.tokens]
-            ),
-            old_policy_probability=self._mean(
-                [token.policy_probability for token in self.tokens]
-            ),
-            severity=self._mean([token.severity for token in self.tokens]),
-            loss=self._mean([token.loss for token in self.tokens]),
-            old_z=old_z,
-            new_z=new_z,
-            delta=actual_delta,
-            policy_weighted_mean_features=weighted_mean,
-            update_norm=math.sqrt(sum(delta * delta for delta in actual_delta)),
-            z_norm=math.sqrt(sum(value * value for value in new_values)),
-            enabled=True,
+        aggregate = latent_learner.aggregate(self.latent_results, self.sampling)
+        return replace(
+            aggregate,
+            old_policy_rank=self._mean_int([r.old_policy_rank for r in self.latent_results]),
+            old_policy_probability=self._mean([r.old_policy_probability for r in self.latent_results]),
+            severity=self._mean([r.severity for r in self.latent_results]),
+            loss=self._mean([r.loss for r in self.latent_results]),
         )
 
     def finish(self, boundary_after: int) -> WriteLearningResult | None:
@@ -331,6 +293,9 @@ class _WriteLearningAccumulator:
                 updated,
                 latent_preference_z=latent_result.sampling.latent_preference_z,
                 latent_strength=latent_result.sampling.latent_strength,
+                latent_preference_fast_z=latent_result.sampling.latent_preference_fast_z,
+                latent_fast_strength=latent_result.sampling.latent_fast_strength,
+                latent_projection_seed=latent_result.sampling.latent_projection_seed,
             )
         return WriteLearningResult(
             sampling=updated,
@@ -339,6 +304,7 @@ class _WriteLearningAccumulator:
             tokens=tuple(self.tokens),
             group_result=group_result,
             latent_result=latent_result,
+            latent_token_results=tuple(self.latent_results),
         )
 
 
@@ -405,6 +371,9 @@ class EpisodeRunner:
                 updated_sampling,
                 latent_preference_z=latent_result.sampling.latent_preference_z,
                 latent_strength=latent_result.sampling.latent_strength,
+                latent_preference_fast_z=latent_result.sampling.latent_preference_fast_z,
+                latent_fast_strength=latent_result.sampling.latent_fast_strength,
+                latent_projection_seed=latent_result.sampling.latent_projection_seed,
             )
         if updated_sampling != old_sampling:
             self.engine.sampling = updated_sampling

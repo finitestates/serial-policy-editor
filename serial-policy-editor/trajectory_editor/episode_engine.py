@@ -22,7 +22,6 @@ from .episode_actions import (
 )
 from .episode_backend import EpisodeBackend, require_episode_backend
 from .episode_hash import token_prefix_sha256, validate_fingerprint
-from .latent_features import DEFAULT_PROJECTION_SEED
 from .sampling import (
     SparseDistribution,
     ObservationStatistics,
@@ -217,7 +216,7 @@ class EpisodeEngine:
 
     def _latent_features(self) -> np.ndarray | None:
         """Load fixed token features only when a saved latent state needs them."""
-        if not self.sampling.latent_preference_z:
+        if not (self.sampling.latent_preference_z or self.sampling.latent_preference_fast_z):
             return None
         provider = getattr(self.backend, "latent_token_features", None)
         if not callable(provider):
@@ -226,8 +225,8 @@ class EpisodeEngine:
             )
         try:
             return provider(
-                feature_dimension=len(self.sampling.latent_preference_z),
-                projection_seed=DEFAULT_PROJECTION_SEED,
+                feature_dimension=len(self.sampling.latent_preference_z or self.sampling.latent_preference_fast_z),
+                projection_seed=self.sampling.latent_projection_seed,
             )
         except (TypeError, ValueError, RuntimeError) as exc:
             raise EditorError(f"could not load latent token features: {exc}") from exc
