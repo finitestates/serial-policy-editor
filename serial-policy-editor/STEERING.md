@@ -196,11 +196,11 @@ The manual fitter supports `--learning-severity-cap`,
 `--learning-dead-zone-rank`, `--learning-no-severity-attenuation`,
 `--learning-rejection-strength`, and `--learning-decay`, alongside its existing
 rate, step, bounds, and group-selection controls. Normal fixed group features
-use a sparse analytical gradient. Both teacher learners sum typed-span evidence,
+use a sparse analytical gradient. By default, both teacher learners sum typed-span evidence,
 then clip and decay once. Interactive steering edits refresh the authoritative
 precommit observation before either learner runs.
 
-### Experimental sampler eligibility gate
+### Adaptive Dead Zones: experimental sampler eligibility gate
 
 Use `--latent-learning-gate sampler` for the latent learner and
 `--learning-gate sampler` for the manual group fitter. Both default to `rank`,
@@ -223,10 +223,12 @@ no effect. Learning rate, rejection strength, clipping, group eligibility, and
 memory limits retain their existing meaning. Gradients still use the untruncated
 policy, so filtered-out teacher choices can teach useful corrections.
 
-**Decay remains independent:** an already-eligible choice supplies no evidence,
-but configured decay still applies. This gate is not a no-decay-on-accept flag.
+**Decay timing is separate:** by default, an already-eligible choice supplies no
+evidence but configured decay still applies. Use the conditional decay experiment
+below to change that.
 For typed writes, each token is evaluated after the preceding written tokens;
-evidence is summed and clipping/decay happen once for the complete write as before.
+evidence is reduced (summed by default), with clipping and any decay applied once
+for the complete write.
 Readouts identify eligibility skips and report how many written tokens were excluded.
 Learning records include the gate, eligibility, and pre-update sampling probability.
 
@@ -235,6 +237,59 @@ does not guarantee admission in one step or calibrate an update to the exact
 truncation boundary. With every token eligible, sampler mode contributes no new
 evidence. Save the launch flags alongside exported weights; the gate is a learner
 setting and must be supplied again when continuing learning in a later session.
+
+### Teacher-learning experiments
+
+All three controls are opt-in and available for both learners. Use the `--latent-`
+prefix for preference learning, or `--learning-` for fitting learnable manual groups.
+They do not change appearance controllers. Existing defaults remain unchanged.
+
+| Flag suffix | Choices (default first) | Experiment |
+| --- | --- | --- |
+| `decay-on` | `update`, `rejection`, `evidence` | When existing memory may decay |
+| `write-reduction` | `sum`, `mean`, `sqrt` | How a typed span's admitted evidence is scaled |
+| `rejection-target` | `proposal`, `sampler` | What a rejected proposal contrasts against |
+
+**Conditional decay.** `--latent-decay-on rejection` skips decay whenever the
+teacher's chosen token matches the captured proposal, including coincidental
+agreement inside a write. A disagreement can still decay memory even if its token
+is inside the dead zone. `--latent-decay-on evidence` requires positive gate severity:
+with Adaptive Dead Zones, only an excluded choice permits decay. With rank gating,
+only a choice beyond the rank dead zone permits it. Evidence here means admission
+by the gate, even if a zero learning rate, clipping, or cancellation of gradients
+prevents an actual learning step. Slow and fast memory share the trigger and retain
+their separate decay rates. During a write, any qualifying token enables one decay
+of the whole memory; the write never decays once per token. These settings have no
+effect when decay rates are zero. Disabled learners and frozen groups remain frozen.
+
+**Write evidence sizing.** With `--learn-from-write`, `sum` retains the existing
+sum of token evidence. `mean` divides that sum by N; `sqrt` divides it by sqrt(N),
+where N is the number of tokens with positive gate severity. Gate-skipped tokens
+do not dilute the correction. With no admitted tokens the scale is 1 and evidence
+is zero. Reduction happens before step clipping, for both slow and fast channels;
+decay and memory bounds are applied once afterward. `mean` should reduce sensitivity
+to paste length; `sqrt` leaves longer corrections more influence than shorter ones,
+but less than `sum`. Opposing token signals can still cancel. This is span sizing,
+not phrase recognition or tokenizer-independent group emission. Direct selections
+are unaffected by `write-reduction`.
+
+**Sampler rejection target.** With nonzero rejection strength, `sampler` replaces
+the sampled proposal's negative features with the probability-weighted features of
+the actual surviving sampler candidates, frozen at the precommit observation. This
+includes temperature, truncation, and steering. At rejection strength 1, the latent
+direction for a disagreement is `features(chosen) - E_sampler[features]`. The manual
+group fitter uses the corresponding group-feature difference. This should reduce
+dependence on which one of several plausible tokens happened to be sampled.
+The chosen-vs-untruncated-policy term and gate remain unchanged; coincidental
+acceptance retains the existing acceptance rule. At rejection strength 0 the target
+flag has no effect. This does not guarantee admission after one update.
+
+Records include the selected controls, effective decay rates, and the aggregate
+write's evidence count and scale. Nondefault controls appear in learning readouts.
+Like the learning gate, these are launch settings: save the flags with your weights
+and supply them again when continuing learning. Exported bias presets preserve
+weights, not these learner settings. See [trials 14–16](CONFIG_TRIALS.md#14--protect-memory-on-acceptance-or-on-all-gate-skips)
+for paired commands that change one experiment at a time.
 
 ## Export and import `biases.json`
 

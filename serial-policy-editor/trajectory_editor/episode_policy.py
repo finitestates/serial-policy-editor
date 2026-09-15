@@ -145,7 +145,8 @@ class WriteLearningResult:
                 {key: getattr(result, key) for key in (
                     "observation_boundary", "chosen_token_id", "proposal_token_id",
                     "proposal_rejected", "severity", "rejection_strength",
-                    "learning_gate", "sampler_eligible", "sampler_probability")}
+                    "learning_gate", "sampler_eligible", "sampler_probability",
+                    "decay_on", "effective_decay", "effective_fast_decay", "rejection_target")}
                 for result in self.latent_token_results
             ]
         return payload

@@ -12,6 +12,7 @@ from typing import Any
 
 from .domain import EditorError, SamplingConfig
 from .sampling import ObservationStatistics
+from .learning_controls import decay_applies, validate_controls, write_scale
 
 
 def _finite_number(value: Any, name: str, *, nonnegative: bool = False) -> float:
@@ -40,12 +41,16 @@ class OnlineLearningConfig:
     rejection_strength: float = 0.0
     decay: float = 0.0
     learning_gate: str = "rank"
+    decay_on: str = "update"
+    write_reduction: str = "sum"
+    rejection_target: str = "proposal"
 
     def __post_init__(self) -> None:
         if type(self.enabled) is not bool:
             raise EditorError("online learning enabled must be a boolean")
         if self.learning_gate not in ("rank", "sampler"):
             raise EditorError("learning gate must be rank or sampler")
+        validate_controls(self.decay_on, self.write_reduction, self.rejection_target)
         learning_rate = _finite_number(
             self.learning_rate, "learning_rate", nonnegative=True
         )
@@ -118,6 +123,12 @@ class LearningResult:
     learning_gate: str = "rank"
     sampler_eligible: bool | None = None
     sampler_probability: float | None = None
+    decay_on: str = "update"
+    effective_decay: float = 0.0
+    write_reduction: str = "sum"
+    write_evidence_scale: float = 1.0
+    write_evidence_tokens: int | None = None
+    rejection_target: str = "proposal"
 
     @property
     def updated_sampling(self) -> SamplingConfig:
@@ -145,6 +156,9 @@ class LearningResult:
             "decay": self.decay, "evidence": self.evidence or {}, "skipped": self.skipped or {},
             "learning_gate": self.learning_gate, "sampler_eligible": self.sampler_eligible,
             "sampler_probability": self.sampler_probability,
+            "decay_on": self.decay_on, "effective_decay": self.effective_decay,
+            "write_reduction": self.write_reduction, "write_evidence_scale": self.write_evidence_scale,
+            "write_evidence_tokens": self.write_evidence_tokens, "rejection_target": self.rejection_target,
         }
 
 
@@ -229,6 +243,9 @@ class OnlineLearner:
         severity = (float(not sampler_eligible) if self.config.learning_gate == "sampler"
                     else self._severity(old_policy_rank))
         loss = self._loss(statistics, chosen_token_id)
+        rejected = observation.proposal_token_id != chosen_token_id
+        effective_decay = self.config.decay if self.enabled and decay_applies(
+            self.config.decay_on, rejected=rejected, severity=severity) else 0.
         groups = tuple(sampling.bias_groups)
         old_weights = {group.name: float(group.bias) for group in groups}
         selected_names = (
@@ -267,7 +284,11 @@ class OnlineLearner:
                     mean = sum(float(statistics.policy_probabilities[t]) * v for t, v in scales.items())
                     gradient = mean - scales.get(chosen_token_id, 0.)
                     if observation.proposal_token_id != chosen_token_id:
-                        gradient += self.config.rejection_strength * (scales.get(observation.proposal_token_id, 0.) - mean)
+                        negative = scales.get(observation.proposal_token_id, 0.)
+                        if self.config.rejection_target == "sampler" and self.config.rejection_strength:
+                            negative = sum(float(p) * scales.get(int(t), 0.) for t, p in zip(
+                                statistics.distribution.ids, statistics.distribution.probabilities))
+                        gradient += self.config.rejection_strength * (negative - mean)
                 else:
                     # Compatibility with nonlinear legacy policies. The normal
                     # lexical/group-objective workflow never needs this path.
@@ -276,10 +297,18 @@ class OnlineLearner:
                     gradient = (self._loss(plus, chosen_token_id) - self._loss(minus, chosen_token_id)) / (2 * self.config.epsilon)
                     if observation.proposal_token_id != chosen_token_id and self.config.rejection_strength:
                         proposal = observation.proposal_token_id
-                        gradient -= self.config.rejection_strength * (self._loss(plus, proposal) - self._loss(minus, proposal)) / (2 * self.config.epsilon)
+                        if self.config.rejection_target == "sampler":
+                            # Freeze the original target distribution across the
+                            # two counterfactual policies, just as for a proposal.
+                            difference = sum(float(p) * (self._loss(plus, int(t)) - self._loss(minus, int(t)))
+                                             for t, p in zip(statistics.distribution.ids,
+                                                             statistics.distribution.probabilities))
+                        else:
+                            difference = self._loss(plus, proposal) - self._loss(minus, proposal)
+                        gradient -= self.config.rejection_strength * difference / (2 * self.config.epsilon)
                 gradients[group.name] = float(gradient) if math.isfinite(float(gradient)) else 0.
                 evidence[group.name] = -self.config.learning_rate * severity * gradients[group.name]
-                new_weights[group.name] = self._apply_evidence(group.bias, evidence[group.name])
+                new_weights[group.name] = self._apply_evidence(group.bias, evidence[group.name], effective_decay)
 
         deltas = {
             name: float(new_weights[name] - old_weights[name])
@@ -311,23 +340,32 @@ class OnlineLearner:
             decay=self.config.decay, evidence=evidence, skipped=skipped,
             learning_gate=self.config.learning_gate, sampler_eligible=sampler_eligible,
             sampler_probability=sampler_probability,
+            decay_on=self.config.decay_on, effective_decay=effective_decay,
+            write_reduction=self.config.write_reduction, rejection_target=self.config.rejection_target,
         )
 
-    def _apply_evidence(self, old, evidence):
+    def _apply_evidence(self, old, evidence, decay=None):
+        decay = self.config.decay if decay is None else decay
         step = max(-self.config.max_step, min(self.config.max_step, evidence))
-        return max(self.config.min_bias, min(self.config.max_bias, (1 - self.config.decay) * old + step))
+        return max(self.config.min_bias, min(self.config.max_bias, (1 - decay) * old + step))
 
     def aggregate(self, results, sampling):
-        """Sum a typed span's evidence; clip and decay once, like latent learning."""
+        """Reduce a typed span's evidence; clip and conditionally decay once."""
         first = results[0]
+        scale, evidence_tokens = write_scale(self.config.write_reduction, results)
+        effective_decay = self.config.decay if self.enabled and any(decay_applies(
+            self.config.decay_on, rejected=r.proposal_rejected, severity=r.severity) for r in results) else 0.
         names = {name for r in results for name in (r.evidence or {})}
-        evidence = {name: sum((r.evidence or {}).get(name, 0.) for r in results) for name in names}
+        evidence = {name: scale * sum((r.evidence or {}).get(name, 0.) for r in results) for name in names}
         weights = dict(first.old_group_weights)
         for name in names:
-            weights[name] = self._apply_evidence(weights[name], evidence[name])
+            weights[name] = self._apply_evidence(weights[name], evidence[name], effective_decay)
         deltas = {name: weights[name] - old for name, old in first.old_group_weights.items()}
         return replace(first, sampling=replace(sampling, bias_groups=tuple(replace(g, bias=weights[g.name]) for g in sampling.bias_groups)),
                        new_group_weights=weights, group_deltas=deltas, evidence=evidence,
                        gradients={name: sum(r.gradients[name] for r in results) / len(results) for name in weights},
                        update_norm=math.sqrt(sum(d*d for d in deltas.values())),
-                       sampler_eligible=None, sampler_probability=None)
+                       sampler_eligible=None, sampler_probability=None,
+                       proposal_rejected=any(r.proposal_rejected for r in results),
+                       effective_decay=effective_decay, write_evidence_scale=scale,
+                       write_evidence_tokens=evidence_tokens)

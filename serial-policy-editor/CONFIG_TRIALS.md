@@ -188,7 +188,7 @@ corrections. If 03 feels inert and this works, severity attenuation is a better
 first suspect than the step limit. Watch for one group dominating after a few
 choices.
 
-## Shared latent settings for 05–11
+## Shared latent settings for 05–16
 
 ```bash
 LATENT=(
@@ -351,7 +351,7 @@ The stronger version should make the difference easier to notice where the
 compiled lexical branches compete, but doesn't promise 10 shadows per outline.
 If the isolated result is useful, add the light reference to 11 in a new run.
 
-## 13 — Learn from choices outside the sampler's candidate set
+## 13 — Adaptive Dead Zones: learn outside the sampler's candidate set
 
 ```bash
 # Your fixed-rank gate: ignore policy ranks 1–5, learn fully beyond them,
@@ -377,12 +377,90 @@ For group learning, add `--learning-gate sampler` to 03 or 04 and use their same
 `b GROUP learn on` commands. Add `--learn-from-write` to compare typed-span learning;
 coincidental agreement remains supported and eligible tokens supply zero evidence.
 
-Readouts distinguish already-eligible choices from excluded choices. **Configured
+Readouts distinguish already-eligible choices from excluded choices. **By default, configured
 decay still applies**, including to fast memory, so a skipped correction can still
 show memory movement. These examples keep decay at the shared baseline of zero.
 To test only the new gate against another configuration, retain that configuration's
 decay, strength, rate, and rejection settings. Leave sampler filters enabled:
 with the entire vocabulary eligible, this mode supplies no new evidence.
+
+## 14 — Protect memory on acceptance or on all gate skips
+
+```bash
+# Same Adaptive Dead Zones and two memories in all three runs.
+# Slow decay 0; fast decay 0.10 forgets 10% of old fast memory WHEN triggered.
+# Fast rate 0.20, strength 0.50, max step 0.25, max norm 1.0.
+DECAY_TRIAL=(
+  "${LATENT[@]}" --latent-learning-gate sampler --latent-rejection-strength 1
+  --latent-fast-slow --latent-fast-learning-rate 0.20 --latent-fast-decay 0.10
+  --latent-fast-strength 0.50 --latent-fast-max-step 0.25 --latent-fast-max-norm 1.0
+)
+trial 14-decay-update "${DECAY_TRIAL[@]}" --latent-decay-on update
+trial 14-decay-rejection "${DECAY_TRIAL[@]}" --latent-decay-on rejection
+trial 14-decay-evidence "${DECAY_TRIAL[@]}" --latent-decay-on evidence
+```
+
+**Expect:** `update` forgets on every teaching action as before. `rejection`
+protects memory when your choice matches the proposal. `evidence` also protects it
+when you disagree but pick another sampler-eligible token. That third run tests
+whether memory stays useful longer when Adaptive Dead Zones says there is nothing
+to learn. Teach a preference first, then alternate agreements with disagreements
+inside the candidate set, watching fast-memory movement. Holds do not teach or decay.
+
+The trigger applies to both memory channels, at their own rates. With typed-write
+learning, any qualifying token enables **one** decay for that whole write. For manual
+groups, add `--learning-decay 0.02 --learning-decay-on evidence` to trial 03: 0.02
+forgets 2% of the old learnable group amount when the gate admits evidence. Compare
+with `--learning-decay-on update`; use the same `b GROUP learn on` setup.
+
+## 15 — How much should a longer typed correction count?
+
+```bash
+# Same gate and rejection strength, with no decay in this comparison.
+# N counts only written tokens admitted by the gate; agreements/skips don't dilute.
+WRITE_TRIAL=(
+  "${LATENT[@]}" --latent-learning-gate sampler --latent-rejection-strength 1
+  --learn-from-write
+)
+trial 15-write-sum "${WRITE_TRIAL[@]}" --latent-write-reduction sum
+trial 15-write-sqrt "${WRITE_TRIAL[@]}" --latent-write-reduction sqrt
+trial 15-write-mean "${WRITE_TRIAL[@]}" --latent-write-reduction mean
+```
+
+**Expect:** `sum` gives a longer correction more influence until clipping caps it;
+`sqrt` tempers that increase; `mean` makes the update reflect the average admitted
+correction. For 9 admitted tokens, the raw sum is multiplied by 1, 1/3, or 1/9.
+Try comparable short corrections and longer rewrites. Watch the evidence count and
+scale in the readout; if every variant hits the same step cap, lower the learning
+rate to expose differences. Token signals can reinforce or cancel one another, so
+length alone cannot predict the final update norm. This does not yet learn phrases
+as atomic units. Manual group equivalents use `--learning-write-reduction`.
+
+## 16 — Teach against the sampler's alternatives instead of one random draw
+
+```bash
+# Rejection strength 1 is essential here: at 0 the target has no effect.
+# Both runs learn only excluded teacher choices, with the same update limits.
+trial 16-target-proposal "${LATENT[@]}" \
+  --latent-learning-gate sampler --latent-rejection-strength 1 \
+  --latent-rejection-target proposal
+trial 16-target-sampler "${LATENT[@]}" \
+  --latent-learning-gate sampler --latent-rejection-strength 1 \
+  --latent-rejection-target sampler
+```
+
+**Expect:** `proposal` contrasts your correction with the one token drawn.
+`sampler` contrasts it with a probability-weighted average of what could have been
+drawn. This is a natural partner for Adaptive Dead Zones: "more like my excluded
+choice, less like this set of available alternatives." It may reduce noisy changes
+caused by which plausible token was randomly proposed, while still allowing strong
+corrections. It does not equalize group members or guarantee crossing the cutoff.
+For manual groups, use `--learning-rejection-target sampler` with
+`--learning-rejection-strength 1`. Coincidental acceptance still follows the normal
+acceptance rule in both modes.
+
+Start with these paired runs; combine favorites afterward. All six new flags keep
+the previous behavior by default (`update`, `sum`, `proposal`).
 
 ## A small protocol that should make your report useful
 

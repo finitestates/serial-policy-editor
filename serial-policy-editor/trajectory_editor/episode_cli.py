@@ -49,6 +49,7 @@ from .episode_ui import InteractivePolicy, PolicyViewPreferences
 from .latent_features import DEFAULT_PROJECTION_CHUNK_SIZE, DEFAULT_PROJECTION_SEED
 from .latent_preference import LatentPreferenceConfig, LatentPreferenceLearner, LatentPreferenceResult
 from .online_learning import LearningResult, OnlineLearner
+from .learning_controls import DECAY_ON, WRITE_REDUCTIONS, REJECTION_TARGETS
 from .transformers_backend import TransformersSettings
 from .tui import TerminalIO
 from .ui_themes import LIVE_THEME_NAMES
@@ -114,6 +115,21 @@ def _read_initial_prompt() -> str:
             error_message="Write at least one character.",
         ),
         validate_while_typing=False,
+    )
+
+
+def _add_learning_experiment_flags(parser, prefix):
+    parser.add_argument(
+        f"--{prefix}-decay-on", choices=DECAY_ON, default="update",
+        help="forget on every update (default), proposal rejection, or gate-admitted evidence; writes decay at most once",
+    )
+    parser.add_argument(
+        f"--{prefix}-write-reduction", choices=WRITE_REDUCTIONS, default="sum",
+        help="scale a write's evidence by 1, 1/N, or 1/sqrt(N); N counts gate-admitted tokens",
+    )
+    parser.add_argument(
+        f"--{prefix}-rejection-target", choices=REJECTION_TARGETS, default="proposal",
+        help="contrast teacher corrections with the sampled proposal or the frozen sampler distribution; requires nonzero rejection strength",
     )
 
 
@@ -280,6 +296,7 @@ def build_parser() -> argparse.ArgumentParser:
     learning.add_argument("--learning-no-severity-attenuation", action="store_true")
     learning.add_argument("--learning-rejection-strength", type=float, default=0.)
     learning.add_argument("--learning-decay", type=float, default=0.)
+    _add_learning_experiment_flags(learning, "learning")
     learning.add_argument(
         "--learning-gate", choices=("rank", "sampler"), default="rank",
         help="sampler replaces rank severity: learn at full severity only from filtered-out tokens; decay is unchanged",
@@ -309,6 +326,7 @@ def build_parser() -> argparse.ArgumentParser:
     latent.add_argument("--latent-max-step", type=float, default=0.25)
     latent.add_argument("--latent-max-norm", type=float, default=4.0)
     latent.add_argument("--latent-decay", type=float, default=0.0)
+    _add_learning_experiment_flags(latent, "latent")
     latent.add_argument("--latent-severity-cap", type=_positive_int, default=1000)
     latent.add_argument(
         "--latent-no-severity-attenuation", action="store_true",
@@ -507,6 +525,8 @@ def _latent_config_from_args(args: argparse.Namespace) -> LatentPreferenceConfig
         fast_strength=args.latent_fast_strength, fast_max_step=args.latent_fast_max_step,
         fast_max_norm=args.latent_fast_max_norm,
         learning_gate=args.latent_learning_gate,
+        decay_on=args.latent_decay_on, write_reduction=args.latent_write_reduction,
+        rejection_target=args.latent_rejection_target,
     )
 
 
@@ -785,8 +805,23 @@ def _learning_gate_notice(result) -> str:
     if result.learning_gate != "sampler":
         return ""
     if result.sampler_eligible:
-        return " · sampler gate: already eligible (no new evidence; configured decay still applies)"
+        return " · sampler gate: already eligible (no new evidence)"
     return " · sampler gate: excluded (full-severity evidence)"
+
+
+def _learning_controls_notice(result) -> str:
+    parts = []
+    if result.decay_on != "update":
+        rates = f"{result.effective_decay:g}"
+        if getattr(result, "old_fast_z", ()):
+            rates += f", fast {result.effective_fast_decay:g}"
+        parts.append(f"decay on {result.decay_on}: rate {rates}")
+    if result.rejection_target != "proposal" and result.rejection_strength:
+        parts.append(f"rejection target: {result.rejection_target}")
+    if result.write_evidence_tokens is not None and result.write_reduction != "sum":
+        parts.append(f"write {result.write_reduction}: {result.write_evidence_tokens} evidence tokens, "
+                     f"scale {result.write_evidence_scale:g}")
+    return " · " + " · ".join(parts) if parts else ""
 
 
 def _online_learning_notice(io: TerminalIO, result: LearningResult) -> None:
@@ -799,6 +834,7 @@ def _online_learning_notice(io: TerminalIO, result: LearningResult) -> None:
         f"rank {result.old_policy_rank}, "
         f"update norm {result.update_norm:.4g} · groups {weights}"
         + _learning_gate_notice(result)
+        + _learning_controls_notice(result)
     )
 
 
@@ -813,6 +849,7 @@ def _latent_preference_notice(
         + (f", fast update {result.fast_update_norm:.4g}, fast norm {result.fast_z_norm:.4g}"
            if result.old_fast_z else "")
         + _learning_gate_notice(result)
+        + _learning_controls_notice(result)
     )
 
 
@@ -828,16 +865,18 @@ def _write_learning_notice(io: TerminalIO, result: WriteLearningResult) -> None:
         )
         parts.append(
             f"group update norm {result.group_result.update_norm:.4g} · groups {weights}"
+            + _learning_controls_notice(result.group_result)
         )
     if result.latent_result is not None:
         parts.append(
             f"latent update norm {result.latent_result.update_norm:.4g}, "
             f"z norm {result.latent_result.z_norm:.4g}"
+            + _learning_controls_notice(result.latent_result)
         )
     if any(r is not None and r.learning_gate == "sampler"
            for r in (result.group_result, result.latent_result)):
         excluded = sum(t.sampler_eligible is False for t in result.tokens)
-        parts.append(f"sampler gate: {excluded}/{result.token_count} tokens excluded; configured decay applies once")
+        parts.append(f"sampler gate: {excluded}/{result.token_count} tokens excluded; decay evaluated once")
     io.write(" · ".join(parts))
 
 
@@ -1204,6 +1243,8 @@ def main(argv: list[str] | None = None) -> int:
                 no_severity_attenuation=args.learning_no_severity_attenuation,
                 rejection_strength=args.learning_rejection_strength, decay=args.learning_decay,
                 learning_gate=args.learning_gate,
+                decay_on=args.learning_decay_on, write_reduction=args.learning_write_reduction,
+                rejection_target=args.learning_rejection_target,
             )
 
             if args.resume is not None:

@@ -11,6 +11,7 @@ import numpy as np
 
 from .domain import MAX_SEED, MIN_SEED, EditorError, SamplingConfig
 from .latent_features import DEFAULT_LATENT_DIMENSION, DEFAULT_PROJECTION_SEED
+from .learning_controls import decay_applies, validate_controls, write_scale
 
 
 _MIN_PROBABILITY = float.fromhex("0x1.0p-1022")
@@ -49,12 +50,16 @@ class LatentPreferenceConfig:
     fast_max_step: float | None = None
     fast_max_norm: float | None = None
     learning_gate: str = "rank"
+    decay_on: str = "update"
+    write_reduction: str = "sum"
+    rejection_target: str = "proposal"
 
     def __post_init__(self) -> None:
         if type(self.enabled) is not bool:
             raise EditorError("latent preference enabled must be a boolean")
         if self.learning_gate not in ("rank", "sampler"):
             raise EditorError("latent learning gate must be rank or sampler")
+        validate_controls(self.decay_on, self.write_reduction, self.rejection_target)
         if type(self.dimension) is not int or self.dimension < 1:
             raise EditorError("latent preference dimension must be positive")
         _finite_number(self.learning_rate, "latent learning_rate", nonnegative=True)
@@ -128,6 +133,13 @@ class LatentPreferenceResult:
     learning_gate: str = "rank"
     sampler_eligible: bool | None = None
     sampler_probability: float | None = None
+    decay_on: str = "update"
+    effective_decay: float = 0.0
+    effective_fast_decay: float = 0.0
+    write_reduction: str = "sum"
+    write_evidence_scale: float = 1.0
+    write_evidence_tokens: int | None = None
+    rejection_target: str = "proposal"
 
     @property
     def updated_sampling(self) -> SamplingConfig:
@@ -173,6 +185,13 @@ class LatentPreferenceResult:
             "learning_gate": self.learning_gate,
             "sampler_eligible": self.sampler_eligible,
             "sampler_probability": self.sampler_probability,
+            "decay_on": self.decay_on,
+            "effective_decay": self.effective_decay,
+            "effective_fast_decay": self.effective_fast_decay,
+            "write_reduction": self.write_reduction,
+            "write_evidence_scale": self.write_evidence_scale,
+            "write_evidence_tokens": self.write_evidence_tokens,
+            "rejection_target": self.rejection_target,
         }
 
 
@@ -300,12 +319,21 @@ class LatentPreferenceLearner:
         if severity == 0.0:
             direction = np.zeros_like(direction)
         elif rejected and self.config.rejection_strength:
+            negative = features[proposal].astype(np.float64)
+            if self.config.rejection_target == "sampler":
+                distribution = statistics.distribution
+                negative = np.einsum("v,vd->d", distribution.probabilities,
+                                     features[distribution.ids], dtype=np.float64, optimize=False)
             direction += self.config.rejection_strength * (
-                weighted_mean - features[proposal].astype(np.float64)
+                weighted_mean - negative
             )
+        decay_allowed = self.enabled and decay_applies(
+            self.config.decay_on, rejected=rejected, severity=severity)
+        effective_decay = self.config.decay if decay_allowed else 0.
+        effective_fast_decay = self.config.fast_decay if decay_allowed and self.config.fast_slow else 0.
         new_z, learning_delta, decay_norm = self._channel(
             old_z, self.config.learning_rate * severity * direction,
-            self.config.decay, self.config.max_step, self.config.max_norm,
+            effective_decay, self.config.max_step, self.config.max_norm,
         )
         old_fast_z = np.asarray(sampling.latent_preference_fast_z or (0.0,) * dimension)
         new_fast_z = old_fast_z.copy()
@@ -314,7 +342,7 @@ class LatentPreferenceLearner:
         if self.config.fast_slow:
             new_fast_z, fast_learning_delta, fast_decay_norm = self._channel(
                 old_fast_z, self.config.fast_learning_rate * severity * direction,
-                self.config.fast_decay, self.config.fast_max_step, self.config.fast_max_norm,
+                effective_fast_decay, self.config.fast_max_step, self.config.fast_max_norm,
             )
         fast_tuple = (tuple(float(v) for v in new_fast_z)
                       if sampling.latent_preference_fast_z or np.any(new_fast_z) else ())
@@ -379,6 +407,9 @@ class LatentPreferenceLearner:
             fast_decay_norm=fast_decay_norm,
             learning_gate=self.config.learning_gate, sampler_eligible=sampler_eligible,
             sampler_probability=sampler_probability,
+            decay_on=self.config.decay_on, effective_decay=effective_decay,
+            effective_fast_decay=effective_fast_decay, write_reduction=self.config.write_reduction,
+            rejection_target=self.config.rejection_target,
         )
 
     def _channel(self, old_z, raw_delta, decay, max_step, max_norm):
@@ -403,20 +434,25 @@ class LatentPreferenceLearner:
     def aggregate(
         self, results: list[LatentPreferenceResult], sampling: SamplingConfig
     ) -> LatentPreferenceResult:
-        """Sum a Write's token evidence, then clip and decay once atomically."""
+        """Reduce a Write's token evidence, then clip and conditionally decay once."""
         first = results[0]
-        evidence = np.sum([r.learning_evidence for r in results], axis=0)
+        scale, evidence_tokens = write_scale(self.config.write_reduction, results)
+        evidence = np.sum([r.learning_evidence for r in results], axis=0) * scale
+        decay_allowed = self.enabled and any(decay_applies(
+            self.config.decay_on, rejected=r.proposal_rejected, severity=r.severity) for r in results)
+        effective_decay = self.config.decay if decay_allowed else 0.
+        effective_fast_decay = self.config.fast_decay if decay_allowed and self.config.fast_slow else 0.
         old_z = np.asarray(first.old_z)
         new_z, step, decay_norm = self._channel(
-            old_z, evidence, self.config.decay, self.config.max_step, self.config.max_norm)
+            old_z, evidence, effective_decay, self.config.max_step, self.config.max_norm)
         z = tuple(float(v) for v in new_z) if sampling.latent_preference_z or np.any(new_z) else ()
         updated = replace(first.sampling, latent_preference_z=z)
         extra = {}
         if self.config.fast_slow:
             old_fast = np.asarray(first.old_fast_z)
-            fast_evidence = np.sum([r.fast_learning_evidence for r in results], axis=0)
+            fast_evidence = np.sum([r.fast_learning_evidence for r in results], axis=0) * scale
             new_fast, fast_step, fast_decay_norm = self._channel(
-                old_fast, fast_evidence, self.config.fast_decay,
+                old_fast, fast_evidence, effective_fast_decay,
                 self.config.fast_max_step, self.config.fast_max_norm)
             fast_z = tuple(float(v) for v in new_fast) if sampling.latent_preference_fast_z or np.any(new_fast) else ()
             updated = replace(updated, latent_preference_fast_z=fast_z)
@@ -435,4 +471,7 @@ class LatentPreferenceLearner:
                        learning_step_norm=float(np.linalg.norm(step)),
                        policy_weighted_mean_features=tuple(np.mean([r.policy_weighted_mean_features for r in results], axis=0)),
                        sampler_eligible=None, sampler_probability=None,
+                       proposal_rejected=any(r.proposal_rejected for r in results),
+                       effective_decay=effective_decay, effective_fast_decay=effective_fast_decay,
+                       write_evidence_scale=scale, write_evidence_tokens=evidence_tokens,
                        **extra)

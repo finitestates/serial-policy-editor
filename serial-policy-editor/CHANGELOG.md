@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Add opt-in teacher-learning controls for both manual groups and latent memory:
+  `--{learning,latent}-decay-on {update,rejection,evidence}` preserves memory on
+  agreement or gate skips; `--{learning,latent}-write-reduction {sum,mean,sqrt}`
+  scales admitted typed evidence before clipping; and
+  `--{learning,latent}-rejection-target {proposal,sampler}` can contrast corrections
+  with the frozen sampler expectation. Preserve existing defaults and once-per-write
+  decay. Include effective controls in records/readouts and paired trial commands.
+
 - Add experimental `--learning-gate sampler` and `--latent-learning-gate sampler`
   to learn at full severity only from teacher tokens excluded by the actual
   sampler filters. Preserve rank-based defaults and independent decay. Include

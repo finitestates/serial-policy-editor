@@ -828,12 +828,21 @@ Typed answers can optionally provide the same kind of live supervision. Add
 `--learn-from-write` alongside `--online-learning` and/or
 `--latent-preference` to let the enabled learners consume a live `Write`
 action. Each typed token is evaluated using the observation immediately before
-it. Latent learning sums the token evidence, then applies step clipping,
+it. By default, latent learning sums the token evidence, then applies step clipping,
 decay, and state norm clipping once for the whole atomic Write. Consistent
 evidence can accumulate; opposing evidence can cancel. This replaces the old
 latent averaging behavior. Manual-group learning also sums its evidence and clips/decays once.
 Neither learner changes the policy midway through the text. Accept, EOG,
 and replay remain non-learning paths.
+
+Three further experiments are available for both learners:
+`--latent-decay-on rejection` skips decay on agreement; `evidence` also skips it
+inside the learning dead zone. `--latent-write-reduction mean` or `sqrt` tempers
+long typed corrections. `--latent-rejection-target sampler` uses the actual sampler's
+weighted alternatives as the negative target when rejection strength is nonzero.
+Use `--learning-` in place of `--latent-` for manual group fitting. Defaults remain
+`update`, `sum`, and `proposal`. See [semantics](STEERING.md#teacher-learning-experiments)
+and [paired trial commands](CONFIG_TRIALS.md#14--protect-memory-on-acceptance-or-on-all-gate-skips).
 
 Additional experimental latent controls are optional:
 
@@ -843,16 +852,16 @@ Additional experimental latent controls are optional:
 | `--latent-severity-cap` | `1000` | Positive rank distance above the dead zone where severity reaches 1. |
 | `--latent-no-severity-attenuation` | off | Give every selection outside the dead zone severity 1, bypassing the logarithmic attenuation. |
 | `--latent-dead-zone-rank` | `1` | Policy ranks at or better than this rank produce no learning evidence. |
-| `--latent-rejection-strength` | `0` | Nonnegative pressure against the actual pre-action sampled proposal when it differs from the chosen token. |
+| `--latent-rejection-strength` | `0` | Nonnegative rejection pressure when the proposal differs from the chosen token; the negative target defaults to that proposal. |
 | `--latent-fast-slow` | off | Also learn an independent fast vector in the same feature space. |
 | `--latent-seed` | `9137` for new episodes | Signed 64-bit projection seed; restored episodes keep their saved seed. |
 | `--latent-random-seed` | off | Draw and print one concrete latent seed at launch; mutually exclusive with `--latent-seed`. |
 
 Severity is `min(1, log1p(max(0, policy_rank - dead_zone_rank)) /
-log1p(severity_cap))`. Rejection strength 1 gives a chosen-versus-proposal
+log1p(severity_cap))`. With the default rejection target, strength 1 gives a chosen-versus-proposal
 pairwise direction; values above 1 add stronger rejection pressure. Selecting
 the sampled proposal retains the expectation-based direction. The dead zone
-gates all learning evidence, but enabled learners still decay once per event.
+gates all learning evidence; by default, enabled learners still decay once per event.
 `--latent-no-severity-attenuation` sets severity to 1 outside the dead zone
 and leaves it zero inside. It applies to both latent channels and typed-write
 evidence; the severity cap is ignored in this mode. It does not remove the
