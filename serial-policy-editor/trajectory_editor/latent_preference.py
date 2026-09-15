@@ -18,6 +18,41 @@ _MIN_PROBABILITY = float.fromhex("0x1.0p-1022")
 FeatureProvider = Callable[..., np.ndarray]
 
 
+def choice_gradient(features, probabilities, chosen_token_id):
+    """Gradient of log q(y) for a categorical log-linear choice."""
+    values = np.asarray(features, dtype=np.float64)
+    weights = np.asarray(probabilities, dtype=np.float64)
+    mean = np.einsum("v,vd->d", weights, values, dtype=np.float64, optimize=False)
+    return np.asarray(values[int(chosen_token_id)], dtype=np.float64) - mean
+
+
+def pairwise_logistic_gradient(z, chosen_features, rejected_features):
+    """Ascent gradient of log sigmoid(z·(f_y-f_r))."""
+    delta = np.asarray(chosen_features, dtype=np.float64) - np.asarray(
+        rejected_features, dtype=np.float64
+    )
+    margin = float(np.dot(np.asarray(z, dtype=np.float64), delta))
+    if margin >= 0.0:
+        coefficient = math.exp(-min(margin, 745.0))
+        coefficient /= 1.0 + coefficient
+    else:
+        coefficient = 1.0 / (1.0 + math.exp(min(margin, 0.0)))
+    return coefficient * delta
+
+
+def fisher_matrix(features, probabilities):
+    """Full categorical Fisher covariance for a feature matrix."""
+    values = np.asarray(features, dtype=np.float64)
+    weights = np.asarray(probabilities, dtype=np.float64)
+    mean = np.einsum("v,vd->d", weights, values, dtype=np.float64, optimize=False)
+    centered = values - mean
+    covariance = np.einsum(
+        "v,vi,vj->ij", weights, centered, centered,
+        dtype=np.float64, optimize=False,
+    )
+    return (covariance + covariance.T) * 0.5
+
+
 def _finite_number(value: Any, name: str, *, nonnegative: bool = False) -> float:
     if type(value) not in (int, float) or not math.isfinite(float(value)):
         raise EditorError(f"{name} must be a finite number")
@@ -53,12 +88,30 @@ class LatentPreferenceConfig:
     decay_on: str = "update"
     write_reduction: str = "sum"
     rejection_target: str = "proposal"
+    learning_scheme: str = "sgd-v1"
+    latent_learning_scheme: str | None = None
+    learning_metric: str = "euclidean"
+    learning_kl: float = 0.05
+    fisher_ridge: float = 1.0e-3
+    fisher_mode: str = "diagonal"
+    fisher_mass: float = 0.999
+    fisher_max_support: int = 2048
 
     def __post_init__(self) -> None:
         if type(self.enabled) is not bool:
             raise EditorError("latent preference enabled must be a boolean")
         if self.learning_gate not in ("rank", "sampler"):
             raise EditorError("latent learning gate must be rank or sampler")
+        if self.latent_learning_scheme is not None:
+            if self.learning_scheme != "sgd-v1" and self.learning_scheme != self.latent_learning_scheme:
+                raise EditorError("learning_scheme and latent_learning_scheme disagree")
+            object.__setattr__(self, "learning_scheme", self.latent_learning_scheme)
+        if self.learning_scheme not in ("sgd-v1", "fisher-kl-v2"):
+            raise EditorError("unsupported latent learning scheme")
+        if self.learning_metric not in ("euclidean", "fisher"):
+            raise EditorError("latent learning_metric must be euclidean or fisher")
+        if self.fisher_mode not in ("diagonal", "full"):
+            raise EditorError("latent fisher_mode must be diagonal or full")
         validate_controls(self.decay_on, self.write_reduction, self.rejection_target)
         if type(self.dimension) is not int or self.dimension < 1:
             raise EditorError("latent preference dimension must be positive")
@@ -81,6 +134,13 @@ class LatentPreferenceConfig:
             if not 0.0 <= value <= 1.0:
                 raise EditorError(f"latent {name} must be between 0 and 1")
         _finite_number(self.rejection_strength, "latent rejection_strength", nonnegative=True)
+        _finite_number(self.learning_kl, "latent learning_kl", nonnegative=True)
+        _finite_number(self.fisher_ridge, "latent fisher_ridge", nonnegative=True)
+        _finite_number(self.fisher_mass, "latent fisher_mass")
+        if not 0.0 < self.fisher_mass <= 1.0:
+            raise EditorError("latent fisher_mass must be in (0, 1]")
+        if type(self.fisher_max_support) is not int or self.fisher_max_support < 1:
+            raise EditorError("latent fisher_max_support must be positive")
         defaults = dict(fast_learning_rate=4.0 * self.learning_rate,
                         fast_strength=0.5 * self.latent_strength,
                         fast_max_step=self.max_step, fast_max_norm=min(1.0, self.max_norm))
@@ -140,6 +200,22 @@ class LatentPreferenceResult:
     write_evidence_scale: float = 1.0
     write_evidence_tokens: int | None = None
     rejection_target: str = "proposal"
+    learning_scheme: str = "sgd-v1"
+    learning_step_kl: float = 0.0
+    requested_learning_kl: float = 0.0
+    fisher_mode: str = "diagonal"
+    fisher_condition_estimate: float = 0.0
+    step_clipped: bool = False
+    norm_clipped: bool = False
+    learning_policy: str = "deployed"
+    learning_policy_rank: int | None = None
+    learning_policy_probability: float | None = None
+    latent_rank_before: int | None = None
+    latent_rank_after: int | None = None
+    latent_pre_post_kl: float = 0.0
+    latent_effective_logit_rms: float = 0.0
+    latent_top_logit_min: float = 0.0
+    latent_top_logit_max: float = 0.0
 
     @property
     def updated_sampling(self) -> SamplingConfig:
@@ -181,7 +257,6 @@ class LatentPreferenceResult:
             "fast_strength": self.fast_strength,
             "fast_learning_delta": list(self.fast_learning_delta),
             "fast_learning_step_norm": self.fast_learning_step_norm,
-            "fast_decay_norm": self.fast_decay_norm,
             "learning_gate": self.learning_gate,
             "sampler_eligible": self.sampler_eligible,
             "sampler_probability": self.sampler_probability,
@@ -192,6 +267,22 @@ class LatentPreferenceResult:
             "write_evidence_scale": self.write_evidence_scale,
             "write_evidence_tokens": self.write_evidence_tokens,
             "rejection_target": self.rejection_target,
+            "learning_scheme": self.learning_scheme,
+            "learning_step_kl": self.learning_step_kl,
+            "requested_learning_kl": self.requested_learning_kl,
+            "fisher_mode": self.fisher_mode,
+            "fisher_condition_estimate": self.fisher_condition_estimate,
+            "step_clipped": self.step_clipped,
+            "norm_clipped": self.norm_clipped,
+            "learning_policy": self.learning_policy,
+            "learning_policy_rank": self.learning_policy_rank,
+            "learning_policy_probability": self.learning_policy_probability,
+            "latent_rank_before": self.latent_rank_before,
+            "latent_rank_after": self.latent_rank_after,
+            "latent_pre_post_kl": self.latent_pre_post_kl,
+            "latent_effective_logit_rms": self.latent_effective_logit_rms,
+            "latent_top_logit_min": self.latent_top_logit_min,
+            "latent_top_logit_max": self.latent_top_logit_max,
         }
 
 
@@ -232,10 +323,16 @@ class LatentPreferenceLearner:
             values = self._feature_matrix
         else:
             assert self._feature_provider is not None
-            values = self._feature_provider(
+            kwargs = dict(
                 feature_dimension=dimension,
                 projection_seed=sampling.latent_projection_seed,
             )
+            if sampling.latent_feature_scheme != "random-projection-unit-v1":
+                kwargs.update(
+                    feature_scheme=sampling.latent_feature_scheme,
+                    whitening_ridge=sampling.latent_whitening_ridge,
+                )
+            values = self._feature_provider(**kwargs)
         values = np.asarray(values, dtype=np.float32)
         expected = (vocabulary_size, dimension)
         if values.shape != expected:
@@ -261,6 +358,113 @@ class LatentPreferenceLearner:
     @staticmethod
     def _loss(probability: float) -> float:
         return -math.log(max(float(probability), _MIN_PROBABILITY))
+
+    @staticmethod
+    def _sigmoid_negative(margin: float) -> float:
+        if margin >= 0.0:
+            value = math.exp(-min(float(margin), 745.0))
+            return value / (1.0 + value)
+        return 1.0 / (1.0 + math.exp(max(float(margin), -745.0)))
+
+    @staticmethod
+    def _pair_loss(margin: float) -> float:
+        return float(np.logaddexp(0.0, -float(margin)))
+
+    def _fisher_direction(self, features, probabilities, mean, direction):
+        """Return a damped natural-gradient direction and Fisher diagnostics."""
+        dimension = features.shape[1]
+        if self.config.fisher_mode == "full":
+            order = np.argsort(-probabilities, kind="stable")
+            cumulative = np.cumsum(probabilities[order])
+            count = int(np.searchsorted(cumulative, self.config.fisher_mass, side="left")) + 1
+            ids = order[: min(count, self.config.fisher_max_support)]
+            support_probabilities = probabilities[ids]
+            support_probabilities = support_probabilities / float(np.sum(support_probabilities))
+            support_features = np.asarray(features[ids], dtype=np.float64)
+            support_mean = np.einsum(
+                "v,vd->d", support_probabilities, support_features,
+                dtype=np.float64, optimize=False,
+            )
+            centered = support_features - support_mean
+            fisher = np.einsum(
+                "v,vi,vj->ij", support_probabilities, centered, centered,
+                dtype=np.float64, optimize=False,
+            )
+            mean = support_mean
+        else:
+            squared = np.asarray(features, dtype=np.float64) ** 2
+            second = np.einsum(
+                "v,vd->d", probabilities, squared,
+                dtype=np.float64, optimize=False,
+            )
+            diagonal = np.maximum(second - mean * mean, 0.0)
+            fisher = np.diag(diagonal)
+        fisher = (fisher + fisher.T) * 0.5
+        damped = fisher + float(self.config.fisher_ridge) * np.eye(dimension)
+        try:
+            natural = np.linalg.solve(damped, direction)
+        except np.linalg.LinAlgError as exc:
+            raise EditorError("latent Fisher solve failed") from exc
+        eigenvalues = np.linalg.eigvalsh(damped)
+        smallest = max(float(np.min(eigenvalues)), np.finfo(np.float64).tiny)
+        condition = float(np.max(eigenvalues) / smallest)
+        return natural, fisher, condition, mean
+
+    def _v2_direction(
+        self, features, statistics, old_z, chosen_token_id, proposal, rejected,
+    ):
+        """Build the choice plus pairwise direction under the canonical policy."""
+        probabilities = np.asarray(
+            getattr(statistics, "learning_probabilities", ()),
+            dtype=np.float64,
+        )
+        if probabilities.shape != (features.shape[0],):
+            base = np.asarray(statistics.pre_latent_logits, dtype=np.float64)
+            canonical_logits = base.copy()
+            if old_z.size:
+                canonical_logits += np.asarray(features @ old_z, dtype=np.float64)
+            shifted = canonical_logits - np.max(canonical_logits)
+            probabilities = np.exp(shifted)
+            probabilities /= float(np.sum(probabilities))
+        mean = np.einsum(
+            "v,vd->d", probabilities, features,
+            dtype=np.float64, optimize=False,
+        )
+        choice = choice_gradient(features, probabilities, chosen_token_id)
+        pair_loss = 0.0
+        pair_direction = np.zeros_like(choice)
+        if rejected and self.config.rejection_strength:
+            chosen_features = np.asarray(features[chosen_token_id], dtype=np.float64)
+            if self.config.rejection_target == "sampler":
+                ids = statistics.distribution.ids
+                weights = np.asarray(statistics.distribution.probabilities, dtype=np.float64)
+                for token_id, weight in zip(ids, weights):
+                    delta_features = chosen_features - np.asarray(features[int(token_id)], dtype=np.float64)
+                    margin = float(np.dot(old_z, delta_features))
+                    pair_direction += float(weight) * pairwise_logistic_gradient(
+                        old_z, chosen_features, features[int(token_id)]
+                    )
+                    pair_loss += float(weight) * self._pair_loss(margin)
+            else:
+                delta_features = chosen_features - np.asarray(features[proposal], dtype=np.float64)
+                margin = float(np.dot(old_z, delta_features))
+                pair_direction = pairwise_logistic_gradient(
+                    old_z, chosen_features, features[proposal]
+                )
+                pair_loss = self._pair_loss(margin)
+            choice += float(self.config.rejection_strength) * pair_direction
+        natural, fisher, condition, mean = self._fisher_direction(
+            features, probabilities, mean, choice,
+        )
+        quadratic = float(natural @ fisher @ natural)
+        if self.config.learning_kl <= 0.0 or quadratic <= 1.0e-24:
+            alpha = 0.0
+        else:
+            alpha = math.sqrt(2.0 * self.config.learning_kl / quadratic)
+        return (
+            probabilities, mean, natural, fisher, condition,
+            float(alpha), pair_loss,
+        )
 
     def update(
         self,
@@ -300,48 +504,139 @@ class LatentPreferenceLearner:
                 raise EditorError(
                     "observation latent features do not match learner dimension"
                 )
-        probabilities = np.asarray(statistics.policy_probabilities, dtype=np.float64)
-        weighted_mean = np.empty(dimension, dtype=np.float64)
-        # Accumulate in float64 without first materializing a float64 copy of
-        # the full float32 feature matrix.  Keep optimization off so this
-        # remains a direct two-operand reduction with bounded workspace.
-        np.einsum(
-            "v,vd->d",
-            probabilities,
-            features,
-            out=weighted_mean,
+        latent_before_logits = np.asarray(
+            getattr(statistics, "pre_latent_logits", statistics.logits),
             dtype=np.float64,
-            optimize=False,
         )
+        latent_after_logits = latent_before_logits + np.asarray(
+            getattr(statistics, "latent_logit_adjustments", np.zeros(len(latent_before_logits))),
+            dtype=np.float64,
+        )
+        latent_rank_before = 1 + int(np.count_nonzero(
+            latent_before_logits > latent_before_logits[chosen_token_id]
+        )) + int(np.count_nonzero(
+            latent_before_logits[:chosen_token_id] == latent_before_logits[chosen_token_id]
+        ))
+        latent_rank_after = 1 + int(np.count_nonzero(
+            latent_after_logits > latent_after_logits[chosen_token_id]
+        )) + int(np.count_nonzero(
+            latent_after_logits[:chosen_token_id] == latent_after_logits[chosen_token_id]
+        ))
+        latent_diagnostics = getattr(statistics, "latent_diagnostics", {})
         proposal = observation.proposal_token_id
         rejected = proposal != chosen_token_id
-        direction = features[chosen_token_id].astype(np.float64) - weighted_mean
-        if severity == 0.0:
-            direction = np.zeros_like(direction)
-        elif rejected and self.config.rejection_strength:
-            negative = features[proposal].astype(np.float64)
-            if self.config.rejection_target == "sampler":
-                distribution = statistics.distribution
-                negative = np.einsum("v,vd->d", distribution.probabilities,
-                                     features[distribution.ids], dtype=np.float64, optimize=False)
-            direction += self.config.rejection_strength * (
-                weighted_mean - negative
+        scheme = (
+            "fisher-kl-v2"
+            if self.config.learning_metric == "fisher"
+            else self.config.learning_scheme
+        )
+        if scheme == "sgd-v1" and sampling.latent_learning_scheme != "sgd-v1":
+            # A restored v2 state remains v2 even when a caller constructs a
+            # learner with only its legacy defaults.
+            scheme = sampling.latent_learning_scheme
+        fisher = None
+        fisher_condition = 0.0
+        pair_loss = 0.0
+        requested_learning_kl = 0.0
+        learning_policy = "deployed"
+        learning_policy_rank = old_policy_rank
+        learning_policy_probability = old_policy_probability
+        if scheme == "fisher-kl-v2":
+            (
+                probabilities, weighted_mean, natural, fisher,
+                fisher_condition, alpha, pair_loss,
+            ) = self._v2_direction(
+                features, statistics, old_z, chosen_token_id, proposal, rejected,
             )
+            learning_rank = 1 + int(np.count_nonzero(
+                probabilities > probabilities[chosen_token_id]
+            )) + int(np.count_nonzero(
+                probabilities[:chosen_token_id] == probabilities[chosen_token_id]
+            ))
+            learning_policy = "canonical"
+            learning_policy_rank = learning_rank
+            learning_policy_probability = float(probabilities[chosen_token_id])
+            if self.config.learning_gate == "rank":
+                severity = (
+                    0.0 if learning_rank <= self.config.dead_zone_rank
+                    else 1.0 if self.config.no_severity_attenuation
+                    else min(
+                        1.0,
+                        math.log1p(max(0, learning_rank - self.config.dead_zone_rank))
+                        / math.log1p(self.config.severity_cap),
+                    )
+                )
+            raw_learning_delta = severity * alpha * natural
+            requested_learning_kl = severity * severity * self.config.learning_kl
+            loss = self._loss(float(probabilities[chosen_token_id])) + (
+                self.config.rejection_strength * pair_loss
+            )
+        else:
+            probabilities = np.asarray(statistics.policy_probabilities, dtype=np.float64)
+            weighted_mean = np.empty(dimension, dtype=np.float64)
+            # Accumulate in float64 without first materializing a float64 copy
+            # of the full float32 feature matrix. Keep this v1 reduction
+            # unchanged for replay compatibility.
+            np.einsum(
+                "v,vd->d",
+                probabilities,
+                features,
+                out=weighted_mean,
+                dtype=np.float64,
+                optimize=False,
+            )
+            direction = features[chosen_token_id].astype(np.float64) - weighted_mean
+            if severity == 0.0:
+                direction = np.zeros_like(direction)
+            elif rejected and self.config.rejection_strength:
+                negative = features[proposal].astype(np.float64)
+                if self.config.rejection_target == "sampler":
+                    distribution = statistics.distribution
+                    negative = np.einsum("v,vd->d", distribution.probabilities,
+                                         features[distribution.ids], dtype=np.float64, optimize=False)
+                direction += self.config.rejection_strength * (
+                    weighted_mean - negative
+                )
+            raw_learning_delta = self.config.learning_rate * severity * direction
         decay_allowed = self.enabled and decay_applies(
             self.config.decay_on, rejected=rejected, severity=severity)
         effective_decay = self.config.decay if decay_allowed else 0.
         effective_fast_decay = self.config.fast_decay if decay_allowed and self.config.fast_slow else 0.
         new_z, learning_delta, decay_norm = self._channel(
-            old_z, self.config.learning_rate * severity * direction,
-            effective_decay, self.config.max_step, self.config.max_norm,
+            old_z, raw_learning_delta, effective_decay,
+            self.config.max_step, self.config.max_norm,
         )
+        step_norm_before_safety = float(np.linalg.norm(raw_learning_delta))
+        step_clipped = bool((
+            self.config.max_step == 0.0 and step_norm_before_safety > 0.0
+        ) or (
+            self.config.max_step > 0.0
+            and step_norm_before_safety > self.config.max_step
+        ))
+        state_before_norm_clip = (1.0 - effective_decay) * old_z + learning_delta
+        norm_clipped = bool((
+            self.config.max_norm == 0.0 and np.linalg.norm(state_before_norm_clip) > 0.0
+        ) or (
+            self.config.max_norm > 0.0
+            and np.linalg.norm(state_before_norm_clip) > self.config.max_norm
+        ))
         old_fast_z = np.asarray(sampling.latent_preference_fast_z or (0.0,) * dimension)
         new_fast_z = old_fast_z.copy()
         fast_learning_delta = np.zeros_like(old_fast_z)
         fast_decay_norm = 0.0
         if self.config.fast_slow:
+            fast_raw_delta = (
+                raw_learning_delta
+                if scheme == "fisher-kl-v2"
+                else self.config.fast_learning_rate * severity * direction
+            )
+            if scheme == "fisher-kl-v2":
+                fast_raw_delta = fast_raw_delta * (
+                    self.config.fast_learning_rate
+                    / max(self.config.learning_rate, 1.0e-12)
+                )
             new_fast_z, fast_learning_delta, fast_decay_norm = self._channel(
-                old_fast_z, self.config.fast_learning_rate * severity * direction,
+                old_fast_z, fast_raw_delta,
                 effective_fast_decay, self.config.fast_max_step, self.config.fast_max_norm,
             )
         fast_tuple = (tuple(float(v) for v in new_fast_z)
@@ -361,6 +656,7 @@ class LatentPreferenceLearner:
             sampling,
             latent_preference_z=new_z_tuple,
             latent_strength=effective_strength,
+            latent_learning_scheme=(scheme if self.enabled else sampling.latent_learning_scheme),
             latent_preference_fast_z=fast_tuple,
             latent_fast_strength=(self.config.fast_strength
                                   if self.enabled and self.config.fast_slow
@@ -390,9 +686,11 @@ class LatentPreferenceLearner:
             rejection_strength=self.config.rejection_strength,
             decay=self.config.decay,
             learning_delta=tuple(float(v) for v in learning_delta),
-            learning_evidence=tuple(self.config.learning_rate * severity * direction),
-            fast_learning_evidence=(tuple(self.config.fast_learning_rate * severity * direction)
-                                    if self.config.fast_slow else ()),
+            learning_evidence=tuple(float(v) for v in raw_learning_delta),
+            fast_learning_evidence=(
+                tuple(float(v) for v in fast_raw_delta)
+                if self.config.fast_slow else ()
+            ),
             learning_step_norm=float(np.linalg.norm(learning_delta)),
             decay_norm=decay_norm,
             old_fast_z=tuple(float(v) for v in old_fast_z) if self.config.fast_slow else (),
@@ -410,6 +708,25 @@ class LatentPreferenceLearner:
             decay_on=self.config.decay_on, effective_decay=effective_decay,
             effective_fast_decay=effective_fast_decay, write_reduction=self.config.write_reduction,
             rejection_target=self.config.rejection_target,
+            learning_scheme=scheme,
+            learning_step_kl=(
+                0.5 * float(learning_delta @ fisher @ learning_delta)
+                if scheme == "fisher-kl-v2" and fisher is not None else 0.0
+            ),
+            requested_learning_kl=requested_learning_kl,
+            fisher_mode=self.config.fisher_mode,
+            fisher_condition_estimate=fisher_condition,
+            step_clipped=step_clipped,
+            norm_clipped=norm_clipped,
+            learning_policy=learning_policy,
+            learning_policy_rank=learning_policy_rank,
+            learning_policy_probability=learning_policy_probability,
+            latent_rank_before=latent_rank_before,
+            latent_rank_after=latent_rank_after,
+            latent_pre_post_kl=float(latent_diagnostics.get("pre_post_latent_kl", 0.0)),
+            latent_effective_logit_rms=float(latent_diagnostics.get("effective_logit_rms", 0.0)),
+            latent_top_logit_min=float(latent_diagnostics.get("top_latent_logit_min", 0.0)),
+            latent_top_logit_max=float(latent_diagnostics.get("top_latent_logit_max", 0.0)),
         )
 
     def _channel(self, old_z, raw_delta, decay, max_step, max_norm):
@@ -446,7 +763,14 @@ class LatentPreferenceLearner:
         new_z, step, decay_norm = self._channel(
             old_z, evidence, effective_decay, self.config.max_step, self.config.max_norm)
         z = tuple(float(v) for v in new_z) if sampling.latent_preference_z or np.any(new_z) else ()
-        updated = replace(first.sampling, latent_preference_z=z)
+        updated = replace(
+            first.sampling,
+            latent_preference_z=z,
+            latent_learning_scheme=(
+                first.learning_scheme
+                if self.enabled else first.sampling.latent_learning_scheme
+            ),
+        )
         extra = {}
         if self.config.fast_slow:
             old_fast = np.asarray(first.old_fast_z)

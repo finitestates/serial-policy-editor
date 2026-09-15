@@ -7,7 +7,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping
 
-from .latent_features import DEFAULT_PROJECTION_SEED
+from .latent_features import (
+    DEFAULT_PROJECTION_SEED,
+    DEFAULT_WHITENING_RIDGE,
+    LATENT_FEATURE_SCHEMES,
+)
 
 
 class EditorError(ValueError):
@@ -40,6 +44,14 @@ class SamplingConfig:
     latent_preference_fast_z: tuple = ()
     latent_fast_strength: float = 0.0
     latent_projection_seed: int = DEFAULT_PROJECTION_SEED
+    latent_feature_scheme: str = "random-projection-unit-v1"
+    latent_whitening_ridge: float = DEFAULT_WHITENING_RIDGE
+    latent_learning_scheme: str = "sgd-v1"
+    latent_influence_mode: str = "manual"
+    latent_influence_kl: float = 0.05
+    latent_min_gain: float = 0.0
+    latent_max_gain: float = 8.0
+    group_control_scheme: str = "appearance-feedback-v1"
     reference_prior_routes: tuple = ()
     reference_prior_scope: str = "active"
     reference_prior_mode: str = "contrastive"
@@ -104,6 +116,37 @@ class SamplingConfig:
         if (type(self.latent_projection_seed) is not int
                 or not MIN_SEED <= self.latent_projection_seed <= MAX_SEED):
             raise EditorError("latent projection seed must be a signed 64-bit integer")
+        if self.latent_feature_scheme not in LATENT_FEATURE_SCHEMES:
+            raise EditorError(
+                "latent_feature_scheme must be random-projection-unit-v1 or "
+                "whitened-projection-v2"
+            )
+        if (
+            type(self.latent_whitening_ridge) not in (int, float)
+            or not math.isfinite(float(self.latent_whitening_ridge))
+            or self.latent_whitening_ridge < 0.0
+        ):
+            raise EditorError("latent_whitening_ridge must be finite and nonnegative")
+        object.__setattr__(self, "latent_whitening_ridge", float(self.latent_whitening_ridge))
+        if self.latent_learning_scheme not in {"sgd-v1", "fisher-kl-v2"}:
+            raise EditorError("unsupported latent_learning_scheme")
+        if self.latent_influence_mode not in {"manual", "kl"}:
+            raise EditorError("latent_influence_mode must be manual or kl")
+        for name in ("latent_influence_kl", "latent_min_gain", "latent_max_gain"):
+            value = getattr(self, name)
+            if (
+                type(value) not in (int, float)
+                or not math.isfinite(float(value))
+                or float(value) < 0.0
+            ):
+                raise EditorError(f"{name} must be finite and nonnegative")
+            object.__setattr__(self, name, float(value))
+        if self.latent_max_gain < self.latent_min_gain:
+            raise EditorError("latent_max_gain must be at least latent_min_gain")
+        if self.group_control_scheme not in {
+            "appearance-feedback-v1", "appearance-rate-v2"
+        }:
+            raise EditorError("unsupported group_control_scheme")
         if self.reference_prior_scope not in {"active", "global"}:
             raise EditorError("reference_prior_scope must be active or global")
         if self.reference_prior_mode not in {
@@ -362,6 +405,26 @@ class SamplingConfig:
             latent_preference_fast_z=value.get("latent_preference_fast_z", ()),
             latent_fast_strength=value.get("latent_fast_strength", 0.0),
             latent_projection_seed=value.get("latent_projection_seed", DEFAULT_PROJECTION_SEED),
+            latent_feature_scheme=value.get(
+                "latent_feature_scheme", defaults.latent_feature_scheme
+            ),
+            latent_whitening_ridge=value.get(
+                "latent_whitening_ridge", defaults.latent_whitening_ridge
+            ),
+            latent_learning_scheme=value.get(
+                "latent_learning_scheme", defaults.latent_learning_scheme
+            ),
+            latent_influence_mode=value.get(
+                "latent_influence_mode", defaults.latent_influence_mode
+            ),
+            latent_influence_kl=value.get(
+                "latent_influence_kl", defaults.latent_influence_kl
+            ),
+            latent_min_gain=value.get("latent_min_gain", defaults.latent_min_gain),
+            latent_max_gain=value.get("latent_max_gain", defaults.latent_max_gain),
+            group_control_scheme=value.get(
+                "group_control_scheme", defaults.group_control_scheme
+            ),
             latent_strength=value.get(
                 "latent_strength", defaults.latent_strength
             ),
@@ -389,6 +452,19 @@ class SamplingConfig:
         if not isinstance(value, Mapping):
             raise EditorError("saved sampler settings must be an object")
         value = dict(value)
+        # Scheme fields were introduced after the original v1 records. Missing
+        # fields mean the original mathematics, never an implicit upgrade.
+        for name, default in (
+            ("latent_feature_scheme", "random-projection-unit-v1"),
+            ("latent_whitening_ridge", DEFAULT_WHITENING_RIDGE),
+            ("latent_learning_scheme", "sgd-v1"),
+            ("latent_influence_mode", "manual"),
+            ("latent_influence_kl", 0.05),
+            ("latent_min_gain", 0.0),
+            ("latent_max_gain", 8.0),
+            ("group_control_scheme", "appearance-feedback-v1"),
+        ):
+            value.setdefault(name, default)
         if "reference_prior_mode" not in value:
             # Older saved segments used ballistic-global as a scope and had
             # no separate mode field. Fill the new fields before checking
@@ -455,6 +531,14 @@ class SamplingConfig:
             "policy_scheme": SAMPLING_POLICY_SCHEME,
             "seed": self.seed,
             "rng_scheme": RNG_SCHEME,
+            "latent_feature_scheme": self.latent_feature_scheme,
+            "latent_whitening_ridge": self.latent_whitening_ridge,
+            "latent_learning_scheme": self.latent_learning_scheme,
+            "latent_influence_mode": self.latent_influence_mode,
+            "latent_influence_kl": self.latent_influence_kl,
+            "latent_min_gain": self.latent_min_gain,
+            "latent_max_gain": self.latent_max_gain,
+            "group_control_scheme": self.group_control_scheme,
             "reference_prior_routes": [
                 {"route": list(route), "weight": weight}
                 for route, weight in self.reference_prior_routes

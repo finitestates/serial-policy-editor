@@ -262,6 +262,7 @@ class _WriteLearningAccumulator:
                 latent_preference_fast_z=latent_result.sampling.latent_preference_fast_z,
                 latent_fast_strength=latent_result.sampling.latent_fast_strength,
                 latent_projection_seed=latent_result.sampling.latent_projection_seed,
+                latent_learning_scheme=latent_result.sampling.latent_learning_scheme,
             )
         return WriteLearningResult(
             sampling=updated,
@@ -341,6 +342,7 @@ class EpisodeRunner:
                 latent_preference_fast_z=latent_result.sampling.latent_preference_fast_z,
                 latent_fast_strength=latent_result.sampling.latent_fast_strength,
                 latent_projection_seed=latent_result.sampling.latent_projection_seed,
+                latent_learning_scheme=latent_result.sampling.latent_learning_scheme,
             )
         if updated_sampling != old_sampling:
             self.engine.sampling = updated_sampling

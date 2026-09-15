@@ -81,6 +81,18 @@ def load_bias_preset(path: Path, backend, provenance: dict) -> SamplingConfig:
         latent_preference_fast_z=value.get("latent_preference_fast_z", ()),
         latent_fast_strength=value.get("latent_fast_strength", 0.0),
         latent_projection_seed=value.get("latent_projection_seed", DEFAULT_PROJECTION_SEED),
+        latent_feature_scheme=value.get(
+            "latent_feature_scheme", "random-projection-unit-v1"
+        ),
+        latent_whitening_ridge=value.get("latent_whitening_ridge", 1.0e-6),
+        latent_learning_scheme=value.get("latent_learning_scheme", "sgd-v1"),
+        latent_influence_mode=value.get("latent_influence_mode", "manual"),
+        latent_influence_kl=value.get("latent_influence_kl", 0.05),
+        latent_min_gain=value.get("latent_min_gain", 0.0),
+        latent_max_gain=value.get("latent_max_gain", 8.0),
+        group_control_scheme=value.get(
+            "group_control_scheme", "appearance-feedback-v1"
+        ),
         **{f.name: value[f.name] for f in fields(SamplingConfig)
            if f.name.startswith("reference_prior_") and f.name in value},
     )
@@ -154,7 +166,8 @@ def project_biases(
     if not rules_only:
         result["bias_groups"] = [group.to_dict() for group in config.bias_groups]
         result.update({key: value for key, value in config.to_dict().items()
-                       if key.startswith(("latent_", "reference_prior_"))})
+                       if key.startswith(("latent_", "reference_prior_"))
+                       or key == "group_control_scheme"})
         result["group_controls"] = [replace(c, history_start=None).to_dict() for c in config.group_controls]
     return json.dumps(
         result,

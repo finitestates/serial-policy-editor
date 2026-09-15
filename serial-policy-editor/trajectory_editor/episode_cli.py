@@ -46,7 +46,10 @@ from .episode_projector import project_episode, project_fork_map, project_lineag
 from .episode_store import EpisodeStore
 from .episode_recovery import recover_sampler_record
 from .episode_ui import InteractivePolicy, PolicyViewPreferences
-from .latent_features import DEFAULT_PROJECTION_CHUNK_SIZE, DEFAULT_PROJECTION_SEED
+from .latent_features import (
+    DEFAULT_PROJECTION_CHUNK_SIZE, DEFAULT_PROJECTION_SEED,
+    DEFAULT_WHITENING_RIDGE, LATENT_FEATURE_SCHEMES,
+)
 from .latent_preference import LatentPreferenceConfig, LatentPreferenceLearner, LatentPreferenceResult
 from .online_learning import LearningResult, OnlineLearner
 from .learning_readout import selection_notice, write_notice, show_learning_details
@@ -242,6 +245,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reference-strength", type=float, help="overall lexical influence (default: 0.25)")
     parser.add_argument("--group-level", type=float, default=1.0, help="appearance objective level; 1 requests twice/half the baseline odds")
     parser.add_argument(
+        "--group-control-scheme",
+        choices=("appearance-feedback-v1", "appearance-rate-v2"),
+        default=None,
+        help="appearance controller mathematics",
+    )
+    parser.add_argument(
         "--reference-prior",
         choices=(
             "off",
@@ -324,6 +333,23 @@ def build_parser() -> argparse.ArgumentParser:
     latent.add_argument("--latent-dimension", type=int, default=64)
     latent.add_argument("--latent-learning-rate", type=float, default=0.05)
     latent.add_argument("--latent-strength", type=float, default=1.0)
+    latent.add_argument(
+        "--latent-feature-scheme", choices=LATENT_FEATURE_SCHEMES, default=None,
+        help="latent feature coordinate scheme; v1 is the replay-compatible default",
+    )
+    latent.add_argument("--latent-whitening-ridge", type=float, default=None)
+    latent.add_argument(
+        "--latent-learning-scheme",
+        choices=("sgd-v1", "fisher-kl-v2"), default=None,
+        help="latent memory update geometry",
+    )
+    latent.add_argument(
+        "--latent-influence-mode", choices=("manual", "kl"), default=None,
+        help="manual actuator strength or automatic KL-calibrated gain",
+    )
+    latent.add_argument("--latent-influence-kl", type=float, default=None)
+    latent.add_argument("--latent-min-gain", type=float, default=None)
+    latent.add_argument("--latent-max-gain", type=float, default=None)
     latent.add_argument("--latent-max-step", type=float, default=0.25)
     latent.add_argument("--latent-max-norm", type=float, default=4.0)
     latent.add_argument("--latent-decay", type=float, default=0.0)
@@ -345,6 +371,16 @@ def build_parser() -> argparse.ArgumentParser:
     latent.add_argument("--latent-fast-strength", type=float)
     latent.add_argument("--latent-fast-max-step", type=float)
     latent.add_argument("--latent-fast-max-norm", type=float)
+    latent.add_argument(
+        "--latent-learning-metric", choices=("euclidean", "fisher"), default=None
+    )
+    latent.add_argument("--latent-learning-kl", type=float, default=None)
+    latent.add_argument("--latent-fisher-ridge", type=float, default=None)
+    latent.add_argument(
+        "--latent-fisher-mode", choices=("diagonal", "full"), default=None
+    )
+    latent.add_argument("--latent-fisher-mass", type=float, default=None)
+    latent.add_argument("--latent-fisher-max-support", type=_positive_int, default=None)
     latent_seeds = latent.add_mutually_exclusive_group()
     latent_seeds.add_argument("--latent-seed", type=int)
     latent_seeds.add_argument("--latent-random-seed", action="store_true")
@@ -483,6 +519,46 @@ def _sampling_from_args(
         "latent_preference_fast_z": base.latent_preference_fast_z,
         "latent_fast_strength": base.latent_fast_strength,
         "latent_projection_seed": base.latent_projection_seed,
+        "latent_feature_scheme": (
+            base.latent_feature_scheme
+            if getattr(args, "latent_feature_scheme", None) is None
+            else args.latent_feature_scheme
+        ),
+        "latent_whitening_ridge": (
+            base.latent_whitening_ridge
+            if getattr(args, "latent_whitening_ridge", None) is None
+            else args.latent_whitening_ridge
+        ),
+        "latent_learning_scheme": (
+            base.latent_learning_scheme
+            if getattr(args, "latent_learning_scheme", None) is None
+            else args.latent_learning_scheme
+        ),
+        "latent_influence_mode": (
+            base.latent_influence_mode
+            if getattr(args, "latent_influence_mode", None) is None
+            else args.latent_influence_mode
+        ),
+        "latent_influence_kl": (
+            base.latent_influence_kl
+            if getattr(args, "latent_influence_kl", None) is None
+            else args.latent_influence_kl
+        ),
+        "latent_min_gain": (
+            base.latent_min_gain
+            if getattr(args, "latent_min_gain", None) is None
+            else args.latent_min_gain
+        ),
+        "latent_max_gain": (
+            base.latent_max_gain
+            if getattr(args, "latent_max_gain", None) is None
+            else args.latent_max_gain
+        ),
+        "group_control_scheme": (
+            base.group_control_scheme
+            if getattr(args, "group_control_scheme", None) is None
+            else args.group_control_scheme
+        ),
         "reference_prior_routes": base.reference_prior_routes,
         "reference_prior_scope": base.reference_prior_scope,
         "reference_prior_mode": base.reference_prior_mode,
@@ -510,6 +586,14 @@ def _apply_latent_preset(
         latent_preference_fast_z=preset_latent.latent_preference_fast_z,
         latent_fast_strength=preset_latent.latent_fast_strength,
         latent_projection_seed=preset_latent.latent_projection_seed,
+        latent_feature_scheme=preset_latent.latent_feature_scheme,
+        latent_whitening_ridge=preset_latent.latent_whitening_ridge,
+        latent_learning_scheme=preset_latent.latent_learning_scheme,
+        latent_influence_mode=preset_latent.latent_influence_mode,
+        latent_influence_kl=preset_latent.latent_influence_kl,
+        latent_min_gain=preset_latent.latent_min_gain,
+        latent_max_gain=preset_latent.latent_max_gain,
+        group_control_scheme=preset_latent.group_control_scheme,
     )
 
 
@@ -528,6 +612,17 @@ def _latent_config_from_args(args: argparse.Namespace) -> LatentPreferenceConfig
         learning_gate=args.latent_learning_gate,
         decay_on=args.latent_decay_on, write_reduction=args.latent_write_reduction,
         rejection_target=args.latent_rejection_target,
+        learning_scheme=getattr(args, "latent_learning_scheme", None) or "sgd-v1",
+        learning_metric=getattr(args, "latent_learning_metric", None) or "euclidean",
+        learning_kl=getattr(args, "latent_learning_kl", None)
+        if getattr(args, "latent_learning_kl", None) is not None else 0.05,
+        fisher_ridge=getattr(args, "latent_fisher_ridge", None)
+        if getattr(args, "latent_fisher_ridge", None) is not None else 1.0e-3,
+        fisher_mode=getattr(args, "latent_fisher_mode", None) or "diagonal",
+        fisher_mass=getattr(args, "latent_fisher_mass", None)
+        if getattr(args, "latent_fisher_mass", None) is not None else 0.999,
+        fisher_max_support=getattr(args, "latent_fisher_max_support", None)
+        if getattr(args, "latent_fisher_max_support", None) is not None else 2048,
     )
 
 
@@ -1352,11 +1447,21 @@ def main(argv: list[str] | None = None) -> int:
             latent_learner = None
             if args.latent_preference:
                 latent_learner = LatentPreferenceLearner(
-                    feature_provider=lambda *, feature_dimension, projection_seed: backend.latent_token_features(
-                        feature_dimension=feature_dimension,
-                        projection_seed=projection_seed,
-                        projection_chunk_size=args.latent_projection_chunk_size,
-                    ),
+                        feature_provider=lambda *, feature_dimension, projection_seed,
+                        feature_scheme="random-projection-unit-v1",
+                        whitening_ridge=DEFAULT_WHITENING_RIDGE: backend.latent_token_features(
+                            feature_dimension=feature_dimension,
+                            projection_seed=projection_seed,
+                            projection_chunk_size=args.latent_projection_chunk_size,
+                            **(
+                                {}
+                                if feature_scheme == "random-projection-unit-v1"
+                                else {
+                                    "feature_scheme": feature_scheme,
+                                    "whitening_ridge": whitening_ridge,
+                                }
+                            ),
+                        ),
                     config=replace(latent_config,
                                    projection_seed=engine.sampling.latent_projection_seed),
                 )

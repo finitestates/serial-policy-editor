@@ -7,7 +7,11 @@ from .episode_engine import EpisodeEngine
 from .episode_store import EpisodeStore
 from .episode_policy import TapeStep, ReplayPlan
 
-POLICY_FIELDS = tuple(f.name for f in fields(SamplingConfig) if f.name.startswith(("reference_prior_", "latent_"))) + ("group_controls",)
+POLICY_FIELDS = tuple(
+    f.name for f in fields(SamplingConfig)
+    if f.name.startswith(("reference_prior_", "latent_"))
+    or f.name == "group_control_scheme"
+) + ("group_controls",)
 
 SAMPLER_FIELDS = ("temperature", "top_k", "top_p", "min_p", "repeat_penalty", "repeat_last_n", "presence_penalty", "frequency_penalty", "seed", "bias_step", "bias_rules", "bias_groups")
 

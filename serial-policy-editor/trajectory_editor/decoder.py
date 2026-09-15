@@ -17,7 +17,9 @@ from .latent_features import (
     DEFAULT_LATENT_DIMENSION,
     DEFAULT_PROJECTION_SEED,
     DEFAULT_PROJECTION_CHUNK_SIZE,
+    DEFAULT_WHITENING_RIDGE,
     project_token_embeddings,
+    embedding_fingerprint,
 )
 
 
@@ -163,7 +165,9 @@ class LlamaCppDecoder:
                 if value >= 0:
                     self._fallback_eog_ids.add(value)
         self._tokens: list[int] = []
-        self._latent_feature_cache: dict[tuple[int, int], np.ndarray] = {}
+        self._latent_feature_cache: dict[tuple[object, ...], np.ndarray] = {}
+        self._latent_embedding_fingerprint: str | None = None
+        self._latent_embedding_width: int | None = None
 
     def vocabulary_size(self) -> int:
         return self._vocabulary_size
@@ -240,12 +244,22 @@ class LlamaCppDecoder:
         feature_dimension: int = DEFAULT_LATENT_DIMENSION,
         projection_seed: int = DEFAULT_PROJECTION_SEED,
         projection_chunk_size: int = DEFAULT_PROJECTION_CHUNK_SIZE,
+        feature_scheme: str = "random-projection-unit-v1",
+        whitening_ridge: float = DEFAULT_WHITENING_RIDGE,
     ) -> np.ndarray:
         """Return fixed projected token embeddings for the loaded GGUF model."""
-        key = (int(feature_dimension), int(projection_seed))
-        cached = self._latent_feature_cache.get(key)
-        if cached is not None:
-            return cached
+        if (
+            self._latent_embedding_fingerprint is not None
+            and self._latent_embedding_width is not None
+        ):
+            key = (
+                self._latent_embedding_fingerprint, self._latent_embedding_width,
+                int(feature_dimension), int(projection_seed),
+                feature_scheme, float(whitening_ridge),
+            )
+            cached = self._latent_feature_cache.get(key)
+            if cached is not None:
+                return cached
         binding = getattr(self._llama_cpp, "llama_cpp", self._llama_cpp)
         library = getattr(binding, "_lib", None)
         getter = getattr(
@@ -267,11 +281,23 @@ class LlamaCppDecoder:
             self._model._model.model,
             embeddings.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
         )
+        fingerprint = embedding_fingerprint(embeddings)
+        self._latent_embedding_fingerprint = fingerprint
+        self._latent_embedding_width = embedding_width
+        key = (
+            fingerprint, embedding_width, int(feature_dimension), int(projection_seed),
+            feature_scheme, float(whitening_ridge),
+        )
+        cached = self._latent_feature_cache.get(key)
+        if cached is not None:
+            return cached
         features = project_token_embeddings(
             embeddings,
             feature_dimension=feature_dimension,
             projection_seed=projection_seed,
             projection_chunk_size=projection_chunk_size,
+            feature_scheme=feature_scheme,
+            whitening_ridge=whitening_ridge,
         )
         self._latent_feature_cache[key] = features
         return features

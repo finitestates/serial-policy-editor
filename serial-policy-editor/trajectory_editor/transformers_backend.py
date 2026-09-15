@@ -18,6 +18,8 @@ from .latent_features import (
     DEFAULT_LATENT_DIMENSION,
     DEFAULT_PROJECTION_SEED,
     DEFAULT_PROJECTION_CHUNK_SIZE,
+    DEFAULT_WHITENING_RIDGE,
+    embedding_fingerprint,
     project_token_embeddings,
 )
 
@@ -303,7 +305,9 @@ class TransformersBackend:
         self._eog_ids, self._eog_source = self._discover_eog_ids()
         self._tokens: list[int] = []
         self._last_logits: np.ndarray | None = None
-        self._latent_feature_cache: dict[tuple[int, int], np.ndarray] = {}
+        self._latent_feature_cache: dict[tuple[object, ...], np.ndarray] = {}
+        self._latent_embedding_fingerprint: str | None = None
+        self._latent_embedding_width: int | None = None
 
     def _apply_execution_controls(self) -> None:
         if self.settings.torch_num_threads is not None:
@@ -538,12 +542,22 @@ class TransformersBackend:
         feature_dimension: int = DEFAULT_LATENT_DIMENSION,
         projection_seed: int = DEFAULT_PROJECTION_SEED,
         projection_chunk_size: int = DEFAULT_PROJECTION_CHUNK_SIZE,
+        feature_scheme: str = "random-projection-unit-v1",
+        whitening_ridge: float = DEFAULT_WHITENING_RIDGE,
     ) -> np.ndarray:
         """Return fixed projected rows from the model output embedding."""
-        key = (int(feature_dimension), int(projection_seed))
-        cached = self._latent_feature_cache.get(key)
-        if cached is not None:
-            return cached
+        if (
+            self._latent_embedding_fingerprint is not None
+            and self._latent_embedding_width is not None
+        ):
+            key = (
+                self._latent_embedding_fingerprint, self._latent_embedding_width,
+                int(feature_dimension), int(projection_seed),
+                feature_scheme, float(whitening_ridge),
+            )
+            cached = self._latent_feature_cache.get(key)
+            if cached is not None:
+                return cached
         output_embeddings = self._model.get_output_embeddings()
         if output_embeddings is None or getattr(output_embeddings, "weight", None) is None:
             raise RuntimeError("Transformers model has no output embedding matrix")
@@ -556,11 +570,23 @@ class TransformersBackend:
             .to(dtype=self._torch.float32, device="cpu")
             .numpy()
         )
+        fingerprint = embedding_fingerprint(matrix)
+        self._latent_embedding_fingerprint = fingerprint
+        self._latent_embedding_width = int(matrix.shape[1])
+        key = (
+            fingerprint, int(matrix.shape[1]), int(feature_dimension), int(projection_seed),
+            feature_scheme, float(whitening_ridge),
+        )
+        cached = self._latent_feature_cache.get(key)
+        if cached is not None:
+            return cached
         features = project_token_embeddings(
             matrix,
             feature_dimension=feature_dimension,
             projection_seed=projection_seed,
             projection_chunk_size=projection_chunk_size,
+            feature_scheme=feature_scheme,
+            whitening_ridge=whitening_ridge,
         )
         self._latent_feature_cache[key] = features
         return features

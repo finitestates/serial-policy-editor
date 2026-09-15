@@ -226,11 +226,17 @@ class EpisodeEngine:
             raise EditorError(
                 "the loaded backend does not expose token embeddings for latent preference"
             )
-        try:
-            return provider(
-                feature_dimension=len(self.sampling.latent_preference_z or self.sampling.latent_preference_fast_z),
-                projection_seed=self.sampling.latent_projection_seed,
+        kwargs = dict(
+            feature_dimension=len(self.sampling.latent_preference_z or self.sampling.latent_preference_fast_z),
+            projection_seed=self.sampling.latent_projection_seed,
+        )
+        if self.sampling.latent_feature_scheme != "random-projection-unit-v1":
+            kwargs.update(
+                feature_scheme=self.sampling.latent_feature_scheme,
+                whitening_ridge=self.sampling.latent_whitening_ridge,
             )
+        try:
+            return provider(**kwargs)
         except (TypeError, ValueError, RuntimeError) as exc:
             raise EditorError(f"could not load latent token features: {exc}") from exc
 
