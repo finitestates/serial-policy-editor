@@ -30,8 +30,10 @@ class Session:
     Revisions include a process nonce. Request receipts last for this process;
     old revisions cannot accidentally become valid after a restart.
     """
-    def __init__(self, backend, store, provenance):
+    def __init__(self, backend, store, provenance, *, sampling=None, catalog=None):
         self.backend, self.store, self.provenance = backend, store, provenance
+        self.initial_sampling = sampling or SamplingConfig()
+        self.catalog = catalog
         self.engine = None
         self.episode_id = None
         self.epoch = secrets.token_hex(12)
@@ -62,6 +64,7 @@ class Session:
         return {"revision": self.revision, "boundary": o.boundary,
                 "proposal": {"token_id": o.proposal_token_id, "text": o.proposal_text,
                              "rank": o.proposal_raw_rank},
+                "group_controls": o.statistics.group_control_diagnostics,
                 "candidates": [c.to_dict() for c in self.engine.candidates(o, start_rank=start, count=count)]}
 
     def mutate(self, operation, payload):
@@ -114,7 +117,7 @@ class Session:
                 prompt = p.get("prompt")
                 if not isinstance(prompt, str) or not prompt.strip():
                     raise EditorError("Enter a prompt")
-                engine = EpisodeEngine(self.backend, sampling=SamplingConfig(), initial_text=prompt)
+                engine = EpisodeEngine(self.backend, sampling=self.initial_sampling, initial_text=prompt)
                 identifier = _create_episode(self.store, engine, backend_provenance=self.provenance,
                                              metadata={"client": "http"})
             self.engine, self.episode_id = engine, identifier
@@ -123,6 +126,24 @@ class Session:
             raise EditorError("Open an episode first")
         e, identifier = self.engine, self.episode_id
         runner = EpisodeRunner(e, self.store, identifier)
+        if operation == "steering":
+            from .tui import parse_bias_command
+            from .bias_commands import apply_bias_command
+            raw = p.get("command")
+            if not isinstance(raw, str):
+                raise EditorError("steering requires a bias command")
+            command = parse_bias_command(raw, vocabulary_size=self.backend.vocabulary_size())
+            if command is None:
+                raise EditorError("use a b group, term, or token bias command")
+            observation = e.observe()
+            sampling, records = apply_bias_command(command, self.backend, e.sampling, observation,
+                lambda rank: e.candidates(observation, start_rank=rank, count=1)[0], self.catalog)
+            e.sampling = sampling
+            self.store.record_sampling_segment(identifier, start_boundary=e.boundary,
+                sampling=sampling, stream_fingerprint=e.stream_fingerprint, coordinate_offset=e.coordinate_offset)
+            for kind, details, _, _ in records:
+                self.store.record_interaction(identifier, e.boundary, kind, details)
+            return None
         if operation == "actions":
             raw = p.get("action")
             if not isinstance(raw, dict):
@@ -231,7 +252,7 @@ def make_handler(session):
                 return
             if self.headers.get("Content-Type", "").split(";")[0] != "application/json":
                 return self.reply(415, {"error": "Use application/json"})
-            operations = {"/api/session": "open", **{f"/api/session/{x}": x for x in ("actions", "fork", "rewind", "settings", "close", "end")}}
+            operations = {"/api/session": "open", **{f"/api/session/{x}": x for x in ("actions", "fork", "rewind", "settings", "steering", "close", "end")}}
             if self.path not in operations:
                 return self.reply(404, {"error": "Not found"})
             try:
@@ -260,6 +281,10 @@ def main(argv=None):
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--n-ctx", type=int, default=4096)
     parser.add_argument("--n-gpu-layers", type=int, default=0)
+    parser.add_argument("--reference", type=Path, help="standalone lexical weight YAML")
+    parser.add_argument("--reference-strength", type=float, default=0.25)
+    parser.add_argument("--groups", type=Path, help="semantic group YAML")
+    parser.add_argument("--biases", type=Path, help="import steering and learner weights JSON")
     for component in ("k", "v"):
         parser.add_argument(f"--cache-type-{component}", dest=f"type_{component}", choices=KV_CACHE_TYPES)
     args = parser.parse_args(argv)
@@ -268,8 +293,18 @@ def main(argv=None):
             type_k=args.type_k, type_v=args.type_v))
     provenance = dict(backend.provenance(include_model_sha256=False))
     provenance["model_path"] = str(args.model.resolve())
+    from .bias_catalog import compile_catalog, load_yaml_source
+    from .bias_presets import load_bias_preset
+    from .lexical_reference import load_reference
+    sampling = load_bias_preset(args.biases, backend, provenance) if args.biases else SamplingConfig()
+    if args.reference:
+        sampling = replace(sampling, reference_prior_routes=load_reference(args.reference, backend),
+                           reference_prior_scope="global", reference_prior_mode="lexical",
+                           reference_prior_strength=args.reference_strength,
+                           reference_prior_attraction=0., reference_prior_exit_strength=0.)
+    catalog = compile_catalog(load_yaml_source(args.groups), backend) if args.groups else None
     with EpisodeStore(args.workspace) as store:
-        session = Session(backend, store, provenance)
+        session = Session(backend, store, provenance, sampling=sampling, catalog=catalog)
         with HTTPServer(("127.0.0.1", args.port), make_handler(session)) as server:
             server.timeout = 1
             print(f"SPE headless: http://127.0.0.1:{server.server_port}", flush=True)

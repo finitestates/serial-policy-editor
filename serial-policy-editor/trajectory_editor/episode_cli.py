@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import math
 from contextlib import ExitStack
 from dataclasses import replace
 import secrets
@@ -20,12 +21,13 @@ from prompt_toolkit import prompt
 from prompt_toolkit.validation import Validator
 
 from .bias_presets import load_bias_preset, project_biases
-from .bias_catalog import load_catalog, validate_catalog
+from .bias_catalog import load_catalog, validate_catalog, compile_catalog, load_yaml_source, BiasCatalog
+from .lexical_reference import load_reference
 from .backend_factory import BACKEND_NAMES, create_backend
 from .decoder import KV_CACHE_TYPES, LlamaCppSettings
 from .domain import MAX_SEED, MIN_SEED, EditorError, SamplingConfig
 from .episode_lifecycle import (
-    _inherit_budget, _model_continuation, _visible_tokens, _restore_engine,
+    POLICY_FIELDS, _inherit_budget, _model_continuation, _visible_tokens, _restore_engine,
     _create_episode, _rewind_episode, _fork_engine, _spr_engine_from_source,
 )
 from .episode_actions import Write
@@ -218,6 +220,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="load a model-matched human-readable bias catalog for b name and b @name",
     )
+    parser.add_argument("--groups", type=Path, help="load semantic term/group YAML directly")
+    parser.add_argument("--reference", type=Path, help="load standalone relative lexical weights from YAML")
+    parser.add_argument("--reference-strength", type=float, help="overall lexical influence (default: 0.25)")
+    parser.add_argument("--group-level", type=float, default=1.0, help="appearance objective level; 1 requests twice/half the baseline odds")
     parser.add_argument(
         "--reference-prior",
         choices=(
@@ -227,22 +233,22 @@ def build_parser() -> argparse.ArgumentParser:
             "global", "global-exit",
             "ballistic-global", "ballistic-global-exit",
         ),
-        help="apply weighted catalog reference routes as a runtime prior (active by default)",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--reference-prior-strength",
         type=float,
-        help="strength of the experimental online reference prior (default: 0.25)",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--reference-prior-attraction",
         type=float,
-        help="additional commitment pressure inside a reference prefix (default: 0)",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--reference-prior-exit-strength",
         type=float,
-        help="strength of terminal EXIT-vs-CONTINUE decisions (default: 0.25)",
+        help=argparse.SUPPRESS,
     )
     learning = parser.add_argument_group("online learning")
     learning.add_argument(
@@ -250,7 +256,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--online-learning-enabled",
         dest="online_learning",
         action="store_true",
-        help="learn named bias-group strengths from live raw-rank selections (off by default)",
+        help="fit explicitly learnable manual group weights to teacher selections; appearance objectives run independently",
     )
     learning.add_argument("--learning-rate", type=float, default=0.05)
     learning.add_argument(
@@ -269,6 +275,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-bias", "--learning-max-bias", dest="learning_max_bias",
         type=float, default=4.0,
     )
+    learning.add_argument("--learning-severity-cap", type=_positive_int, default=1000)
+    learning.add_argument("--learning-dead-zone-rank", type=_positive_int, default=1)
+    learning.add_argument("--learning-no-severity-attenuation", action="store_true")
+    learning.add_argument("--learning-rejection-strength", type=float, default=0.)
+    learning.add_argument("--learning-decay", type=float, default=0.)
     learning.add_argument(
         "--learnable-groups",
         nargs="+",
@@ -429,6 +440,9 @@ def _sampling_from_args(
     args: argparse.Namespace, source: SamplingConfig | None = None
 ) -> SamplingConfig:
     base = source if source is not None else SamplingConfig()
+    if getattr(args, "_model_changed", False):
+        base = replace(base, bias_rules=(), bias_groups=(), group_controls=(),
+                       reference_prior_routes=(), latent_preference_z=(), latent_preference_fast_z=())
     values = {
         name: getattr(args, name)
         if getattr(args, name) is not None
@@ -436,6 +450,7 @@ def _sampling_from_args(
         for name in SAMPLER_FIELDS
     }
     values.update({
+        "group_controls": base.group_controls,
         "latent_preference_z": base.latent_preference_z,
         "latent_strength": base.latent_strength,
         "latent_preference_fast_z": base.latent_preference_fast_z,
@@ -448,6 +463,9 @@ def _sampling_from_args(
         "reference_prior_attraction": base.reference_prior_attraction,
         "reference_prior_exit_strength": base.reference_prior_exit_strength,
     })
+    if getattr(args, "bias_groups", None) is not None:
+        preset = getattr(args, "_bias_preset", None)
+        values["group_controls"] = preset.group_controls if preset is not None else ()
     return SamplingConfig(**values)
 
 
@@ -459,6 +477,7 @@ def _apply_latent_preset(
         return sampling
     return replace(
         sampling,
+        group_controls=preset_latent.group_controls,
         latent_preference_z=preset_latent.latent_preference_z,
         latent_strength=preset_latent.latent_strength,
         latent_preference_fast_z=preset_latent.latent_preference_fast_z,
@@ -501,11 +520,26 @@ def _apply_catalog_reference_prior(
 ) -> SamplingConfig:
     """Attach compiled reference routes to the episode's saved sampler state."""
 
+    direct = getattr(args, "_reference_routes", None)
+    strength = getattr(args, "reference_strength", None)
+    preset = getattr(args, "_bias_preset", None)
     requested = args.reference_prior
+    if direct is not None:
+        if requested not in (None, "off"):
+            raise EditorError("--reference uses one standalone lexical policy; omit legacy --reference-prior modes")
+        return replace(sampling, reference_prior_routes=() if requested == "off" else direct,
+                       reference_prior_scope="global", reference_prior_mode="lexical",
+                       reference_prior_strength=0.25 if strength is None else strength,
+                       reference_prior_attraction=0., reference_prior_exit_strength=0.)
     if requested is None:
-        if catalog is None or not catalog.reference_prior_routes:
-            return sampling
-        requested = "active"
+        if catalog is not None and catalog.reference_prior_routes:
+            return replace(sampling, reference_prior_routes=tuple((r.token_ids, r.weight) for r in catalog.reference_prior_routes),
+                           reference_prior_scope="global", reference_prior_mode="lexical",
+                           reference_prior_strength=0.25 if strength is None else strength,
+                           reference_prior_attraction=0., reference_prior_exit_strength=0.)
+        if preset is not None:
+            sampling = replace(sampling, **{k: v for k, v in preset.__dict__.items() if k.startswith("reference_prior_")})
+        return sampling if strength is None else replace(sampling, reference_prior_strength=strength)
     if requested == "off":
         return replace(
             sampling,
@@ -560,7 +594,7 @@ def _sampler_override(current: SamplingConfig, raw: str) -> SamplingConfig:
         return current
     if len(pieces) == 1 and pieces[0].lower() in {"random", "random-seed"}:
         values["seed"] = _random_seed()
-        return SamplingConfig(**values)
+        return replace(current, **values)
     for piece in pieces:
         if "=" not in piece:
             raise EditorError("sampler changes use key=value (for example top_k=20)")
@@ -572,7 +606,7 @@ def _sampler_override(current: SamplingConfig, raw: str) -> SamplingConfig:
             values[key] = int(value) if key in {"top_k", "repeat_last_n", "seed"} else float(value)
         except ValueError as exc:
             raise EditorError(f"invalid value for {key}: {value!r}") from exc
-    return SamplingConfig(**values)
+    return replace(current, **values)
 
 
 def _backend(args: argparse.Namespace):
@@ -713,6 +747,7 @@ def _interactive_policy(
         episode_id=episode_id,
         seamless=io.supports_live_choices,
         catalog=catalog,
+        group_level=getattr(args, "group_level", 1.0),
     )
 
 
@@ -1111,6 +1146,14 @@ def main(argv: list[str] | None = None) -> int:
                 catalog = validate_catalog(
                     load_catalog(args.bias_catalog), backend, provenance
                 )
+            if args.groups is not None:
+                supplied = compile_catalog(load_yaml_source(args.groups), backend)
+                catalog = BiasCatalog.merge((catalog, supplied)) if catalog is not None else supplied
+            if args.reference is not None:
+                args._reference_routes = load_reference(args.reference, backend)
+            if not math.isfinite(args.group_level) or args.group_level < 0:
+                raise EditorError("group level must be finite and nonnegative")
+            args._model_changed = model_changed
             if model_changed:
                 args.bias_rules = ()
                 args.bias_groups = ()
@@ -1121,6 +1164,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.bias_rules = preset.bias_rules
                 args.bias_groups = preset.bias_groups
                 preset_latent = preset
+                args._bias_preset = preset
             requested_id = args.episode_id
             parent_id: str | None = None
             fork_boundary: int | None = None
@@ -1133,6 +1177,9 @@ def main(argv: list[str] | None = None) -> int:
                 min_bias=args.learning_min_bias,
                 max_bias=args.learning_max_bias,
                 learnable_groups=args.learnable_groups,
+                severity_cap=args.learning_severity_cap, dead_zone_rank=args.learning_dead_zone_rank,
+                no_severity_attenuation=args.learning_no_severity_attenuation,
+                rejection_strength=args.learning_rejection_strength, decay=args.learning_decay,
             )
 
             if args.resume is not None:
@@ -1207,8 +1254,19 @@ def main(argv: list[str] | None = None) -> int:
                 sampling = _apply_catalog_reference_prior(
                     _sampling_from_args(args, source_sampling), catalog, args
                 )
-                if args.fixed_config:
-                    sampling = _apply_latent_preset(sampling, preset_latent)
+                sampling = _apply_latent_preset(sampling, preset_latent)
+                # Explicit steering imports apply to every replay segment, just
+                # like explicit sampler flags. Unspecified fields follow source.
+                if args.bias_groups is not None:
+                    overrides["group_controls"] = sampling.group_controls
+                for name in POLICY_FIELDS:
+                    reference_override = name.startswith("reference_prior_") and (
+                        args.reference is not None or args.reference_prior is not None
+                        or args.reference_prior_strength is not None or args.reference_strength is not None
+                        or (catalog is not None and catalog.reference_prior_routes)
+                    )
+                    if preset_latent is not None or model_changed or reference_override:
+                        overrides[name] = getattr(sampling, name)
                 sampling = _apply_latent_seed(
                     sampling, args.latent_seed, io,
                     replay=args.replay is not None and not args.fixed_config,

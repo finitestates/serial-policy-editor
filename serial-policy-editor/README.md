@@ -735,222 +735,53 @@ explicit launch options override saved settings. The local headless server
 accepts the same two cache-precision options. `--cache off` controls prefix reuse,
 not cache precision.
 
-### Single-token logit biases
+### Lexical references and group objectives
 
-At a live token position, use a **raw rank** followed by an operator:
+Load a lexical universe independently with `--reference reference.yaml`.
+Load group definitions directly with `--groups groups.yaml`, or assemble them
+at the teacher prompt with `b atmosphere -> {shadow, silhouette}`.
 
-- `12-` or `7+`: decrease or increase that token's bias by 0.5.
-- `8-0.25` or `8+2`: adjust by an explicit positive amount.
-- `12=`: clear that token's bias back to zero.
+```text
+b atmosphere +       promote appearances adaptively
+b atmosphere -       suppress appearances adaptively
+b atmosphere =       maintain approximately the present rate
+b atmosphere off     disable that activation
+b atmosphere +0.5    explicit manual logit bias
+b                    inspect groups and controller diagnostics
+```
 
-The rank identifies the token now; the bias then follows its token ID throughout
-this episode. Commands accumulate without advancing, so you can enter `12-`,
-`7-`, `201+`, then `6` to make your actual move. Raw ranks remain unchanged;
-the sampled proposal and decoding probabilities refresh. Biased menu tokens show
-`[bias +/-N]`. Use `--bias-step 1` to change the default increment (also available
-as `s bias_step=1` in the EDGE menu).
+All semantic operations support `after … until …`. Adaptive group objectives
+operate during autonomous generation without teacher learning. Canonical
+surface routes are used at runtime; alternate decompositions remain available
+through `policy-editor-bias --explore` for inspection.
 
-Biases are added after history penalties and before temperature, top-k, top-p,
-and min-p. Positive values encourage a token; negative values discourage it.
-They do not ban tokens or prevent Teacher from selecting them. Bias commands
-neither evaluate new tokens nor advance the sampling coordinate. Clearing all
-biases restores the proposal for the unchanged context and sampler settings.
-
-Resume restores biases. Fork and rewind use exactly the existing sampler-state
-semantics: both select the state at the target boundary, including adjustments
-already recorded at that boundary. Rewind removes changes at later boundaries.
-Replay follows the recorded bias states unless explicitly overridden; in-place
-SPR keeps the destination sampler, including its biases. Switching models clears
-inherited token-ID biases.
+See [Steering](STEERING.md) for the complete command, reference, learning, and
+`biases.json` workflow, and [Catalog YAML](BIAS_CATALOG_YAML.md) for definitions.
 
 ### Bias catalogs and structured policy files
 
-The standalone `policy-editor-bias` tool compiles human-readable YAML terms
-against a local model tokenizer. It produces a model-specific, bias-free JSON
-catalog for inspection and for the logical bias-rule runtime. A simple YAML list
-becomes the automatic `global` group:
+The catalog compiler is optional. `--groups` reads YAML directly; `--bias-catalog`
+still reads compiled JSON. Both use canonical runtime routes, including when
+an exploratory catalog also contains other decompositions.
 
-```yaml
-- sky
-- cloud
-- fog
-- aardvark
-```
-
-Named groups use the expanded mapping form:
-
-```yaml
-terms:
-  - sky
-  - mango
-groups:
-  nautical:
-    members:
-      - anchor
-      - steamship
-      - port of call
-```
-
-Catalog YAML, compiled catalog JSON, reference YAML, and runtime bias-preset
-JSON are different formats. Catalog YAML describes semantic terms and groups;
-compiled catalog JSON contains model-specific token routes; runtime preset JSON
-contains active rules and group amounts. The complete schemas and examples are
-in [BIAS_CATALOG_YAML.md](BIAS_CATALOG_YAML.md).
-
-The optional `--reference reference.yaml` input is a separate lexical universe,
-not another catalog. It accepts either a list of equally weighted surfaces:
-
-```yaml
-- shadow
-- shadowing
-```
-
-or a mapping of surfaces to positive relative weights:
-
-```yaml
-shadow: 100
-shadowing: 2
-```
-
-The mapping form must contain numeric weights; `groups:` and `members:` belong
-to catalog YAML, not reference YAML.
-
-Compile the catalog with the normal tokenizer route search:
+Export/import remains:
 
 ```bash
-policy-editor-bias \
-  --model /path/to/model.gguf \
-  --input terms.yaml \
-  --output catalog.json
+policy-editor --workspace episodes.sqlite3 --project '#1' --biases-only > biases.json
+policy-editor --model model.gguf --new-prompt 'Another story' --biases biases.json
 ```
 
-Use `--level minimal`, `--level standard`, or `--level exhaustive` to select a
-single best route per generated form, bounded route candidates, or a broader
-exact-route search.
-`--max-route-tokens` controls decomposition depth, while `--max-routes`
-controls how many routes are retained. `--term TEXT` may be repeated for
-one-off compilation without a YAML file. YAML quoting is only YAML syntax:
-quoted, unquoted, and single-quoted semantic terms receive the same spacing
-and case expansion. The compiler adds leading-space variants automatically,
-so users do not need to write them.
-`max_routes` is a per-term cap across all generated case, spacing, plural, and
-suffix forms; increase it only for terms where the extra routes are useful.
-For an experimental allocation strategy, set `allocation: equal`, `full`,
-`information`, `information_amplified`, or `naive_chaining` in YAML (or pass
-`--allocation`). `naive_chaining` is a deliberately simple null-hypothesis
-strategy for multi-token routes: it assigns successive edges `0`, `0.5`,
-`1.0`, `1.5`, and so on, and only applies each edge after the preceding route
-prefix has been entered. Single-token routes retain weight `1.0`.
-Information allocation uses compile-time prefix ambiguity statistics and
-stores its edge weights in the catalog; `--allocation-floor` defaults to `0.05`
-so a weak early edge cannot dead-end a route. `information_amplified` leaves
-two-token routes unchanged, but amplifies later edges on routes of length 3+
-using accumulated Phi without renormalizing. Use `--allocation-floor 0` for
-the unfloored raw result, and `--reference` with a YAML list or
-surface-to-weight mapping to use an external reference lexicon. The generated
-route JSON includes diagnostics for remaining mass, information, Phi, and edge
-weight.
-When a reference file is supplied, its model-tokenized weighted routes are also
-embedded in the catalog for an experimental online lexical prior. The runtime
-default is `--reference-prior active`, which applies the prior only to routes
-represented by active bias rules. `global` uses the complete reference
-universe. The mode presets are:
-
-* `active` / `global`: contrastive branch preference only.
-* `active-exit` / `global-exit`: contrastive preference plus an
-  EXIT-vs-CONTINUE gate.
-* `ballistic-active` / `ballistic-global`: adds root entry attraction.
-* `ballistic-active-exit` / `ballistic-global-exit`: adds both root attraction
-  and the EXIT-vs-CONTINUE gate.
-
-`off` disables the prior. `--reference-prior-strength` defaults to `0.25`.
-Reference weights are relative lexical importance rather than literal output
-probabilities. `--reference-prior-attraction` adds commitment pressure inside
-a lexical prefix and defaults to `0`; `--reference-prior-exit-strength`
-defaults to `0.25` in `*-exit` modes. The exit gate uses that value times the
-log ratio of continuation mass to terminal mass, independently of attraction
-and relative child branch scoring. The online prior uses one
-history-reconstructed weighted token trie rather than independently restarting
-every reference route. Once a route prefix is entered, unrelated root branches
-stop contributing until normal failure/suffix transitions return to them.
-These are runtime presets, not compiler YAML fields; the compiler YAML still
-controls terms, groups, forms, route policy, allocation, and per-term scales,
-while the separate `--reference` YAML supplies the weighted lexical universe.
-With the default legacy allocation, preferred direct, word-aligned, and
-cohesive routes are selected first, then deterministic remaining routes are
-selected round-robin across generated forms until the budget is full. The
-experimental allocation strategies use the same route scoring for every
-accepted route. The tokenizer's default decomposition is only one candidate
-and is not automatically privileged. Use `--route-policy cohesive`
-(or the corresponding YAML option) to remove fragmented routes made from tiny
-internal subword pieces. Cohesive mode preserves whitespace-separated pieces
-such as `port` + `of` + `call`, but does not surface routes such as `o` + `f`,
-`m` + `y`, or `an` + `other`. `--min-route-piece-chars` changes the default
-three-character threshold for non-whole-word-like pieces. If no cohesive route
-exists for a term, the compiler uses the best exact route as a tail-only
-fallback and emits a warning.
-Per-term YAML may set `mode: auto`, `tail`, `path`, or `beheaded`; `auto` uses
-beheaded path semantics for bare boundary heads and one- or two-letter route
-heads, then preserves the ordinary lexical-term/phrase distinction. Case
-controls include sentence case,
-so a phrase such as `my favorite chair` can also search `My favorite chair`.
-Path terms may also set
-`head_scale` and `continuation_scale` to make a common head gentler while the
-phrase is being completed.
-
-The runtime matcher now has one logical route engine. A plain lexical target
-that tokenizes into multiple pieces uses telescoping path semantics: `b
-velociraptor +1` biases a viable starting token and then the next route token
-after each matching prefix. Whitespace phrases retain tail semantics by
-default, so a phrase continues to mean “bias the completion after this prefix.”
-Alternate routes sharing an edge contribute once per logical rule rather than
-once per route. Logical rules and named groups can be saved in the
-`spe-bias-rules-v2` JSON preset format.
-
-For the complete accepted YAML schema, including list, mapping, per-term,
-defaults, group, and reference forms, see the [bias catalog YAML reference](BIAS_CATALOG_YAML.md).
-
-Load a compiled catalog into an interactive episode with
-`--bias-catalog catalog.json`. A bare bias target uses a matching catalog entry
-when one exists and otherwise falls back to one-shot tokenizer resolution;
-`b @name +1` requires that catalog entry. Quoted runtime text bypasses catalog
-lookup and remains an exact text target.
-
-Named groups can also be created during an episode:
-
-```text
-b nautical -> {anchor, steamship, " port of call"}
-b nautical +1
-```
-
-The arrow command creates or appends to a durable runtime group. A later bare
-reference to that name uses the same compiled routes as a catalog group;
-`@name` remains strictly a catalog reference. The group has one shared bias
-amount, so adding a member immediately inherits the group's current amount.
-Group definitions and their bias changes are sampler state: replay, fork, and
-rewind restore them at the relevant boundary. Runtime groups are included in
-the normal `--biases-only` export, while `--editor-friendly` exports only their
-recompilable YAML membership.
+The v3 preset includes manual rules, groups, adaptive objectives, independent
+reference weights, and preference vectors/metadata. Existing v2 presets remain
+readable. `--editor-friendly` exports membership YAML; `--rules-only` is for
+manual rules and rejects active adaptive objectives.
 
 ### Opt-in online group learning
 
-The optional learner updates only the scalar strengths of existing named bias
-groups. It never stores a token-to-preference map and never changes group rules,
-the model, or sampler exploration settings. Enable it explicitly for a live
-session:
-
-```bash
-policy-editor --model /path/to/model.gguf --biases groups.json \
-  --online-learning --learning-rate 0.05 --max-step 0.25
-```
-
-It learns from live `SelectRawRank` choices only; `Accept`, `Write`, EOG, and
-replay do not update it. Each correction uses finite differences over the
-existing group biases, is bounded by `--min-bias` and `--max-bias`, and is
-stored as the next normal sampler segment. The `online-learning-update`
-interaction records the selected token as diagnostic context plus the old and
-new group weights, gradients, and update norm. Use `--learnable-groups` to
-restrict which named groups may move. Learning is off by default.
+Appearance objectives run independently of teacher fitting. The older
+`--online-learning` fitter remains for manual group records marked `learnable`.
+New command-created groups use explicit objectives or manual amounts and are
+not silently fitted to selections. See [teacher learning controls](STEERING.md#teacher-preference-learning).
 
 ### Opt-in latent preference learning
 
@@ -994,7 +825,7 @@ action. Each typed token is evaluated using the observation immediately before
 it. Latent learning sums the token evidence, then applies step clipping,
 decay, and state norm clipping once for the whole atomic Write. Consistent
 evidence can accumulate; opposing evidence can cancel. This replaces the old
-latent averaging behavior. Named-group learning still averages its updates.
+latent averaging behavior. Manual-group learning also sums its evidence and clips/decays once.
 Neither learner changes the policy midway through the text. Accept, EOG,
 and replay remain non-learning paths.
 
@@ -1056,142 +887,6 @@ source latent state even when loading a bias preset. Changing the seed on
 resume, fork, or fixed-config replay clears both latent vectors and prints a
 reset notice, because their coordinates would otherwise have changed meaning.
 
-Export the current surviving bias set as a JSON preset:
-
-```bash
-policy-editor --workspace episodes.sqlite3 --project '#1' --biases-only > biases.json
-policy-editor --workspace episodes.sqlite3 --project '#1' --biases-only --rules-only > rules.json
-policy-editor --workspace episodes.sqlite3 --project '#1' --biases-only --editor-friendly > groups.yaml
-policy-editor --model /path/to/model.gguf --biases biases.json --new-prompt 'Once upon a time'
-```
-
-The loadable preset uses `"format": "spe-bias-rules-v2"`. Its top-level
-sections are `model` (identity checks), `bias_rules` (direct logical rules),
-and `bias_groups` (named groups with one shared `bias` and bias-free `rules`).
-Full presets may also contain `latent_preference_z`, `latent_strength`,
-`latent_preference_fast_z`, `latent_fast_strength`, and `latent_projection_seed`.
-`--rules-only` keeps the JSON preset format but replaces named groups with their
-effective ordinary rules. `--editor-friendly` instead emits YAML `groups:`
-membership and intentionally omits active amounts, compiled routes, direct
-rules, and latent state.
-
-`--biases` replaces the saved bias set, including on resume, fork, or replay.
-An empty `bias_rules` list explicitly clears direct rules. A full preset contains
-a format version, model metadata, direct logical rules, and any named groups.
-`--rules-only` flattens the group's effective routes into ordinary logical rules
-and omits group names and runtime metadata, producing a portable rules-only
-preset that can be loaded like any other bias file. Loading checks vocabulary
-size and supplied model metadata. Use presets with the model/tokenizer they
-were made for; token IDs are not portable across tokenizers. Presets store bias
-values, not the default interactive step. The supported preset format is
-`spe-bias-rules-v2`.
-`--editor-friendly` instead emits standalone YAML `groups:` definitions that
-can be fed back into `policy-editor-bias`; it omits active bias amounts and
-model-specific compiled routes. The export contains named groups only; direct
-one-shot bias rules are intentionally omitted. This makes the result a clean,
-recompilable description of the groups themselves.
-
-### Logical bias rules
-
-Every bias command creates one logical rule. A rule contains one or more token
-routes, a mode, an amount, and optionally trigger/lifetime conditions. Raw model
-probabilities and raw ranks remain untouched. The displayed `[bias +/-N]` is the
-total currently active bias for that token.
-
-Several ways to enter a rule:
-
-```text
-b New York +0.5
-b {New York, New Jersey, "C"} +0.25
-b " New York" +0.5
-bl 3 -
-12+0.5 ... " New"
-```
-
-- `b` bare text is continuation-oriented: surrounding whitespace is stripped and
-  SPE supplies one leading space before tokenization. This makes `b wings +` mean
-  the common token spelling `" wings"` without making you type the space or quotes.
-- `{...}` applies the same edit to several comma-separated targets. Bare items get
-  the same automatic leading space; quoted items are exact. Multiword bare items are
-  fine because commas, not spaces, separate the group.
-- A quoted `b` phrase remains exact. JSON quoting supports escaped quotes, newlines
-  (`\n`), and intentional leading/no-leading whitespace. The older exact JSON-list
-  form such as `[" wings", " scales"]` remains accepted.
-- `bl X` captures the last X actual context tokens, including prompt tokens if
-  the span reaches into the prompt. X must be positive and no greater than the
-  context length. It does not insert text or retroactively change those tokens.
-- The conditional rank form tokenizes the quoted prefix separately, then appends
-  the exact token ID at that raw rank. It does not retokenize their combined text.
-
-All forms accept bare `+`/`-` for the default increment and `=` to clear the exact
-rule (`b " New York" =`, `bl 3 =`, or `12= ... " New"`). A one-token target is a
-one-edge path rule. A lexical target that tokenizes into multiple pieces uses
-telescoping path semantics: its head is biased when the term can begin, and each
-continuation is biased after the matching prefix. Whitespace phrases default to
-tail semantics, while `bl X` and ranked-prefix commands explicitly use tail
-semantics. Empty phrases and empty conditional prefixes are rejected.
-
-The commands stay at the same live position. Multiple rules may be edited before
-making a move, and `v` still sorts by policy rank while raw ranks remain visible.
-Rules follow the same sampler-state persistence, resume, replay, fork, and rewind
-semantics as single-token biases. Matching is recomputed from the restored context;
-there is no separate matcher state to restore. Rewinding retains rules at the
-target boundary and discards later rule changes, exactly like other sampler settings.
-
-`--project '#1' --biases-only` exports the complete logical rule and group set;
-add `--rules-only` to flatten named groups into ordinary logical rules. Loading
-a preset replaces the saved direct rules and named groups.
-
-### Triggered biases with exact stop tokens
-
-A scoped logical rule activates after any trigger appears since its most recent
-stop token:
-
-```text
-b wings +0.5 after dragon until "."
-b {scales, claws} + after {dragon, wyvern, winged serpent} until "."
-b @spooky +1 after @nautical
-12- after dragon until "\n"
-```
-
-Bare targets and triggers use the same continuation-friendly spelling as ordinary
-`b` commands: `wings` means `" wings"`, while quoted strings are exact. Braces mean
-"any/all of these comma-separated items": any trigger activates the gate, and the
-same edit is compiled into one ordinary scoped rule per target. Quoted items inside
-a brace group stay exact, for example `{hello, "Hello", "\n"}`.
-
-Targets and triggers can be bare catalog terms or groups, explicit `@name`
-catalog references, runtime groups, or one-shot plain text. Bare names resolve
-through the catalog or current runtime groups when available and otherwise use
-the normal one-shot tokenizer rules; `@name` must name a catalog entry. A
-multi-token catalog member becomes a trigger only after its complete compiled
-route has appeared, not after an early prefix. A trigger group is expanded into
-one trigger set, so matching several members does not multiply the target bias.
-
-The `until "TOKEN"` form names one exact stop token. SPE tokenizes the quoted text
-without a BOS token and requires it to resolve to exactly one token; if it does
-not, use `until #N` to name a token ID explicitly. `until .` and `until |` remain
-available as sentence and newline lifetime heuristics. If `until` is omitted,
-the rule defaults to the exact period token, equivalent to `until "."`.
-Because activation is
-derived from token history, rewind, fork, resume, and replay need no separate
-matcher state.
-
-Targets and triggers are exact token sequences after the human spelling is expanded.
-Repeated triggers do not multiply a rule's strength. Distinct active rules add
-together. These rules do not perform semantic similarity matching.
-
-Use bare `+`/`-` for the configured step, an explicit amount to change it, or `=`
-to clear the exact rule. The target, trigger set, and stop condition identify the
-rule; reordering trigger alternatives does not create a new rule. Multiple targets
-are command-line sugar only and remain separate ordinary rules in saved sampler
-state. Multiple targets also work without a scope:
-
-```text
-b {wings, scales, claws} +0.5
-b {wings, scales} = after {wyvern, dragon} until "."
-```
-
-Scoped syntax supports human/quoted `b` targets, catalog/runtime group targets,
-and ranked targets. Use a `b` target for scoped multi-token rules rather than
-combining the rank-prefix `...` form with `after`.
+Export all active steering and vectors with `--project EPISODE --biases-only`,
+and reload with `--biases biases.json`. See [Steering](STEERING.md#export-and-import-biasesjson)
+for the complete v3 schema and portable-history behavior.

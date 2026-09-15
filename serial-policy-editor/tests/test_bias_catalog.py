@@ -195,6 +195,7 @@ def test_auto_beheads_short_alternate_route_heads(backend):
         "shadow",
         backend,
         options=CompileOptions(
+            route_policy="all",
             cases=("original",), leading_space=False, plural=False
         ),
     )
@@ -208,10 +209,12 @@ def test_auto_beheads_short_alternate_route_heads(backend):
         "shadow",
         backend,
         options=CompileOptions(
+            route_policy="all",
             mode="path", cases=("original",), leading_space=False, plural=False
         ),
     )
     assert {route.mode for route in explicit_path.routes} == {"path"}
+
 
 
 def test_auto_beheads_whitespace_only_route_heads():
@@ -224,12 +227,14 @@ def test_auto_beheads_whitespace_only_route_heads():
         "window",
         SpaceHeadBackend(),
         options=CompileOptions(
+            route_policy="all",
             cases=("original",), leading_space=True, plural=False
         ),
     )
 
     modes = {route.token_ids: route.mode for route in entry.routes}
     assert modes[(25, 26)] == "beheaded"
+
 
 
 def test_auto_does_not_behead_complete_short_terms_or_word_aligned_heads():
@@ -251,6 +256,7 @@ def test_auto_does_not_behead_complete_short_terms_or_word_aligned_heads():
         "go",
         backend,
         options=CompileOptions(
+            route_policy="all",
             cases=("original",), leading_space=False, plural=False
         ),
     )
@@ -259,12 +265,14 @@ def test_auto_does_not_behead_complete_short_terms_or_word_aligned_heads():
         "go there",
         backend,
         options=CompileOptions(
+            route_policy="all",
             cases=("original",), leading_space=False, plural=False
         ),
     )
 
     assert {route.mode for route in direct.routes if route.token_ids == (25,)} == {"path"}
     assert {route.mode for route in phrase.routes if route.token_ids == (25, 26)} == {"tail"}
+
 
 
 def test_cohesive_route_policy_filters_tiny_subword_alternates(backend):
@@ -326,6 +334,7 @@ def test_tokenizer_default_route_is_not_automatically_preferred():
         "another",
         RouteRankingBackend(),
         options=CompileOptions(
+            route_policy="all",
             level="exhaustive",
             cases=("original",),
             leading_space=False,
@@ -339,6 +348,7 @@ def test_tokenizer_default_route_is_not_automatically_preferred():
     assert entry.routes[0].strategies == ("preferred",)
     assert entry.routes[1].route_class == "fragmented"
     assert entry.routes[1].strategies == ("derived",)
+
 
 
 def test_cohesive_policy_omits_fragmented_default_route_when_clean_route_exists():
@@ -395,8 +405,8 @@ def test_named_group_includes_implicit_terms_and_preserves_word_phrase_modes(bac
     assert group.kind == "group"
     assert group.members == ("anchor", "steamship", "port of call")
     assert catalog.require("anchor").mode == "path"
-    assert catalog.require("port of call").mode == "tail"
-    assert {route.mode for route in group.routes} == {"path", "tail"}
+    assert catalog.require("port of call").mode == "path"
+    assert {route.mode for route in group.routes} == {"path"}
 
 
 def test_standard_and_exhaustive_levels_find_bounded_alternate_routes(backend):
@@ -405,6 +415,7 @@ def test_standard_and_exhaustive_levels_find_bounded_alternate_routes(backend):
         "shadowing",
         backend,
         options=CompileOptions(
+            route_policy="all",
             level="standard", cases=("original",), leading_space=False,
             plural=False,
         ),
@@ -414,6 +425,7 @@ def test_standard_and_exhaustive_levels_find_bounded_alternate_routes(backend):
         "shadowing",
         backend,
         options=CompileOptions(
+            route_policy="all",
             level="exhaustive", cases=("original",), leading_space=False,
             plural=False, max_route_tokens=3,
         ),
@@ -425,6 +437,7 @@ def test_standard_and_exhaustive_levels_find_bounded_alternate_routes(backend):
     assert (1, 8) in standard_routes
     assert (9, 10, 8) not in standard_routes
     assert (9, 10, 8) in exhaustive_routes
+
 
 
 def test_route_budget_round_robins_alternates_across_forms():
@@ -470,6 +483,7 @@ def test_route_budget_round_robins_alternates_across_forms():
         "ab",
         Backend(),
         options=CompileOptions(
+            route_policy="all",
             level="exhaustive", cases=("original", "upper"),
             leading_space=False, plural=False, max_routes=4,
         ),
@@ -480,12 +494,14 @@ def test_route_budget_round_robins_alternates_across_forms():
     ]
 
 
+
 def test_max_routes_applies_across_all_generated_forms(backend):
     entry = compile_term(
         "Shadow",
         "Shadow",
         backend,
         options=CompileOptions(
+            route_policy="all",
             level="minimal", cases=("original", "lower"),
             leading_space=False, plural=False, max_routes=1,
         ),
@@ -493,10 +509,11 @@ def test_max_routes_applies_across_all_generated_forms(backend):
     assert len(entry.routes) == 1
 
 
+
 def test_explicit_forms_and_per_term_levels(backend):
     catalog = compile_catalog(
         {
-            "defaults": {"cases": ["original"], "plural": False, "level": "minimal"},
+            "defaults": {"cases": ["original"], "plural": False, "level": "minimal", "route_policy": "all"},
             "terms": {
                 "shadowing": {"forms": ["shadowing"], "level": "exhaustive",
                               "max_route_tokens": 3},

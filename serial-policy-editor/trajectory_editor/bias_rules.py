@@ -223,6 +223,9 @@ class BiasGroup:
     rules: tuple[BiasRule, ...]
     bias: float = 0.0
     members: tuple[str, ...] = ()
+    surfaces: tuple[str, ...] = ()
+    enabled: bool = True
+    learnable: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not GROUP_NAME_RE.fullmatch(self.name):
@@ -245,6 +248,11 @@ class BiasGroup:
         members = tuple(str(member) for member in self.members)
         if any(not member for member in members):
             raise EditorError("bias group members cannot be empty")
+        if type(self.enabled) is not bool or type(self.learnable) is not bool:
+            raise EditorError("bias group enabled and learnable must be booleans")
+        if isinstance(self.surfaces, str) or any(not isinstance(s, str) or not s.strip() for s in self.surfaces):
+            raise EditorError("bias group surfaces must contain nonempty text")
+        object.__setattr__(self, "surfaces", tuple(dict.fromkeys(self.surfaces)))
         object.__setattr__(self, "rules", tuple(sorted(rules, key=lambda rule: rule.sort_key)))
         object.__setattr__(self, "bias", float(self.bias))
         object.__setattr__(self, "members", tuple(dict.fromkeys(members)))
@@ -264,7 +272,7 @@ class BiasGroup:
                 logical_target=f"group:{self.name}",
             )
             for rule in self.rules
-            if self.bias != 0.0
+            if self.enabled and self.bias != 0.0
         )
 
     @classmethod
@@ -273,7 +281,7 @@ class BiasGroup:
             return value
         if not isinstance(value, Mapping):
             raise EditorError("bias group must be an object")
-        allowed = {"name", "rules", "bias", "members"}
+        allowed = {"name", "rules", "bias", "members", "surfaces", "enabled", "learnable"}
         unknown = set(value) - allowed
         if unknown:
             raise EditorError(f"unknown bias group fields: {', '.join(sorted(unknown))}")
@@ -284,6 +292,9 @@ class BiasGroup:
             rules=value["rules"],
             bias=value.get("bias", 0.0),
             members=value.get("members", ()),
+            surfaces=value.get("surfaces", ()),
+            enabled=value.get("enabled", True),
+            learnable=value.get("learnable", True),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -292,6 +303,9 @@ class BiasGroup:
             "bias": self.bias,
             "members": list(self.members),
             "rules": [rule.to_dict() for rule in self.rules],
+            "surfaces": list(self.surfaces),
+            "enabled": self.enabled,
+            "learnable": self.learnable,
         }
 
 
@@ -553,7 +567,7 @@ def routes_for_catalog_entry(
         tuple[str, float, float, bool],
         list[tuple[tuple[int, ...], tuple[float, ...]]],
     ] = {}
-    for route in entry.routes:
+    for route in (getattr(entry, "runtime_routes", ()) or entry.routes):
         selected = mode or route.mode
         if selected not in BIAS_MODES:
             raise EditorError(f"catalog route has unsupported bias mode {selected!r}")

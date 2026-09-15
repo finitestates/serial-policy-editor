@@ -1,11 +1,13 @@
 """Shared episode lifecycle operations for terminal and headless clients."""
 from __future__ import annotations
-from dataclasses import replace
+from dataclasses import fields, replace
 from typing import Any
 from .domain import EditorError, SamplingConfig
 from .episode_engine import EpisodeEngine
 from .episode_store import EpisodeStore
 from .episode_policy import TapeStep, ReplayPlan
+
+POLICY_FIELDS = tuple(f.name for f in fields(SamplingConfig) if f.name.startswith(("reference_prior_", "latent_"))) + ("group_controls",)
 
 SAMPLER_FIELDS = ("temperature", "top_k", "top_p", "min_p", "repeat_penalty", "repeat_last_n", "presence_penalty", "frequency_penalty", "seed", "bias_step", "bias_rules", "bias_groups")
 
@@ -31,7 +33,8 @@ def _model_continuation(store, source_id, backend, provenance):
     engine = EpisodeEngine(
         backend, sampling=replace(
             SamplingConfig.from_record(segment["sampling"]),
-            bias_rules=(), bias_groups=(), latent_preference_z=(), latent_preference_fast_z=(),
+            bias_rules=(), bias_groups=(), group_controls=(), reference_prior_routes=(),
+            latent_preference_z=(), latent_preference_fast_z=(),
         ),
         initial_text=source["initial_text"] + source["visible_text"],
         max_tokens=source["max_tokens"],
@@ -212,7 +215,7 @@ def _spr_engine_from_source(
 ) -> tuple[EpisodeEngine, ReplayPlan]:
     source = store.get_episode(source_id)
     overrides = dict(sampling_overrides or {})
-    if overrides.keys() - set(SAMPLER_FIELDS):
+    if overrides.keys() - set((*SAMPLER_FIELDS, *POLICY_FIELDS)):
         raise EditorError("unknown replay sampler override")
     sampling = replace(sampling, **overrides)
     if follow_source_sampling is None:

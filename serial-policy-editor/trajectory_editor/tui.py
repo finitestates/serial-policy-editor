@@ -305,6 +305,7 @@ class TeacherCommand:
     fork_address: ForkAddress | None = None
     warning: str | None = None
     bias_operator: str | None = None
+    bias_status: bool = False
     bias_amount: float | None = None
     bias_targets: tuple[str, ...] | None = None
     bias_target_bare: tuple[bool, ...] | None = None
@@ -337,7 +338,8 @@ HELP_TEXT = """Commands:
                     Enter remains the only commit action
                     --manual-acceptance leaves the command blank instead
   accept             commit the sampled proposal
-  b wings +          bare words/phrases imply the usual leading space
+  b wings + / - / =  adapt group appearance: promote / suppress / maintain
+  b wings off        disable this target (optional after/until scope)
   b {wings, scales, claws} +0.5          bias several targets at once
   b {wings, scales} + after {dragon, wyvern} until "."
                     braces are comma-separated human text; quoted items stay exact
@@ -345,7 +347,7 @@ HELP_TEXT = """Commands:
   b nautical -> {anchor, steamship, wharf}
                     create or append a durable runtime bias group
   N- after dragon until "\n"            ranked target with an exact one-token stop
-  b " TEXT" +/-[N]  quoted text remains exact; = clears the exact bias
+  b " TEXT" +/-[N]  quoted text remains exact; explicit amounts apply manual bias
   bl X +/-[N]       bias the last X context tokens; bl 1 is a single-token bias
   N+/-[X] ... " P"  bias ranked token N only after the tokenized prefix P
   N+ / N-           adjust token bias by the default step without advancing
@@ -618,6 +620,8 @@ def _parse_bias_stop(raw: str, *, vocabulary_size: int) -> tuple[str | None, str
 
 def parse_bias_command(raw: str, *, vocabulary_size: int) -> TeacherCommand | None:
     """Parse bias edits without interpreting quoted text as another command."""
+    if raw.strip() in {"b", "groups"}:
+        return TeacherCommand(CommandKind.BIAS, bias_status=True)
     quoted = r'"(?:[^"\\]|\\.)*"'
     group_match = re.fullmatch(
         r"b\s+(?P<name>[A-Za-z_][A-Za-z0-9_.-]*)\s*->\s*(?P<members>\{.*\})",
@@ -633,7 +637,7 @@ def parse_bias_command(raw: str, *, vocabulary_size: int) -> TeacherCommand | No
             bias_group_members=members,
             bias_group_member_bare=bare_flags,
         )
-    adjustment = r"(?P<op>[+\-=])\s*(?P<amount>\d+(?:\.\d*)?|\.\d+)?"
+    adjustment = r"(?P<op>off|[+\-=])\s*(?P<amount>\d+(?:\.\d*)?|\.\d+)?"
     stop = rf"(?:{quoted}|\#[0-9]+|[.|])"
     scope = rf"(?:\s+after\s+(?P<triggers>.+?)(?:\s+until\s+(?P<until>{stop}))?)?"
     patterns = (
@@ -653,8 +657,8 @@ def parse_bias_command(raw: str, *, vocabulary_size: int) -> TeacherCommand | No
             raise EditorError("bias rank is outside the vocabulary")
         if last is not None and last < 1:
             raise EditorError("bl requires a positive token count")
-        if operator == "=" and amount is not None:
-            raise EditorError("use = without an amount to clear a bias")
+        if operator in {"=", "off"} and amount is not None:
+            raise EditorError("use = or off without an amount")
         value = float(amount) if amount is not None else None
         if value is not None and (not math.isfinite(value) or value <= 0):
             raise EditorError("bias adjustment must be finite and positive")

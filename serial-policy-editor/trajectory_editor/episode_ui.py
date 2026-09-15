@@ -14,7 +14,6 @@ from typing import Any
 
 from .domain import Candidate, ChoiceSet, EditorError
 from .bias_catalog import BiasCatalog
-from .bias_rules import BiasGroup, BiasRule, routes_for_catalog_entry
 from .episode_actions import (
     EndGeneration,
     Finish,
@@ -55,13 +54,6 @@ class SearchLens:
     target_rank: int
     lower_rank: int
     upper_rank: int
-
-
-def _default_bias_mode(text: str) -> str:
-    """Use telescoping semantics for one lexical term, tail semantics for phrases."""
-
-    semantic = text[1:] if text.startswith(" ") else text
-    return "tail" if any(character.isspace() for character in semantic) else "path"
 
 
 def _choice_from_observation(
@@ -118,6 +110,7 @@ class InteractivePolicy:
         episode_id: str | None = None,
         seamless: bool = False,
         catalog: BiasCatalog | None = None,
+        group_level: float = 1.0,
     ) -> None:
         if min(menu_size, search_radius, default_hold_tokens) < 1:
             raise EditorError("menu, search, and hold sizes must be positive")
@@ -136,6 +129,7 @@ class InteractivePolicy:
         self.episode_id = episode_id
         self.seamless = bool(seamless)
         self.catalog = catalog
+        self.group_level = group_level
         self.choice_serial = 0
 
     def _show_policy_diagnostics(self, engine: EpisodeEngine) -> bool:
@@ -533,370 +527,38 @@ class InteractivePolicy:
                     plain_redraw = True
                 continue
             if command.kind == CommandKind.BIAS:
+                from .bias_commands import apply_bias_command
+                if command.bias_status:
+                    lines = [f"{g.name}: manual {g.bias:+g}; {len(g.members)} members"
+                             for g in engine.sampling.bias_groups]
+                    for row in observation.statistics.group_control_diagnostics:
+                        if row["active"]:
+                            lines.append(f"{row['group']}: {row['direction']}; observed {1000*row['observed_rate']:.2f}, "
+                                         f"target {1000*row['target_rate']:.2f} /1000 tokens; pressure {row['pressure']:+.3f}")
+                        else:
+                            lines.append(f"{row['group']}: {row['direction']} waiting for scope or disabled")
+                    if engine.sampling.reference_prior_routes:
+                        lines.append(f"Lexical reference: {len(engine.sampling.reference_prior_routes)} routes; "
+                                     f"strength {engine.sampling.reference_prior_strength:g}")
+                    self.io.page("\n".join(lines) or "No active groups or lexical reference.")
+                    continue
                 try:
-                    if command.bias_group_name is not None:
-                        groups_by_name = {
-                            group.name: group for group in engine.sampling.bias_groups
-                        }
-                        group_name = command.bias_group_name
-                        member_texts = command.bias_group_members or ()
-                        member_bare = command.bias_group_member_bare or tuple(
-                            False for _ in member_texts
-                        )
-                        existing = groups_by_name.get(group_name)
-                        if existing is None and self.catalog is not None:
-                            catalog_entry = self.catalog.resolve(group_name)
-                            if catalog_entry is not None and catalog_entry.kind == "group":
-                                existing = BiasGroup(
-                                    name=group_name,
-                                    rules=routes_for_catalog_entry(catalog_entry, 0),
-                                    members=catalog_entry.members,
-                                )
-                        template_by_key = {
-                            rule.key: rule for rule in (existing.rules if existing else ())
-                        }
-                        member_names = list(existing.members if existing else ())
-                        added_members = []
-                        for target_text, is_bare in zip(member_texts, member_bare):
-                            semantic = (
-                                target_text[1:]
-                                if is_bare and target_text.startswith(" ")
-                                else target_text
-                            )
-                            entry = None
-                            if is_bare and semantic.startswith("@"):
-                                if self.catalog is None:
-                                    raise EditorError(
-                                        f"catalog reference {semantic!r} requires --bias-catalog"
-                                    )
-                                if not semantic[1:]:
-                                    raise EditorError("catalog reference cannot be empty")
-                                entry = self.catalog.require(semantic[1:])
-                            elif is_bare and self.catalog is not None:
-                                entry = self.catalog.resolve(semantic)
-                            nested = groups_by_name.get(semantic) if is_bare else None
-                            if nested is not None:
-                                templates = nested.rules
-                            elif entry is not None:
-                                templates = routes_for_catalog_entry(entry, 0)
-                            else:
-                                tokens = tuple(engine.backend.tokenize(
-                                    target_text, add_bos=False, special=False))
-                                if not tokens:
-                                    raise EditorError("bias group member produced no tokens")
-                                templates = (BiasRule(
-                                    routes=(tokens,), bias=0,
-                                    mode=_default_bias_mode(target_text),
-                                ),)
-                            for template in templates:
-                                template_by_key[template.key] = template
-                            member_name = semantic if is_bare else target_text
-                            if member_name not in member_names:
-                                member_names.append(member_name)
-                                added_members.append(member_name)
-                        group = BiasGroup(
-                            name=group_name,
-                            rules=tuple(template_by_key.values()),
-                            bias=existing.bias if existing else 0.0,
-                            members=tuple(member_names),
-                        )
-                        groups_by_name[group.name] = group
-                        updated = replace(
-                            engine.sampling,
-                            bias_groups=tuple(groups_by_name.values()),
-                        )
-                        updates = [(
-                            "bias-group",
-                            {
-                                "group": group.to_dict(),
-                                "added_members": added_members,
-                            },
-                            f"Group {group.name!r} · {len(group.members)} members",
-                            group.bias,
-                        )]
-                        if self.store is not None and self.episode_id is not None:
-                            with self.store.transaction():
-                                self.store.record_sampling_segment(self.episode_id,
-                                    start_boundary=engine.boundary, sampling=updated,
-                                    stream_fingerprint=engine.stream_fingerprint,
-                                    coordinate_offset=engine.coordinate_offset)
-                                for kind, payload, _label, _value in updates:
-                                    self._interaction(engine.boundary, kind, payload)
-                        engine.sampling = updated
-                        observation = engine.observe()
-                        ranks = tuple(exposed)
-                        exposed = {rank: engine.candidates(observation, start_rank=rank, count=1)[0] for rank in ranks}
-                        preview_candidates = dict(exposed)
-                        candidates = tuple(resolve_candidate(c.rank) for c in choice.candidates)
-                        choice = _choice_from_observation(engine, observation, candidates,
-                            context_characters=self.context_characters, serial=self.choice_serial)
-                        feedback = ChoiceFeedback(
-                            "status", "BIAS GROUP UPDATED", (
-                                f"{updates[0][2]}: {group.bias:+g}",
-                            ))
-                        if not live:
-                            self.io.write(f"Bias {updates[0][2]}: {group.bias:+g}")
-                            plain_redraw = True
-                        continue
-                    groups_by_name = {
-                        group.name: group for group in engine.sampling.bias_groups
-                    }
-                    specs = []
-                    if command.bias_targets is not None:
-                        bare_flags = command.bias_target_bare or tuple(
-                            True for _ in command.bias_targets
-                        )
-                        direct_targets = []
-                        for target_text, is_bare in zip(command.bias_targets, bare_flags):
-                            semantic = (
-                                target_text[1:]
-                                if is_bare and target_text.startswith(" ")
-                                else target_text
-                            )
-                            entry = None
-                            if is_bare and semantic.startswith("@"):
-                                if self.catalog is None:
-                                    raise EditorError(
-                                        f"catalog reference {semantic!r} requires --bias-catalog"
-                                    )
-                                if not semantic[1:]:
-                                    raise EditorError("catalog reference cannot be empty")
-                                entry = self.catalog.require(semantic[1:])
-                            elif is_bare and self.catalog is not None:
-                                entry = self.catalog.resolve(semantic)
-                            runtime_group = groups_by_name.get(semantic) if is_bare else None
-                            if runtime_group is not None:
-                                specs.append(("group", runtime_group))
-                                continue
-                            if entry is not None and entry.kind == "group":
-                                runtime_group = groups_by_name.get(entry.name)
-                                if runtime_group is None:
-                                    runtime_group = BiasGroup(
-                                        name=entry.name,
-                                        rules=routes_for_catalog_entry(entry, 0),
-                                        members=entry.members,
-                                    )
-                                    groups_by_name[entry.name] = runtime_group
-                                specs.append(("group", runtime_group))
-                                continue
-                            if entry is not None:
-                                specs.append(("catalog", entry))
-                                continue
-                            tokens = tuple(engine.backend.tokenize(
-                                target_text, add_bos=False, special=False))
-                            if not tokens:
-                                raise EditorError("bias phrase produced no tokens")
-                            direct_targets.append(tokens)
-                            specs.append(("tokens", (tokens, _default_bias_mode(target_text))))
-                        if len(set(direct_targets)) != len(direct_targets):
-                            raise EditorError("bias targets resolve to duplicate token sequences")
-                    elif command.bias_last is not None:
-                        if command.bias_last > len(observation.prefix_token_ids):
-                            raise EditorError("bl requests more tokens than the current context contains")
-                        specs.append(("tokens", (
-                            observation.prefix_token_ids[-command.bias_last:], "tail"
-                        )))
-                    else:
-                        candidate = resolve_candidate(command.search_rank)
-                        prefix = () if command.bias_prefix is None else tuple(
-                            engine.backend.tokenize(command.bias_prefix, add_bos=False, special=False))
-                        if command.bias_prefix is not None and not prefix:
-                            raise EditorError("bias prefix produced no tokens")
-                        specs.append(("tokens", ((*prefix, candidate.token_id), "tail")))
-
-                    triggers = None
-                    trigger_bare = command.bias_trigger_bare or tuple(
-                        True for _ in (command.bias_triggers or ())
-                    )
-                    trigger_texts = None
-                    lifetime = None
-                    if command.bias_triggers is not None:
-                        trigger_routes = []
-                        trigger_texts = []
-                        for text, is_bare in zip(command.bias_triggers, trigger_bare):
-                            semantic = (
-                                text[1:] if is_bare and text.startswith(" ") else text
-                            )
-                            entry = None
-                            if is_bare and semantic.startswith("@"):
-                                if self.catalog is None:
-                                    raise EditorError(
-                                        f"catalog reference {semantic!r} requires --bias-catalog"
-                                    )
-                                if not semantic[1:]:
-                                    raise EditorError("catalog reference cannot be empty")
-                                entry = self.catalog.require(semantic[1:])
-                            elif is_bare and self.catalog is not None:
-                                entry = self.catalog.resolve(semantic)
-                            runtime_group = groups_by_name.get(semantic) if is_bare else None
-                            if runtime_group is not None:
-                                routes = tuple(
-                                    route
-                                    for rule in runtime_group.rules
-                                    for route in rule.routes
-                                )
-                            elif entry is not None:
-                                routes = tuple(route.token_ids for route in entry.routes)
-                            else:
-                                routes = (tuple(engine.backend.tokenize(
-                                    text, add_bos=False, special=False)),)
-                            routes = tuple(dict.fromkeys(routes))
-                            if any(not route for route in routes):
-                                raise EditorError("bias trigger produced no tokens")
-                            trigger_routes.extend(routes)
-                            trigger_texts.extend(
-                                [
-                                    [engine.backend.token_text(token) for token in route]
-                                    for route in routes
-                                ]
-                            )
-                        triggers = tuple(dict.fromkeys(trigger_routes))
-                        lifetime = command.bias_until
-                        if command.bias_stop_text is not None:
-                            stop = tuple(engine.backend.tokenize(
-                                command.bias_stop_text, add_bos=False, special=False))
-                            if len(stop) != 1:
-                                raise EditorError(
-                                    "scoped-bias stop text must tokenize to exactly one token; "
-                                    "use until #N for an explicit token ID")
-                            lifetime = stop[0]
-                        elif command.bias_stop_token is not None:
-                            lifetime = command.bias_stop_token
-                        if lifetime is None:
-                            raise EditorError("scoped bias requires a stop token or lifetime")
-
-                    logical_biases = {rule.key: rule for rule in engine.sampling.bias_rules}
-                    step = command.bias_amount if command.bias_amount is not None else engine.sampling.bias_step
-                    updates = []
-                    logical_specs = []
-                    for kind, value in specs:
-                        if kind == "group":
-                            if triggers is None:
-                                logical_specs.append((
-                                    value,
-                                    f"Group {value.name!r} ({len(value.rules)} rules)",
-                                ))
-                            else:
-                                # A scoped group update is an ordinary logical
-                                # rule set that targets the group's current
-                                # route snapshot.  Keeping it out of the
-                                # group's single unscoped amount allows a
-                                # group to have both unconditional and
-                                # trigger-gated biases without accidentally
-                                # changing one when the other is edited.
-                                scoped_target = f"group:{value.name}"
-                                seen = set()
-                                for rule in value.rules:
-                                    template = replace(
-                                        rule,
-                                        bias=0,
-                                        triggers=triggers,
-                                        until=lifetime,
-                                        logical_target=scoped_target,
-                                    )
-                                    if template.key in seen:
-                                        continue
-                                    seen.add(template.key)
-                                    logical_specs.append((
-                                        template,
-                                        f"Group {value.name!r} · {template.mode} "
-                                        f"({len(template.routes)} routes)",
-                                    ))
-                            continue
-                        if kind == "catalog":
-                            entry = value
-                            for template in routes_for_catalog_entry(entry, 0):
-                                if triggers is not None:
-                                    template = replace(
-                                        template, triggers=triggers, until=lifetime
-                                    )
-                                logical_specs.append((
-                                    template,
-                                    f"Catalog {entry.name!r} · {template.mode} "
-                                    f"({len(template.routes)} routes)",
-                                ))
-                            continue
-                        tokens, default_mode = value
-                        template = BiasRule(
-                            routes=(tokens,), bias=0, mode=default_mode,
-                            triggers=triggers or (),
-                            until=lifetime if triggers is not None else None,
-                        )
-                        texts = [engine.backend.token_text(token) for token in tokens]
-                        label = (
-                            f"Path {texts!r} (ids={list(tokens)})"
-                            if default_mode == "path"
-                            else (
-                                f"{texts[0]!r} (id={tokens[0]})"
-                                if len(tokens) == 1
-                                else f"After {texts[:-1]!r} → {texts[-1]!r} (ids={list(tokens)})"
-                            )
-                        )
-                        logical_specs.append((template, label))
-
-                    logical_keys = set()
-                    group_names = set()
-                    for template, label in logical_specs:
-                        if isinstance(template, BiasGroup):
-                            group = groups_by_name[template.name]
-                            if group.name in group_names:
-                                raise EditorError(
-                                    "bias targets resolve to duplicate named groups"
-                                )
-                            group_names.add(group.name)
-                            old = group.bias
-                            value = 0.0 if command.bias_operator == "=" else old + (
-                                step if command.bias_operator == "+" else -step
-                            )
-                            group = replace(group, bias=value)
-                            groups_by_name[group.name] = group
-                            updates.append((
-                                "bias-group",
-                                {
-                                    "previous": old,
-                                    "bias": value,
-                                    "group": group.to_dict(),
-                                },
-                                label,
-                                value,
-                            ))
-                            continue
-                        if template.key in logical_keys:
-                            raise EditorError("bias targets resolve to duplicate logical rules")
-                        logical_keys.add(template.key)
-                        key = template.key
-                        old = logical_biases[key].bias if key in logical_biases else 0.0
-                        value = 0.0 if command.bias_operator == "=" else old + (
-                            step if command.bias_operator == "+" else -step)
-                        logical_biases[key] = replace(template, bias=value)
-                        if template.triggers:
-                            label += f" after any of {trigger_texts!r}"
-                            label += f" until {lifetime}" if type(lifetime) is not int else (
-                                f" until {engine.backend.token_text(lifetime)!r} (id={lifetime})"
-                            )
-                        payload = {
-                            "previous": old, "bias": value,
-                            "rule": logical_biases[key].to_dict(),
-                        }
-                        updates.append(("bias-rule", payload, label, value))
-
-                    updated = replace(
-                        engine.sampling,
-                        bias_rules=tuple(logical_biases.values()),
-                        bias_groups=tuple(groups_by_name.values()),
+                    updated, updates = apply_bias_command(
+                        command, engine.backend, engine.sampling, observation,
+                        resolve_candidate, self.catalog, level=self.group_level,
                     )
                 except EditorError as exc:
                     feedback = ChoiceFeedback("error", "INVALID BIAS", (str(exc),))
                     if not live:
                         self.io.write(str(exc))
                     continue
-
                 if self.store is not None and self.episode_id is not None:
                     with self.store.transaction():
-                        self.store.record_sampling_segment(self.episode_id,
-                            start_boundary=engine.boundary, sampling=updated,
+                        self.store.record_sampling_segment(
+                            self.episode_id, start_boundary=engine.boundary, sampling=updated,
                             stream_fingerprint=engine.stream_fingerprint,
-                            coordinate_offset=engine.coordinate_offset)
+                            coordinate_offset=engine.coordinate_offset,
+                        )
                         for kind, payload, _label, _value in updates:
                             self._interaction(engine.boundary, kind, payload)
                 engine.sampling = updated
@@ -908,11 +570,10 @@ class InteractivePolicy:
                 choice = _choice_from_observation(engine, observation, candidates,
                     context_characters=self.context_characters, serial=self.choice_serial)
                 lines = tuple(f"{label}: {value:+g}" for _kind, _payload, label, value in updates)
-                feedback = ChoiceFeedback(
-                    "status", "BIAS UPDATED" if len(lines) == 1 else "BIASES UPDATED", lines)
+                feedback = ChoiceFeedback("status", "STEERING UPDATED", lines)
                 if not live:
                     for line in lines:
-                        self.io.write(f"Bias {line}")
+                        self.io.write(line)
                     plain_redraw = True
                 continue
             if command.kind == CommandKind.HELP:

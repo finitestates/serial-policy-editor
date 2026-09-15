@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.4.0.dev0 — lexical steering redesign
+
+- Load standalone relative lexical weights with `--reference`, without catalogs,
+  groups, or learning. Normal reference behavior is global and independent of
+  group direction, with one optional overall strength.
+- Load group YAML directly with `--groups`. Bare semantic `b target +`, `-`, and
+  `=` now activate promote, suppress, and maintain appearance objectives.
+  `b target off` disables the selected scope; explicit amounts remain manual.
+- Control completed appearances during autonomous generation, using canonical
+  entry/continuation routes and bounded history feedback. Scopes retain their
+  own activation and baseline. `b` shows controller diagnostics.
+- Separate canonical runtime routes from optional compiler exploration
+  (`--explore`). Shared command resolution replaces the UI's duplicated bias
+  assembly logic.
+- Export/import full steering in `spe-bias-rules-v3`, including reference state,
+  group objectives, and both latent preference vectors and metadata. Read v2
+  presets and minimal preference-array files. Preserve exact episode history
+  origins for replay while rebasing portable presets to the destination.
+- Fix stale learner observations after interactive bias edits and accidental
+  modification of excluded/out-of-range manual weights. Sum typed evidence
+  before clipping/decay in both teacher learners. Add severity, dead-zone,
+  rejection, and decay controls to the manual group fitter and use analytical
+  sparse gradients for its normal fixed-feature policy.
+- Support references/presets and shared steering commands in the HTTP adapter.
+
+See [Steering](STEERING.md) for interfaces, limitations, and migration details.
+
 ## 0.3.8 — 2026-09-14
 
 This release carries the model-aware biasing work forward into a broader,

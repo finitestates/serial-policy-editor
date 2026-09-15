@@ -41,6 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="compile one semantic term; may be repeated",
     )
     parser.add_argument("--level", choices=("minimal", "standard", "exhaustive"), default=None)
+    parser.add_argument("--explore", action="store_true", help="include alternate decompositions for inspection; runtime routes remain canonical")
     parser.add_argument(
         "--allocation",
         choices=ALLOCATIONS,
@@ -180,6 +181,8 @@ def main(argv: list[str] | None = None) -> int:
         source = _source_from_args(args)
         reference = load_yaml_source(args.reference) if args.reference is not None else None
         overrides: dict[str, Any] = {}
+        if args.explore:
+            overrides["route_policy"] = "all"
         if args.max_routes is not None:
             overrides["max_routes"] = args.max_routes
         if args.max_route_tokens is not None:

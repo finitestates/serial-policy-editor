@@ -216,55 +216,12 @@ class _WriteLearningAccumulator:
     def _aggregate_groups(self) -> LearningResult | None:
         if not self.group_results:
             return None
-        first = self.group_results[0]
-        learner = self.learner
-        assert learner is not None
-        old_weights = dict(first.old_group_weights)
-        new_weights: dict[str, float] = {}
-        gradients: dict[str, float] = {}
-        for group in self.sampling.bias_groups:
-            name = group.name
-            average_delta = self._mean(
-                [result.group_deltas[name] for result in self.group_results]
-            )
-            value = max(
-                learner.config.min_bias,
-                min(
-                    learner.config.max_bias,
-                    old_weights[name] + average_delta,
-                ),
-            )
-            new_weights[name] = float(value)
-            gradients[name] = self._mean(
-                [result.gradients[name] for result in self.group_results]
-            )
-        deltas = {
-            name: float(new_weights[name] - old_weights[name])
-            for name in old_weights
-        }
-        updated_groups = tuple(
-            replace(group, bias=new_weights[group.name])
-            for group in self.sampling.bias_groups
-        )
-        return LearningResult(
-            sampling=replace(self.sampling, bias_groups=updated_groups),
-            observation_boundary=self.tokens[0].observation_boundary,
-            chosen_token_id=self.tokens[0].token_id,
-            old_policy_rank=self._mean_int(
-                [token.policy_rank for token in self.tokens]
-            ),
-            old_policy_probability=self._mean(
-                [token.policy_probability for token in self.tokens]
-            ),
-            severity=self._mean([token.severity for token in self.tokens]),
-            loss=self._mean([token.loss for token in self.tokens]),
-            old_group_weights=old_weights,
-            new_group_weights=new_weights,
-            group_deltas=deltas,
-            gradients=gradients,
-            update_norm=math.sqrt(sum(delta * delta for delta in deltas.values())),
-            enabled=True,
-        )
+        result = self.learner.aggregate(self.group_results, self.sampling)
+        return replace(result,
+                       old_policy_rank=self._mean_int([r.old_policy_rank for r in self.group_results]),
+                       old_policy_probability=self._mean([r.old_policy_probability for r in self.group_results]),
+                       severity=self._mean([r.severity for r in self.group_results]),
+                       loss=self._mean([r.loss for r in self.group_results]))
 
     def _aggregate_latent(self) -> LatentPreferenceResult | None:
         if not self.latent_results:
@@ -474,7 +431,7 @@ class EpisodeRunner:
                         self.store.record_sampling_segment(
                             self.episode_id,
                             start_boundary=self.engine.boundary,
-                            sampling=step.sampling,
+                            sampling=self.engine.sampling,
                             stream_fingerprint=self.engine.stream_fingerprint,
                             coordinate_offset=self.engine.coordinate_offset,
                         )
@@ -516,7 +473,7 @@ class EpisodeRunner:
                     self.store.record_sampling_segment(
                         self.episode_id,
                         start_boundary=self.engine.boundary,
-                        sampling=plan.final_sampling,
+                        sampling=self.engine.sampling,
                         stream_fingerprint=self.engine.stream_fingerprint,
                         coordinate_offset=self.engine.coordinate_offset,
                     )
@@ -537,6 +494,9 @@ class EpisodeRunner:
             ):
                 observation = self.engine.observe()
                 action = live_policy.choose(self.engine, observation)
+                # A policy UI can edit steering before returning an action.
+                # Learning must use exactly the surface that will be committed.
+                observation = self.engine.observe()
                 active_action = action
                 executing_replay = False
                 write_accumulator = (

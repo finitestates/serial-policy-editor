@@ -397,7 +397,7 @@ def test_policy_prefers_catalog_for_bare_names_and_falls_back_for_unknown_names(
             io=ScriptedIO(["b velociraptor +2", "q"]), catalog=catalog
         ).choose(runtime, runtime.observe())
 
-    assert runtime.sampling.bias_rules[0].routes == ((1, 2), (1, 3))
+    assert runtime.sampling.bias_groups[0].rules[0].routes == ((1, 2), (1, 3))
     assert runtime.sampling.active_biases([]) == {1: 2}
     assert runtime.sampling.active_biases([1]) == {2: 2, 3: 2}
 
@@ -406,7 +406,7 @@ def test_policy_prefers_catalog_for_bare_names_and_falls_back_for_unknown_names(
         InteractivePolicy(
             io=ScriptedIO(["b unknownword +2", "q"]), catalog=catalog
         ).choose(fallback, fallback.observe())
-    assert fallback.sampling.bias_rules[0].routes == ((8, 9),)
+    assert fallback.sampling.bias_groups[0].rules[0].routes == ((8, 9),)
 
 
 def test_at_reference_requires_catalog_entry_and_quotes_bypass_resolution():
@@ -426,7 +426,7 @@ def test_at_reference_requires_catalog_entry_and_quotes_bypass_resolution():
         InteractivePolicy(
             io=ScriptedIO(['b "velociraptor" +2', "q"]), catalog=catalog
         ).choose(quoted, quoted.observe())
-    assert quoted.sampling.bias_rules[0].routes == ((8, 9),)
+    assert quoted.sampling.bias_groups[0].rules[0].routes == ((8, 9),)
 
 
 def test_runtime_groups_are_append_only_and_share_one_bias():

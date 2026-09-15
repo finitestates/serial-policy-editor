@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 from typing import Any
 
@@ -194,7 +194,10 @@ class EpisodeEngine:
         if not backend_positioned:
             backend.reset(list(tokens))
         self.backend = backend
-        self.sampling = sampling
+        self.sampling = replace(sampling, group_controls=tuple(
+            replace(c, history_start=len(tokens)) if c.history_start is None else c
+            for c in sampling.group_controls
+        )) if sampling.group_controls else sampling
         self.max_tokens = max_tokens
         self.checkpoint_boundary = max_tokens
         self.initial_text = (
@@ -237,6 +240,10 @@ class EpisodeEngine:
 
     @sampling.setter
     def sampling(self, value: SamplingConfig) -> None:
+        if hasattr(self, "initial_token_ids") and any(c.history_start is None for c in value.group_controls):
+            value = replace(value, group_controls=tuple(
+                replace(c, history_start=len(self.initial_token_ids)) if c.history_start is None else c
+                for c in value.group_controls))
         bias_tokens = []
         for rule in (*value.bias_rules,
                      *(rule for group in value.bias_groups for rule in group.rules)):
@@ -244,6 +251,11 @@ class EpisodeEngine:
             bias_tokens.extend(token for trigger in rule.triggers for token in trigger)
             if type(rule.until) is int:
                 bias_tokens.append(rule.until)
+        for control in value.group_controls:
+            bias_tokens.extend(t for route in control.triggers for t in route)
+            if type(control.until) is int:
+                bias_tokens.append(control.until)
+        bias_tokens.extend(t for route, _ in value.reference_prior_routes for t in route)
         if any(token >= self.backend.vocabulary_size() for token in bias_tokens):
             raise EditorError("bias token id is outside the model vocabulary")
         self._sampling = value
@@ -369,6 +381,7 @@ class EpisodeEngine:
             key[0],
             self._classify_token_boundary,
             latent_features=self._latent_features(),
+            render_tokens=self.backend.render,
         )
         logits = statistics.logits
         distribution = statistics.distribution

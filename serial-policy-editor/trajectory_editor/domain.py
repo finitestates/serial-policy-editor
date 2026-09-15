@@ -34,6 +34,7 @@ class SamplingConfig:
     bias_step: float = 0.5
     bias_rules: tuple = ()
     bias_groups: tuple = ()
+    group_controls: tuple = ()
     latent_preference_z: tuple = ()
     latent_strength: float = 1.0
     latent_preference_fast_z: tuple = ()
@@ -70,6 +71,16 @@ class SamplingConfig:
         if len({group.name for group in groups}) != len(groups):
             raise EditorError("duplicate bias group")
         object.__setattr__(self, "bias_groups", tuple(sorted(groups, key=lambda group: group.name)))
+        from .group_control import GroupControl
+        try:
+            controls = tuple(GroupControl.from_record(c) for c in self.group_controls)
+        except TypeError as exc:
+            raise EditorError("group_controls must be a list of controls") from exc
+        if len({c.key for c in controls}) != len(controls):
+            raise EditorError("duplicate group control scope")
+        if any(c.group not in {g.name for g in groups} for c in controls):
+            raise EditorError("group control refers to a missing group")
+        object.__setattr__(self, "group_controls", controls)
         for name in ("latent_preference_z", "latent_preference_fast_z"):
             raw = getattr(self, name)
             if isinstance(raw, (str, bytes, bytearray)):
@@ -96,7 +107,7 @@ class SamplingConfig:
         if self.reference_prior_scope not in {"active", "global"}:
             raise EditorError("reference_prior_scope must be active or global")
         if self.reference_prior_mode not in {
-            "contrastive", "contrastive-exit", "ballistic", "ballistic-exit"
+            "lexical", "contrastive", "contrastive-exit", "ballistic", "ballistic-exit"
         }:
             raise EditorError(
                 "reference_prior_mode must be contrastive, contrastive-exit, "
@@ -165,8 +176,8 @@ class SamplingConfig:
             self, "reference_prior_exit_strength", float(self.reference_prior_exit_strength)
         )
         if prior_routes:
-            from .sampling import ReferencePriorTrie
-            object.__setattr__(self, "_reference_prior_trie", ReferencePriorTrie(prior_routes))
+            from .sampling import reference_trie
+            object.__setattr__(self, "_reference_prior_trie", reference_trie(tuple(prior_routes)))
         if (
             type(self.temperature) not in {int, float}
             or not math.isfinite(float(self.temperature))
@@ -216,7 +227,8 @@ class SamplingConfig:
         return (
             self.history_penalties_active
             or bool(self.bias_rules)
-            or any(group.bias != 0.0 for group in self.bias_groups)
+            or any(group.enabled and group.bias != 0.0 for group in self.bias_groups)
+            or any(c.enabled for c in self.group_controls)
             or bool(self.latent_preference_z)
             or bool(self.latent_preference_fast_z)
             or self.reference_prior_active
@@ -343,6 +355,7 @@ class SamplingConfig:
             bias_step=value.get("bias_step", defaults.bias_step),
             bias_rules=value.get("bias_rules", ()),
             bias_groups=value.get("bias_groups", ()),
+            group_controls=value.get("group_controls", ()),
             latent_preference_z=value.get(
                 "latent_preference_z", defaults.latent_preference_z
             ),
@@ -415,6 +428,7 @@ class SamplingConfig:
         return {
             **({"bias_rules": [rule.to_dict() for rule in self.bias_rules]} if self.bias_rules else {}),
             **({"bias_groups": [group.to_dict() for group in self.bias_groups]} if self.bias_groups else {}),
+            **({"group_controls": [c.to_dict() for c in self.group_controls]} if self.group_controls else {}),
             **(
                 {
                     "latent_preference_z": list(self.latent_preference_z),

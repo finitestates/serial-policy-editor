@@ -6,6 +6,7 @@ import hashlib
 import math
 from collections import deque
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 
@@ -155,6 +156,12 @@ class ReferencePriorTrie:
         }
 
 
+@lru_cache(maxsize=32)
+def reference_trie(routes):
+    """Reuse immutable route structure when a strength or learner state changes."""
+    return ReferencePriorTrie(routes)
+
+
 @dataclass(frozen=True)
 class ReferencePriorSnapshot:
     scope: str
@@ -190,7 +197,7 @@ def reference_prior_snapshot(
         scope, mode = "global", "ballistic-exit"
     if scope not in {"active", "global"}:
         raise ValueError("reference prior scope must be active or global")
-    if mode not in {"contrastive", "contrastive-exit", "ballistic", "ballistic-exit"}:
+    if mode not in {"lexical", "contrastive", "contrastive-exit", "ballistic", "ballistic-exit"}:
         raise ValueError("unknown reference prior mode")
 
     selected_routes = routes
@@ -207,7 +214,7 @@ def reference_prior_snapshot(
     else:
         history = tuple(int(token) for token in history_token_ids)
     if trie is None or active_routes is not None:
-        trie = ReferencePriorTrie(selected_routes)
+        trie = reference_trie(tuple(selected_routes))
     state = trie.state_for_history(history)
     node = trie.nodes[state]
     outgoing = trie.outgoing(state)
@@ -243,6 +250,16 @@ def reference_prior_snapshot(
     for token, mass in outgoing:
         branch = float(strength) * (log_masses[token] - center)
         total = branch + state_attraction + exit_continue
+        if mode == "lexical":
+            # Relative preference at every lexical branch, with modest support
+            # for completing a prefix the model has already entered. Root
+            # words receive no unconditional attraction. Extreme weights have
+            # bounded influence and unlisted decoder tokens stay available.
+            commitment = float(strength) if state and not node.terminal_mass else 0.0
+            if state and node.terminal_mass and continuation_mass:
+                commitment = float(strength) * math.log(continuation_mass / node.terminal_mass)
+            total = max(-2.0, min(2.0, branch + commitment))
+            state_attraction = commitment
         rows.append((token, mass, branch, state_attraction, exit_continue, total))
         biases[token] = total
     return ReferencePriorSnapshot(
@@ -412,10 +429,12 @@ class ObservationStatistics:
         history_token_ids,
         boundaries=None,
         latent_features=None,
+        render_tokens=None,
     ):
         self.logits = _validated_logits(logits).copy()
         self.boundaries = boundaries
         self.latent_features = latent_features
+        self.render_tokens = render_tokens
         penalties_active = config.history_penalties_active
         if penalties_active:
             self.adjusted, _, _ = _history_penalty_surface(
@@ -472,6 +491,16 @@ class ObservationStatistics:
             self.adjusted += latent_adjustments
         else:
             self.latent_logit_adjustments = np.zeros_like(self.adjusted)
+        self.baseline_probabilities = _softmax(self.adjusted)
+        from .group_control import control_adjustments
+        self.group_control_biases, self.group_control_diagnostics = control_adjustments(
+            config.group_controls, config.bias_groups, () if history_token_ids is None else history_token_ids,
+            self.adjusted, boundaries, render_tokens,
+        )
+        if self.group_control_biases:
+            self.adjusted = self.adjusted.copy()
+            for token, amount in self.group_control_biases.items():
+                self.adjusted[token] += amount
         penalties_active = config.policy_active
         self.maximum = float(np.max(self.logits))
         exponentials = np.exp(self.logits - self.maximum)
@@ -486,7 +515,7 @@ class ObservationStatistics:
         assert ids is not None
         self.distribution = SparseDistribution(ids, _softmax(scaled[ids]))
         for array in (
-            self.logits, self.adjusted, self.policy_probabilities,
+            self.logits, self.adjusted, self.policy_probabilities, self.baseline_probabilities,
             self.distribution.ids, self.distribution.probabilities,
         ):
             array.setflags(write=False)

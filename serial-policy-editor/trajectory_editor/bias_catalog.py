@@ -34,13 +34,13 @@ ALLOCATIONS = (
     "naive_chaining",
 )
 DEFAULT_ALLOCATION = "legacy"
-ROUTE_POLICIES = ("all", "cohesive")
+ROUTE_POLICIES = ("canonical", "all", "cohesive")
 ROUTE_CLASSES = ("direct", "word_aligned", "cohesive", "fragmented")
 DEFAULT_LEVEL = "standard"
 DEFAULT_MAX_ROUTES = 4096
 DEFAULT_STANDARD_MAX_ROUTE_TOKENS = 2
 DEFAULT_EXHAUSTIVE_MAX_ROUTE_TOKENS = 8
-DEFAULT_ROUTE_POLICY = "all"
+DEFAULT_ROUTE_POLICY = "canonical"
 DEFAULT_MIN_ROUTE_PIECE_CHARS = 3
 GROUP_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 SurfaceIndex = Mapping[str, Sequence[tuple[str, Sequence[int]]]]
@@ -646,11 +646,13 @@ class CatalogEntry:
     members: tuple[str, ...] = ()
     level: str | None = None
     warnings: tuple[str, ...] = ()
+    runtime_routes: tuple[CompiledRoute, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
             "kind": self.kind,
             "routes": [route.to_dict() for route in self.routes],
+            **({"runtime_routes": [r.to_dict() for r in self.runtime_routes]} if self.runtime_routes else {}),
         }
         if self.source is not None:
             result["source"] = self.source
@@ -764,6 +766,7 @@ class BiasCatalog:
                 members=members,
                 level=raw_entry.get("level"),
                 warnings=warnings,
+                runtime_routes=_routes_from_dict(raw_entry.get("runtime_routes", ()), path=f"entries.{name}.runtime_routes"),
             )
         return cls(
             model=dict(value.get("model", {})),
@@ -881,6 +884,7 @@ def _merge_entries(left: CatalogEntry, right: CatalogEntry) -> CatalogEntry:
         members=tuple(dict.fromkeys((*left.members, *right.members))),
         level=left.level,
         warnings=tuple(dict.fromkeys((*left.warnings, *right.warnings))),
+        runtime_routes=_merge_routes(left.runtime_routes or left.routes, right.runtime_routes or right.routes),
     )
 
 
@@ -998,6 +1002,13 @@ def validate_catalog(catalog: BiasCatalog, backend: Any, provenance: Mapping[str
     vocabulary_size = model.get("vocabulary_size")
     if type(vocabulary_size) is not int or vocabulary_size != int(backend.vocabulary_size()):
         raise EditorError("bias catalog vocabulary does not match the loaded model")
+    for entry in catalog.entries.values():
+        for route in (*entry.routes, *entry.runtime_routes):
+            if any(t < 0 or t >= vocabulary_size or backend.is_eog(t) for t in route.token_ids):
+                raise EditorError("bias catalog route contains an invalid or special token")
+    for route in catalog.reference_prior_routes:
+        if any(t < 0 or t >= vocabulary_size or backend.is_eog(t) for t in route.token_ids):
+            raise EditorError("bias catalog reference contains an invalid or special token")
     expected_fingerprint = model.get("tokenizer_fingerprint")
     if expected_fingerprint is not None:
         actual_fingerprint = tokenizer_fingerprint(backend)
@@ -1363,10 +1374,20 @@ def compile_term(
     if mode == "auto":
         mode = "tail" if any(character.isspace() for character in source) else "path"
     forms = generate_forms(source, options, explicit_forms)
+    form_specs = tuple((form, _canonical_route(form, backend)) for form in forms)
+    runtime_routes = _merge_routes((), tuple(CompiledRoute(
+        token_ids=route, texts=(form,), token_texts=tuple(str(backend.token_text(t)) for t in route),
+        mode="path" if options.mode == "auto" else options.mode, strategies=("canonical",),
+        head_scale=options.head_scale, continuation_scale=options.continuation_scale,
+        sources=(name,), route_class=_route_class(tuple(str(backend.token_text(t)) for t in route),
+                                                min_piece_chars=options.min_route_piece_chars),
+    ) for form, route in form_specs))
+    if options.route_policy == "canonical" and options.allocation == DEFAULT_ALLOCATION:
+        return CatalogEntry(name=name, kind="term", routes=runtime_routes, runtime_routes=runtime_routes,
+                            mode="path" if options.mode == "auto" else options.mode, source=source, level=options.level)
     index = surface_index if surface_index is not None else _surface_index(backend)
     if reference_stats is None:
         reference_stats = _reference_stats_for_backend(backend, forms)
-    form_specs = tuple((form, _canonical_route(form, backend)) for form in forms)
 
     def candidates_for(
         route_policy: str,
@@ -1550,6 +1571,7 @@ def compile_term(
         source=source,
         level=options.level,
         warnings=(warning,) if warning else (),
+        runtime_routes=runtime_routes,
     )
 
 
@@ -1683,7 +1705,7 @@ def compile_catalog(
                             spec.explicit_forms)
             for name, spec in terms.items()
         }
-    index = _surface_index(backend)
+    index = None
     compiled_terms: dict[str, CatalogEntry] = {}
 
     def ensure_implicit(member: str, *, level: str | None = None) -> str:
@@ -1725,12 +1747,14 @@ def compile_catalog(
         if group is None:
             raise EditorError(f"unknown catalog entry {name!r}")
         routes: list[CompiledRoute] = []
+        runtime_routes: list[CompiledRoute] = []
         members: list[str] = []
         for member in group.members:
             target = ensure_implicit(member, level=group.level)
             if target not in members:
                 members.append(target)
             child = compile_entry(target, (*stack, name))
+            runtime_routes.extend(child.runtime_routes or child.routes)
             routes.extend(
                 CompiledRoute(
                     token_ids=route.token_ids,
@@ -1752,6 +1776,7 @@ def compile_catalog(
             name=name,
             kind="group",
             routes=_merge_routes((), routes),
+            runtime_routes=_merge_routes((), runtime_routes),
             members=tuple(members),
             level=group.level,
             warnings=tuple(dict.fromkeys(
@@ -1784,11 +1809,10 @@ def compile_catalog(
         for spec in terms.values()
         for form in generate_forms(spec.source, spec.options, spec.explicit_forms)
     )
-    reference_stats = _reference_stats_for_backend(
-        backend,
-        reference_surfaces,
-        reference,
-    )
+    exploring = any(spec.options.route_policy != "canonical" or spec.options.allocation != DEFAULT_ALLOCATION for spec in terms.values())
+    if exploring:
+        index = _surface_index(backend)
+    reference_stats = _reference_stats_for_backend(backend, reference_surfaces, reference) if exploring else None
     reference_prior_routes = _compile_reference_prior_routes(backend, reference)
 
     for name in tuple(terms):
@@ -1805,7 +1829,7 @@ def compile_catalog(
     return BiasCatalog(
         model=model,
         compiler={
-            "format_version": 1,
+            "format_version": 2,
             "default_level": defaults.level,
             "default_mode": defaults.mode,
             "default_allocation": defaults.allocation,
@@ -1823,7 +1847,7 @@ def compile_catalog(
                 "compiled-token-routes-v1" if reference_prior_routes else "none"
             ),
             "route_selection": (
-                "preferred-routes-first-v2"
+                "canonical-runtime-with-exploration-v1" if not exploring else "preferred-routes-first-v2"
                 if defaults.allocation == DEFAULT_ALLOCATION
                 else "all-routes-round-robin-v1"
             ),

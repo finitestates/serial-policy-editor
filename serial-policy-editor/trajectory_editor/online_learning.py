@@ -1,9 +1,7 @@
-"""Small, opt-in online learning over named bias-group strengths.
+"""Optional teacher fitting of explicitly learnable manual group strengths.
 
-The model, vocabulary, and group definitions remain fixed.  The only values
-this module can change are the scalar ``BiasGroup.bias`` values already held by
-the sampling configuration.  Counterfactual policy surfaces are evaluated from
-the frozen logits captured in an :class:`Observation`.
+Appearance objectives live in group_control and never consume teacher labels.
+This compatibility fitter uses sparse group features on a frozen policy surface.
 """
 
 from __future__ import annotations
@@ -14,9 +12,6 @@ from typing import Any
 
 from .domain import EditorError, SamplingConfig
 from .sampling import ObservationStatistics
-
-
-_SEVERITY_RANK_CAP = 1000
 
 
 def _finite_number(value: Any, name: str, *, nonnegative: bool = False) -> float:
@@ -39,6 +34,11 @@ class OnlineLearningConfig:
     min_bias: float = -4.0
     max_bias: float = 4.0
     learnable_groups: tuple[str, ...] | None = None
+    severity_cap: int = 1000
+    dead_zone_rank: int = 1
+    no_severity_attenuation: bool = False
+    rejection_strength: float = 0.0
+    decay: float = 0.0
 
     def __post_init__(self) -> None:
         if type(self.enabled) is not bool:
@@ -54,6 +54,15 @@ class OnlineLearningConfig:
             raise EditorError("epsilon must be positive")
         if min_bias > max_bias:
             raise EditorError("min_bias must not exceed max_bias")
+        for name in ("severity_cap", "dead_zone_rank"):
+            if type(getattr(self, name)) is not int or getattr(self, name) < 1:
+                raise EditorError(f"learning {name} must be a positive integer")
+        if type(self.no_severity_attenuation) is not bool:
+            raise EditorError("learning no_severity_attenuation must be a boolean")
+        _finite_number(self.rejection_strength, "rejection_strength", nonnegative=True)
+        decay = _finite_number(self.decay, "decay", nonnegative=True)
+        if decay > 1:
+            raise EditorError("learning decay must be between 0 and 1")
         if self.learnable_groups is None:
             groups = None
         else:
@@ -94,6 +103,15 @@ class LearningResult:
     gradients: dict[str, float]
     update_norm: float
     enabled: bool
+    severity_cap: int = 1000
+    dead_zone_rank: int = 1
+    no_severity_attenuation: bool = False
+    rejection_strength: float = 0.0
+    proposal_token_id: int | None = None
+    proposal_rejected: bool = False
+    decay: float = 0.0
+    evidence: dict[str, float] | None = None
+    skipped: dict[str, str] | None = None
 
     @property
     def updated_sampling(self) -> SamplingConfig:
@@ -114,11 +132,16 @@ class LearningResult:
             "gradients": dict(self.gradients),
             "update_norm": self.update_norm,
             "enabled": self.enabled,
+            "severity_cap": self.severity_cap, "dead_zone_rank": self.dead_zone_rank,
+            "no_severity_attenuation": self.no_severity_attenuation,
+            "rejection_strength": self.rejection_strength,
+            "proposal_token_id": self.proposal_token_id, "proposal_rejected": self.proposal_rejected,
+            "decay": self.decay, "evidence": self.evidence or {}, "skipped": self.skipped or {},
         }
 
 
 class OnlineLearner:
-    """Finite-difference learner for fixed named bias groups.
+    """Teacher learner for fixed named manual bias groups.
 
     This object is deliberately stateless.  Learned state lives only in the
     returned ``SamplingConfig`` and therefore remains replayable through the
@@ -138,13 +161,12 @@ class OnlineLearner:
     def enabled(self) -> bool:
         return self.config.enabled
 
-    @staticmethod
-    def _severity(policy_rank: int) -> float:
-        return min(
-            1.0,
-            math.log1p(max(0, policy_rank - 1))
-            / math.log1p(_SEVERITY_RANK_CAP),
-        )
+    def _severity(self, policy_rank: int) -> float:
+        if policy_rank <= self.config.dead_zone_rank:
+            return 0.0
+        if self.config.no_severity_attenuation:
+            return 1.0
+        return min(1.0, math.log1p(policy_rank - self.config.dead_zone_rank) / math.log1p(self.config.severity_cap))
 
     @staticmethod
     def _loss(statistics: ObservationStatistics, token_id: int) -> float:
@@ -174,6 +196,7 @@ class OnlineLearner:
             observation.prefix_token_ids,
             observation.statistics.boundaries,
             latent_features=getattr(observation.statistics, "latent_features", None),
+            render_tokens=getattr(observation.statistics, "render_tokens", None),
         )
 
     def update(
@@ -209,36 +232,41 @@ class OnlineLearner:
 
         gradients = {group.name: 0.0 for group in groups}
         new_weights = dict(old_weights)
+        evidence = {}
+        skipped = {}
         if self.enabled:
+            from .bias_rules import BiasMatcher
             for group in groups:
-                if group.name not in selected_names:
+                if group.name not in selected_names or not group.enabled or not group.learnable:
+                    skipped[group.name] = "disabled or frozen"
                     continue
-                plus = self._counterfactual(
-                    observation,
-                    self._with_group_bias(
-                        sampling, group.name, group.bias + self.config.epsilon
-                    ),
-                )
-                minus = self._counterfactual(
-                    observation,
-                    self._with_group_bias(
-                        sampling, group.name, group.bias - self.config.epsilon
-                    ),
-                )
-                gradient = (self._loss(plus, chosen_token_id) - self._loss(
-                    minus, chosen_token_id
-                )) / (2.0 * self.config.epsilon)
-                gradients[group.name] = (
-                    float(gradient) if math.isfinite(float(gradient)) else 0.0
-                )
-                raw_delta = (
-                    -self.config.learning_rate * severity * gradients[group.name]
-                )
-                delta = max(-self.config.max_step, min(self.config.max_step, raw_delta))
-                new_weights[group.name] = max(
-                    self.config.min_bias,
-                    min(self.config.max_bias, group.bias + delta),
-                )
+                if any(c.group == group.name for c in sampling.group_controls):
+                    skipped[group.name] = "controlled by appearance objective"
+                    continue
+                if not self.config.min_bias <= group.bias <= self.config.max_bias:
+                    skipped[group.name] = "manual amount outside learning bounds"
+                    continue
+                # A group's deduplicated edge scales are sparse fixed features.
+                # Standalone lexical priors do not depend on group magnitude.
+                if not sampling.group_controls and not (sampling.reference_prior_active and sampling.reference_prior_scope == "active"):
+                    scales = BiasMatcher(replace(group, bias=1.).effective_rules()).active_biases(
+                        observation.prefix_token_ids, statistics.boundaries)
+                    mean = sum(float(statistics.policy_probabilities[t]) * v for t, v in scales.items())
+                    gradient = mean - scales.get(chosen_token_id, 0.)
+                    if observation.proposal_token_id != chosen_token_id:
+                        gradient += self.config.rejection_strength * (scales.get(observation.proposal_token_id, 0.) - mean)
+                else:
+                    # Compatibility with nonlinear legacy policies. The normal
+                    # lexical/group-objective workflow never needs this path.
+                    plus = self._counterfactual(observation, self._with_group_bias(sampling, group.name, group.bias + self.config.epsilon))
+                    minus = self._counterfactual(observation, self._with_group_bias(sampling, group.name, group.bias - self.config.epsilon))
+                    gradient = (self._loss(plus, chosen_token_id) - self._loss(minus, chosen_token_id)) / (2 * self.config.epsilon)
+                    if observation.proposal_token_id != chosen_token_id and self.config.rejection_strength:
+                        proposal = observation.proposal_token_id
+                        gradient -= self.config.rejection_strength * (self._loss(plus, proposal) - self._loss(minus, proposal)) / (2 * self.config.epsilon)
+                gradients[group.name] = float(gradient) if math.isfinite(float(gradient)) else 0.
+                evidence[group.name] = -self.config.learning_rate * severity * gradients[group.name]
+                new_weights[group.name] = self._apply_evidence(group.bias, evidence[group.name])
 
         deltas = {
             name: float(new_weights[name] - old_weights[name])
@@ -262,4 +290,28 @@ class OnlineLearner:
             gradients=gradients,
             update_norm=update_norm,
             enabled=self.enabled,
+            severity_cap=self.config.severity_cap, dead_zone_rank=self.config.dead_zone_rank,
+            no_severity_attenuation=self.config.no_severity_attenuation,
+            rejection_strength=self.config.rejection_strength,
+            proposal_token_id=observation.proposal_token_id,
+            proposal_rejected=observation.proposal_token_id != chosen_token_id,
+            decay=self.config.decay, evidence=evidence, skipped=skipped,
         )
+
+    def _apply_evidence(self, old, evidence):
+        step = max(-self.config.max_step, min(self.config.max_step, evidence))
+        return max(self.config.min_bias, min(self.config.max_bias, (1 - self.config.decay) * old + step))
+
+    def aggregate(self, results, sampling):
+        """Sum a typed span's evidence; clip and decay once, like latent learning."""
+        first = results[0]
+        names = {name for r in results for name in (r.evidence or {})}
+        evidence = {name: sum((r.evidence or {}).get(name, 0.) for r in results) for name in names}
+        weights = dict(first.old_group_weights)
+        for name in names:
+            weights[name] = self._apply_evidence(weights[name], evidence[name])
+        deltas = {name: weights[name] - old for name, old in first.old_group_weights.items()}
+        return replace(first, sampling=replace(sampling, bias_groups=tuple(replace(g, bias=weights[g.name]) for g in sampling.bias_groups)),
+                       new_group_weights=weights, group_deltas=deltas, evidence=evidence,
+                       gradients={name: sum(r.gradients[name] for r in results) / len(results) for name in weights},
+                       update_norm=math.sqrt(sum(d*d for d in deltas.values())))
