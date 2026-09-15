@@ -133,7 +133,7 @@ def test_write_gates_each_token_and_aggregates_decay_once(tokens):
     assert [t['sampler_eligible'] for t in payload['tokens']] == [t != 3 for t in tokens]
     io = ScriptedIO([])
     _write_learning_notice(io, result)
-    assert f'{tokens.count(3)}/{len(tokens)} tokens excluded' in io.output[-1]
+    assert f'{tokens.count(3)}/{len(tokens)} evidence' in io.output[-1]
 
 
 def test_real_write_gate_observes_preceding_written_tokens():

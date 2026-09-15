@@ -125,6 +125,7 @@ class WriteLearningResult:
     group_result: LearningResult | None
     latent_result: LatentPreferenceResult | None
     latent_token_results: tuple[LatentPreferenceResult, ...] = ()
+    group_token_results: tuple[LearningResult, ...] = ()
 
     @property
     def token_count(self) -> int:
@@ -270,6 +271,7 @@ class _WriteLearningAccumulator:
             group_result=group_result,
             latent_result=latent_result,
             latent_token_results=tuple(self.latent_results),
+            group_token_results=tuple(self.group_results),
         )
 
 

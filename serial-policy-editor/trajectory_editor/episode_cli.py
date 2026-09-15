@@ -49,6 +49,7 @@ from .episode_ui import InteractivePolicy, PolicyViewPreferences
 from .latent_features import DEFAULT_PROJECTION_CHUNK_SIZE, DEFAULT_PROJECTION_SEED
 from .latent_preference import LatentPreferenceConfig, LatentPreferenceLearner, LatentPreferenceResult
 from .online_learning import LearningResult, OnlineLearner
+from .learning_readout import selection_notice, write_notice, show_learning_details
 from .learning_controls import DECAY_ON, WRITE_REDUCTIONS, REJECTION_TARGETS
 from .transformers_backend import TransformersSettings
 from .tui import TerminalIO
@@ -801,83 +802,16 @@ def _sampler_summary(config: SamplingConfig) -> str:
     return summary
 
 
-def _learning_gate_notice(result) -> str:
-    if result.learning_gate != "sampler":
-        return ""
-    if result.sampler_eligible:
-        return " · sampler gate: already eligible (no new evidence)"
-    return " · sampler gate: excluded (full-severity evidence)"
+def _online_learning_notice(io, result, *, token_text=None, episode_id=None):
+    selection_notice(io, result, latent=False, token_text=token_text, episode_id=episode_id)
 
 
-def _learning_controls_notice(result) -> str:
-    parts = []
-    if result.decay_on != "update":
-        rates = f"{result.effective_decay:g}"
-        if getattr(result, "old_fast_z", ()):
-            rates += f", fast {result.effective_fast_decay:g}"
-        parts.append(f"decay on {result.decay_on}: rate {rates}")
-    if result.rejection_target != "proposal" and result.rejection_strength:
-        parts.append(f"rejection target: {result.rejection_target}")
-    if result.write_evidence_tokens is not None and result.write_reduction != "sum":
-        parts.append(f"write {result.write_reduction}: {result.write_evidence_tokens} evidence tokens, "
-                     f"scale {result.write_evidence_scale:g}")
-    return " · " + " · ".join(parts) if parts else ""
+def _latent_preference_notice(io, result, *, token_text=None, episode_id=None):
+    selection_notice(io, result, latent=True, token_text=token_text, episode_id=episode_id)
 
 
-def _online_learning_notice(io: TerminalIO, result: LearningResult) -> None:
-    weights = ", ".join(
-        f"{name}={value:g}" for name, value in result.new_group_weights.items()
-    )
-    io.write(
-        f"Online learning @ boundary {result.observation_boundary + 1}: "
-        f"selected token {result.chosen_token_id}, "
-        f"rank {result.old_policy_rank}, "
-        f"update norm {result.update_norm:.4g} · groups {weights}"
-        + _learning_gate_notice(result)
-        + _learning_controls_notice(result)
-    )
-
-
-def _latent_preference_notice(
-    io: TerminalIO, result: LatentPreferenceResult
-) -> None:
-    io.write(
-        f"Latent preference @ boundary {result.observation_boundary + 1}: "
-        f"selected token {result.chosen_token_id}, "
-        f"rank {result.old_policy_rank}, "
-        f"update norm {result.update_norm:.4g}, z norm {result.z_norm:.4g}"
-        + (f", fast update {result.fast_update_norm:.4g}, fast norm {result.fast_z_norm:.4g}"
-           if result.old_fast_z else "")
-        + _learning_gate_notice(result)
-        + _learning_controls_notice(result)
-    )
-
-
-def _write_learning_notice(io: TerminalIO, result: WriteLearningResult) -> None:
-    parts = [
-        f"Write learning @ boundary {result.boundary_after}: "
-        f"{result.token_count} typed tokens"
-    ]
-    if result.group_result is not None:
-        weights = ", ".join(
-            f"{name}={value:g}"
-            for name, value in result.group_result.new_group_weights.items()
-        )
-        parts.append(
-            f"group update norm {result.group_result.update_norm:.4g} · groups {weights}"
-            + _learning_controls_notice(result.group_result)
-        )
-    if result.latent_result is not None:
-        parts.append(
-            f"latent update norm {result.latent_result.update_norm:.4g}, "
-            f"z norm {result.latent_result.z_norm:.4g}"
-            + _learning_controls_notice(result.latent_result)
-        )
-    if any(r is not None and r.learning_gate == "sampler"
-           for r in (result.group_result, result.latent_result)):
-        excluded = sum(t.sampler_eligible is False for t in result.tokens)
-        parts.append(f"sampler gate: {excluded}/{result.token_count} tokens excluded; decay evaluated once")
-    io.write(" · ".join(parts))
+def _write_learning_notice(io, result, *, token_text=None, episode_id=None):
+    write_notice(io, result, token_text=token_text, episode_id=episode_id)
 
 
 def _live_edge_menu(
@@ -908,12 +842,15 @@ def _live_edge_menu(
             raw = io.read(
                 "[c]ontinue  [n N/off] budget  [s key=value] sampler  "
                 "([s random-seed] randomize)  [f N] fork  [fm] fork map  "
-                "[spr ID [--until Y | m]] replay  [p]roject  [e]nd  [q]uit > "
+                "[spr ID [--until Y | m]] replay  [learning] details  [p]roject  [e]nd  [q]uit > "
             )
         if raw is None:
             return "quit", None
         text = raw.strip()
         lower = text.lower()
+        if lower == "learning":
+            show_learning_details(io, episode_id=episode_id)
+            continue
         if lower in {"ls", "ls all"}:
             io.page(store.workspace_list(include_finished=lower == "ls all", current=episode_id))
             selected = io.read("Episode #number (Enter returns)> ")
@@ -1437,15 +1374,15 @@ def main(argv: list[str] | None = None) -> int:
                     divergence_policy=args.divergence_policy,
                     learner=learner,
                     on_learning_update=lambda result: _online_learning_notice(
-                        io, result
+                        io, result, token_text=backend.token_text, episode_id=episode_id
                     ),
                     latent_learner=latent_learner,
                     on_latent_learning_update=lambda result: _latent_preference_notice(
-                        io, result
+                        io, result, token_text=backend.token_text, episode_id=episode_id
                     ),
                     learn_from_write=args.learn_from_write,
                     on_write_learning_update=lambda result: _write_learning_notice(
-                        io, result
+                        io, result, token_text=backend.token_text, episode_id=episode_id
                     ),
                 )
                 try:

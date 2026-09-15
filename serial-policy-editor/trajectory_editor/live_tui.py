@@ -271,6 +271,7 @@ def action_preview(
         "p": "The note-after action begins on Enter.",
         "?": "Full command help opens on Enter.",
         "help": "Full command help opens on Enter.",
+        "learning": "Explain the latest teaching update without generating tokens.",
     }
     head = normalized_lower.split(maxsplit=1)[0] if normalized_lower else ""
     if raw == "/":

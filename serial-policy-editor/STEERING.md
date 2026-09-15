@@ -238,6 +238,33 @@ truncation boundary. With every token eligible, sampler mode contributes no new
 evidence. Save the launch flags alongside exported weights; the gate is a learner
 setting and must be supplied again when continuing learning in a later session.
 
+### Reading learning feedback
+
+The one-line notice explains whether the latest teaching choice supplied evidence,
+was skipped by the gate, changed memory through decay, or left memory unchanged.
+Type **`learning`** at a token choice or the live edge to open a scrollable report;
+Enter/Esc returns to the same choice. Opening the report generates no tokens and
+changes no weights.
+
+The report includes:
+
+- Chosen/proposed token text and IDs, pre-update policy rank, and separately labeled
+  policy and sampler probabilities. Sampler probability is after decoder filtering.
+- The gate's reason for admitting or skipping evidence and the rejection settings.
+- New learning before/after step clipping, decay, memory-bound adjustments, and net
+  movement. Slow and fast channels appear separately.
+- Memory size (`z norm`) before/after the update and the channel's maximum possible
+  token logit adjustment at the active strength. These are magnitudes, not confidence
+  or counts of remembered preferences; vector movements do not simply add.
+- Per-group changes and reasons frozen or controlled groups were skipped.
+- For Writes, each learner's evidence/skip counts, proposal agreement, individual
+  token ranks/gate decisions, reduction scale, and once-per-write decay.
+
+Only the latest teaching event in this session is retained in this view. It is an
+explicitly labeled historical report: Hold, replay, manual edits, and rewinds do
+not refresh it. Switching episodes never shows another episode's report. The
+persistent episode records remain available through the normal projection tools.
+
 ### Teacher-learning experiments
 
 All three controls are opt-in and available for both learners. Use the `--latent-`

@@ -30,6 +30,7 @@ from .episode_policy import (
     SeamlessRewindRequested,
 )
 from .episode_store import EpisodeStore
+from .learning_readout import show_learning_details
 from .episode_hash import token_prefix_sha256
 from .sampling import raw_rank
 from .tui import (
@@ -474,6 +475,9 @@ class InteractivePolicy:
                 if self._seamless_edge_boundary(observation.boundary + 1) == review_boundary:
                     raise SeamlessEdgeRequested(review_boundary)
                 raise SeamlessRewindRequested(review_boundary)
+            if raw.strip().lower() == "learning":
+                show_learning_details(self.io, episode_id=self.episode_id)
+                continue
             if raw == "" and review_boundary is None:
                 raw = str(observation.proposal_raw_rank)
             proposal_prefill_available = False

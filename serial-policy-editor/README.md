@@ -835,6 +835,11 @@ latent averaging behavior. Manual-group learning also sums its evidence and clip
 Neither learner changes the policy midway through the text. Accept, EOG,
 and replay remain non-learning paths.
 
+Learning notices now summarize the cause of an update or skip. Type **`learning`**
+at a token choice or the live edge for the latest teaching event's token evidence,
+learning/decay/clipping breakdown, and explained slow/fast memory sizes. The report
+opens on demand without generating tokens. See [reading learning feedback](STEERING.md#reading-learning-feedback).
+
 Three further experiments are available for both learners:
 `--latent-decay-on rejection` skips decay on agreement; `evidence` also skips it
 inside the learning dead zone. `--latent-write-reduction mean` or `sqrt` tempers

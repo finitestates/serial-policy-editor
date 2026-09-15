@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Replace opaque learning notices with compact explanations of gate skips,
+  learning, decay, and unchanged memory. Add the read-only `learning` command at
+  token choices and the live edge for the latest teaching event's slow/fast
+  learning, decay, clipping, memory magnitudes, and per-token Write evidence.
+  Keep detailed reports out of the one-line notice and label their historical scope.
+
 - Add opt-in teacher-learning controls for both manual groups and latent memory:
   `--{learning,latent}-decay-on {update,rejection,evidence}` preserves memory on
   agreement or gate skips; `--{learning,latent}-write-reduction {sum,mean,sqrt}`

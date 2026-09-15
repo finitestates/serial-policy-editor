@@ -360,6 +360,7 @@ HELP_TEXT = """Commands:
   t TEXT            insert continuation text (adds a joining space if needed)
   x TEXT            insert exact text
                     after `t ` or `x `, Tab inserts a literal tab character
+  learning           explain the latest teaching update (no tokens generated)
   h [N]              release control for N tokens (default: configured limit)
   h . [N]            hold through first token containing . ! ?, capped at N
   h | [N]            hold through first token containing a newline, capped at N

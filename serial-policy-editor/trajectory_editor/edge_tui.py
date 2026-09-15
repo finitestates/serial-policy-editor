@@ -73,6 +73,7 @@ def _edge_header(
         _command_row("f N", "fork at boundary N  ·  fm shows the fork map\n")
     )
     fragments.extend(_command_row("spr ID", "replay from another episode\n"))
+    fragments.extend(_command_row("learning", "explain the last teaching update\n"))
     fragments.extend(_command_row("p / project", "view the episode record\n"))
     fragments.extend(_command_row("e / end", "end and seal the episode\n"))
     fragments.extend(_command_row("q / quit", "leave without sealing\n"))

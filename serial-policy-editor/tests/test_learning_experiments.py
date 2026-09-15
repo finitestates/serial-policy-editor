@@ -14,6 +14,7 @@ from trajectory_editor.episode_cli import build_parser, main, _write_learning_no
 from trajectory_editor.episode_policy import _WriteLearningAccumulator
 from trajectory_editor.latent_preference import LatentPreferenceConfig, LatentPreferenceLearner
 from trajectory_editor.online_learning import OnlineLearningConfig, OnlineLearner
+from trajectory_editor.learning_readout import show_learning_details
 
 
 def memory_engine():
@@ -97,6 +98,7 @@ def test_write_reduction_counts_only_admitted_evidence_and_scales_both_channels(
     io = ScriptedIO([])
     _write_learning_notice(io, result)
     if reduction != 'sum':
+        show_learning_details(io)
         assert reduction in io.output[-1] and '2 evidence tokens' in io.output[-1]
 
 
