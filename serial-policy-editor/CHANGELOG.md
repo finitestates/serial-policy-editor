@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0.dev0 — lexical steering redesign
+## 0.4.0 — 2026-09-15
 
 - Load standalone relative lexical weights with `--reference`, without catalogs,
   groups, or learning. Normal reference behavior is global and independent of
@@ -23,6 +23,11 @@
   before clipping/decay in both teacher learners. Add severity, dead-zone,
   rejection, and decay controls to the manual group fitter and use analytical
   sparse gradients for its normal fixed-feature policy.
+- Carry forward optional fast/slow preference memory, persisted projection seeds,
+  decay, severity/dead-zone/rejection controls, and full-strength severity mode.
+  Add policy diagnostics and chunked feature construction to reduce memory spikes.
+- Apply explicit reference and preset imports across every replay segment while
+  preserving other source transitions. Clear token-based steering on model change.
 - Support references/presets and shared steering commands in the HTTP adapter.
 
 See [Steering](STEERING.md) for interfaces, limitations, and migration details.

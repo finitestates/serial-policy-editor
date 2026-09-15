@@ -1,6 +1,6 @@
-# SPE 0.3.8 headless preview
+# SPE 0.4.0 headless preview
 
-The 0.3.8 package includes a local browser editor and a small HTTP API over
+The 0.4.0 package includes a local browser editor and a small HTTP API over
 SPE's existing episode engine, runner, and SQLite workspace. The service owns
 one loaded model and one active episode. Opening or forking an episode switches
 that active state.
@@ -39,6 +39,20 @@ Whitespace is shown as dots in candidate labels; the underlying token text is
 unchanged. Raw probability is shown in the candidate list; the tooltip includes
 sampler probability.
 
+## References and group objectives
+
+The server accepts `--reference reference.yaml`, `--reference-strength N`,
+`--groups groups.yaml`, and `--biases biases.json`. Initial reference/preset
+settings apply when opening a new prompt; reopening an episode restores its
+saved policy. Group YAML supplies definitions for subsequent steering commands.
+
+Use `POST /api/session/steering` with the usual revision/request ID fields and a
+`command`, for example `b atmosphere +` or `b atmosphere off`. This uses the same
+semantic commands as the terminal. Objectives run during holds and writes;
+observation responses include `group_controls` diagnostics. The current browser
+interface has no dedicated steering controls; use the HTTP API or launch options.
+See [Steering](STEERING.md) for group semantics and preset export/import.
+
 ## HTTP contract
 
 All data responses use JSON. Send `Content-Type: application/json` for mutations.
@@ -66,6 +80,7 @@ model replacement is left to the terminal in this preview.
 | POST | `/api/session/actions` | `action`: existing SPE action object |
 | POST | `/api/session/fork` | `boundary`: visible token boundary in active episode |
 | POST | `/api/session/rewind` | `boundary`: permanently removes later history |
+| POST | `/api/session/steering` | `command`: semantic `b` command; updates the saved policy |
 | POST | `/api/session/settings` | Optional `sampling` object and `max_tokens` |
 | POST | `/api/session/close` | Release active episode, leaving its saved record open |
 | POST | `/api/session/end` | Seal without generating another token |

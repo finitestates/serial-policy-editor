@@ -1,26 +1,29 @@
-# Serial Policy Editor 0.3.8
+# Serial Policy Editor 0.4.0
 
 Serial Policy Editor (SPE) is a terminal editor for steering a local language
 model one token, text insertion, or delegated span at a time. Save your choices,
 rewind or fork a continuation, and replay the recorded editing procedure in a
 new context.
 
-**0.3.8 adds a complete model-specific bias and learning layer.** It includes
-human-readable YAML catalogs, compiled JSON catalogs, durable named groups,
-stateful lexical reference priors, opt-in online group and latent preference
-learning, and optional learning from typed writes. It also includes the
-persistent full-screen editor,
-scrollable context, multiline input,
-Ctrl+E input expansion, and performance improvements. The default hold is now
-100 tokens; use `--hold-default` to choose another value. Transient busy feedback
-has been removed to prevent layout shifts. Experimental history replacement and
-fork-edit variations are excluded from this release.
+**0.4.0 introduces adaptive group objectives and standalone lexical references.**
+Load relative term weights with `--reference`, define groups with YAML or
+commands, and activate promote, suppress, or maintain objectives with bare
+`b target +`, `-`, or `=`. Numeric amounts remain manual; `off` clears an
+activation. The compiler uses canonical runtime routes and keeps optional
+alternate decompositions for exploration.
+
+Teacher preference learning remains independent, with optional fast/slow
+memory, configurable severity and rejection, persisted projection seeds, and
+learning from typed writes. Full `biases.json` presets preserve references,
+groups, objectives, and learner vectors. The persistent terminal editor,
+multiline input, browser preview, and replay workflows remain available.
+The default hold is 100 tokens; use `--hold-default` to choose another value.
 
 Start with [installation](#install) and the [first-session walkthrough](#your-first-session).
 The rest of this guide covers the [editor](#the-editor), [live-edge menu](#live-edge-menu),
 [replay](#serial-policy-replay), [saved work](#persistence-and-plain-text),
 [projection](#projector), [troubleshooting](#troubleshooting), and [tests](#tests).
-See [the changelog](CHANGELOG.md) and [the 0.3.8 release notes](RELEASE_NOTES_0.3.8.md)
+See [the changelog](CHANGELOG.md) and [the 0.4.0 release notes](RELEASE_NOTES_0.4.0.md)
 for release history and the structured-file formats.
 
 ## Core ideas
@@ -785,7 +788,7 @@ not silently fitted to selections. See [teacher learning controls](STEERING.md#t
 
 ### Opt-in latent preference learning
 
-The independent latent learner is a second opt-in experiment. It derives a
+The latent preference learner is independent of group objectives. It derives a
 fixed 64-dimensional, unit-normalized feature vector for every vocabulary
 token from the loaded model's token/output embedding through a deterministic
 projection. It learns only an anonymous vector `z`; there are no named latent
@@ -881,9 +884,11 @@ The concrete projection seed is persisted with the vectors in sampler
 segments and full bias presets. Old records without a seed use 9137. Ordinary
 replay follows each original segment's seed and vectors and never rerolls a
 latent seed or performs fresh learning. Conflicting explicit seeds (including
-conflicts in later segments) are rejected; randomizing or replacing latent
-state during replay requires `--fixed-config`. Source-following replay keeps
-source latent state even when loading a bias preset. Changing the seed on
+conflicts in later segments) are rejected; randomizing the projection seed
+during replay requires `--fixed-config`. An explicit `--biases` preset replaces
+its corresponding steering fields, including latent vectors and seed, in every
+replay segment. An explicit `--reference` similarly overrides reference state;
+other fields continue to follow the source. Changing the seed on
 resume, fork, or fixed-config replay clears both latent vectors and prints a
 reset notice, because their coordinates would otherwise have changed meaning.
 

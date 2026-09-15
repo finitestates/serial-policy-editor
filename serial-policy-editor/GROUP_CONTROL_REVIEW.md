@@ -1,7 +1,7 @@
 # Group-control implementation review
 
 Implemented from `70363ab` on `codex/group-control` in an independent development
-checkout. The original checkout remains untouched. Package version: `0.4.0.dev0`.
+checkout before promotion to `main` for release. Package version: `0.4.0`.
 
 ## Result
 
@@ -70,7 +70,9 @@ See [STEERING.md](STEERING.md) for commands, YAML examples, and preset semantics
 ## Validation
 
 Final full test run: **889 passed, 15 skipped**. This included the local HTTP
-integration test. The new controller tests cover:
+integration test. During release validation, one earlier run hit an intermittent
+terminal resize/input assertion; it passed in isolation and on the full rerun.
+The new controller tests cover:
 
 - Directional changes in completed single-token and phrase appearances during
   deterministic autonomous generation, plus bounded feedback and maintain mode.
@@ -87,13 +89,14 @@ integration test. The new controller tests cover:
   typed-evidence aggregation.
 
 `git diff --check` passed. A wheel built successfully with all three new modules;
-its CLI reports `0.4.0.dev0`.
+its CLI reports `0.4.0`.
 
 ## Practical limits
 
 The generation checks use deterministic test backends. Real-model quality and
 latency have not been benchmarked; a model backend is not installed in the test
-environment. This is a development implementation ready for model trials.
+environment. The user subsequently tested the implementation successfully;
+that qualitative check is separate from a controlled model benchmark.
 
 The initial appearance baseline is an estimate, especially for phrases. Control
 is bounded and uses no lookahead, so shared token fragments, model context, and

@@ -1,4 +1,4 @@
-# Serial Policy Editor 0.3.8
+# Serial Policy Editor 0.4.0
 
 Steer a local language model in your terminal: choose individual tokens, insert
 text, delegate a span, and rewind or fork the result. Serial Policy Replay (SPR)
@@ -9,12 +9,21 @@ SPE supports **llama.cpp (GGUF)** and **Hugging Face Transformers (local model
 directories)**. A SQLite workspace keeps episodes, editing actions, and token
 evidence for resumption, replay, and text or evidence projection.
 
-**0.3.8 adds model-specific bias catalogs, durable bias groups, stateful lexical
-priors, and opt-in learning from token choices and typed writes.** It retains
-the persistent full-screen editor, scrollable context, multiline input, and
-performance improvements from 0.3.6. The default hold is 100 tokens; use
-`--hold-default` to choose another value. Calibration and experimental history
-replacement/fork-edit work are not part of this release.
+**0.4.0 separates lexical references, adaptive group objectives, and teacher
+preference learning.** Load relative term weights with `--reference`, define
+groups with `--groups` or commands, then use `b group +`, `-`, or `=` to ask for
+more, less, or approximately the current appearance rate. Explicit numeric
+biases remain available, and `biases.json` carries the complete steering state.
+Canonical token routes serve runtime steering; optional compiler exploration
+preserves alternate decompositions for inspection.
+
+The release also includes slow/fast preference memory, persisted projection
+seeds, configurable learning severity and rejection, policy diagnostics, and
+lower-memory feature construction. It retains the terminal editor, browser
+preview, and replay workflows. The default hold is 100 tokens.
+
+See the [steering guide](serial-policy-editor/STEERING.md) and
+[0.4.0 release notes](serial-policy-editor/RELEASE_NOTES_0.4.0.md).
 
 ## Getting started
 
@@ -157,6 +166,10 @@ The user in this program is referred to as "Teacher" as a reference to Teacher-f
 - [Troubleshooting and backing up work](serial-policy-editor/README.md#troubleshooting)
 - [Testing and real-model smoke checks](serial-policy-editor/README.md#tests)
 - [Changelog](serial-policy-editor/CHANGELOG.md)
+- [Lexical references, group objectives, and learner weights](serial-policy-editor/STEERING.md)
+- [Group/catalog YAML reference](serial-policy-editor/BIAS_CATALOG_YAML.md)
+- [Browser editor and HTTP API](serial-policy-editor/HEADLESS.md)
+- [0.4.0 release notes](serial-policy-editor/RELEASE_NOTES_0.4.0.md)
 - [0.3.8 release notes](serial-policy-editor/RELEASE_NOTES_0.3.8.md)
 - [0.3.6 release notes](serial-policy-editor/RELEASE_NOTES_0.3.6.md)
 - [Historical architecture overview (0.3.3)](serial-policy-editor/ARCHITECTURE_0.3.3.md)
