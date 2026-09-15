@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add experimental `--learning-gate sampler` and `--latent-learning-gate sampler`
+  to learn at full severity only from teacher tokens excluded by the actual
+  sampler filters. Preserve rank-based defaults and independent decay. Include
+  per-token eligibility in write evidence and explain gating in learning readouts.
+
 - Add `b GROUP learn on` / `off` to opt manual groups into online teacher
   learning or freeze their current amounts without editing a preset. Resolve
   groups directly from loaded YAML/catalogs and show eligibility in `b` status.

@@ -351,6 +351,39 @@ The stronger version should make the difference easier to notice where the
 compiled lexical branches compete, but doesn't promise 10 shadows per outline.
 If the isolated result is useful, add the light reference to 11 in a new run.
 
+## 13 — Learn from choices outside the sampler's candidate set
+
+```bash
+# Your fixed-rank gate: ignore policy ranks 1–5, learn fully beyond them,
+# with a chosen-versus-proposed feature direction when they differ.
+trial 13-rank-gate "${LATENT[@]}" \
+  --latent-dead-zone-rank 5 --latent-no-severity-attenuation \
+  --latent-rejection-strength 1
+
+# Replace that cutoff with actual sampler eligibility. The other launch
+# settings, including sampler seed and latent memory limits, stay the same.
+trial 13-sampler-gate "${LATENT[@]}" \
+  --latent-learning-gate sampler --latent-rejection-strength 1
+```
+
+**Expect:** the second run learns from tokens your sampler could not emit, while
+ignoring new evidence from alternatives it already considers. Rank 15 may survive
+in a broad distribution, while rank 4 may be excluded in a concentrated one.
+Sampler mode gives excluded choices full severity and ignores rank severity flags.
+It retains the existing update direction; it does not stop an individual step
+at the exact admission threshold or promise admission after one correction.
+
+For group learning, add `--learning-gate sampler` to 03 or 04 and use their same
+`b GROUP learn on` commands. Add `--learn-from-write` to compare typed-span learning;
+coincidental agreement remains supported and eligible tokens supply zero evidence.
+
+Readouts distinguish already-eligible choices from excluded choices. **Configured
+decay still applies**, including to fast memory, so a skipped correction can still
+show memory movement. These examples keep decay at the shared baseline of zero.
+To test only the new gate against another configuration, retain that configuration's
+decay, strength, rate, and rejection settings. Leave sampler filters enabled:
+with the entire vocabulary eligible, this mode supplies no new evidence.
+
 ## A small protocol that should make your report useful
 
 1. For group trials, activate at the same boundary and generate at least 256

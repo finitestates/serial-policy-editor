@@ -98,6 +98,8 @@ class WriteTokenLearning:
     policy_probability: float
     severity: float
     loss: float
+    sampler_eligible: bool | None = None
+    sampler_probability: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -107,6 +109,8 @@ class WriteTokenLearning:
             "old_policy_probability": self.policy_probability,
             "severity": self.severity,
             "loss": self.loss,
+            "sampler_eligible": self.sampler_eligible,
+            "sampler_probability": self.sampler_probability,
         }
 
 
@@ -140,7 +144,8 @@ class WriteLearningResult:
             payload["latent_token_observations"] = [
                 {key: getattr(result, key) for key in (
                     "observation_boundary", "chosen_token_id", "proposal_token_id",
-                    "proposal_rejected", "severity", "rejection_strength")}
+                    "proposal_rejected", "severity", "rejection_strength",
+                    "learning_gate", "sampler_eligible", "sampler_probability")}
                 for result in self.latent_token_results
             ]
         return payload
@@ -198,6 +203,8 @@ class _WriteLearningAccumulator:
                 policy_probability=source.old_policy_probability,
                 severity=source.severity,
                 loss=source.loss,
+                sampler_eligible=source.sampler_eligible,
+                sampler_probability=source.sampler_probability,
             )
         )
         if group_result is not None:

@@ -281,6 +281,10 @@ def build_parser() -> argparse.ArgumentParser:
     learning.add_argument("--learning-rejection-strength", type=float, default=0.)
     learning.add_argument("--learning-decay", type=float, default=0.)
     learning.add_argument(
+        "--learning-gate", choices=("rank", "sampler"), default="rank",
+        help="sampler replaces rank severity: learn at full severity only from filtered-out tokens; decay is unchanged",
+    )
+    learning.add_argument(
         "--learnable-groups",
         nargs="+",
         metavar="GROUP",
@@ -311,6 +315,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="use severity 1 outside the dead zone; retain learning step and memory norm limits",
     )
     latent.add_argument("--latent-dead-zone-rank", type=_positive_int, default=1)
+    latent.add_argument(
+        "--latent-learning-gate", choices=("rank", "sampler"), default="rank",
+        help="sampler replaces rank severity: learn at full severity only from filtered-out tokens; decay is unchanged",
+    )
     latent.add_argument("--latent-rejection-strength", type=float, default=0.0)
     latent.add_argument("--latent-fast-slow", action="store_true")
     latent.add_argument("--latent-fast-learning-rate", type=float)
@@ -498,6 +506,7 @@ def _latent_config_from_args(args: argparse.Namespace) -> LatentPreferenceConfig
         fast_learning_rate=args.latent_fast_learning_rate, fast_decay=args.latent_fast_decay,
         fast_strength=args.latent_fast_strength, fast_max_step=args.latent_fast_max_step,
         fast_max_norm=args.latent_fast_max_norm,
+        learning_gate=args.latent_learning_gate,
     )
 
 
@@ -772,6 +781,14 @@ def _sampler_summary(config: SamplingConfig) -> str:
     return summary
 
 
+def _learning_gate_notice(result) -> str:
+    if result.learning_gate != "sampler":
+        return ""
+    if result.sampler_eligible:
+        return " · sampler gate: already eligible (no new evidence; configured decay still applies)"
+    return " · sampler gate: excluded (full-severity evidence)"
+
+
 def _online_learning_notice(io: TerminalIO, result: LearningResult) -> None:
     weights = ", ".join(
         f"{name}={value:g}" for name, value in result.new_group_weights.items()
@@ -781,6 +798,7 @@ def _online_learning_notice(io: TerminalIO, result: LearningResult) -> None:
         f"selected token {result.chosen_token_id}, "
         f"rank {result.old_policy_rank}, "
         f"update norm {result.update_norm:.4g} · groups {weights}"
+        + _learning_gate_notice(result)
     )
 
 
@@ -794,6 +812,7 @@ def _latent_preference_notice(
         f"update norm {result.update_norm:.4g}, z norm {result.z_norm:.4g}"
         + (f", fast update {result.fast_update_norm:.4g}, fast norm {result.fast_z_norm:.4g}"
            if result.old_fast_z else "")
+        + _learning_gate_notice(result)
     )
 
 
@@ -815,6 +834,10 @@ def _write_learning_notice(io: TerminalIO, result: WriteLearningResult) -> None:
             f"latent update norm {result.latent_result.update_norm:.4g}, "
             f"z norm {result.latent_result.z_norm:.4g}"
         )
+    if any(r is not None and r.learning_gate == "sampler"
+           for r in (result.group_result, result.latent_result)):
+        excluded = sum(t.sampler_eligible is False for t in result.tokens)
+        parts.append(f"sampler gate: {excluded}/{result.token_count} tokens excluded; configured decay applies once")
     io.write(" · ".join(parts))
 
 
@@ -1180,6 +1203,7 @@ def main(argv: list[str] | None = None) -> int:
                 severity_cap=args.learning_severity_cap, dead_zone_rank=args.learning_dead_zone_rank,
                 no_severity_attenuation=args.learning_no_severity_attenuation,
                 rejection_strength=args.learning_rejection_strength, decay=args.learning_decay,
+                learning_gate=args.learning_gate,
             )
 
             if args.resume is not None:

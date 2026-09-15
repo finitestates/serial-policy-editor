@@ -39,10 +39,13 @@ class OnlineLearningConfig:
     no_severity_attenuation: bool = False
     rejection_strength: float = 0.0
     decay: float = 0.0
+    learning_gate: str = "rank"
 
     def __post_init__(self) -> None:
         if type(self.enabled) is not bool:
             raise EditorError("online learning enabled must be a boolean")
+        if self.learning_gate not in ("rank", "sampler"):
+            raise EditorError("learning gate must be rank or sampler")
         learning_rate = _finite_number(
             self.learning_rate, "learning_rate", nonnegative=True
         )
@@ -112,6 +115,9 @@ class LearningResult:
     decay: float = 0.0
     evidence: dict[str, float] | None = None
     skipped: dict[str, str] | None = None
+    learning_gate: str = "rank"
+    sampler_eligible: bool | None = None
+    sampler_probability: float | None = None
 
     @property
     def updated_sampling(self) -> SamplingConfig:
@@ -137,6 +143,8 @@ class LearningResult:
             "rejection_strength": self.rejection_strength,
             "proposal_token_id": self.proposal_token_id, "proposal_rejected": self.proposal_rejected,
             "decay": self.decay, "evidence": self.evidence or {}, "skipped": self.skipped or {},
+            "learning_gate": self.learning_gate, "sampler_eligible": self.sampler_eligible,
+            "sampler_probability": self.sampler_probability,
         }
 
 
@@ -214,7 +222,12 @@ class OnlineLearner:
         statistics = observation.statistics
         old_policy_rank = statistics.policy_rank(chosen_token_id)
         old_policy_probability = float(statistics.policy_probabilities[chosen_token_id])
-        severity = self._severity(old_policy_rank)
+        # Membership, rather than probability > 0, also handles numerical
+        # underflow for a token that survived the actual decoder filters.
+        sampler_eligible = bool(chosen_token_id in statistics.distribution.ids)
+        sampler_probability = statistics.distribution.probability(chosen_token_id)
+        severity = (float(not sampler_eligible) if self.config.learning_gate == "sampler"
+                    else self._severity(old_policy_rank))
         loss = self._loss(statistics, chosen_token_id)
         groups = tuple(sampling.bias_groups)
         old_weights = {group.name: float(group.bias) for group in groups}
@@ -296,6 +309,8 @@ class OnlineLearner:
             proposal_token_id=observation.proposal_token_id,
             proposal_rejected=observation.proposal_token_id != chosen_token_id,
             decay=self.config.decay, evidence=evidence, skipped=skipped,
+            learning_gate=self.config.learning_gate, sampler_eligible=sampler_eligible,
+            sampler_probability=sampler_probability,
         )
 
     def _apply_evidence(self, old, evidence):
@@ -314,4 +329,5 @@ class OnlineLearner:
         return replace(first, sampling=replace(sampling, bias_groups=tuple(replace(g, bias=weights[g.name]) for g in sampling.bias_groups)),
                        new_group_weights=weights, group_deltas=deltas, evidence=evidence,
                        gradients={name: sum(r.gradients[name] for r in results) / len(results) for name in weights},
-                       update_norm=math.sqrt(sum(d*d for d in deltas.values())))
+                       update_norm=math.sqrt(sum(d*d for d in deltas.values())),
+                       sampler_eligible=None, sampler_probability=None)

@@ -48,10 +48,13 @@ class LatentPreferenceConfig:
     fast_strength: float | None = None
     fast_max_step: float | None = None
     fast_max_norm: float | None = None
+    learning_gate: str = "rank"
 
     def __post_init__(self) -> None:
         if type(self.enabled) is not bool:
             raise EditorError("latent preference enabled must be a boolean")
+        if self.learning_gate not in ("rank", "sampler"):
+            raise EditorError("latent learning gate must be rank or sampler")
         if type(self.dimension) is not int or self.dimension < 1:
             raise EditorError("latent preference dimension must be positive")
         _finite_number(self.learning_rate, "latent learning_rate", nonnegative=True)
@@ -122,6 +125,9 @@ class LatentPreferenceResult:
     fast_learning_delta: tuple[float, ...] = ()
     fast_learning_step_norm: float = 0.0
     fast_decay_norm: float = 0.0
+    learning_gate: str = "rank"
+    sampler_eligible: bool | None = None
+    sampler_probability: float | None = None
 
     @property
     def updated_sampling(self) -> SamplingConfig:
@@ -164,6 +170,9 @@ class LatentPreferenceResult:
             "fast_learning_delta": list(self.fast_learning_delta),
             "fast_learning_step_norm": self.fast_learning_step_norm,
             "fast_decay_norm": self.fast_decay_norm,
+            "learning_gate": self.learning_gate,
+            "sampler_eligible": self.sampler_eligible,
+            "sampler_probability": self.sampler_probability,
         }
 
 
@@ -250,7 +259,10 @@ class LatentPreferenceLearner:
         old_policy_probability = float(
             statistics.policy_probabilities[chosen_token_id]
         )
-        severity = self._severity(old_policy_rank)
+        sampler_eligible = bool(chosen_token_id in statistics.distribution.ids)
+        sampler_probability = statistics.distribution.probability(chosen_token_id)
+        severity = (float(not sampler_eligible) if self.config.learning_gate == "sampler"
+                    else self._severity(old_policy_rank))
         loss = self._loss(old_policy_probability)
         dimension = len(
             sampling.latent_preference_z or sampling.latent_preference_fast_z
@@ -365,6 +377,8 @@ class LatentPreferenceLearner:
             fast_learning_delta=tuple(float(v) for v in fast_learning_delta) if self.config.fast_slow else (),
             fast_learning_step_norm=float(np.linalg.norm(fast_learning_delta)),
             fast_decay_norm=fast_decay_norm,
+            learning_gate=self.config.learning_gate, sampler_eligible=sampler_eligible,
+            sampler_probability=sampler_probability,
         )
 
     def _channel(self, old_z, raw_delta, decay, max_step, max_norm):
@@ -420,4 +434,5 @@ class LatentPreferenceLearner:
                        learning_evidence=tuple(evidence),
                        learning_step_norm=float(np.linalg.norm(step)),
                        policy_weighted_mean_features=tuple(np.mean([r.policy_weighted_mean_features for r in results], axis=0)),
+                       sampler_eligible=None, sampler_probability=None,
                        **extra)

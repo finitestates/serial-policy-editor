@@ -200,6 +200,42 @@ use a sparse analytical gradient. Both teacher learners sum typed-span evidence,
 then clip and decay once. Interactive steering edits refresh the authoritative
 precommit observation before either learner runs.
 
+### Experimental sampler eligibility gate
+
+Use `--latent-learning-gate sampler` for the latent learner and
+`--learning-gate sampler` for the manual group fitter. Both default to `rank`,
+which preserves the existing rank dead zone and severity behavior.
+
+```bash
+policy-editor --model model.gguf --latent-preference \
+  --latent-learning-gate sampler --latent-rejection-strength 1
+```
+
+Sampler mode replaces rank severity with a binary decision at each precommit
+observation: a chosen token already surviving the actual decoder filters supplies
+zero new evidence; an excluded token supplies full-severity evidence. This includes
+temperature, top-k, top-p, min-p, and all current steering. Membership in the final
+surviving set is authoritative, even if numerical underflow makes a surviving
+token's probability zero. With greedy temperature zero, only the top token survives.
+
+In sampler mode, the rank dead zone, severity cap, and no-attenuation flags have
+no effect. Learning rate, rejection strength, clipping, group eligibility, and
+memory limits retain their existing meaning. Gradients still use the untruncated
+policy, so filtered-out teacher choices can teach useful corrections.
+
+**Decay remains independent:** an already-eligible choice supplies no evidence,
+but configured decay still applies. This gate is not a no-decay-on-accept flag.
+For typed writes, each token is evaluated after the preceding written tokens;
+evidence is summed and clipping/decay happen once for the complete write as before.
+Readouts identify eligibility skips and report how many written tokens were excluded.
+Learning records include the gate, eligibility, and pre-update sampling probability.
+
+This experiment changes which choices teach, using the existing update rule. It
+does not guarantee admission in one step or calibrate an update to the exact
+truncation boundary. With every token eligible, sampler mode contributes no new
+evidence. Save the launch flags alongside exported weights; the gate is a learner
+setting and must be supplied again when continuing learning in a later session.
+
 ## Export and import `biases.json`
 
 ```bash
