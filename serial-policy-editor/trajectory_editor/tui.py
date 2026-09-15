@@ -319,6 +319,7 @@ class TeacherCommand:
     bias_group_name: str | None = None
     bias_group_members: tuple[str, ...] | None = None
     bias_group_member_bare: tuple[bool, ...] | None = None
+    bias_learnable: bool | None = None
 
     @property
     def bias_text(self) -> str | None:
@@ -340,6 +341,9 @@ HELP_TEXT = """Commands:
   accept             commit the sampled proposal
   b wings + / - / =  adapt group appearance: promote / suppress / maintain
   b wings off        disable this target (optional after/until scope)
+  b wings learn on / off
+                    opt a manual group into teacher fitting / freeze its amount
+                    requires --online-learning; clear appearance objectives first
   b {wings, scales, claws} +0.5          bias several targets at once
   b {wings, scales} + after {dragon, wyvern} until "."
                     braces are comma-separated human text; quoted items stay exact
@@ -623,6 +627,18 @@ def parse_bias_command(raw: str, *, vocabulary_size: int) -> TeacherCommand | No
     if raw.strip() in {"b", "groups"}:
         return TeacherCommand(CommandKind.BIAS, bias_status=True)
     quoted = r'"(?:[^"\\]|\\.)*"'
+    learning_match = re.fullmatch(
+        r"b\s+(?P<name>@?[A-Za-z_][A-Za-z0-9_.-]*)\s+learn\s+(?P<state>on|off)",
+        raw.strip(),
+    )
+    if learning_match is not None:
+        return TeacherCommand(
+            CommandKind.BIAS,
+            bias_group_name=learning_match.group("name"),
+            bias_learnable=learning_match.group("state") == "on",
+        )
+    if re.match(r"b\s+@?[A-Za-z_][A-Za-z0-9_.-]*\s+learn(?:\s|$)", raw.strip()):
+        raise EditorError("use b GROUP learn on or b GROUP learn off; learning toggles are group-wide")
     group_match = re.fullmatch(
         r"b\s+(?P<name>[A-Za-z_][A-Za-z0-9_.-]*)\s*->\s*(?P<members>\{.*\})",
         raw.strip(),

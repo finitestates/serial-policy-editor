@@ -781,10 +781,13 @@ manual rules and rejects active adaptive objectives.
 
 ### Opt-in online group learning
 
-Appearance objectives run independently of teacher fitting. The older
-`--online-learning` fitter remains for manual group records marked `learnable`.
-New command-created groups use explicit objectives or manual amounts and are
-not silently fitted to selections. See [teacher learning controls](STEERING.md#teacher-preference-learning).
+Appearance objectives run independently of teacher fitting. Start with
+`--online-learning`, define or load a group, then use `b GROUP learn on` to let
+your selections adjust its manual amount. Use `b GROUP learn off` to freeze the
+amount, and `b` to inspect learning eligibility. New groups start with learning
+off; membership and numeric edits preserve your explicit choice. Clear any
+appearance objectives before enabling learning for that group.
+See [teacher learning controls](STEERING.md#teacher-preference-learning).
 
 ### Opt-in latent preference learning
 

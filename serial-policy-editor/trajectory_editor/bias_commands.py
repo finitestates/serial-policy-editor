@@ -87,6 +87,27 @@ def apply_bias_command(command, backend, sampling, observation, resolve_candidat
     if command.bias_status:
         return sampling, []
     groups = {g.name: g for g in sampling.bias_groups}
+    if command.bias_learnable is not None:
+        name = command.bias_group_name
+        required_catalog = name.startswith("@")
+        name = name.removeprefix("@")
+        group = None if required_catalog else groups.get(name)
+        if group is None:
+            entry = catalog.require(name) if required_catalog and catalog is not None else (
+                catalog.resolve(name) if catalog is not None else None)
+            if entry is None or entry.kind != "group":
+                raise EditorError(f"Unknown group {name!r}; define it with b {name} -> {{members}} or --groups first")
+            group = groups.get(name) or _entry_group(entry)
+        if command.bias_learnable and any(c.group == name for c in sampling.group_controls):
+            raise EditorError(
+                f"Group {name!r} has an appearance objective; clear it with b {name} off "
+                "(using the matching after/until scope for scoped objectives), then retry learn on")
+        group = replace(group, learnable=command.bias_learnable,
+                        enabled=True if command.bias_learnable else group.enabled)
+        groups[name] = group
+        state = "on (requires --online-learning)" if group.learnable else "off (amount frozen)"
+        return replace(sampling, bias_groups=tuple(groups.values())), [
+            ("bias-group", {"group": group.to_dict()}, f"Group {name!r} learning {state}", group.bias)]
     if command.bias_group_name is not None:
         name = command.bias_group_name
         existing = groups.get(name)
@@ -106,7 +127,8 @@ def apply_bias_command(command, backend, sampling, observation, resolve_candidat
             surfaces.extend(target.surfaces)
         group = BiasGroup(name, tuple(rules.values()), bias=existing.bias if existing else 0.,
                           members=tuple(dict.fromkeys(members)), surfaces=tuple(dict.fromkeys(surfaces)),
-                          enabled=existing.enabled if existing else True, learnable=False)
+                          enabled=existing.enabled if existing else True,
+                          learnable=existing.learnable if existing else False)
         groups[name] = group
         return replace(sampling, bias_groups=tuple(groups.values())), [
             ("bias-group", {"group": group.to_dict()}, f"Group {name!r} · {len(group.members)} members", group.bias)]
@@ -174,7 +196,7 @@ def apply_bias_command(command, backend, sampling, observation, resolve_candidat
                 controls.pop(key, None)
                 step = command.bias_amount * (1 if command.bias_operator == "+" else -1)
                 if not triggers:
-                    group = replace(group, bias=group.bias + step, enabled=True, learnable=False)
+                    group = replace(group, bias=group.bias + step, enabled=True)
                     groups[group.name] = group
                     updates.append(("bias-group", {"group": group.to_dict()}, f"Group {group.name!r} manual", group.bias))
                 else:

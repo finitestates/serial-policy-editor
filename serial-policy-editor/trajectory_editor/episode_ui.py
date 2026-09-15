@@ -529,7 +529,9 @@ class InteractivePolicy:
             if command.kind == CommandKind.BIAS:
                 from .bias_commands import apply_bias_command
                 if command.bias_status:
-                    lines = [f"{g.name}: manual {g.bias:+g}; {len(g.members)} members"
+                    lines = [f"{g.name}: manual {g.bias:+g}; {len(g.members)} members; "
+                             f"learnable {'on' if g.learnable else 'off'}; "
+                             f"{'enabled' if g.enabled else 'disabled'}"
                              for g in engine.sampling.bias_groups]
                     for row in observation.statistics.group_control_diagnostics:
                         if row["active"]:

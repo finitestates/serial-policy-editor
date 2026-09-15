@@ -161,10 +161,36 @@ projection seed, and strengths remain ordinary serializable learner weights.
 Group objectives do not use rank severity or interpret autonomous samples as
 preferences.
 
-The older `--online-learning` fitter remains available for manual group records
-explicitly marked `learnable: true`. New command-created groups are not fitted
-to teacher choices. Appearance-controlled groups are always excluded from this
-fitter. Disabled and frozen groups remain unchanged.
+The `--online-learning` fitter remains available for manual groups. Launch with
+it enabled, then opt in at the teacher prompt:
+
+```bash
+policy-editor --model model.gguf --groups groups.yaml --online-learning
+```
+
+```text
+b atmosphere learn on
+b
+b atmosphere learn off
+```
+
+`learn on` enables the group and permits teacher fitting, resolving its definition
+directly from loaded group YAML/catalogs if needed. `learn off` freezes its current
+amount without removing its steering effect. New groups default to learning off;
+membership and numeric edits preserve an existing group's learning choice.
+`b` shows each group's `learnable` and enabled state. `--learnable-groups`, if
+supplied, still restricts which opted-in groups can learn; it does not opt them in.
+
+Appearance-controlled groups are always excluded from this fitter. `learn on`
+rejects groups with an appearance objective; use `b atmosphere off` first (and
+the matching `after … until …` for each scoped objective). Activating an appearance
+objective or clearing an unscoped target switches its learning off. Group learning
+is group-wide, so the toggle itself does not accept an `after` scope.
+
+The choice persists in episodes and bias presets as `learnable: true` / `false`.
+Older preset records omitting that field default to true for compatibility.
+The toggle does not enable the session's learner: launch with `--online-learning`.
+Disabled and frozen groups remain unchanged by the fitter.
 
 The manual fitter supports `--learning-severity-cap`,
 `--learning-dead-zone-rank`, `--learning-no-severity-attenuation`,

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Add `b GROUP learn on` / `off` to opt manual groups into online teacher
+  learning or freeze their current amounts without editing a preset. Resolve
+  groups directly from loaded YAML/catalogs and show eligibility in `b` status.
+  Preserve the learning choice across membership and numeric edits. Appearance
+  objectives remain separate and must be cleared before enabling group learning.
+
 ## 0.4.0 — 2026-09-15
 
 - Load standalone relative lexical weights with `--reference`, without catalogs,

@@ -284,7 +284,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--learnable-groups",
         nargs="+",
         metavar="GROUP",
-        help="restrict online learning to these named bias groups",
+        help="restrict online learning to these groups; opt them in with b GROUP learn on",
     )
     learning.add_argument(
         "--learn-from-write",

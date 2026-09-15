@@ -200,6 +200,25 @@ def test_runtime_bias_group_command_preserves_bare_and_quoted_members() -> None:
     assert command.bias_group_member_bare == (True, False)
 
 
+@pytest.mark.parametrize('target', ('nautical', '@nautical', 'scene.motion'))
+@pytest.mark.parametrize('state', ('on', 'off'))
+def test_group_learning_toggle(target, state) -> None:
+    command = parse(f'b {target} learn {state}')
+    assert command.kind == CommandKind.BIAS
+    assert command.bias_group_name == target
+    assert command.bias_learnable is (state == 'on')
+    assert command.bias_group_members is None
+
+
+@pytest.mark.parametrize('raw', ('b nautical learn', 'b nautical learn yes',
+                                  'b nautical learn on after dragon',
+                                  'b nautical learn off after dragon',
+                                  'b nautical learn off 2'))
+def test_invalid_group_learning_toggle(raw) -> None:
+    with pytest.raises(EditorError):
+        parse(raw)
+
+
 @pytest.mark.parametrize('rank', (13, 499, 700, 1000))
 def test_rank_selection_does_not_require_menu_exposure(rank) -> None:
     assert parse(str(rank)).action.selected_rank == rank

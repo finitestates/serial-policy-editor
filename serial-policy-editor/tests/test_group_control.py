@@ -10,7 +10,7 @@ from trajectory_editor.bias_catalog import CompileOptions, compile_term, compile
 from trajectory_editor.bias_commands import apply_bias_command
 from trajectory_editor.bias_presets import load_bias_preset, project_biases
 from trajectory_editor.bias_rules import BiasGroup, BiasRule, routes_for_catalog_entry
-from trajectory_editor.domain import SamplingConfig
+from trajectory_editor.domain import EditorError, SamplingConfig
 from trajectory_editor.episode_actions import Hold, SelectRawRank
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_lifecycle import _create_episode
@@ -26,6 +26,116 @@ from trajectory_editor.tui import parse_bias_command
 
 def group(name="concrete", route=(3,), **kwargs):
     return BiasGroup(name, (BiasRule(routes=(route,), bias=0),), **kwargs)
+
+
+def edit_group(engine, text, catalog=None):
+    command = parse_bias_command(text, vocabulary_size=engine.backend.vocabulary_size())
+    sampling, _ = apply_bias_command(command, engine.backend, engine.sampling,
+                                     engine.observe(), lambda n: None, catalog)
+    engine.sampling = sampling
+    return sampling
+
+
+@pytest.mark.parametrize('target', ('concrete', '@concrete'))
+def test_learning_toggle_resolves_yaml_group_and_freezes_learned_amount(tmp_path, target):
+    backend = ConformingFakeBackend()
+    path = tmp_path / 'groups.yaml'
+    path.write_text('defaults:\n  cases: [original]\n  plural: false\n  leading_space: false\n'
+                    'groups:\n  concrete: [C]\n')
+    from trajectory_editor.bias_catalog import load_yaml_source
+    catalog = compile_catalog(load_yaml_source(path), backend)
+    engine = EpisodeEngine(backend, initial_token_ids=[7], sampling=SamplingConfig())
+    sampling = edit_group(engine, f'b {target} learn on', catalog)
+    assert sampling.bias_groups[0].learnable and sampling.bias_groups[0].enabled
+    learner = OnlineLearner(enabled=True, no_severity_attenuation=True)
+    result = learner.update(engine.observe(), 3, sampling)
+    assert result.group_deltas['concrete'] > 0
+    engine.sampling = result.sampling
+    amount = result.new_group_weights['concrete']
+    frozen = edit_group(engine, 'b concrete learn off')
+    assert frozen.bias_groups[0].bias == amount
+    assert frozen.bias_groups[0].enabled and not frozen.bias_groups[0].learnable
+    assert frozen.bias_groups[0].effective_rules()
+    assert learner.update(engine.observe(), 3, frozen).sampling == frozen
+
+
+def test_learning_choice_survives_membership_and_numeric_edits():
+    engine = EpisodeEngine(ConformingFakeBackend(), initial_token_ids=[7], sampling=SamplingConfig())
+    assert not edit_group(engine, 'b concrete -> {C}').bias_groups[0].learnable
+    assert not edit_group(engine, 'b concrete +0.5').bias_groups[0].learnable
+    edit_group(engine, 'b concrete learn on')
+    assert edit_group(engine, 'b concrete -> {B}').bias_groups[0].learnable
+    current = edit_group(engine, 'b concrete +0.5').bias_groups[0]
+    assert current.learnable and current.bias == 1
+    edit_group(engine, 'b concrete learn off')
+    assert not edit_group(engine, 'b concrete -> {A}').bias_groups[0].learnable
+    assert not edit_group(engine, 'b concrete +0.5').bias_groups[0].learnable
+
+
+@pytest.mark.parametrize('suffix', ('', ' after "P" until "!"'))
+def test_learning_toggle_rejects_objectives_without_mutating_them(suffix):
+    engine = EpisodeEngine(ConformingFakeBackend(), initial_token_ids=[7],
+                           sampling=SamplingConfig(bias_groups=(group(learnable=False),)))
+    controlled = edit_group(engine, 'b concrete +' + suffix)
+    with pytest.raises(EditorError, match='appearance objective'):
+        edit_group(engine, 'b concrete learn on')
+    assert engine.sampling == controlled
+    edit_group(engine, 'b concrete off' + suffix)
+    assert edit_group(engine, 'b concrete learn on').bias_groups[0].learnable
+    assert not edit_group(engine, 'b concrete +' + suffix).bias_groups[0].learnable
+
+
+def test_learning_toggle_does_not_enable_session_or_bypass_group_filter():
+    engine = EpisodeEngine(ConformingFakeBackend(), initial_token_ids=[7],
+                           sampling=SamplingConfig(bias_groups=(group(enabled=False, learnable=False),)))
+    sampling = edit_group(engine, 'b concrete learn on')
+    assert sampling.bias_groups[0].enabled
+    for learner in (OnlineLearner(enabled=False), OnlineLearner(enabled=True, learnable_groups=())):
+        assert learner.update(engine.observe(), 3, sampling).sampling == sampling
+    with pytest.raises(EditorError, match='Unknown group'):
+        edit_group(engine, 'b typo learn on')
+    assert engine.sampling == sampling
+
+
+def test_live_learning_toggle_updates_before_selection_and_persists(tmp_path):
+    engine = EpisodeEngine(ConformingFakeBackend(), initial_token_ids=[7],
+                           sampling=SamplingConfig(bias_groups=(group(learnable=False),)))
+    io = ScriptedIO(['b concrete learn on', 'b', '3'])
+    results = []
+    with EpisodeStore(tmp_path / 'store.db') as store:
+        eid = _create_episode(store, engine, backend_provenance=engine.backend.provenance())
+        EpisodeRunner(engine, store, eid, learner=OnlineLearner(enabled=True),
+                      on_learning_update=results.append).run(
+            live_policy=InteractivePolicy(io=io, store=store, episode_id=eid), max_live_actions=1)
+        assert results[0].group_deltas['concrete'] > 0
+        path = tmp_path / 'biases.json'
+        path.write_text(project_biases(store, eid))
+        restored = load_bias_preset(path, engine.backend, engine.backend.provenance())
+        assert restored.bias_groups == engine.sampling.bias_groups
+    assert any('learnable on' in text for text in io.output)
+
+
+def test_headless_learning_toggle_survives_fork_and_reopen(tmp_path):
+    from tests.test_headless import send
+    from tests.test_episode_runtime import NoEogBackend
+    from trajectory_editor.headless import Session
+    backend = NoEogBackend()
+    with EpisodeStore(tmp_path / 'api.db') as store:
+        session = Session(backend, store, backend.provenance(), sampling=SamplingConfig())
+        send(session, 'open', prompt='P')
+        send(session, 'steering', command='b concrete -> {C}')
+        send(session, 'steering', command='b concrete learn on')
+        send(session, 'actions', action={'kind': 'hold', 'limit': 4})
+        send(session, 'fork', boundary=4)
+        assert session.engine.sampling.bias_groups[0].learnable
+        identifier = session.episode_id
+        send(session, 'close')
+        send(session, 'open', episode_id=identifier)
+        assert session.engine.sampling.bias_groups[0].learnable
+        send(session, 'steering', command='b concrete learn off')
+        send(session, 'close')
+        send(session, 'open', episode_id=identifier)
+        assert not session.engine.sampling.bias_groups[0].learnable
 
 
 def test_control_increases_and_reduces_appearance_during_hold():
