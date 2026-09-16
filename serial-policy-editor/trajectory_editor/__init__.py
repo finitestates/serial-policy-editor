@@ -27,6 +27,7 @@ from .token_preference import (
     TokenPreferenceResult,
 )
 from .token_preference_features import TokenPreferenceCoordinateIdentity
+from .vector_artifacts import TokenPreferenceVectorArtifact
 from .online_learning import LearningResult, OnlineLearner, OnlineLearningConfig
 from .version import VERSION
 
@@ -53,6 +54,7 @@ __all__ = [
     "TokenPreferenceLearner",
     "TokenPreferenceResult",
     "TokenPreferenceCoordinateIdentity",
+    "TokenPreferenceVectorArtifact",
     "OnlineLearner",
     "OnlineLearningConfig",
     "SelectRawRank",

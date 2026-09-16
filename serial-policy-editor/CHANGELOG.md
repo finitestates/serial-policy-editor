@@ -8,6 +8,10 @@
   persisted-preset terminology change. Projection seed flags now use their
   explicit `--token-preference-projection-seed` names, and presets use v4.
 
+- Add `policy-editor-vector` for standalone token-preference vector artifacts:
+  extract, inspect, validate, explain, blend, and apply model-matched vectors
+  without confusing token-feature preferences with residual-stream activations.
+
 - Replace opaque learning notices with compact explanations of gate skips,
   learning, decay, and unchanged memory. Add the read-only `learning` command at
   token choices and the live edge for the latest teaching event's slow/fast

@@ -774,10 +774,10 @@ policy-editor --workspace episodes.sqlite3 --project '#1' --biases-only > biases
 policy-editor --model model.gguf --new-prompt 'Another story' --biases biases.json
 ```
 
-The v3 preset includes manual rules, groups, adaptive objectives, independent
-reference weights, and preference vectors/metadata. Existing v2 presets remain
-readable. `--editor-friendly` exports membership YAML; `--rules-only` is for
-manual rules and rejects active adaptive objectives.
+The v4 preset includes manual rules, groups, adaptive objectives, independent
+reference weights, and token preference vectors/metadata. Older preset formats
+are intentionally rejected. `--editor-friendly` exports membership YAML;
+`--rules-only` is for manual rules and rejects active adaptive objectives.
 
 ### Opt-in online group learning
 
@@ -823,6 +823,29 @@ buffer. Use `--token-preference-projection-chunk-size` to lower the peak further
 cost of slower initialization) or raise it when startup speed matters more
 than peak memory. The setting does not change the learned feature space and is
 not persisted in presets.
+
+### Offline token-preference vector workbench
+
+`policy-editor-vector` manages standalone, model-matched token preference
+artifacts. It does not capture or modify residual-stream activations; those are
+reserved for a future activation-vector interface. Extract a vector from an
+episode or a v4 preset, inspect its coordinate identity and norms, and explain
+which vocabulary tokens it favors:
+
+```bash
+policy-editor-vector token-preference extract \
+  --workspace episodes.sqlite3 --episode '#7' --output preference.json
+policy-editor-vector token-preference inspect preference.json
+policy-editor-vector token-preference explain preference.json \
+  --model model.gguf --top 50
+```
+
+Use `validate` to check an artifact against a model, `blend` to combine
+artifacts with compatible coordinates, and `apply` to write a vector into a
+new v4 `biases.json` file. Artifacts record their model identity, projection
+seed, feature scheme, coordinate identity, slow/fast vectors, strengths, and
+source metadata. The workbench refuses to combine vectors from incompatible
+models or feature bases.
 
 Typed answers can optionally provide the same kind of live supervision. Add
 `--learn-from-write` alongside `--online-learning` and/or

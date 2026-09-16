@@ -21,6 +21,7 @@ transformers-bnb = ["torch>=2.1", "transformers>=4.45,<6", "bitsandbytes>=0.43"]
 policy-editor = "trajectory_editor.episode_cli:main"
 policy-editor-server = "trajectory_editor.headless:main"
 policy-editor-bias = "trajectory_editor.bias_cli:main"
+policy-editor-vector = "trajectory_editor.vector_cli:main"
 
 [tool.setuptools]
 packages = ["trajectory_editor"]
