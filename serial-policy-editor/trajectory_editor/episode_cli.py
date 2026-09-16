@@ -57,7 +57,7 @@ from .online_learning import LearningResult, OnlineLearner
 from .learning_readout import selection_notice, write_notice, show_learning_details
 from .learning_controls import DECAY_ON, WRITE_REDUCTIONS, REJECTION_TARGETS
 from .transformers_backend import TransformersSettings
-from .runtime_setup import run_runtime_setup_menu
+from .runtime_setup import RuntimePlan, effective_plan_summary, run_runtime_setup_menu
 from .tui import TerminalIO
 from .ui_themes import LIVE_THEME_NAMES
 from .version import VERSION
@@ -1049,6 +1049,46 @@ def _sampler_summary(config: SamplingConfig) -> str:
     return summary
 
 
+def _confirm_runtime_plan(
+    io: TerminalIO,
+    args: argparse.Namespace,
+    backend: Any,
+    provenance: dict[str, Any],
+    sampling: SamplingConfig,
+    *,
+    source_sampling: SamplingConfig | None = None,
+    activation_artifact: ActivationVectorArtifact | None = None,
+    catalog: Any | None = None,
+) -> bool:
+    """Show the resolved plan and require an explicit final go in setup mode."""
+    if not getattr(args, "_setup_menu_active", False):
+        return True
+    validated: list[str] = []
+    if activation_artifact is not None:
+        validated.append("activation vector: model and width matched")
+    if args.biases is not None:
+        validated.append("bias preset: loaded and model-matched")
+    if catalog is not None:
+        validated.append("groups/catalog: compiled and model-matched")
+    if args.reference is not None:
+        validated.append("reference policy: compiled and model-matched")
+    plan = RuntimePlan.from_args(args)
+    io.page(
+        effective_plan_summary(
+            plan,
+            sampling,
+            source_sampling=source_sampling,
+            provenance=provenance,
+            validated_artifacts=tuple(validated),
+        )
+    )
+    answer = io.read("Final go? [go/q] > ")
+    if answer is None or answer.strip().lower() not in {"go", "g", "yes", "y"}:
+        io.write("Launch cancelled.")
+        return False
+    return True
+
+
 def _online_learning_notice(io, result, *, token_text=None, episode_id=None):
     selection_notice(io, result, preference=False, token_text=token_text, episode_id=episode_id)
 
@@ -1404,6 +1444,7 @@ def main(argv: list[str] | None = None) -> int:
                     and sys.stdout.isatty()
                 )
             )
+            args._setup_menu_active = setup_menu
             io: TerminalIO | None = None
             if setup_menu:
                 if not sys.stdin.isatty() or not sys.stdout.isatty():
@@ -1515,6 +1556,13 @@ def main(argv: list[str] | None = None) -> int:
                 sampling = _apply_activation_artifact(
                     sampling, activation_artifact, args
                 )
+                if not _confirm_runtime_plan(
+                    io, args, backend, provenance, sampling,
+                    source_sampling=source_sampling,
+                    activation_artifact=activation_artifact,
+                    catalog=catalog,
+                ):
+                    return 0
                 explicit = sampling != source_sampling
                 io.write("Restoring saved context...")
                 if model_changed:
@@ -1551,6 +1599,12 @@ def main(argv: list[str] | None = None) -> int:
                 sampling = _apply_activation_artifact(
                     sampling, activation_artifact, args
                 )
+                if not _confirm_runtime_plan(
+                    io, args, backend, provenance, sampling,
+                    activation_artifact=activation_artifact,
+                    catalog=catalog,
+                ):
+                    return 0
                 engine = EpisodeEngine(
                     backend,
                     sampling=sampling,
@@ -1581,6 +1635,13 @@ def main(argv: list[str] | None = None) -> int:
                 sampling = _apply_activation_artifact(
                     sampling, activation_artifact, args
                 )
+                if not _confirm_runtime_plan(
+                    io, args, backend, provenance, sampling,
+                    source_sampling=source_sampling,
+                    activation_artifact=activation_artifact,
+                    catalog=catalog,
+                ):
+                    return 0
                 # Explicit steering imports apply to every replay segment, just
                 # like explicit sampler flags. Unspecified fields follow source.
                 if args.bias_groups is not None:
@@ -1672,6 +1733,13 @@ def main(argv: list[str] | None = None) -> int:
                 sampling = _apply_activation_artifact(
                     sampling, activation_artifact, args
                 )
+                if not _confirm_runtime_plan(
+                    io, args, backend, provenance, sampling,
+                    source_sampling=source_sampling,
+                    activation_artifact=activation_artifact,
+                    catalog=catalog,
+                ):
+                    return 0
                 engine = EpisodeEngine(
                     backend,
                     sampling=sampling,

@@ -15,6 +15,10 @@
 - Let setup switch workspaces, list and inspect episodes by `#N`/`N`, and show
   read-only fork maps with `fm [#N]`; a bare `sampler` now explains all
   available sampler settings and their planned values.
+- Make `learning`/`group` and `preference` learner panels discoverable from
+  setup: bare commands show every associated control, `key=value` edits are
+  accepted, and the main plan redraws after each change so enabled states are
+  visible.
 
 ## 0.4.2 — 2026-09-16
 

@@ -1,9 +1,13 @@
 from pathlib import Path
 
-from trajectory_editor.episode_cli import build_parser
+from trajectory_editor.domain import SamplingConfig
+from trajectory_editor.episode_cli import _confirm_runtime_plan, build_parser
 from trajectory_editor.runtime_setup import (
     RuntimePlan,
     apply_setup_command,
+    effective_plan_summary,
+    learning_summary,
+    preference_summary,
     run_runtime_setup_menu,
     sampler_summary,
     setup_summary,
@@ -182,6 +186,58 @@ def test_sampler_without_arguments_describes_defaults_and_inheritance():
     assert "inherited from source" in sampler_summary(replay_plan)
 
 
+def test_learning_and_preference_panels_show_and_update_all_controls():
+    plan = _plan()
+
+    assert apply_setup_command("learning", plan) == "show-learning"
+    assert apply_setup_command("preference", plan) == "show-preference"
+    assert "enabled                 off" in learning_summary(plan)
+    assert "enabled                 off" in preference_summary(plan)
+
+    apply_setup_command(
+        "group on rate=.2 gate=sampler groups=concrete,abstract from_write=on",
+        plan,
+    )
+    apply_setup_command(
+        "preference on dimension=32 learning_scheme=fisher-kl-v2 "
+        "fast_slow=on projection_seed=random",
+        plan,
+    )
+
+    assert plan.online_learning is True
+    assert plan.learning_rate == .2
+    assert plan.learning_gate == "sampler"
+    assert plan.learnable_groups == ("concrete", "abstract")
+    assert plan.learn_from_write is True
+    assert plan.token_preference is True
+    assert plan.token_preference_dimension == 32
+    assert plan.token_preference_learning_scheme == "fisher-kl-v2"
+    assert plan.token_preference_fast_slow is True
+    assert plan.token_preference_random_projection_seed is True
+    assert "enabled                 on" in learning_summary(plan)
+    assert "enabled                 on" in preference_summary(plan)
+    assert "fisher-kl-v2" in preference_summary(plan)
+
+    args = _args()
+    plan.apply_to_args(args)
+    assert args.online_learning is True
+    assert args.learning_gate == "sampler"
+    assert args.learnable_groups == ("concrete", "abstract")
+    assert args.token_preference is True
+    assert args.token_preference_dimension == 32
+    assert args.token_preference_random_projection_seed is True
+
+
+def test_setup_menu_redraws_after_learning_and_preference_changes():
+    args = _args()
+    io = ScriptedIO(["learning on", "preference on", "prompt New", "go"])
+
+    assert run_runtime_setup_menu(io, args) is True
+    rendered = "\n".join(text for text in io.writes if isinstance(text, str))
+    assert "Group learn  on" in rendered
+    assert "Preference   on" in rendered
+
+
 def test_bare_episode_number_inspects_and_fork_map_is_read_only(monkeypatch):
     from trajectory_editor import episode_projector
 
@@ -209,3 +265,68 @@ def test_setup_menu_switches_workspace_before_go(tmp_path):
     assert store.path == selected
     assert args.workspace == selected
     assert args.new_prompt == "New"
+
+
+def test_runtime_plan_profile_round_trips_paths_and_explicit_choices(tmp_path):
+    plan = RuntimePlan(
+        workspace=tmp_path / "work.sqlite3",
+        model=tmp_path / "model.gguf",
+        replay="#2",
+        temperature=.8,
+        explicit_options={"workspace", "model", "replay", "temperature"},
+    )
+
+    restored = RuntimePlan.from_dict(plan.to_dict())
+    assert restored == plan
+    assert restored.workspace == tmp_path / "work.sqlite3"
+    assert restored.model == tmp_path / "model.gguf"
+
+
+def test_effective_plan_summary_marks_inheritance_and_validation(tmp_path):
+    plan = RuntimePlan(
+        workspace=tmp_path / "work.sqlite3",
+        replay="#1",
+        temperature=.8,
+        explicit_options={"temperature", "replay"},
+    )
+    source = SamplingConfig(temperature=1.0)
+    sampling = SamplingConfig(temperature=.8, activation_vector_digest="a" * 64)
+
+    rendered = effective_plan_summary(
+        plan,
+        sampling,
+        source_sampling=source,
+        provenance={"backend": "llama.cpp", "model_path": str(tmp_path / "model.gguf")},
+        validated_artifacts=("activation vector: model and width matched",),
+    )
+    assert "RUNTIME PREFLIGHT" in rendered
+    assert "temperature      0.8  [override]" in rendered
+    assert "top_k            40  [inherited]" in rendered
+    assert "aaaaaaaaaaaa" in rendered
+    assert "activation vector: model and width matched" in rendered
+
+
+def test_preflight_requires_final_go_before_runtime_creation():
+    args = _args()
+    args.new_prompt = "Prompt"
+    args._setup_menu_active = True
+    sampling = SamplingConfig()
+
+    io = ScriptedIO(["go"])
+    assert _confirm_runtime_plan(
+        io,
+        args,
+        object(),
+        {"backend": "llama.cpp", "model_path": "/models/example.gguf"},
+        sampling,
+    ) is True
+    assert any("RUNTIME PREFLIGHT" in text for text in io.writes if isinstance(text, str))
+
+    cancelled = ScriptedIO(["q"])
+    assert _confirm_runtime_plan(
+        cancelled,
+        args,
+        object(),
+        {"backend": "llama.cpp"},
+        sampling,
+    ) is False
