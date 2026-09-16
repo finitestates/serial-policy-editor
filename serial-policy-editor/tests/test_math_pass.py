@@ -416,3 +416,28 @@ def test_coordinate_identity_same_basis_and_zero_memory_are_stable():
     changed_args._explicit_options = {"latent_feature_scheme"}
     changed_empty = _sampling_from_args(changed_args, empty)
     assert _apply_latent_coordinate_overrides(changed_empty, changed_args, ScriptedIO([])) == changed_empty
+
+
+def test_coordinate_identity_allows_later_backend_metadata_discovery():
+    state = SamplingConfig(
+        latent_preference_z=(0.3, -0.2),
+        latent_feature_scheme="whitened-projection-v2",
+    )
+    assert coordinate_identity_matches(
+        state,
+        model_fingerprint="backend-discovered",
+        embedding_width=2048,
+    )
+    known = replace(
+        state,
+        latent_coordinate_identity={
+            **state.latent_coordinate_identity.to_dict(),
+            "model_fingerprint": "old-model",
+            "embedding_width": 1024,
+        },
+    )
+    assert not coordinate_identity_matches(
+        known,
+        model_fingerprint="new-model",
+        embedding_width=2048,
+    )

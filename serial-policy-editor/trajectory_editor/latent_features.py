@@ -144,11 +144,14 @@ def coordinate_identity_matches(
         model_fingerprint=model_fingerprint,
         embedding_width=embedding_width,
     )
-    # Unknown current fingerprints do not invalidate an identity whose model
-    # fingerprint is also unknown.  A known mismatch is always incompatible.
-    if stored.model_fingerprint is not None and requested.model_fingerprint is not None:
-        return stored.basis_key == requested.basis_key
-    return stored.basis_key[1:] == requested.basis_key[1:]
+    # A lightweight provider may not know the model fingerprint or embedding
+    # width when it first creates a vector.  Unknown metadata is compatible
+    # with later-discovered metadata; a conflict between two known values is
+    # always incompatible.
+    return all(
+        left == right or left is None or right is None
+        for left, right in zip(stored.basis_key, requested.basis_key)
+    )
 
 
 def embedding_fingerprint(embeddings: np.ndarray) -> str:
