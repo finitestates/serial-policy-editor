@@ -5,6 +5,10 @@
 - Add episode-pair activation tooling: derive portable output-layer vectors
   from positive/negative replay or fork episodes, or export escaped paired
   prompt files plus provenance for llama.cpp's `llama-cvector-generator`.
+- Add an interactive pre-runtime setup menu for selecting episode sources,
+  model/backend, steering artifacts, common sampler settings, budgets, seeds,
+  and learner toggles before the existing launch path begins. `--setup-menu`
+  opens it explicitly; headless and flag-driven workflows remain available.
 
 ## 0.4.2 — 2026-09-16
 

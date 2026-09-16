@@ -57,6 +57,7 @@ from .online_learning import LearningResult, OnlineLearner
 from .learning_readout import selection_notice, write_notice, show_learning_details
 from .learning_controls import DECAY_ON, WRITE_REDUCTIONS, REJECTION_TARGETS
 from .transformers_backend import TransformersSettings
+from .runtime_setup import run_runtime_setup_menu
 from .tui import TerminalIO
 from .ui_themes import LIVE_THEME_NAMES
 from .version import VERSION
@@ -231,6 +232,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hold-default", type=int, default=100)
     parser.add_argument("--context-chars", type=int, default=0, help="Context character limit (0 keeps all context)")
     parser.add_argument("--plain-ui", action="store_true")
+    parser.add_argument(
+        "--setup-menu",
+        action="store_true",
+        help="open the pre-runtime setup menu before creating or restoring an episode",
+    )
     parser.add_argument(
         "--cache",
         choices=("auto", "off"),
@@ -1343,7 +1349,7 @@ def main(argv: list[str] | None = None) -> int:
                     ).text
                 )
                 return 0
-            if not any(
+            has_episode_source = any(
                 (
                     args.new_prompt is not None,
                     args.new_prompt_file is not None,
@@ -1351,13 +1357,29 @@ def main(argv: list[str] | None = None) -> int:
                     args.resume is not None,
                     args.fork_from is not None,
                 )
-            ):
+            )
+            setup_menu = bool(
+                args.setup_menu
+                or (
+                    not has_episode_source
+                    and not args.plain_ui
+                    and sys.stdin.isatty()
+                    and sys.stdout.isatty()
+                )
+            )
+            io: TerminalIO | None = None
+            if setup_menu:
+                if not sys.stdin.isatty() or not sys.stdout.isatty():
+                    raise EditorError("--setup-menu requires an interactive terminal")
+                io = TerminalIO(live_choices=not args.plain_ui, live_theme=args.theme)
+                if not run_runtime_setup_menu(io, args, store=store):
+                    return 0
+            elif not has_episode_source:
                 if not sys.stdin.isatty() or not sys.stdout.isatty():
                     raise EditorError(
                         "no episode source supplied; use --new-prompt, "
                         "--new-prompt-file, --replay, --resume, or --fork-from"
                     )
-
                 args.new_prompt = _read_initial_prompt()
 
             token_preference_config = _token_preference_config_from_args(args)
@@ -1374,7 +1396,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.seed = _random_seed()
                 print(f"Random seed: {args.seed}", flush=True)
 
-            io = TerminalIO(live_choices=not args.plain_ui, live_theme=args.theme)
+            if io is None:
+                io = TerminalIO(live_choices=not args.plain_ui, live_theme=args.theme)
             for field in ("resume", "fork_from", "replay"):
                 if getattr(args, field):
                     setattr(args, field, recover_sampler_record(store, getattr(args, field), io))

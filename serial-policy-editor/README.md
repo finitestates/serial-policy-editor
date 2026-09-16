@@ -69,6 +69,19 @@ policy-editor \
   --cache auto
 ```
 
+For an interactive launch, omit the episode source to open the pre-runtime
+setup menu:
+
+```bash
+policy-editor
+```
+
+Choose a prompt or replay source, model/backend, vector or bias artifacts,
+common sampler settings, budget, seed, and learner toggles there. Type `show`
+to review the selection and `go` to start. The same menu can be opened for an
+otherwise flag-configured interactive launch with `--setup-menu`; scripted and
+non-interactive launches continue to use the command-line interface directly.
+
 Use `--seed N` for a reproducible sampler seed, or `--random-seed` to choose
 and print a new seed from the supported signed 64-bit range.  The two options
 are mutually exclusive.  The selected value is stored in the episode's
