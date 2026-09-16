@@ -214,6 +214,8 @@ class EpisodeEngine:
         self.stream_fingerprint = fingerprint
         self._observation: Observation | None = None
         self._observation_key: tuple | None = None
+        self._activation_validation_key: tuple | None = None
+        self._activation_runtime_key: tuple | None = None
         # This engine owns one backend/tokenizer. Sampler changes and rewinds
         # do not change token spellings, so their classifications remain valid.
         self._token_boundaries: dict[int, frozenset[str]] = {}
@@ -286,6 +288,7 @@ class EpisodeEngine:
         self._sampling = value
         if not (value.token_preference_vector or value.token_preference_fast_vector):
             self._token_preference_coordinate_identity = None
+        self._activation_validation_key = None
         self._invalidate_observation()
 
     @property
@@ -374,6 +377,79 @@ class EpisodeEngine:
         self._observation = None
         self._observation_key = None
 
+    def _prepare_activation_runtime(self) -> None:
+        """Install a layerwise llama.cpp cvector before reading logits."""
+        is_control = (
+            self.sampling.activation_vector_layer == "control-vector"
+            and bool(self.sampling.activation_vector)
+            and self.sampling.activation_vector_strength != 0.0
+        )
+        current_key = (
+            "control-vector",
+            self.sampling.activation_vector_digest,
+            self.sampling.activation_vector_model,
+            self.sampling.activation_vector_layer_start,
+            self.sampling.activation_vector_layer_end,
+            self.sampling.activation_vector_strength,
+        ) if is_control else ("output",)
+        if current_key == self._activation_runtime_key:
+            return
+        previous = self._activation_runtime_key
+        if previous is not None and previous[0] == "control-vector" and not is_control:
+            clear = getattr(self.backend, "clear_activation_control_vector", None)
+            if callable(clear):
+                try:
+                    clear()
+                except (RuntimeError, TypeError, ValueError) as exc:
+                    raise EditorError(f"could not clear activation control vector: {exc}") from exc
+        if is_control:
+            setter = getattr(self.backend, "set_activation_control_vector", None)
+            if not callable(setter):
+                raise EditorError(
+                    "the loaded backend does not expose llama.cpp control-vector runtime support"
+                )
+            validation_key = (
+                self.sampling.activation_vector_digest,
+                self.sampling.activation_vector_model,
+            )
+            if validation_key != self._activation_validation_key:
+                from .activation_vectors import (
+                    assert_model_compatible,
+                    model_identity,
+                    model_identity_from_json,
+                )
+                expected_model = model_identity_from_json(
+                    self.sampling.activation_vector_model
+                )
+                if expected_model:
+                    width_method = getattr(self.backend, "activation_width", None)
+                    if not callable(width_method):
+                        raise EditorError(
+                            "the loaded backend does not expose activation width metadata"
+                        )
+                    assert_model_compatible(
+                        expected_model,
+                        model_identity(
+                            self.backend.provenance(include_model_sha256=False),
+                            activation_width=int(width_method()),
+                        ),
+                        label="loaded model",
+                    )
+                self._activation_validation_key = validation_key
+            try:
+                setter(
+                    self.sampling.activation_vector,
+                    layer_start=self.sampling.activation_vector_layer_start,
+                    layer_end=self.sampling.activation_vector_layer_end,
+                    strength=self.sampling.activation_vector_strength,
+                )
+                # Existing KV state was evaluated without the newly selected
+                # control vector; rebuild the current prefix under the adapter.
+                self.backend.reset(self.token_ids)
+            except (RuntimeError, TypeError, ValueError) as exc:
+                raise EditorError(f"could not apply activation control vector: {exc}") from exc
+        self._activation_runtime_key = current_key
+
     def _decision_key(self) -> tuple:
         return (
             tuple(self.token_ids), self.sampling, self.coordinate_offset,
@@ -399,9 +475,66 @@ class EpisodeEngine:
         key = self._decision_key()
         if self._observation is not None and self._observation_key == key:
             return self._observation
+        self._prepare_activation_runtime()
         logits = np.asarray(self.backend.last_logits(), dtype=np.float64)
         if logits.ndim != 1 or len(logits) != self.backend.vocabulary_size():
             raise RuntimeError("backend logits do not match its vocabulary")
+        activation_logit_adjustments = None
+        if (
+            self.sampling.activation_vector_layer == "output"
+            and self.sampling.activation_vector
+            and self.sampling.activation_vector_strength != 0.0
+        ):
+            provider = getattr(self.backend, "activation_logit_adjustments", None)
+            if not callable(provider):
+                raise EditorError(
+                    "the loaded backend does not expose output activation runtime support"
+                )
+            validation_key = (
+                self.sampling.activation_vector_digest,
+                self.sampling.activation_vector_model,
+            )
+            if validation_key != self._activation_validation_key:
+                from .activation_vectors import (
+                    assert_model_compatible,
+                    model_identity,
+                    model_identity_from_json,
+                )
+                expected_model = model_identity_from_json(
+                    self.sampling.activation_vector_model
+                )
+                if expected_model:
+                    width_method = getattr(self.backend, "activation_width", None)
+                    if not callable(width_method):
+                        raise EditorError(
+                            "the loaded backend does not expose activation width metadata"
+                        )
+                    assert_model_compatible(
+                        expected_model,
+                        model_identity(
+                            self.backend.provenance(include_model_sha256=False),
+                            activation_width=int(width_method()),
+                        ),
+                        label="loaded model",
+                    )
+                self._activation_validation_key = validation_key
+            try:
+                activation_logit_adjustments = provider(
+                    self.sampling.activation_vector,
+                    layer=self.sampling.activation_vector_layer,
+                    position=self.sampling.activation_vector_position,
+                )
+            except (RuntimeError, TypeError, ValueError) as exc:
+                raise EditorError(f"could not apply activation vector: {exc}") from exc
+            activation_logit_adjustments = np.asarray(
+                activation_logit_adjustments, dtype=np.float64
+            )
+            if activation_logit_adjustments.shape != logits.shape:
+                raise RuntimeError(
+                    "activation logit adjustments do not match the backend vocabulary"
+                )
+            if not np.all(np.isfinite(activation_logit_adjustments)):
+                raise RuntimeError("activation logit adjustments are not finite")
         statistics = ObservationStatistics(
             logits,
             self.sampling,
@@ -410,6 +543,7 @@ class EpisodeEngine:
             token_preference_features=self._token_preference_features(),
             token_preference_coordinate_identity=getattr(self, "_token_preference_coordinate_identity", None),
             render_tokens=self.backend.render,
+            activation_logit_adjustments=activation_logit_adjustments,
         )
         logits = statistics.logits
         distribution = statistics.distribution

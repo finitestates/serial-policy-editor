@@ -12,6 +12,18 @@
   extract, inspect, validate, explain, blend, and apply model-matched vectors
   without confusing token-feature preferences with residual-stream activations.
 
+- Add first-generation output activation vectors to `policy-editor-vector`:
+  create a unit-normalized Prompt A minus Prompt B direction with llama.cpp or
+  Transformers, inspect/validate/explain/blend the artifact, and load it into
+  `policy-editor`. Persist activation state, model identity, artifact digest,
+  and output-head actuation through sampler segments and replay.
+
+- Import llama.cpp `llama-cvector-generator` GGUFs as layerwise activation
+  artifacts, preserving their `direction.N` hidden-state directions and layer
+  range. Install them through llama.cpp's native control-vector runtime,
+  including prefix rebuilds when the active vector changes; retain the
+  output-layer path for static token-level explanations.
+
 - Replace opaque learning notices with compact explanations of gate skips,
   learning, decay, and unchanged memory. Add the read-only `learning` command at
   token choices and the live edge for the latest teaching event's slow/fast

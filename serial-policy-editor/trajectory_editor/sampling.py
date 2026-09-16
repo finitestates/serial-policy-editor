@@ -500,6 +500,7 @@ class ObservationStatistics:
         token_preference_features=None,
         render_tokens=None,
         token_preference_coordinate_identity=None,
+        activation_logit_adjustments=None,
     ):
         self.logits = _validated_logits(logits).copy()
         self.boundaries = boundaries
@@ -515,6 +516,42 @@ class ObservationStatistics:
             if history_token_ids is not None:
                 _validated_history(history_token_ids, len(self.logits))
             self.adjusted = self.logits
+        self.activation_logit_adjustments = np.zeros_like(self.logits)
+        if (
+            config.activation_vector_layer == "output"
+            and config.activation_vector
+            and config.activation_vector_strength != 0.0
+        ):
+            if activation_logit_adjustments is None:
+                raise ValueError(
+                    "activation logit adjustments are required when activation state is active"
+                )
+            raw_activation = np.asarray(activation_logit_adjustments, dtype=np.float64)
+            if raw_activation.shape != self.logits.shape:
+                raise ValueError(
+                    "activation logit adjustments do not match the policy vocabulary"
+                )
+            if not np.all(np.isfinite(raw_activation)):
+                raise ValueError("activation logit adjustments must be finite")
+            self.activation_logit_adjustments = (
+                float(config.activation_vector_strength) * raw_activation
+            )
+            if not np.all(np.isfinite(self.activation_logit_adjustments)):
+                raise ValueError("activation vector produced non-finite policy logits")
+            self.adjusted = self.adjusted.copy()
+            self.adjusted += self.activation_logit_adjustments
+        self.activation_diagnostics = {
+            "vector_norm": float(
+                np.linalg.norm(np.asarray(config.activation_vector, dtype=np.float64))
+            ) if config.activation_vector else 0.0,
+            "strength": float(config.activation_vector_strength),
+            "logit_rms": float(
+                np.sqrt(np.mean(self.activation_logit_adjustments ** 2))
+            ),
+            "logit_min": float(np.min(self.activation_logit_adjustments)),
+            "logit_max": float(np.max(self.activation_logit_adjustments)),
+            "digest": config.activation_vector_digest,
+        }
         active_biases = config.active_biases(history_token_ids, boundaries)
         self.active_biases = active_biases
         self.reference_prior_snapshot = config.active_reference_prior_snapshot(
@@ -693,6 +730,7 @@ class ObservationStatistics:
             self.logits, self.adjusted, self.policy_probabilities, self.baseline_probabilities,
             self.preference_base_logits, self.preference_base_probabilities,
             self.learning_logits, self.learning_probabilities, self.token_preference_raw_scores,
+            self.activation_logit_adjustments,
             self.distribution.ids, self.distribution.probabilities,
         ):
             array.setflags(write=False)

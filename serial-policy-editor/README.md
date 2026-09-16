@@ -827,10 +827,8 @@ not persisted in presets.
 ### Offline token-preference vector workbench
 
 `policy-editor-vector` manages standalone, model-matched token preference
-artifacts. It does not capture or modify residual-stream activations; those are
-reserved for a future activation-vector interface. Extract a vector from an
-episode or a v4 preset, inspect its coordinate identity and norms, and explain
-which vocabulary tokens it favors:
+artifacts. Extract a vector from an episode or a v4 preset, inspect its
+coordinate identity and norms, and explain which vocabulary tokens it favors:
 
 ```bash
 policy-editor-vector token-preference extract \
@@ -846,6 +844,48 @@ new v4 `biases.json` file. Artifacts record their model identity, projection
 seed, feature scheme, coordinate identity, slow/fast vectors, strengths, and
 source metadata. The workbench refuses to combine vectors from incompatible
 models or feature bases.
+
+The same workbench can create a first-generation output activation vector from
+two prompts. It computes Prompt A minus Prompt B at the final hidden/output
+layer; the default artifact is unit-normalized and can be loaded directly by
+the editor:
+
+```bash
+policy-editor-vector activation create \
+  --model model.gguf --backend llama.cpp \
+  --prompt-a "Answer warmly and briefly." \
+  --prompt-b "Answer coldly and at length." \
+  --output style.json
+policy-editor-vector activation explain style.json \
+  --model model.gguf --top 50
+policy-editor --model model.gguf --new-prompt "Hello" \
+  --activation-vector style.json
+```
+
+This initial activation contract operates at the output layer: the captured
+hidden-state direction is projected through the model output head at each
+decision. The loaded vector, layer, strength, and model identity are persisted
+in sampler segments and included in replay state. `inspect`, `validate`, and
+`blend` are available for activation artifacts as well.
+
+For llama.cpp's native layerwise control vectors, import the GGUF emitted by
+`llama-cvector-generator`:
+
+```bash
+policy-editor-vector activation import-cvector control_vector.gguf \
+  --model model.gguf --backend llama.cpp --output mood-cvector.json
+policy-editor-vector activation validate mood-cvector.json \
+  --model model.gguf --backend llama.cpp
+policy-editor --model model.gguf --new-prompt "Hello" \
+  --activation-vector mood-cvector.json
+```
+
+These artifacts preserve the `direction.1` through `direction.N` hidden-state
+directions and their layer range. The editor installs them through llama.cpp's
+control-vector API and rebuilds the current prefix when that runtime state
+changes. Layerwise cvectors are inspectable and replayable; token-level
+`explain` is intentionally limited to output-layer artifacts because a
+layerwise intervention is not a static output-logit offset.
 
 Typed answers can optionally provide the same kind of live supervision. Add
 `--learn-from-write` alongside `--online-learning` and/or

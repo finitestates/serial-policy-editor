@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,13 @@ import numpy as np
 
 from .backend_factory import BACKEND_NAMES, create_backend
 from .bias_presets import FORMAT as BIAS_FORMAT
+from .activation_vectors import (
+    FORMAT as ACTIVATION_FORMAT,
+    ActivationVectorArtifact,
+    assert_compatible as assert_activation_compatible,
+    blend_artifacts as blend_activation_artifacts,
+    model_identity,
+)
 from .decoder import LlamaCppSettings
 from .domain import EditorError
 from .episode_store import EpisodeStore
@@ -104,6 +112,65 @@ def build_parser() -> argparse.ArgumentParser:
     apply.add_argument("artifact", type=Path)
     apply.add_argument("--biases", type=Path, required=True)
     apply.add_argument("--output", type=Path, required=True)
+
+    activation = commands.add_parser(
+        "activation",
+        help="create and manage output-layer vectors and llama.cpp cvectors",
+    )
+    activation_actions = activation.add_subparsers(dest="action", required=True)
+
+    create = activation_actions.add_parser(
+        "create", help="create a vector from two prompts"
+    )
+    _add_backend_args(create, require_model=True)
+    prompt_a = create.add_mutually_exclusive_group(required=True)
+    prompt_a.add_argument("--prompt-a")
+    prompt_a.add_argument("--prompt-a-file", type=Path)
+    prompt_b = create.add_mutually_exclusive_group(required=True)
+    prompt_b.add_argument("--prompt-b")
+    prompt_b.add_argument("--prompt-b-file", type=Path)
+    create.add_argument("--capture-position", choices=("first", "last"), default="last")
+    create.add_argument("--no-normalize", action="store_true")
+    create.add_argument("--strength", type=float, default=1.0)
+    create.add_argument("--output", type=Path)
+
+    import_cvector = activation_actions.add_parser(
+        "import-cvector",
+        help="import a llama.cpp cvector-generator GGUF as a portable artifact",
+    )
+    import_cvector.add_argument("cvector", type=Path)
+    import_cvector.add_argument("--strength", type=float, default=1.0)
+    import_cvector.add_argument("--output", type=Path)
+    _add_backend_args(import_cvector)
+
+    activation_inspect = activation_actions.add_parser(
+        "inspect", help="show activation artifact metadata and norm"
+    )
+    activation_inspect.add_argument("artifact", type=Path)
+    _add_report_args(activation_inspect)
+
+    activation_validate = activation_actions.add_parser(
+        "validate", help="validate an activation artifact, optionally against a model"
+    )
+    activation_validate.add_argument("artifact", type=Path)
+    _add_backend_args(activation_validate)
+    _add_report_args(activation_validate)
+
+    activation_explain = activation_actions.add_parser(
+        "explain", help="rank vocabulary tokens by activation-induced logit adjustment"
+    )
+    activation_explain.add_argument("artifact", type=Path)
+    _add_backend_args(activation_explain, require_model=True)
+    activation_explain.add_argument("--top", type=_positive_int, default=20)
+    activation_explain.add_argument("--include-eog", action="store_true")
+    _add_report_args(activation_explain)
+
+    activation_blend = activation_actions.add_parser(
+        "blend", help="combine compatible activation artifacts by effective actuation"
+    )
+    activation_blend.add_argument("artifacts", type=Path, nargs="+")
+    activation_blend.add_argument("--weights", type=float, nargs="+")
+    activation_blend.add_argument("--output", type=Path)
     return parser
 
 
@@ -154,6 +221,20 @@ def _close_backend(backend: Any) -> None:
         if callable(close):
             close()
             return
+
+
+def _prompt_value(args: argparse.Namespace, text_name: str, file_name: str, label: str) -> str:
+    text = getattr(args, text_name)
+    path = getattr(args, file_name)
+    if text is not None:
+        return text
+    try:
+        value = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise EditorError(f"could not read {label}: {exc}") from exc
+    if not value:
+        raise EditorError(f"{label} must be nonempty")
+    return value
 
 
 def _extract(args: argparse.Namespace) -> TokenPreferenceVectorArtifact:
@@ -226,6 +307,52 @@ def _text_inspect(report: dict[str, Any]) -> str:
         lines.append("model: " + " ".join(f"{key}={value}" for key, value in sorted(model.items())))
     if report["source"] is not None:
         lines.append("source: " + json.dumps(report["source"], ensure_ascii=False, sort_keys=True))
+    return "\n".join(lines)
+
+
+def _activation_inspect_report(artifact: ActivationVectorArtifact) -> dict[str, Any]:
+    return {
+        "format": ACTIVATION_FORMAT,
+        "kind": "activation",
+        "model": dict(artifact.model),
+        "dimension": artifact.dimension,
+        "norm": artifact.norm,
+        "layer": artifact.layer,
+        "position": artifact.position,
+        "layer_start": artifact.layer_start,
+        "layer_end": artifact.layer_end,
+        "strength": artifact.strength,
+        "method": artifact.method,
+        "digest": artifact.digest,
+        "source": dict(artifact.source) if artifact.source is not None else None,
+    }
+
+
+def _text_activation_inspect(report: dict[str, Any]) -> str:
+    lines = [
+        f"valid: {report['valid']}" if "valid" in report else None,
+        f"format: {report['format']}",
+        f"kind: {report['kind']}",
+        f"dimension: {report['dimension']}",
+        f"norm: {report['norm']:.6g} strength={report['strength']:.6g}",
+        f"layer: {report['layer']} position={report['position']}"
+        + (
+            f" range={report['layer_start']}..{report['layer_end']}"
+            if report["layer_start"] is not None
+            else ""
+        ),
+        f"method: {report['method']}",
+        f"digest: {report['digest']}",
+    ]
+    lines = [line for line in lines if line is not None]
+    if report["model"]:
+        lines.append("model: " + " ".join(
+            f"{key}={value}" for key, value in sorted(report["model"].items())
+        ))
+    if report["source"] is not None:
+        lines.append("source: " + json.dumps(
+            report["source"], ensure_ascii=False, sort_keys=True
+        ))
     return "\n".join(lines)
 
 
@@ -321,6 +448,70 @@ def _text_explain(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _activation_explain_report(
+    artifact: ActivationVectorArtifact,
+    backend: Any,
+    provenance: dict[str, Any],
+    *,
+    top: int,
+    include_eog: bool,
+) -> dict[str, Any]:
+    if artifact.layer == "control-vector":
+        raise EditorError(
+            "layerwise cvector artifacts do not have a static token-logit explanation; "
+            "use activation validate and inspect them with the llama.cpp runtime"
+        )
+    adjustments = artifact.validate_against_backend(backend, provenance)
+    adjustments = float(artifact.strength) * np.asarray(adjustments, dtype=np.float64)
+    eog_ids = set(backend.eog_token_ids())
+    token_ids = [
+        token_id
+        for token_id in range(backend.vocabulary_size())
+        if include_eog or token_id not in eog_ids
+    ]
+    descending = sorted(token_ids, key=lambda token_id: (-float(adjustments[token_id]), token_id))
+    ascending = sorted(token_ids, key=lambda token_id: (float(adjustments[token_id]), token_id))
+
+    def rows(order: list[int], *, positive: bool) -> list[dict[str, Any]]:
+        result = []
+        for token_id in order:
+            score = float(adjustments[token_id])
+            if (positive and score <= 0.0) or (not positive and score >= 0.0):
+                continue
+            try:
+                text = backend.token_text(token_id)
+            except (RuntimeError, TypeError, ValueError):
+                text = ""
+            result.append({"token_id": token_id, "text": text, "score": score})
+            if len(result) >= top:
+                break
+        return result
+
+    return {
+        **_activation_inspect_report(artifact),
+        "eligible_token_count": len(token_ids),
+        "logit_rms": float(np.sqrt(np.mean(adjustments[token_ids] ** 2))) if token_ids else 0.0,
+        "top_positive": rows(descending, positive=True),
+        "top_negative": rows(ascending, positive=False),
+    }
+
+
+def _text_activation_explain(report: dict[str, Any]) -> str:
+    lines = [
+        f"activation explanation: dimension={report['dimension']} eligible_tokens={report['eligible_token_count']}",
+        f"logit_rms={report['logit_rms']:.6g} layer={report['layer']} strength={report['strength']:.6g}",
+    ]
+    for title, key in (("top positive", "top_positive"), ("top negative", "top_negative")):
+        lines.append(f"{title}:")
+        if not report[key]:
+            lines.append("  (none)")
+        for row in report[key]:
+            lines.append(
+                f"  {row['token_id']:>8} {row['score']:>+12.6g} {row['text']!r}"
+            )
+    return "\n".join(lines)
+
+
 def _render(report: dict[str, Any], output: Path | None, format_name: str, text_renderer) -> None:
     text = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) if format_name == "json" else text_renderer(report)
     _write_text(text, output)
@@ -356,6 +547,87 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     backend = None
     try:
+        if args.kind == "activation":
+            if args.action == "create":
+                backend = _load_backend(args)
+                artifact = ActivationVectorArtifact.from_prompt_pair(
+                    backend,
+                    backend.provenance(include_model_sha256=False),
+                    _prompt_value(args, "prompt_a", "prompt_a_file", "prompt A"),
+                    _prompt_value(args, "prompt_b", "prompt_b_file", "prompt B"),
+                    capture_position=args.capture_position,
+                    normalize=not args.no_normalize,
+                )
+                if args.strength != artifact.strength:
+                    artifact = replace(artifact, strength=args.strength)
+                _write_text(artifact.to_json(), args.output)
+                return 0
+            if args.action == "import-cvector":
+                artifact = ActivationVectorArtifact.from_cvector_path(
+                    args.cvector, strength=args.strength
+                )
+                if args.model is not None:
+                    backend = _load_backend(args)
+                    artifact.validate_against_backend(
+                        backend, backend.provenance(include_model_sha256=False)
+                    )
+                    artifact = replace(
+                        artifact,
+                        model=model_identity(
+                            backend.provenance(include_model_sha256=False),
+                            activation_width=backend.activation_width(),
+                        ),
+                    )
+                _write_text(artifact.to_json(), args.output)
+                return 0
+            if args.action == "inspect":
+                artifact = ActivationVectorArtifact.from_path(args.artifact)
+                report = _activation_inspect_report(artifact)
+                _render(report, args.output, args.format, _text_activation_inspect)
+                return 0
+            if args.action == "validate":
+                artifact = ActivationVectorArtifact.from_path(args.artifact)
+                if args.model is not None:
+                    backend = _load_backend(args)
+                    artifact.validate_against_backend(
+                        backend, backend.provenance(include_model_sha256=False)
+                    )
+                report = _activation_inspect_report(artifact)
+                report["valid"] = True
+                report["validated_against_model"] = args.model is not None
+                _render(report, args.output, args.format, _text_activation_inspect)
+                return 0
+            if args.action == "explain":
+                artifact = ActivationVectorArtifact.from_path(args.artifact)
+                backend = _load_backend(args)
+                report = _activation_explain_report(
+                    artifact,
+                    backend,
+                    backend.provenance(include_model_sha256=False),
+                    top=args.top,
+                    include_eog=args.include_eog,
+                )
+                _render(report, args.output, args.format, _text_activation_explain)
+                return 0
+            if args.action == "blend":
+                weights = args.weights or [1.0] * len(args.artifacts)
+                artifacts = [
+                    ActivationVectorArtifact.from_path(path)
+                    for path in args.artifacts
+                ]
+                result = blend_activation_artifacts(
+                    artifacts,
+                    weights,
+                    source={
+                        "type": "blend",
+                        "inputs": [str(path) for path in args.artifacts],
+                        "weights": weights,
+                    },
+                )
+                _write_text(result.to_json(), args.output)
+                return 0
+            raise EditorError(f"unsupported activation action {args.action!r}")
+
         if args.kind != "token-preference":
             raise EditorError("unsupported vector kind")
         if args.action == "extract":

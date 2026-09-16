@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import inspect
 import platform
 import sys
@@ -308,6 +309,7 @@ class TransformersBackend:
         self._token_preference_feature_cache: dict[tuple[object, ...], np.ndarray] = {}
         self._token_preference_embedding_fingerprint: str | None = None
         self._token_preference_embedding_width: int | None = None
+        self._activation_logit_cache: dict[tuple[str, str, str], np.ndarray] = {}
 
     def _apply_execution_controls(self) -> None:
         if self.settings.torch_num_threads is not None:
@@ -535,6 +537,103 @@ class TransformersBackend:
         if self._last_logits is None:
             raise RuntimeError("decoder has not evaluated a prefix")
         return self._last_logits.copy()
+
+    def activation_width(self) -> int:
+        """Return the width of the final hidden state used by the output head."""
+        output_embeddings = self._model.get_output_embeddings()
+        weight = getattr(output_embeddings, "weight", None)
+        if weight is None or getattr(weight, "ndim", None) != 2:
+            raise RuntimeError("Transformers model has no two-dimensional output head")
+        return int(weight.shape[1])
+
+    def activation_snapshot(
+        self,
+        text: str,
+        *,
+        layer: str = "output",
+        position: str = "last",
+    ) -> np.ndarray:
+        """Capture one final hidden-state position for a prompt.
+
+        ``layer=output`` names the representation immediately before the
+        language-model output head.  This is the first portable activation
+        coordinate shared with the llama.cpp adapter.
+        """
+        if layer != "output":
+            raise RuntimeError("Transformers activation snapshots currently support layer=output only")
+        if position not in {"first", "last"}:
+            raise RuntimeError("activation snapshot position must be first or last")
+        if not isinstance(text, str) or not text:
+            raise RuntimeError("activation snapshot prompt must be nonempty")
+        token_ids = self.tokenize(text, add_bos=True, special=True)
+        if not token_ids:
+            raise RuntimeError("activation snapshot prompt produced no tokens")
+        self._validate_tokens(token_ids)
+        torch = self._torch
+        input_ids = torch.tensor(
+            [token_ids], dtype=torch.long, device=self._input_device
+        )
+        attention_mask = torch.ones_like(input_ids)
+        with torch.inference_mode():
+            outputs = self._model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=False,
+                return_dict=True,
+                output_hidden_states=True,
+            )
+        hidden_states = getattr(outputs, "hidden_states", None)
+        if not hidden_states:
+            raise RuntimeError("Transformers model returned no hidden states")
+        hidden = hidden_states[-1]
+        index = 0 if position == "first" else -1
+        row = hidden[0, index].detach().to(dtype=torch.float32, device="cpu").numpy()
+        result = np.asarray(row, dtype=np.float32).copy()
+        if result.ndim != 1 or result.shape[0] != self.activation_width():
+            raise RuntimeError("Transformers activation snapshot has the wrong width")
+        if not np.all(np.isfinite(result)):
+            raise RuntimeError("Transformers activation snapshot is not finite")
+        return result
+
+    def activation_logit_adjustments(
+        self,
+        vector,
+        *,
+        layer: str = "output",
+        position: str = "current",
+    ) -> np.ndarray:
+        """Project a final-hidden activation delta through the output head."""
+        if layer != "output":
+            raise RuntimeError("Transformers activation runtime currently supports layer=output only")
+        if position != "current":
+            raise RuntimeError("Transformers activation runtime position must be current")
+        values = np.asarray(vector, dtype=np.float32)
+        if values.ndim != 1 or values.shape[0] != self.activation_width():
+            raise RuntimeError("activation vector does not match the output-head width")
+        if not np.all(np.isfinite(values)):
+            raise RuntimeError("activation vector is not finite")
+        digest = hashlib.sha256(np.ascontiguousarray(values).tobytes()).hexdigest()
+        key = (layer, position, digest)
+        cached = self._activation_logit_cache.get(key)
+        if cached is not None:
+            return cached.copy()
+        output_embeddings = self._model.get_output_embeddings()
+        weight = getattr(output_embeddings, "weight", None)
+        if weight is None or getattr(weight, "ndim", None) != 2:
+            raise RuntimeError("Transformers model has no two-dimensional output head")
+        torch = self._torch
+        direction = torch.as_tensor(values, dtype=weight.dtype, device=weight.device)
+        with torch.inference_mode():
+            projected = torch.matmul(weight[: self._vocabulary_size], direction)
+        result = (
+            projected.detach().to(dtype=torch.float32, device="cpu").numpy().astype(
+                np.float32, copy=True
+            )
+        )
+        if not np.all(np.isfinite(result)):
+            raise RuntimeError("activation output-head projection is not finite")
+        self._activation_logit_cache[key] = result
+        return result.copy()
 
     def token_preference_features(
         self,

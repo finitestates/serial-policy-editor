@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import platform
 import sys
 from dataclasses import asdict, dataclass
@@ -85,6 +86,59 @@ class LlamaCppSettings:
             )
 
 
+def _llama_options(
+    llama_cpp: Any,
+    model_path: Path,
+    settings: LlamaCppSettings,
+    *,
+    embedding: bool = False,
+) -> dict[str, Any]:
+    """Build shared options for inference and the auxiliary embedding context."""
+    options = {
+        "model_path": str(model_path),
+        "n_ctx": settings.n_ctx,
+        "n_batch": settings.n_batch,
+        "flash_attn": settings.flash_attn,
+        "use_mmap": settings.use_mmap,
+        "use_mlock": settings.use_mlock,
+        "logits_all": False,
+        "embedding": embedding,
+        "verbose": False,
+        "n_ubatch": settings.n_ubatch,
+        "n_threads": settings.n_threads,
+        "n_threads_batch": settings.n_threads_batch,
+        "n_gpu_layers": settings.n_gpu_layers,
+        "split_mode": settings.split_mode,
+        "main_gpu": settings.main_gpu,
+        "tensor_split": list(settings.tensor_split) if settings.tensor_split else None,
+        "offload_kqv": settings.offload_kqv,
+        "type_k": settings.type_k,
+        "type_v": settings.type_v,
+        "numa": settings.numa,
+        "rope_scaling_type": settings.rope_scaling_type,
+        "rope_freq_base": settings.rope_freq_base,
+        "rope_freq_scale": settings.rope_freq_scale,
+    }
+    for name in ("type_k", "type_v"):
+        value = options[name]
+        if isinstance(value, str):
+            constant = "GGML_TYPE_" + value.upper()
+            if not hasattr(llama_cpp, constant):
+                raise EditorError(
+                    f"Installed llama-cpp-python does not support cache type {value}"
+                )
+            options[name] = getattr(llama_cpp, constant)
+    if not settings.flash_attn and options["type_v"] is not None:
+        quantized_types = {
+            getattr(llama_cpp, "GGML_TYPE_" + name.upper(), None)
+            for name in KV_CACHE_TYPES
+            if name != "f16"
+        }
+        if options["type_v"] in quantized_types:
+            raise EditorError("Quantized V cache requires Flash Attention")
+    return {key: value for key, value in options.items() if value is not None}
+
+
 class LlamaCppDecoder:
     """Thin adapter over llama-cpp-python's token evaluation API."""
 
@@ -111,45 +165,8 @@ class LlamaCppDecoder:
             raise RuntimeError(f"model file does not exist: {self.model_path}")
         # SPE samples the returned logits itself. A llama.cpp RNG seed would
         # describe an unused sampler and could contradict the active SPE seed.
-        options = {
-            "model_path": str(self.model_path),
-            "n_ctx": settings.n_ctx,
-            "n_batch": settings.n_batch,
-            "flash_attn": settings.flash_attn,
-            "use_mmap": settings.use_mmap,
-            "use_mlock": settings.use_mlock,
-            "logits_all": False,
-            "verbose": False,
-            "n_ubatch": settings.n_ubatch,
-            "n_threads": settings.n_threads,
-            "n_threads_batch": settings.n_threads_batch,
-            "n_gpu_layers": settings.n_gpu_layers,
-            "split_mode": settings.split_mode,
-            "main_gpu": settings.main_gpu,
-            "tensor_split": list(settings.tensor_split) if settings.tensor_split else None,
-            "offload_kqv": settings.offload_kqv,
-            "type_k": settings.type_k,
-            "type_v": settings.type_v,
-            "numa": settings.numa,
-            "rope_scaling_type": settings.rope_scaling_type,
-            "rope_freq_base": settings.rope_freq_base,
-            "rope_freq_scale": settings.rope_freq_scale,
-        }
-        for name in ("type_k", "type_v"):
-            value = options[name]
-            if isinstance(value, str):
-                constant = "GGML_TYPE_" + value.upper()
-                if not hasattr(llama_cpp, constant):
-                    raise EditorError(f"Installed llama-cpp-python does not support cache type {value}")
-                options[name] = getattr(llama_cpp, constant)
-        if not settings.flash_attn and options["type_v"] is not None:
-            quantized_types = {
-                getattr(llama_cpp, "GGML_TYPE_" + name.upper(), None)
-                for name in KV_CACHE_TYPES if name != "f16"
-            }
-            if options["type_v"] in quantized_types:
-                raise EditorError("Quantized V cache requires Flash Attention")
-        self._model = Llama(**{k: v for k, v in options.items() if v is not None})
+        options = _llama_options(llama_cpp, self.model_path, settings)
+        self._model = Llama(**options)
         n_vocab = getattr(self._model, "n_vocab", None)
         self._vocabulary_size = int(n_vocab() if callable(n_vocab) else n_vocab)
         if self._vocabulary_size < 1:
@@ -168,6 +185,9 @@ class LlamaCppDecoder:
         self._token_preference_feature_cache: dict[tuple[object, ...], np.ndarray] = {}
         self._token_preference_embedding_fingerprint: str | None = None
         self._token_preference_embedding_width: int | None = None
+        self._token_embedding_matrix_cache: np.ndarray | None = None
+        self._activation_model: Any | None = None
+        self._activation_logit_cache: dict[tuple[str, str, str], np.ndarray] = {}
 
     def vocabulary_size(self) -> int:
         return self._vocabulary_size
@@ -238,6 +258,178 @@ class LlamaCppDecoder:
             np.float32, copy=True
         )
 
+    def activation_width(self) -> int:
+        """Return the final hidden/output-head width for this GGUF model."""
+        return int(self._model.n_embd())
+
+    def activation_control_vector_width(self) -> int:
+        """Return the per-layer width expected by llama.cpp cvector data."""
+        return self.activation_width()
+
+    def activation_control_vector_layer_count(self) -> int:
+        """Return the number of direction slots emitted by cvector-generator."""
+        getter = getattr(self._llama_cpp, "llama_model_n_layer", None)
+        if callable(getter):
+            return max(1, int(getter(self._model._model.model)) - 1)
+        raise RuntimeError("installed llama.cpp binding does not expose model layer count")
+
+    def set_activation_control_vector(
+        self,
+        vector,
+        *,
+        layer_start: int,
+        layer_end: int,
+        strength: float,
+    ) -> None:
+        """Install a layerwise cvector on the live llama.cpp context."""
+        setter = getattr(self._llama_cpp, "llama_set_adapter_cvec", None)
+        if not callable(setter):
+            raise RuntimeError("installed llama.cpp binding does not expose control vectors")
+        width = self.activation_control_vector_width()
+        layer_count = self.activation_control_vector_layer_count()
+        if (
+            type(layer_start) is not int
+            or type(layer_end) is not int
+            or layer_start < 1
+            or layer_end < layer_start
+            or layer_end > layer_count
+        ):
+            raise RuntimeError("control-vector layer range is outside the loaded model")
+        values = np.asarray(vector, dtype=np.float32)
+        if values.ndim != 1 or values.size != width * layer_count:
+            raise RuntimeError("control-vector data does not match the loaded model")
+        if not np.all(np.isfinite(values)):
+            raise RuntimeError("control-vector data is not finite")
+        scaled = np.ascontiguousarray(values * float(strength), dtype=np.float32)
+        context = self._model._ctx.ctx if hasattr(self._model, "_ctx") else self._model.ctx
+        result = setter(
+            context,
+            scaled.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            int(scaled.size),
+            width,
+            layer_start,
+            layer_end,
+        )
+        if int(result) != 0:
+            raise RuntimeError(f"llama.cpp rejected the control vector (error {result})")
+
+    def clear_activation_control_vector(self) -> None:
+        """Remove any cvector from the live llama.cpp context."""
+        setter = getattr(self._llama_cpp, "llama_set_adapter_cvec", None)
+        if not callable(setter):
+            return
+        width = self.activation_control_vector_width()
+        layer_count = self.activation_control_vector_layer_count()
+        context = self._model._ctx.ctx if hasattr(self._model, "_ctx") else self._model.ctx
+        result = setter(context, None, 0, width, 1, layer_count)
+        if int(result) != 0:
+            raise RuntimeError(f"llama.cpp rejected clearing the control vector (error {result})")
+
+    def _activation_embedding_model(self) -> Any:
+        if self._activation_model is None:
+            self._activation_model = self._model.__class__(
+                **_llama_options(
+                    self._llama_cpp,
+                    self.model_path,
+                    self.settings,
+                    embedding=True,
+                )
+            )
+        return self._activation_model
+
+    def activation_snapshot(
+        self,
+        text: str,
+        *,
+        layer: str = "output",
+        position: str = "last",
+    ) -> np.ndarray:
+        """Capture one final hidden-state position for a prompt.
+
+        llama.cpp exposes the final representation through its embedding
+        context.  The first cross-backend contract therefore uses the output
+        layer; internal-layer capture remains a separate future capability.
+        """
+        if layer != "output":
+            raise RuntimeError("llama.cpp activation snapshots currently support layer=output only")
+        if position not in {"first", "last"}:
+            raise RuntimeError("activation snapshot position must be first or last")
+        if not isinstance(text, str) or not text:
+            raise RuntimeError("activation snapshot prompt must be nonempty")
+        model = self._activation_embedding_model()
+        values = np.asarray(
+            model.embed(text, normalize=False, truncate=False), dtype=np.float32
+        )
+        if values.ndim != 2 or values.shape[0] < 1:
+            raise RuntimeError("llama.cpp returned no per-token activation snapshot")
+        row = values[0 if position == "first" else -1].copy()
+        if row.ndim != 1 or row.shape[0] != self.activation_width():
+            raise RuntimeError("llama.cpp activation snapshot has the wrong width")
+        if not np.all(np.isfinite(row)):
+            raise RuntimeError("llama.cpp activation snapshot is not finite")
+        return row
+
+    def _token_embedding_matrix(self) -> np.ndarray:
+        if self._token_embedding_matrix_cache is not None:
+            return self._token_embedding_matrix_cache
+        binding = getattr(self._llama_cpp, "llama_cpp", self._llama_cpp)
+        library = getattr(binding, "_lib", None)
+        getter = getattr(
+            library,
+            "_Z24llama_model_get_tok_embdPK11llama_modelPf",
+            None,
+        )
+        if getter is None:
+            raise RuntimeError(
+                "installed llama.cpp binding does not expose token embeddings"
+            )
+        embeddings = np.empty(
+            (self._vocabulary_size, self.activation_width()), dtype=np.float32
+        )
+        getter.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float)]
+        getter.restype = None
+        getter(
+            self._model._model.model,
+            embeddings.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        )
+        if not np.all(np.isfinite(embeddings)):
+            raise RuntimeError("llama.cpp returned non-finite token embeddings")
+        self._token_embedding_matrix_cache = embeddings
+        return embeddings
+
+    def activation_logit_adjustments(
+        self,
+        vector,
+        *,
+        layer: str = "output",
+        position: str = "current",
+    ) -> np.ndarray:
+        """Project a final-hidden activation delta through the GGUF output head.
+
+        llama.cpp currently exposes the token embedding matrix, which is the
+        output head for the tied-output models supported by this adapter.
+        """
+        if layer != "output":
+            raise RuntimeError("llama.cpp activation runtime currently supports layer=output only")
+        if position != "current":
+            raise RuntimeError("llama.cpp activation runtime position must be current")
+        values = np.asarray(vector, dtype=np.float32)
+        if values.ndim != 1 or values.shape[0] != self.activation_width():
+            raise RuntimeError("activation vector does not match the output-head width")
+        if not np.all(np.isfinite(values)):
+            raise RuntimeError("activation vector is not finite")
+        digest = hashlib.sha256(np.ascontiguousarray(values).tobytes()).hexdigest()
+        key = (layer, position, digest)
+        cached = self._activation_logit_cache.get(key)
+        if cached is not None:
+            return cached.copy()
+        result = self._token_embedding_matrix() @ values
+        result = np.asarray(result, dtype=np.float32)
+        if not np.all(np.isfinite(result)):
+            raise RuntimeError("llama.cpp activation output-head projection is not finite")
+        self._activation_logit_cache[key] = result.copy()
+        return result
+
     def token_preference_features(
         self,
         *,
@@ -260,27 +452,8 @@ class LlamaCppDecoder:
             cached = self._token_preference_feature_cache.get(key)
             if cached is not None:
                 return cached
-        binding = getattr(self._llama_cpp, "llama_cpp", self._llama_cpp)
-        library = getattr(binding, "_lib", None)
-        getter = getattr(
-            library,
-            "_Z24llama_model_get_tok_embdPK11llama_modelPf",
-            None,
-        )
-        if getter is None:
-            raise RuntimeError(
-                "installed llama.cpp binding does not expose token embeddings"
-            )
-        embedding_width = int(self._model.n_embd())
-        embeddings = np.empty(
-            (self._vocabulary_size, embedding_width), dtype=np.float32
-        )
-        getter.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float)]
-        getter.restype = None
-        getter(
-            self._model._model.model,
-            embeddings.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-        )
+        embeddings = self._token_embedding_matrix()
+        embedding_width = int(embeddings.shape[1])
         fingerprint = embedding_fingerprint(embeddings)
         self._token_preference_embedding_fingerprint = fingerprint
         self._token_preference_embedding_width = embedding_width
@@ -301,6 +474,16 @@ class LlamaCppDecoder:
         )
         self._token_preference_feature_cache[key] = features
         return features
+
+    def close(self) -> None:
+        """Release both the normal and auxiliary activation contexts."""
+        for name in ("_activation_model", "_model"):
+            model = getattr(self, name, None)
+            if model is not None:
+                close = getattr(model, "close", None)
+                if callable(close):
+                    close()
+                setattr(self, name, None)
 
     def token_preference_coordinate_identity(
         self,
@@ -368,6 +551,15 @@ class LlamaCppDecoder:
         requested = asdict(self.settings)
         if requested.get("tensor_split") is not None:
             requested["tensor_split"] = list(requested["tensor_split"])
+        model_type = None
+        meta_reader = getattr(self._llama_cpp, "llama_model_meta_val_str", None)
+        if callable(meta_reader):
+            buffer = ctypes.create_string_buffer(128)
+            try:
+                if int(meta_reader(self._model._model.model, b"general.architecture", buffer, 128)) >= 0:
+                    model_type = buffer.value.decode("utf-8")
+            except (TypeError, ValueError, UnicodeDecodeError):
+                model_type = None
         return {
             "backend": "llama.cpp",
             "adapter": "llama-cpp-python",
@@ -375,6 +567,9 @@ class LlamaCppDecoder:
             "filename": self.model_path.name,
             "file_size_bytes": int(stat.st_size),
             "vocabulary_size": self.vocabulary_size(),
+            "model_type": model_type,
+            "activation_width": self.activation_width(),
+            "activation_layer_count": self.activation_control_vector_layer_count(),
             "llama_cpp_python_version": getattr(self._llama_cpp, "__version__", None),
             "numpy_version": np.__version__,
             "python_version": sys.version,

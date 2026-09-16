@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import json
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping
@@ -54,6 +56,16 @@ class SamplingConfig:
     token_preference_min_gain: float = 0.0
     token_preference_max_gain: float = 8.0
     token_preference_coordinate_identity: TokenPreferenceCoordinateIdentity | Mapping[str, Any] | None = None
+    activation_vector: tuple = ()
+    activation_vector_strength: float = 0.0
+    activation_vector_layer: str = "output"
+    activation_vector_position: str = "current"
+    activation_vector_layer_start: int | None = None
+    activation_vector_layer_end: int | None = None
+    # Stored as canonical JSON so the frozen sampler remains hashable while
+    # retaining the model identity needed for replay diagnostics.
+    activation_vector_model: str = ""
+    activation_vector_digest: str = ""
     group_control_scheme: str = "appearance-feedback-v1"
     reference_prior_routes: tuple = ()
     reference_prior_scope: str = "active"
@@ -165,6 +177,96 @@ class SamplingConfig:
         ):
             raise EditorError("token_preference_whitening_ridge must be finite and nonnegative")
         object.__setattr__(self, "token_preference_whitening_ridge", float(self.token_preference_whitening_ridge))
+        raw_activation = self.activation_vector
+        if isinstance(raw_activation, (str, bytes, bytearray)):
+            raise EditorError("activation_vector must be a numeric vector")
+        try:
+            activation = tuple(float(value) for value in raw_activation)
+        except (TypeError, ValueError) as exc:
+            raise EditorError("activation_vector must be a numeric vector") from exc
+        if any(not math.isfinite(value) for value in activation):
+            raise EditorError("activation_vector must contain finite numbers")
+        object.__setattr__(self, "activation_vector", activation)
+        if self.activation_vector_layer == "output":
+            if self.activation_vector_position != "current":
+                raise EditorError("output activation position must be current")
+            if (
+                self.activation_vector_layer_start is not None
+                or self.activation_vector_layer_end is not None
+            ):
+                raise EditorError("output activation vectors cannot specify a layer range")
+        elif self.activation_vector_layer == "control-vector":
+            if self.activation_vector_position != "layers":
+                raise EditorError("control-vector activation position must be layers")
+            if (
+                type(self.activation_vector_layer_start) is not int
+                or self.activation_vector_layer_start < 1
+                or type(self.activation_vector_layer_end) is not int
+                or self.activation_vector_layer_end < self.activation_vector_layer_start
+            ):
+                raise EditorError("activation vector layer range must be a positive interval")
+        else:
+            raise EditorError("activation_vector_layer must be output or control-vector")
+        value = self.activation_vector_strength
+        if (
+            type(value) not in (int, float)
+            or not math.isfinite(float(value))
+            or float(value) < 0.0
+        ):
+            raise EditorError("activation_vector_strength must be finite and nonnegative")
+        object.__setattr__(self, "activation_vector_strength", float(value))
+        model = self.activation_vector_model
+        if isinstance(model, Mapping):
+            model = json.dumps(
+                dict(model), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+        if not isinstance(model, str):
+            raise EditorError("activation_vector_model must be a JSON object")
+        if model:
+            try:
+                parsed_model = json.loads(model)
+            except (TypeError, ValueError) as exc:
+                raise EditorError("activation_vector_model must be valid JSON") from exc
+            if not isinstance(parsed_model, dict):
+                raise EditorError("activation_vector_model must be a JSON object")
+            model = json.dumps(
+                parsed_model, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+        object.__setattr__(self, "activation_vector_model", model)
+        digest = self.activation_vector_digest
+        if not isinstance(digest, str) or (
+            digest and re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            raise EditorError("activation_vector_digest must be a lowercase SHA-256 digest")
+        object.__setattr__(self, "activation_vector_digest", digest)
+        if activation and model:
+            width = json.loads(model).get("activation_width")
+            if (
+                width is not None
+                and self.activation_vector_layer == "output"
+                and width != len(activation)
+            ):
+                raise EditorError("activation vector dimension does not match model width")
+            if (
+                width is not None
+                and self.activation_vector_layer == "control-vector"
+                and (type(width) is not int or width < 1 or len(activation) % width)
+            ):
+                raise EditorError("control-vector dimension is not layer-aligned")
+            if (
+                self.activation_vector_layer == "control-vector"
+                and width is None
+            ):
+                raise EditorError("control-vector activation requires model width")
+            layer_count = json.loads(model).get("activation_layer_count")
+            if (
+                layer_count is not None
+                and self.activation_vector_layer == "control-vector"
+                and (type(layer_count) is not int or layer_count < 1
+                     or len(activation) // int(width) != layer_count
+                     or self.activation_vector_layer_end > layer_count)
+            ):
+                raise EditorError("control-vector dimension does not match its layer metadata")
         if self.token_preference_learning_scheme not in {"sgd-v1", "fisher-kl-v2"}:
             raise EditorError("unsupported token_preference_learning_scheme")
         if self.token_preference_influence_mode not in {"manual", "kl"}:
@@ -311,6 +413,7 @@ class SamplingConfig:
             or any(c.enabled for c in self.group_controls)
             or bool(self.token_preference_vector)
             or bool(self.token_preference_fast_vector)
+            or (bool(self.activation_vector) and self.activation_vector_strength != 0.0)
             or self.reference_prior_active
         )
 
@@ -462,6 +565,28 @@ class SamplingConfig:
             token_preference_coordinate_identity=value.get(
                 "token_preference_coordinate_identity", defaults.token_preference_coordinate_identity
             ),
+            activation_vector=value.get("activation_vector", defaults.activation_vector),
+            activation_vector_strength=value.get(
+                "activation_vector_strength", defaults.activation_vector_strength
+            ),
+            activation_vector_layer=value.get(
+                "activation_vector_layer", defaults.activation_vector_layer
+            ),
+            activation_vector_position=value.get(
+                "activation_vector_position", defaults.activation_vector_position
+            ),
+            activation_vector_layer_start=value.get(
+                "activation_vector_layer_start", defaults.activation_vector_layer_start
+            ),
+            activation_vector_layer_end=value.get(
+                "activation_vector_layer_end", defaults.activation_vector_layer_end
+            ),
+            activation_vector_model=value.get(
+                "activation_vector_model", defaults.activation_vector_model
+            ),
+            activation_vector_digest=value.get(
+                "activation_vector_digest", defaults.activation_vector_digest
+            ),
             group_control_scheme=value.get(
                 "group_control_scheme", defaults.group_control_scheme
             ),
@@ -504,6 +629,14 @@ class SamplingConfig:
             ("token_preference_max_gain", 8.0),
             ("token_preference_coordinate_identity", None),
             ("group_control_scheme", "appearance-feedback-v1"),
+            ("activation_vector", ()),
+            ("activation_vector_strength", 0.0),
+            ("activation_vector_layer", "output"),
+            ("activation_vector_position", "current"),
+            ("activation_vector_layer_start", None),
+            ("activation_vector_layer_end", None),
+            ("activation_vector_model", ""),
+            ("activation_vector_digest", ""),
         ):
             value.setdefault(name, default)
         if "reference_prior_mode" not in value:
@@ -582,6 +715,30 @@ class SamplingConfig:
             "token_preference_coordinate_identity": (
                 self.token_preference_coordinate_identity.to_dict()
                 if self.token_preference_coordinate_identity is not None else None
+            ),
+            **(
+                {
+                    "activation_vector": list(self.activation_vector),
+                    "activation_vector_strength": self.activation_vector_strength,
+                    "activation_vector_layer": self.activation_vector_layer,
+                    "activation_vector_position": self.activation_vector_position,
+                    "activation_vector_layer_start": self.activation_vector_layer_start,
+                    "activation_vector_layer_end": self.activation_vector_layer_end,
+                    "activation_vector_model": (
+                        json.loads(self.activation_vector_model)
+                        if self.activation_vector_model else {}
+                    ),
+                    "activation_vector_digest": self.activation_vector_digest,
+                }
+                if (
+                    self.activation_vector
+                    or self.activation_vector_strength != 0.0
+                    or self.activation_vector_model
+                    or self.activation_vector_digest
+                    or self.activation_vector_layer_start is not None
+                    or self.activation_vector_layer_end is not None
+                )
+                else {}
             ),
             "group_control_scheme": self.group_control_scheme,
             "reference_prior_routes": [

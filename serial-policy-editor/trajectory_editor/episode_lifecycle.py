@@ -9,7 +9,7 @@ from .episode_policy import TapeStep, ReplayPlan
 
 POLICY_FIELDS = tuple(
     f.name for f in fields(SamplingConfig)
-    if f.name.startswith(("reference_prior_", "token_preference_"))
+    if f.name.startswith(("reference_prior_", "token_preference_", "activation_"))
     or f.name == "group_control_scheme"
 ) + ("group_controls",)
 
@@ -40,6 +40,9 @@ def _model_continuation(store, source_id, backend, provenance):
             bias_rules=(), bias_groups=(), group_controls=(), reference_prior_routes=(),
             token_preference_vector=(), token_preference_fast_vector=(),
             token_preference_coordinate_identity=None,
+            activation_vector=(), activation_vector_strength=0.0,
+            activation_vector_layer_start=None, activation_vector_layer_end=None,
+            activation_vector_model="", activation_vector_digest="",
         ),
         initial_text=source["initial_text"] + source["visible_text"],
         max_tokens=source["max_tokens"],

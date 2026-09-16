@@ -20,6 +20,7 @@ from typing import Any
 from prompt_toolkit import prompt
 from prompt_toolkit.validation import Validator
 
+from .activation_vectors import ActivationVectorArtifact
 from .bias_presets import load_bias_preset, project_biases
 from .bias_catalog import load_catalog, validate_catalog, compile_catalog, load_yaml_source, BiasCatalog
 from .lexical_reference import load_reference
@@ -93,7 +94,14 @@ def _sampling_overrides_present(args: argparse.Namespace) -> bool:
         )
         for name in TOKEN_PREFERENCE_OVERRIDE_FIELDS
     )
-    return ordinary or preference
+    activation = (
+        getattr(args, "activation_vector", None) is not None
+        or (
+            getattr(args, "activation_strength", None) is not None
+            and "activation_strength" in explicit
+        )
+    )
+    return ordinary or preference or activation
 SAMPLER_ALIASES = {
     "temp": "temperature",
     "rep": "repeat_penalty",
@@ -443,6 +451,16 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         sampling.add_argument("--" + name.replace("_", "-"), type=kind)
     sampling.add_argument("--biases", type=Path, help="load a JSON bias preset (replaces the saved bias set)")
+    sampling.add_argument(
+        "--activation-vector",
+        type=Path,
+        help="load a model-matched activation artifact or llama.cpp cvector GGUF",
+    )
+    sampling.add_argument(
+        "--activation-strength",
+        type=float,
+        help="override the activation vector artifact strength",
+    )
     sampling.add_argument("--bias-step", type=float, help="default positive bias adjustment (default: 0.5)")
     parser.set_defaults(bias_rules=None, bias_groups=None)
     seed_options = sampling.add_mutually_exclusive_group()
@@ -537,7 +555,10 @@ def _sampling_from_args(
     base = source if source is not None else SamplingConfig()
     if getattr(args, "_model_changed", False):
         base = replace(base, bias_rules=(), bias_groups=(), group_controls=(),
-                       reference_prior_routes=(), token_preference_vector=(), token_preference_fast_vector=())
+                       reference_prior_routes=(), token_preference_vector=(), token_preference_fast_vector=(),
+                       activation_vector=(), activation_vector_model="", activation_vector_digest="",
+                       activation_vector_strength=0.0,
+                       activation_vector_layer_start=None, activation_vector_layer_end=None)
     values = {
         name: getattr(args, name)
         if getattr(args, name) is not None
@@ -560,6 +581,14 @@ def _sampling_from_args(
         ),
         "token_preference_projection_seed": base.token_preference_projection_seed,
         "token_preference_coordinate_identity": base.token_preference_coordinate_identity,
+        "activation_vector": base.activation_vector,
+        "activation_vector_strength": base.activation_vector_strength,
+        "activation_vector_layer": base.activation_vector_layer,
+        "activation_vector_position": base.activation_vector_position,
+        "activation_vector_layer_start": base.activation_vector_layer_start,
+        "activation_vector_layer_end": base.activation_vector_layer_end,
+        "activation_vector_model": base.activation_vector_model,
+        "activation_vector_digest": base.activation_vector_digest,
         "token_preference_feature_scheme": (
             base.token_preference_feature_scheme
             if getattr(args, "token_preference_feature_scheme", None) is None
@@ -635,8 +664,32 @@ def _apply_token_preference_preset(
         token_preference_min_gain=preset_preference.token_preference_min_gain,
         token_preference_max_gain=preset_preference.token_preference_max_gain,
         token_preference_coordinate_identity=preset_preference.token_preference_coordinate_identity,
+        activation_vector=preset_preference.activation_vector,
+        activation_vector_strength=preset_preference.activation_vector_strength,
+        activation_vector_layer=preset_preference.activation_vector_layer,
+        activation_vector_position=preset_preference.activation_vector_position,
+        activation_vector_layer_start=preset_preference.activation_vector_layer_start,
+        activation_vector_layer_end=preset_preference.activation_vector_layer_end,
+        activation_vector_model=preset_preference.activation_vector_model,
+        activation_vector_digest=preset_preference.activation_vector_digest,
         group_control_scheme=preset_preference.group_control_scheme,
     )
+
+
+def _apply_activation_artifact(
+    sampling: SamplingConfig,
+    artifact: ActivationVectorArtifact | None,
+    args: argparse.Namespace,
+) -> SamplingConfig:
+    if artifact is None:
+        return sampling
+    strength = (
+        args.activation_strength
+        if "activation_strength" in getattr(args, "_explicit_options", set())
+        and args.activation_strength is not None
+        else artifact.strength
+    )
+    return artifact.apply_to_sampling(sampling, strength=strength)
 
 
 def _token_preference_config_from_args(args: argparse.Namespace) -> TokenPreferenceConfig:
@@ -968,6 +1021,13 @@ def _sampler_summary(config: SamplingConfig) -> str:
         summary += (f" token_preference_norm={norm:g} token_preference_strength={config.token_preference_strength:g}"
                     f" token_preference_fast_norm={fast_norm:g} token_preference_fast_strength={config.token_preference_fast_strength:g}"
                     f" token_preference_projection_seed={config.token_preference_projection_seed}")
+    if config.activation_vector or config.activation_vector_digest:
+        norm = sum(value * value for value in config.activation_vector) ** 0.5
+        summary += (
+            f" activation_vector_norm={norm:g}"
+            f" activation_vector_strength={config.activation_vector_strength:g}"
+            f" activation_vector_digest={config.activation_vector_digest[:12]}"
+        )
     return summary
 
 
@@ -1333,6 +1393,14 @@ def main(argv: list[str] | None = None) -> int:
                 args.bias_groups = preset.bias_groups
                 preset_preference = preset
                 args._bias_preset = preset
+            activation_artifact = None
+            if args.activation_strength is not None and args.activation_vector is None:
+                raise EditorError("--activation-strength requires --activation-vector")
+            if args.activation_vector is not None:
+                activation_artifact = ActivationVectorArtifact.from_path(
+                    args.activation_vector
+                )
+                activation_artifact.validate_against_backend(backend, provenance)
             requested_id = args.episode_id
             parent_id: str | None = None
             fork_boundary: int | None = None
@@ -1372,6 +1440,9 @@ def main(argv: list[str] | None = None) -> int:
                     sampling, args.token_preference_projection_seed, io,
                     replay=args.replay is not None and not args.fixed_config,
                 )
+                sampling = _apply_activation_artifact(
+                    sampling, activation_artifact, args
+                )
                 explicit = sampling != source_sampling
                 io.write("Restoring saved context...")
                 if model_changed:
@@ -1405,6 +1476,9 @@ def main(argv: list[str] | None = None) -> int:
                     sampling, args.token_preference_projection_seed, io,
                     replay=args.replay is not None and not args.fixed_config,
                 )
+                sampling = _apply_activation_artifact(
+                    sampling, activation_artifact, args
+                )
                 engine = EpisodeEngine(
                     backend,
                     sampling=sampling,
@@ -1432,22 +1506,29 @@ def main(argv: list[str] | None = None) -> int:
                     sampling, args, io,
                     replay=args.replay is not None and not args.fixed_config,
                 )
+                sampling = _apply_activation_artifact(
+                    sampling, activation_artifact, args
+                )
                 # Explicit steering imports apply to every replay segment, just
                 # like explicit sampler flags. Unspecified fields follow source.
                 if args.bias_groups is not None:
                     overrides["group_controls"] = sampling.group_controls
                 token_preference_override = _sampling_overrides_present(args)
+                activation_override = activation_artifact is not None
                 for name in POLICY_FIELDS:
                     reference_override = name.startswith("reference_prior_") and (
                         args.reference is not None or args.reference_prior is not None
                         or args.reference_prior_strength is not None or args.reference_strength is not None
                         or (catalog is not None and catalog.reference_prior_routes)
                     )
-                    if preset_preference is not None or model_changed or reference_override or token_preference_override:
+                    if preset_preference is not None or model_changed or reference_override or token_preference_override or activation_override:
                         overrides[name] = getattr(sampling, name)
                 sampling = _apply_token_preference_seed(
                     sampling, args.token_preference_projection_seed, io,
                     replay=args.replay is not None and not args.fixed_config,
+                )
+                sampling = _apply_activation_artifact(
+                    sampling, activation_artifact, args
                 )
                 replay_prefix = None
                 if model_changed:
@@ -1515,6 +1596,9 @@ def main(argv: list[str] | None = None) -> int:
                 sampling = _apply_token_preference_seed(
                     sampling, args.token_preference_projection_seed, io,
                     replay=args.replay is not None and not args.fixed_config,
+                )
+                sampling = _apply_activation_artifact(
+                    sampling, activation_artifact, args
                 )
                 engine = EpisodeEngine(
                     backend,

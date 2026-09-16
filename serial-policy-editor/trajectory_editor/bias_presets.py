@@ -90,6 +90,14 @@ def load_bias_preset(path: Path, backend, provenance: dict) -> SamplingConfig:
         token_preference_influence_kl=value.get("token_preference_influence_kl", 0.05),
         token_preference_min_gain=value.get("token_preference_min_gain", 0.0),
         token_preference_max_gain=value.get("token_preference_max_gain", 8.0),
+        activation_vector=value.get("activation_vector", ()),
+        activation_vector_strength=value.get("activation_vector_strength", 0.0),
+        activation_vector_layer=value.get("activation_vector_layer", "output"),
+        activation_vector_position=value.get("activation_vector_position", "current"),
+        activation_vector_layer_start=value.get("activation_vector_layer_start"),
+        activation_vector_layer_end=value.get("activation_vector_layer_end"),
+        activation_vector_model=value.get("activation_vector_model", ""),
+        activation_vector_digest=value.get("activation_vector_digest", ""),
         group_control_scheme=value.get(
             "group_control_scheme", "appearance-feedback-v1"
         ),
@@ -166,7 +174,7 @@ def project_biases(
     if not rules_only:
         result["bias_groups"] = [group.to_dict() for group in config.bias_groups]
         result.update({key: value for key, value in config.to_dict().items()
-                       if key.startswith(("token_preference_", "reference_prior_"))
+                       if key.startswith(("token_preference_", "reference_prior_", "activation_"))
                        or key == "group_control_scheme"})
         result["group_controls"] = [replace(c, history_start=None).to_dict() for c in config.group_controls]
     return json.dumps(
