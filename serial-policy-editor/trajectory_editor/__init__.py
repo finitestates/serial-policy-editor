@@ -21,12 +21,12 @@ from .episode_engine import (
 from .episode_policy import EpisodeRunner, RunResult, TapeStep, WriteLearningResult
 from .episode_projector import EpisodeProjection, project_episode
 from .episode_store import EpisodeStore
-from .latent_preference import (
-    LatentPreferenceConfig,
-    LatentPreferenceLearner,
-    LatentPreferenceResult,
+from .token_preference import (
+    TokenPreferenceConfig,
+    TokenPreferenceLearner,
+    TokenPreferenceResult,
 )
-from .latent_features import LatentCoordinateIdentity
+from .token_preference_features import TokenPreferenceCoordinateIdentity
 from .online_learning import LearningResult, OnlineLearner, OnlineLearningConfig
 from .version import VERSION
 
@@ -49,10 +49,10 @@ __all__ = [
     "RunResult",
     "SamplingConfig",
     "LearningResult",
-    "LatentPreferenceConfig",
-    "LatentPreferenceLearner",
-    "LatentPreferenceResult",
-    "LatentCoordinateIdentity",
+    "TokenPreferenceConfig",
+    "TokenPreferenceLearner",
+    "TokenPreferenceResult",
+    "TokenPreferenceCoordinateIdentity",
     "OnlineLearner",
     "OnlineLearningConfig",
     "SelectRawRank",

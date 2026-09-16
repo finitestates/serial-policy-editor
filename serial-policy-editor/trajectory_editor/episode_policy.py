@@ -11,7 +11,7 @@ from .domain import SamplingConfig
 from .episode_actions import PolicyAction, SelectRawRank, Write
 from .episode_engine import ActionOutcome, EpisodeEngine, Observation, ReplayExpectation, InstructionRejected
 from .episode_store import EpisodeStore
-from .latent_preference import LatentPreferenceLearner, LatentPreferenceResult
+from .token_preference import TokenPreferenceLearner, TokenPreferenceResult
 from .online_learning import LearningResult, OnlineLearner
 
 
@@ -123,8 +123,8 @@ class WriteLearningResult:
     boundary_after: int
     tokens: tuple[WriteTokenLearning, ...]
     group_result: LearningResult | None
-    latent_result: LatentPreferenceResult | None
-    latent_token_results: tuple[LatentPreferenceResult, ...] = ()
+    token_preference_result: TokenPreferenceResult | None
+    token_preference_token_results: tuple[TokenPreferenceResult, ...] = ()
     group_token_results: tuple[LearningResult, ...] = ()
 
     @property
@@ -140,15 +140,15 @@ class WriteLearningResult:
         }
         if self.group_result is not None:
             payload["group_update"] = self.group_result.to_dict()
-        if self.latent_result is not None:
-            payload["latent_update"] = self.latent_result.to_dict()
-            payload["latent_token_observations"] = [
+        if self.token_preference_result is not None:
+            payload["token_preference_update"] = self.token_preference_result.to_dict()
+            payload["token_preference_token_observations"] = [
                 {key: getattr(result, key) for key in (
                     "observation_boundary", "chosen_token_id", "proposal_token_id",
                     "proposal_rejected", "severity", "rejection_strength",
                     "learning_gate", "sampler_eligible", "sampler_probability",
                     "decay_on", "effective_decay", "effective_fast_decay", "rejection_target")}
-                for result in self.latent_token_results
+                for result in self.token_preference_token_results
             ]
         return payload
 
@@ -161,25 +161,25 @@ class _WriteLearningAccumulator:
         backend,
         sampling: SamplingConfig,
         learner: OnlineLearner | None,
-        latent_learner: LatentPreferenceLearner | None,
+        token_preference_learner: TokenPreferenceLearner | None,
     ) -> None:
         self.backend = backend
         self.sampling = sampling
         self.learner = learner if learner is not None and learner.enabled else None
-        self.latent_learner = (
-            latent_learner
-            if latent_learner is not None and latent_learner.enabled
+        self.token_preference_learner = (
+            token_preference_learner
+            if token_preference_learner is not None and token_preference_learner.enabled
             else None
         )
         self.tokens: list[WriteTokenLearning] = []
         self.group_results: list[LearningResult] = []
-        self.latent_results: list[LatentPreferenceResult] = []
-        self.latent_base_probabilities = None
-        self.latent_features = None
+        self.token_preference_results: list[TokenPreferenceResult] = []
+        self.token_preference_base_probabilities = None
+        self.token_preference_features = None
 
     @property
     def enabled(self) -> bool:
-        return self.learner is not None or self.latent_learner is not None
+        return self.learner is not None or self.token_preference_learner is not None
 
     def add(self, observation: Observation, token_id: int) -> None:
         # Terminal selection is not a preference-bearing token in either v0
@@ -191,20 +191,20 @@ class _WriteLearningAccumulator:
             if self.learner is not None
             else None
         )
-        if self.latent_learner is not None and self.latent_base_probabilities is None:
-            base = getattr(observation.statistics, "pre_latent_probabilities", None)
+        if self.token_preference_learner is not None and self.token_preference_base_probabilities is None:
+            base = getattr(observation.statistics, "preference_base_probabilities", None)
             if base is not None:
                 import numpy as np
-                self.latent_base_probabilities = np.asarray(base, dtype=np.float64).copy()
-            features = getattr(observation.statistics, "latent_features", None)
+                self.token_preference_base_probabilities = np.asarray(base, dtype=np.float64).copy()
+            features = getattr(observation.statistics, "token_preference_features", None)
             if features is not None:
-                self.latent_features = np.asarray(features, dtype=np.float32)
-        latent_result = (
-            self.latent_learner.update(observation, token_id, self.sampling)
-            if self.latent_learner is not None
+                self.token_preference_features = np.asarray(features, dtype=np.float32)
+        token_preference_result = (
+            self.token_preference_learner.update(observation, token_id, self.sampling)
+            if self.token_preference_learner is not None
             else None
         )
-        source = group_result or latent_result
+        source = group_result or token_preference_result
         if source is None:
             return
         self.tokens.append(
@@ -221,8 +221,8 @@ class _WriteLearningAccumulator:
         )
         if group_result is not None:
             self.group_results.append(group_result)
-        if latent_result is not None:
-            self.latent_results.append(latent_result)
+        if token_preference_result is not None:
+            self.token_preference_results.append(token_preference_result)
 
     @staticmethod
     def _mean(values: Sequence[float]) -> float:
@@ -242,43 +242,43 @@ class _WriteLearningAccumulator:
                        severity=self._mean([r.severity for r in self.group_results]),
                        loss=self._mean([r.loss for r in self.group_results]))
 
-    def _aggregate_latent(self) -> LatentPreferenceResult | None:
-        if not self.latent_results:
+    def _aggregate_preference(self) -> TokenPreferenceResult | None:
+        if not self.token_preference_results:
             return None
-        latent_learner = self.latent_learner
-        assert latent_learner is not None
-        aggregate = latent_learner.aggregate(
-            self.latent_results,
+        token_preference_learner = self.token_preference_learner
+        assert token_preference_learner is not None
+        aggregate = token_preference_learner.aggregate(
+            self.token_preference_results,
             self.sampling,
-            base_probabilities=self.latent_base_probabilities,
-            features=self.latent_features,
+            base_probabilities=self.token_preference_base_probabilities,
+            features=self.token_preference_features,
         )
         return replace(
             aggregate,
-            old_policy_rank=self._mean_int([r.old_policy_rank for r in self.latent_results]),
-            old_policy_probability=self._mean([r.old_policy_probability for r in self.latent_results]),
-            severity=self._mean([r.severity for r in self.latent_results]),
-            loss=self._mean([r.loss for r in self.latent_results]),
+            old_policy_rank=self._mean_int([r.old_policy_rank for r in self.token_preference_results]),
+            old_policy_probability=self._mean([r.old_policy_probability for r in self.token_preference_results]),
+            severity=self._mean([r.severity for r in self.token_preference_results]),
+            loss=self._mean([r.loss for r in self.token_preference_results]),
         )
 
     def finish(self, boundary_after: int) -> WriteLearningResult | None:
         if not self.tokens:
             return None
         group_result = self._aggregate_groups()
-        latent_result = self._aggregate_latent()
+        token_preference_result = self._aggregate_preference()
         updated = self.sampling
         if group_result is not None:
             updated = group_result.sampling
-        if latent_result is not None:
+        if token_preference_result is not None:
             updated = replace(
                 updated,
-                latent_preference_z=latent_result.sampling.latent_preference_z,
-                latent_strength=latent_result.sampling.latent_strength,
-                latent_preference_fast_z=latent_result.sampling.latent_preference_fast_z,
-                latent_fast_strength=latent_result.sampling.latent_fast_strength,
-                latent_projection_seed=latent_result.sampling.latent_projection_seed,
-                latent_learning_scheme=latent_result.sampling.latent_learning_scheme,
-                latent_coordinate_identity=latent_result.sampling.latent_coordinate_identity,
+                token_preference_vector=token_preference_result.sampling.token_preference_vector,
+                token_preference_strength=token_preference_result.sampling.token_preference_strength,
+                token_preference_fast_vector=token_preference_result.sampling.token_preference_fast_vector,
+                token_preference_fast_strength=token_preference_result.sampling.token_preference_fast_strength,
+                token_preference_projection_seed=token_preference_result.sampling.token_preference_projection_seed,
+                token_preference_learning_scheme=token_preference_result.sampling.token_preference_learning_scheme,
+                token_preference_coordinate_identity=token_preference_result.sampling.token_preference_coordinate_identity,
             )
         return WriteLearningResult(
             sampling=updated,
@@ -286,8 +286,8 @@ class _WriteLearningAccumulator:
             boundary_after=boundary_after,
             tokens=tuple(self.tokens),
             group_result=group_result,
-            latent_result=latent_result,
-            latent_token_results=tuple(self.latent_results),
+            token_preference_result=token_preference_result,
+            token_preference_token_results=tuple(self.token_preference_results),
             group_token_results=tuple(self.group_results),
         )
 
@@ -304,8 +304,8 @@ class EpisodeRunner:
         divergence_policy: str = "handoff",
         learner: OnlineLearner | None = None,
         on_learning_update: Callable[[LearningResult], None] | None = None,
-        latent_learner: LatentPreferenceLearner | None = None,
-        on_latent_learning_update: Callable[[LatentPreferenceResult], None] | None = None,
+        token_preference_learner: TokenPreferenceLearner | None = None,
+        on_token_preference_learning_update: Callable[[TokenPreferenceResult], None] | None = None,
         learn_from_write: bool = False,
         on_write_learning_update: Callable[[WriteLearningResult], None] | None = None,
     ) -> None:
@@ -315,8 +315,8 @@ class EpisodeRunner:
         self.divergence_policy = divergence_policy
         self.learner = learner
         self.on_learning_update = on_learning_update
-        self.latent_learner = latent_learner
-        self.on_latent_learning_update = on_latent_learning_update
+        self.token_preference_learner = token_preference_learner
+        self.on_token_preference_learning_update = on_token_preference_learning_update
         self.learn_from_write = bool(learn_from_write)
         self.on_write_learning_update = on_write_learning_update
 
@@ -325,7 +325,7 @@ class EpisodeRunner:
         observation: Observation,
         action: PolicyAction,
         outcome: ActionOutcome,
-    ) -> LearningResult | LatentPreferenceResult | None:
+    ) -> LearningResult | TokenPreferenceResult | None:
         """Learn after a committed live raw-rank selection only."""
         if (
             not isinstance(action, SelectRawRank)
@@ -341,25 +341,25 @@ class EpisodeRunner:
             group_result = self.learner.update(
                 observation, evidence.token_id, old_sampling
             )
-        latent_result = None
-        if self.latent_learner is not None and self.latent_learner.enabled:
-            latent_result = self.latent_learner.update(
+        token_preference_result = None
+        if self.token_preference_learner is not None and self.token_preference_learner.enabled:
+            token_preference_result = self.token_preference_learner.update(
                 observation, evidence.token_id, old_sampling
             )
 
         updated_sampling = old_sampling
         if group_result is not None:
             updated_sampling = group_result.sampling
-        if latent_result is not None:
+        if token_preference_result is not None:
             updated_sampling = replace(
                 updated_sampling,
-                latent_preference_z=latent_result.sampling.latent_preference_z,
-                latent_strength=latent_result.sampling.latent_strength,
-                latent_preference_fast_z=latent_result.sampling.latent_preference_fast_z,
-                latent_fast_strength=latent_result.sampling.latent_fast_strength,
-                latent_projection_seed=latent_result.sampling.latent_projection_seed,
-                latent_learning_scheme=latent_result.sampling.latent_learning_scheme,
-                latent_coordinate_identity=latent_result.sampling.latent_coordinate_identity,
+                token_preference_vector=token_preference_result.sampling.token_preference_vector,
+                token_preference_strength=token_preference_result.sampling.token_preference_strength,
+                token_preference_fast_vector=token_preference_result.sampling.token_preference_fast_vector,
+                token_preference_fast_strength=token_preference_result.sampling.token_preference_fast_strength,
+                token_preference_projection_seed=token_preference_result.sampling.token_preference_projection_seed,
+                token_preference_learning_scheme=token_preference_result.sampling.token_preference_learning_scheme,
+                token_preference_coordinate_identity=token_preference_result.sampling.token_preference_coordinate_identity,
             )
         if updated_sampling != old_sampling:
             self.engine.sampling = updated_sampling
@@ -382,19 +382,19 @@ class EpisodeRunner:
             )
             if self.on_learning_update is not None:
                 self.on_learning_update(group_result)
-        if latent_result is not None:
-            payload = latent_result.to_dict()
+        if token_preference_result is not None:
+            payload = token_preference_result.to_dict()
             payload["boundary"] = self.engine.boundary
-            payload["observation_boundary"] = latent_result.observation_boundary
+            payload["observation_boundary"] = token_preference_result.observation_boundary
             self.store.record_interaction(
                 self.episode_id,
                 self.engine.boundary,
-                "latent-preference-update",
+                "token-preference-update",
                 payload,
             )
-            if self.on_latent_learning_update is not None:
-                self.on_latent_learning_update(latent_result)
-        return latent_result or group_result
+            if self.on_token_preference_learning_update is not None:
+                self.on_token_preference_learning_update(token_preference_result)
+        return token_preference_result or group_result
 
     def _learn_live_write(
         self,
@@ -533,7 +533,7 @@ class EpisodeRunner:
                         self.engine.backend,
                         self.engine.sampling,
                         self.learner,
-                        self.latent_learner,
+                        self.token_preference_learner,
                     )
                     if self.learn_from_write and isinstance(action, Write)
                     else None

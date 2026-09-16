@@ -113,7 +113,7 @@ Existing catalog files lacking `runtime_routes` retain their historical route
 set; recompile their YAML to adopt canonical runtime routing.
 
 The complete bias/learner preset remains a different file:
-`--project EPISODE --biases-only` writes a `spe-bias-rules-v3` preset, which is
+`--project EPISODE --biases-only` writes a `spe-bias-rules-v4` preset, which is
 loaded by `--biases`. It includes active amounts/objectives, references, and
 preference vectors. Catalog JSON describes reusable definitions.
 

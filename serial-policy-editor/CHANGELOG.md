@@ -2,21 +2,27 @@
 
 ## Unreleased
 
+- Rename the current projected token-feature learner and controls from
+  “latent” to “token preference”; reserve “activation vector” for future
+  residual-stream interventions. This is a breaking CLI, Python API, and
+  persisted-preset terminology change. Projection seed flags now use their
+  explicit `--token-preference-projection-seed` names, and presets use v4.
+
 - Replace opaque learning notices with compact explanations of gate skips,
   learning, decay, and unchanged memory. Add the read-only `learning` command at
   token choices and the live edge for the latest teaching event's slow/fast
   learning, decay, clipping, memory magnitudes, and per-token Write evidence.
   Keep detailed reports out of the one-line notice and label their historical scope.
 
-- Add opt-in teacher-learning controls for both manual groups and latent memory:
-  `--{learning,latent}-decay-on {update,rejection,evidence}` preserves memory on
-  agreement or gate skips; `--{learning,latent}-write-reduction {sum,mean,sqrt}`
+- Add opt-in teacher-learning controls for both manual groups and token preference memory:
+  `--{learning,token-preference}-decay-on {update,rejection,evidence}` preserves memory on
+  agreement or gate skips; `--{learning,token-preference}-write-reduction {sum,mean,sqrt}`
   scales admitted typed evidence before clipping; and
-  `--{learning,latent}-rejection-target {proposal,sampler}` can contrast corrections
+  `--{learning,token-preference}-rejection-target {proposal,sampler}` can contrast corrections
   with the frozen sampler expectation. Preserve existing defaults and once-per-write
   decay. Include effective controls in records/readouts and paired trial commands.
 
-- Add experimental `--learning-gate sampler` and `--latent-learning-gate sampler`
+- Add experimental `--learning-gate sampler` and `--token-preference-learning-gate sampler`
   to learn at full severity only from teacher tokens excluded by the actual
   sampler filters. Preserve rank-based defaults and independent decay. Include
   per-token eligibility in write evidence and explain gating in learning readouts.
@@ -42,7 +48,7 @@
   (`--explore`). Shared command resolution replaces the UI's duplicated bias
   assembly logic.
 - Export/import full steering in `spe-bias-rules-v3`, including reference state,
-  group objectives, and both latent preference vectors and metadata. Read v2
+  group objectives, and both token preference vectors and metadata. Read v2
   presets and minimal preference-array files. Preserve exact episode history
   origins for replay while rebasing portable presets to the destination.
 - Fix stale learner observations after interactive bias edits and accidental
@@ -63,7 +69,7 @@ See [Steering](STEERING.md) for interfaces, limitations, and migration details.
 
 This release carries the model-aware biasing work forward into a broader,
 opt-in learning layer. The default editor behavior remains conservative: the
-new reference prior, named-group learner, latent learner, and typed-write
+new reference prior, named-group learner, token preference learner, and typed-write
 learning are all explicitly enabled features.
 
 - Add a documented `spe-bias-catalog-v1` compiler format. YAML catalog inputs
@@ -92,7 +98,7 @@ learning are all explicitly enabled features.
   bounded, finite-difference based, restricted to live raw-rank selections by
   default, persisted as sampler segments, and recorded as diagnostic
   interactions.
-- Add an independent opt-in latent preference learner. It projects the model's
+- Add an independent opt-in token preference learner. It projects the model's
   output embedding into a deterministic fixed feature space and learns only a
   bounded anonymous preference vector, which is persisted and replayed without
   rerunning the learner.
@@ -100,11 +106,11 @@ learning are all explicitly enabled features.
   Each token is observed before commit, updates are averaged, and one update is
   installed after the write remains atomic.
 - Improve the Transformers backend's final-position logits path and expose
-  cached model features needed by latent preference learning.
+  cached model features needed by token preference learning.
 - Remove obsolete intermediate beheaded-route patch artifacts; their behavior
   is represented by the refined compiler and runtime implementation.
 - Expand tests and user documentation for catalogs, references, route
-  allocation, online learning, latent learning, and typed-write learning.
+  allocation, online learning, token preference learning, and typed-write learning.
 
 ## 0.3.7 — 2026-09-12
 

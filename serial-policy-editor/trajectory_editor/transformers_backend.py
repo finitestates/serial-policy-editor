@@ -14,8 +14,8 @@ import numpy as np
 
 from .domain import EditorError
 from .episode_backend import CacheMode, validate_cache_mode
-from .latent_features import (
-    DEFAULT_LATENT_DIMENSION,
+from .token_preference_features import (
+    DEFAULT_TOKEN_PREFERENCE_DIMENSION,
     DEFAULT_PROJECTION_SEED,
     DEFAULT_PROJECTION_CHUNK_SIZE,
     DEFAULT_WHITENING_RIDGE,
@@ -305,9 +305,9 @@ class TransformersBackend:
         self._eog_ids, self._eog_source = self._discover_eog_ids()
         self._tokens: list[int] = []
         self._last_logits: np.ndarray | None = None
-        self._latent_feature_cache: dict[tuple[object, ...], np.ndarray] = {}
-        self._latent_embedding_fingerprint: str | None = None
-        self._latent_embedding_width: int | None = None
+        self._token_preference_feature_cache: dict[tuple[object, ...], np.ndarray] = {}
+        self._token_preference_embedding_fingerprint: str | None = None
+        self._token_preference_embedding_width: int | None = None
 
     def _apply_execution_controls(self) -> None:
         if self.settings.torch_num_threads is not None:
@@ -536,10 +536,10 @@ class TransformersBackend:
             raise RuntimeError("decoder has not evaluated a prefix")
         return self._last_logits.copy()
 
-    def latent_token_features(
+    def token_preference_features(
         self,
         *,
-        feature_dimension: int = DEFAULT_LATENT_DIMENSION,
+        feature_dimension: int = DEFAULT_TOKEN_PREFERENCE_DIMENSION,
         projection_seed: int = DEFAULT_PROJECTION_SEED,
         projection_chunk_size: int = DEFAULT_PROJECTION_CHUNK_SIZE,
         feature_scheme: str = "random-projection-unit-v1",
@@ -547,15 +547,15 @@ class TransformersBackend:
     ) -> np.ndarray:
         """Return fixed projected rows from the model output embedding."""
         if (
-            self._latent_embedding_fingerprint is not None
-            and self._latent_embedding_width is not None
+            self._token_preference_embedding_fingerprint is not None
+            and self._token_preference_embedding_width is not None
         ):
             key = (
-                self._latent_embedding_fingerprint, self._latent_embedding_width,
+                self._token_preference_embedding_fingerprint, self._token_preference_embedding_width,
                 int(feature_dimension), int(projection_seed),
                 feature_scheme, float(whitening_ridge),
             )
-            cached = self._latent_feature_cache.get(key)
+            cached = self._token_preference_feature_cache.get(key)
             if cached is not None:
                 return cached
         output_embeddings = self._model.get_output_embeddings()
@@ -571,13 +571,13 @@ class TransformersBackend:
             .numpy()
         )
         fingerprint = embedding_fingerprint(matrix)
-        self._latent_embedding_fingerprint = fingerprint
-        self._latent_embedding_width = int(matrix.shape[1])
+        self._token_preference_embedding_fingerprint = fingerprint
+        self._token_preference_embedding_width = int(matrix.shape[1])
         key = (
             fingerprint, int(matrix.shape[1]), int(feature_dimension), int(projection_seed),
             feature_scheme, float(whitening_ridge),
         )
-        cached = self._latent_feature_cache.get(key)
+        cached = self._token_preference_feature_cache.get(key)
         if cached is not None:
             return cached
         features = project_token_embeddings(
@@ -588,10 +588,10 @@ class TransformersBackend:
             feature_scheme=feature_scheme,
             whitening_ridge=whitening_ridge,
         )
-        self._latent_feature_cache[key] = features
+        self._token_preference_feature_cache[key] = features
         return features
 
-    def latent_coordinate_identity(
+    def token_preference_coordinate_identity(
         self,
         *,
         feature_dimension: int,
@@ -600,20 +600,20 @@ class TransformersBackend:
         whitening_ridge: float = DEFAULT_WHITENING_RIDGE,
     ):
         """Describe the embedding-backed coordinates after materialization."""
-        self.latent_token_features(
+        self.token_preference_features(
             feature_dimension=feature_dimension,
             projection_seed=projection_seed,
             feature_scheme=feature_scheme,
             whitening_ridge=whitening_ridge,
         )
-        from .latent_features import coordinate_identity
+        from .token_preference_features import coordinate_identity
         return coordinate_identity(
             dimension=feature_dimension,
             projection_seed=projection_seed,
             feature_scheme=feature_scheme,
             whitening_ridge=whitening_ridge,
-            model_fingerprint=self._latent_embedding_fingerprint,
-            embedding_width=self._latent_embedding_width,
+            model_fingerprint=self._token_preference_embedding_fingerprint,
+            embedding_width=self._token_preference_embedding_width,
         )
 
     def tokenize(

@@ -49,7 +49,7 @@ def policy_kl(probabilities: np.ndarray, reference: np.ndarray) -> float:
     )))
 
 
-def calibrated_latent_gain(
+def calibrated_token_preference_gain(
     probabilities: np.ndarray,
     scores: np.ndarray,
     target_kl: float,
@@ -65,12 +65,12 @@ def calibrated_latent_gain(
     p = np.asarray(probabilities, dtype=np.float64)
     a = np.asarray(scores, dtype=np.float64)
     if p.shape != a.shape or p.ndim != 1:
-        raise ValueError("latent calibration inputs must have equal 1-D shapes")
+        raise ValueError("preference calibration inputs must have equal 1-D shapes")
     if (
         not np.all(np.isfinite(p)) or np.any(p < 0.0)
         or not np.all(np.isfinite(a)) or float(np.sum(p)) <= 0.0
     ):
-        raise ValueError("latent calibration inputs must be finite probabilities and scores")
+        raise ValueError("preference calibration inputs must be finite probabilities and scores")
     p = p / float(np.sum(p))
     centered = a - float(np.dot(p, a))
     variance = float(np.dot(p, centered * centered))
@@ -497,14 +497,14 @@ class ObservationStatistics:
         config,
         history_token_ids,
         boundaries=None,
-        latent_features=None,
+        token_preference_features=None,
         render_tokens=None,
-        latent_coordinate_identity=None,
+        token_preference_coordinate_identity=None,
     ):
         self.logits = _validated_logits(logits).copy()
         self.boundaries = boundaries
-        self.latent_features = latent_features
-        self.latent_coordinate_identity = latent_coordinate_identity
+        self.token_preference_features = token_preference_features
+        self.token_preference_coordinate_identity = token_preference_coordinate_identity
         self.render_tokens = render_tokens
         penalties_active = config.history_penalties_active
         if penalties_active:
@@ -532,110 +532,110 @@ class ObservationStatistics:
                 self.adjusted[token] += bias
             if not np.all(np.isfinite(self.adjusted)):
                 raise ValueError("biases produced non-finite policy logits")
-        # This is the canonical surface immediately before latent actuation.
+        # This is the canonical surface immediately before preference actuation.
         # Keep it separate from both the deployed policy and the raw model.
-        self.pre_latent_logits = np.asarray(self.adjusted, dtype=np.float64).copy()
-        self.pre_latent_probabilities = _softmax(self.pre_latent_logits)
-        self.learning_logits = self.pre_latent_logits.copy()
-        self.learning_probabilities = self.pre_latent_probabilities.copy()
-        latent_z = tuple(config.latent_preference_z)
-        fast_z = tuple(config.latent_preference_fast_z)
-        self.latent_effective_strength = 0.0
-        self.latent_effective_fast_strength = 0.0
-        self.latent_raw_scores = np.zeros(len(self.logits), dtype=np.float64)
-        self.latent_diagnostics = {
-            "z_norm": float(np.linalg.norm(np.asarray(latent_z, dtype=np.float64)))
-            if latent_z else 0.0,
+        self.preference_base_logits = np.asarray(self.adjusted, dtype=np.float64).copy()
+        self.preference_base_probabilities = _softmax(self.preference_base_logits)
+        self.learning_logits = self.preference_base_logits.copy()
+        self.learning_probabilities = self.preference_base_probabilities.copy()
+        token_preference_vector = tuple(config.token_preference_vector)
+        fast_vector = tuple(config.token_preference_fast_vector)
+        self.token_preference_effective_strength = 0.0
+        self.token_preference_effective_fast_strength = 0.0
+        self.token_preference_raw_scores = np.zeros(len(self.logits), dtype=np.float64)
+        self.token_preference_diagnostics = {
+            "z_norm": float(np.linalg.norm(np.asarray(token_preference_vector, dtype=np.float64)))
+            if token_preference_vector else 0.0,
             "raw_fz_rms": 0.0,
             "effective_logit_rms": 0.0,
             "effective_strength": 0.0,
             "effective_fast_strength": 0.0,
-            "pre_post_latent_kl": 0.0,
-            "top_latent_logit_min": 0.0,
-            "top_latent_logit_max": 0.0,
+            "pre_post_token_preference_kl": 0.0,
+            "top_token_preference_logit_min": 0.0,
+            "top_token_preference_logit_max": 0.0,
             "slow_raw_logit_rms": 0.0,
             "fast_raw_logit_rms": 0.0,
             "combined_raw_logit_rms": 0.0,
             "effective_gain": 0.0,
-            "user_multiplier": float(config.latent_strength),
+            "user_multiplier": float(config.token_preference_strength),
             "gain_capped": False,
             "deployment_kl": 0.0,
             "relative_fast_weight": 0.0,
         }
-        if latent_z or fast_z:
-            if latent_features is None:
+        if token_preference_vector or fast_vector:
+            if token_preference_features is None:
                 raise ValueError(
-                    "latent token features are required when latent preference state is active"
+                    "preference token features are required when token preference state is active"
                 )
-            features = np.asarray(latent_features, dtype=np.float32)
-            if features.shape != (len(self.logits), len(latent_z or fast_z)):
+            features = np.asarray(token_preference_features, dtype=np.float32)
+            if features.shape != (len(self.logits), len(token_preference_vector or fast_vector)):
                 raise ValueError(
-                    "latent token features do not match the policy vocabulary and state"
+                    "preference token features do not match the policy vocabulary and state"
                 )
             if not np.all(np.isfinite(features)):
-                raise ValueError("latent token features must be finite")
+                raise ValueError("preference token features must be finite")
             slow_scores = (
-                features @ np.asarray(latent_z, dtype=np.float32)
-                if latent_z else np.zeros(len(self.logits), dtype=np.float32)
+                features @ np.asarray(token_preference_vector, dtype=np.float32)
+                if token_preference_vector else np.zeros(len(self.logits), dtype=np.float32)
             )
             fast_scores = (
-                features @ np.asarray(fast_z, dtype=np.float32)
-                if fast_z else np.zeros(len(self.logits), dtype=np.float32)
+                features @ np.asarray(fast_vector, dtype=np.float32)
+                if fast_vector else np.zeros(len(self.logits), dtype=np.float32)
             )
-            relative_fast_weight = float(config.latent_fast_strength) if fast_z else 0.0
+            relative_fast_weight = float(config.token_preference_fast_strength) if fast_vector else 0.0
             combined_scores = np.asarray(slow_scores, dtype=np.float64) + (
                 relative_fast_weight * np.asarray(fast_scores, dtype=np.float64)
             )
-            if config.latent_influence_mode == "kl":
-                auto_gain = calibrated_latent_gain(
-                    self.pre_latent_probabilities,
+            if config.token_preference_influence_mode == "kl":
+                auto_gain = calibrated_token_preference_gain(
+                    self.preference_base_probabilities,
                     combined_scores,
-                    config.latent_influence_kl,
-                    min_gain=config.latent_min_gain,
-                    max_gain=config.latent_max_gain,
+                    config.token_preference_influence_kl,
+                    min_gain=config.token_preference_min_gain,
+                    max_gain=config.token_preference_max_gain,
                 ) if np.any(combined_scores) else 0.0
-                slow_strength = float(config.latent_strength) * auto_gain
-                fast_strength = float(config.latent_strength) * auto_gain * relative_fast_weight
+                slow_strength = float(config.token_preference_strength) * auto_gain
+                fast_strength = float(config.token_preference_strength) * auto_gain * relative_fast_weight
             else:
-                slow_strength = float(config.latent_strength)
-                fast_strength = float(config.latent_fast_strength)
+                slow_strength = float(config.token_preference_strength)
+                fast_strength = float(config.token_preference_fast_strength)
             if (
-                config.latent_feature_scheme == "random-projection-unit-v1"
-                and config.latent_influence_mode == "manual"
+                config.token_preference_feature_scheme == "random-projection-unit-v1"
+                and config.token_preference_influence_mode == "manual"
             ):
                 # Preserve the original float32 actuator arithmetic for all
                 # v1 records.  The new diagnostics are observational only.
-                latent_adjustments = (
-                    float(config.latent_strength) * slow_scores
-                    if latent_z else np.zeros(len(self.logits), dtype=np.float32)
+                token_preference_adjustments = (
+                    float(config.token_preference_strength) * slow_scores
+                    if token_preference_vector else np.zeros(len(self.logits), dtype=np.float32)
                 )
-                if fast_z:
-                    latent_adjustments += float(config.latent_fast_strength) * fast_scores
+                if fast_vector:
+                    token_preference_adjustments += float(config.token_preference_fast_strength) * fast_scores
             else:
-                latent_adjustments = (
+                token_preference_adjustments = (
                     slow_strength * np.asarray(slow_scores, dtype=np.float64)
                     + fast_strength * np.asarray(fast_scores, dtype=np.float64)
                 )
-            if fast_z:
-                self.latent_effective_fast_strength = fast_strength
-            if not np.all(np.isfinite(latent_adjustments)):
-                raise ValueError("latent preference produced non-finite policy logits")
-            self.latent_features = features
-            self.latent_logit_adjustments = latent_adjustments
-            self.latent_raw_scores = np.asarray(slow_scores, dtype=np.float64)
-            if latent_z or fast_z:
+            if fast_vector:
+                self.token_preference_effective_fast_strength = fast_strength
+            if not np.all(np.isfinite(token_preference_adjustments)):
+                raise ValueError("token preference produced non-finite policy logits")
+            self.token_preference_features = features
+            self.token_preference_logit_adjustments = token_preference_adjustments
+            self.token_preference_raw_scores = np.asarray(slow_scores, dtype=np.float64)
+            if token_preference_vector or fast_vector:
                 # The internal learner sees the complete memory state, while
                 # deployment may apply a different user gain.
                 self.learning_logits += combined_scores
                 self.learning_probabilities = _softmax(self.learning_logits)
-            self.latent_effective_strength = slow_strength
+            self.token_preference_effective_strength = slow_strength
             slow_raw_rms = float(np.sqrt(np.mean(np.asarray(slow_scores, dtype=np.float64) ** 2)))
             fast_raw_rms = float(np.sqrt(np.mean(np.asarray(fast_scores, dtype=np.float64) ** 2)))
             raw_rms = float(np.sqrt(np.mean(combined_scores ** 2)))
-            effective_rms = float(np.sqrt(np.mean(latent_adjustments ** 2)))
-            self.latent_diagnostics = {
-                "z_norm": float(np.linalg.norm(np.asarray(latent_z, dtype=np.float64)))
-                if latent_z else 0.0,
+            effective_rms = float(np.sqrt(np.mean(token_preference_adjustments ** 2)))
+            self.token_preference_diagnostics = {
+                "z_norm": float(np.linalg.norm(np.asarray(token_preference_vector, dtype=np.float64)))
+                if token_preference_vector else 0.0,
                 "raw_fz_rms": raw_rms,
                 "effective_logit_rms": effective_rms,
                 "effective_strength": slow_strength,
@@ -643,29 +643,29 @@ class ObservationStatistics:
                 "slow_raw_logit_rms": slow_raw_rms,
                 "fast_raw_logit_rms": fast_raw_rms,
                 "combined_raw_logit_rms": raw_rms,
-                "effective_gain": float(auto_gain) if config.latent_influence_mode == "kl" else 1.0,
-                "user_multiplier": float(config.latent_strength),
+                "effective_gain": float(auto_gain) if config.token_preference_influence_mode == "kl" else 1.0,
+                "user_multiplier": float(config.token_preference_strength),
                 "gain_capped": bool(
-                    config.latent_influence_mode == "kl" and auto_gain in {
-                        float(config.latent_min_gain), float(config.latent_max_gain)
+                    config.token_preference_influence_mode == "kl" and auto_gain in {
+                        float(config.token_preference_min_gain), float(config.token_preference_max_gain)
                     }
                 ),
                 "relative_fast_weight": relative_fast_weight,
-                "pre_post_latent_kl": 0.0,
-                "top_latent_logit_min": float(np.min(latent_adjustments)),
-                "top_latent_logit_max": float(np.max(latent_adjustments)),
+                "pre_post_token_preference_kl": 0.0,
+                "top_token_preference_logit_min": float(np.min(token_preference_adjustments)),
+                "top_token_preference_logit_max": float(np.max(token_preference_adjustments)),
             }
             self.adjusted = self.adjusted.copy()
-            self.adjusted += latent_adjustments
+            self.adjusted += token_preference_adjustments
         else:
-            self.latent_logit_adjustments = np.zeros_like(self.adjusted)
+            self.token_preference_logit_adjustments = np.zeros_like(self.adjusted)
         self.baseline_probabilities = _softmax(self.adjusted)
-        if latent_z or fast_z:
-            self.latent_diagnostics["pre_post_latent_kl"] = policy_kl(
-                self.baseline_probabilities, self.pre_latent_probabilities
+        if token_preference_vector or fast_vector:
+            self.token_preference_diagnostics["pre_post_token_preference_kl"] = policy_kl(
+                self.baseline_probabilities, self.preference_base_probabilities
             )
-            self.latent_diagnostics["deployment_kl"] = self.latent_diagnostics[
-                "pre_post_latent_kl"
+            self.token_preference_diagnostics["deployment_kl"] = self.token_preference_diagnostics[
+                "pre_post_token_preference_kl"
             ]
         from .group_control import control_adjustments
         self.group_control_biases, self.group_control_diagnostics = control_adjustments(
@@ -691,8 +691,8 @@ class ObservationStatistics:
         self.distribution = SparseDistribution(ids, _softmax(scaled[ids]))
         for array in (
             self.logits, self.adjusted, self.policy_probabilities, self.baseline_probabilities,
-            self.pre_latent_logits, self.pre_latent_probabilities,
-            self.learning_logits, self.learning_probabilities, self.latent_raw_scores,
+            self.preference_base_logits, self.preference_base_probabilities,
+            self.learning_logits, self.learning_probabilities, self.token_preference_raw_scores,
             self.distribution.ids, self.distribution.probabilities,
         ):
             array.setflags(write=False)

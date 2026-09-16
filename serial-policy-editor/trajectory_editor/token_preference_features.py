@@ -10,19 +10,19 @@ from typing import Any, Mapping
 import numpy as np
 
 
-DEFAULT_LATENT_DIMENSION = 64
+DEFAULT_TOKEN_PREFERENCE_DIMENSION = 64
 DEFAULT_PROJECTION_SEED = 9137
 DEFAULT_PROJECTION_CHUNK_SIZE = 8192
 DEFAULT_WHITENING_RIDGE = 1.0e-6
-LATENT_FEATURE_SCHEMES = (
+TOKEN_PREFERENCE_FEATURE_SCHEMES = (
     "random-projection-unit-v1",
     "whitened-projection-v2",
 )
 
 
 @dataclass(frozen=True)
-class LatentCoordinateIdentity:
-    """The immutable coordinate system in which a latent memory is expressed.
+class TokenPreferenceCoordinateIdentity:
+    """The immutable coordinate system in which a token preference memory is expressed.
 
     A preference vector is not portable across feature bases.  The model and
     embedding fields are optional because lightweight providers often do not
@@ -39,9 +39,9 @@ class LatentCoordinateIdentity:
     whitening_ridge: float
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, Any]) -> "LatentCoordinateIdentity":
+    def from_mapping(cls, value: Mapping[str, Any]) -> "TokenPreferenceCoordinateIdentity":
         if not isinstance(value, Mapping):
-            raise ValueError("latent coordinate identity must be an object")
+            raise ValueError("token preference coordinate identity must be an object")
         return cls(
             model_fingerprint=value.get("model_fingerprint"),
             embedding_width=value.get("embedding_width"),
@@ -85,9 +85,9 @@ def coordinate_identity(
     whitening_ridge: float,
     model_fingerprint: str | None = None,
     embedding_width: int | None = None,
-) -> LatentCoordinateIdentity:
+) -> TokenPreferenceCoordinateIdentity:
     """Build the canonical identity for a feature request."""
-    return LatentCoordinateIdentity(
+    return TokenPreferenceCoordinateIdentity(
         model_fingerprint=model_fingerprint,
         embedding_width=embedding_width,
         dimension=int(dimension),
@@ -108,20 +108,20 @@ def sampling_coordinate_identity(
     dimension: int | None = None,
     model_fingerprint: str | None = None,
     embedding_width: int | None = None,
-) -> LatentCoordinateIdentity:
+) -> TokenPreferenceCoordinateIdentity:
     """Return the identity requested by a sampling configuration."""
     if dimension is None:
         vectors = (
-            getattr(sampling, "latent_preference_z", ())
-            or getattr(sampling, "latent_preference_fast_z", ())
+            getattr(sampling, "token_preference_vector", ())
+            or getattr(sampling, "token_preference_fast_vector", ())
         )
-        stored = getattr(sampling, "latent_coordinate_identity", None)
-        dimension = len(vectors) or (stored.dimension if stored is not None else DEFAULT_LATENT_DIMENSION)
+        stored = getattr(sampling, "token_preference_coordinate_identity", None)
+        dimension = len(vectors) or (stored.dimension if stored is not None else DEFAULT_TOKEN_PREFERENCE_DIMENSION)
     return coordinate_identity(
         dimension=dimension,
-        projection_seed=sampling.latent_projection_seed,
-        feature_scheme=sampling.latent_feature_scheme,
-        whitening_ridge=sampling.latent_whitening_ridge,
+        projection_seed=sampling.token_preference_projection_seed,
+        feature_scheme=sampling.token_preference_feature_scheme,
+        whitening_ridge=sampling.token_preference_whitening_ridge,
         model_fingerprint=model_fingerprint,
         embedding_width=embedding_width,
     )
@@ -135,7 +135,7 @@ def coordinate_identity_matches(
     embedding_width: int | None = None,
 ) -> bool:
     """Check whether persisted coordinates match the currently requested basis."""
-    stored = getattr(sampling, "latent_coordinate_identity", None)
+    stored = getattr(sampling, "token_preference_coordinate_identity", None)
     if stored is None:
         return True
     requested = sampling_coordinate_identity(
@@ -166,13 +166,13 @@ def embedding_fingerprint(embeddings: np.ndarray) -> str:
 def project_token_embeddings(
     embeddings: np.ndarray,
     *,
-    feature_dimension: int = DEFAULT_LATENT_DIMENSION,
+    feature_dimension: int = DEFAULT_TOKEN_PREFERENCE_DIMENSION,
     projection_seed: int = DEFAULT_PROJECTION_SEED,
     projection_chunk_size: int = DEFAULT_PROJECTION_CHUNK_SIZE,
     feature_scheme: str = "random-projection-unit-v1",
     whitening_ridge: float = DEFAULT_WHITENING_RIDGE,
 ) -> np.ndarray:
-    """Project a vocabulary-by-embedding matrix to fixed latent features.
+    """Project a vocabulary-by-embedding matrix to fixed token preference features.
 
     The v1 branch intentionally retains the original per-token unit
     normalization.  v2 centers and whitens the projected vocabulary with a
@@ -190,8 +190,8 @@ def project_token_embeddings(
         raise ValueError("projection seed must be an integer")
     if type(projection_chunk_size) is not int or projection_chunk_size < 1:
         raise ValueError("projection chunk size must be a positive integer")
-    if feature_scheme not in LATENT_FEATURE_SCHEMES:
-        raise ValueError(f"unknown latent feature scheme: {feature_scheme}")
+    if feature_scheme not in TOKEN_PREFERENCE_FEATURE_SCHEMES:
+        raise ValueError(f"unknown preference feature scheme: {feature_scheme}")
     if (
         type(whitening_ridge) not in (int, float)
         or not math.isfinite(float(whitening_ridge))

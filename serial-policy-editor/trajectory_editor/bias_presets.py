@@ -8,10 +8,10 @@ from pathlib import Path
 
 from .bias_rules import BiasGroup, BiasRule
 from .domain import EditorError, SamplingConfig
-from .latent_features import DEFAULT_PROJECTION_SEED
+from .token_preference_features import DEFAULT_PROJECTION_SEED
 
 
-FORMAT = "spe-bias-rules-v3"
+FORMAT = "spe-bias-rules-v4"
 IDENTITY_FIELDS = ("backend", "filename", "file_size_bytes", "vocabulary_size")
 
 
@@ -44,7 +44,7 @@ def load_bias_preset(path: Path, backend, provenance: dict) -> SamplingConfig:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise EditorError(f"Could not read bias preset: {exc}") from exc
-    if not isinstance(value, dict) or value.get("format") not in {FORMAT, "spe-bias-rules-v2", "spe-preference-weights-v1"}:
+    if not isinstance(value, dict) or value.get("format") != FORMAT:
         raise EditorError(f"Bias preset must use format {FORMAT}")
     model = value.get("model")
     rows = value.get("bias_rules", [])
@@ -76,20 +76,20 @@ def load_bias_preset(path: Path, backend, provenance: dict) -> SamplingConfig:
         bias_rules=rules,
         bias_groups=groups,
         group_controls=value.get("group_controls", ()),
-        latent_preference_z=value.get("latent_preference_z", value.get("weights", ())),
-        latent_strength=value.get("latent_strength", 1.0),
-        latent_preference_fast_z=value.get("latent_preference_fast_z", ()),
-        latent_fast_strength=value.get("latent_fast_strength", 0.0),
-        latent_projection_seed=value.get("latent_projection_seed", DEFAULT_PROJECTION_SEED),
-        latent_feature_scheme=value.get(
-            "latent_feature_scheme", "random-projection-unit-v1"
+        token_preference_vector=value.get("token_preference_vector", ()),
+        token_preference_strength=value.get("token_preference_strength", 1.0),
+        token_preference_fast_vector=value.get("token_preference_fast_vector", ()),
+        token_preference_fast_strength=value.get("token_preference_fast_strength", 0.0),
+        token_preference_projection_seed=value.get("token_preference_projection_seed", DEFAULT_PROJECTION_SEED),
+        token_preference_feature_scheme=value.get(
+            "token_preference_feature_scheme", "random-projection-unit-v1"
         ),
-        latent_whitening_ridge=value.get("latent_whitening_ridge", 1.0e-6),
-        latent_learning_scheme=value.get("latent_learning_scheme", "sgd-v1"),
-        latent_influence_mode=value.get("latent_influence_mode", "manual"),
-        latent_influence_kl=value.get("latent_influence_kl", 0.05),
-        latent_min_gain=value.get("latent_min_gain", 0.0),
-        latent_max_gain=value.get("latent_max_gain", 8.0),
+        token_preference_whitening_ridge=value.get("token_preference_whitening_ridge", 1.0e-6),
+        token_preference_learning_scheme=value.get("token_preference_learning_scheme", "sgd-v1"),
+        token_preference_influence_mode=value.get("token_preference_influence_mode", "manual"),
+        token_preference_influence_kl=value.get("token_preference_influence_kl", 0.05),
+        token_preference_min_gain=value.get("token_preference_min_gain", 0.0),
+        token_preference_max_gain=value.get("token_preference_max_gain", 8.0),
         group_control_scheme=value.get(
             "group_control_scheme", "appearance-feedback-v1"
         ),
@@ -166,7 +166,7 @@ def project_biases(
     if not rules_only:
         result["bias_groups"] = [group.to_dict() for group in config.bias_groups]
         result.update({key: value for key, value in config.to_dict().items()
-                       if key.startswith(("latent_", "reference_prior_"))
+                       if key.startswith(("token_preference_", "reference_prior_"))
                        or key == "group_control_scheme"})
         result["group_controls"] = [replace(c, history_start=None).to_dict() for c in config.group_controls]
     return json.dumps(

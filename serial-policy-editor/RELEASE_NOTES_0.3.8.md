@@ -58,7 +58,7 @@ It is off by default, bounded by the configured bias limits, and learns from
 live numeric raw-rank selections. `--learnable-groups` restricts which groups
 may change.
 
-`--latent-preference` learns a bounded anonymous vector from fixed features
+`--token-preference` learns a bounded anonymous vector from fixed features
 derived from the model output embedding. It generalizes across tokens in that
 feature space, is model-specific, and is stored in sampler segments and full
 JSON bias presets.
@@ -78,11 +78,11 @@ SPE uses four intentionally separate structured artifacts:
 | `terms.yaml` | `policy-editor-bias --input` | Human-readable catalog terms, options, and groups. |
 | `reference.yaml` | `policy-editor-bias --reference` | Optional lexical reference list or surface-to-weight mapping. |
 | `catalog.json` | Compiler output and `--bias-catalog` | Model-specific compiled routes; do not hand-edit token IDs. |
-| `biases.json` | `--biases-only` and `--biases` | Runtime logical rules, named groups, model identity, and optional latent state. |
+| `biases.json` | `--biases-only` and `--biases` | Runtime logical rules, named groups, model identity, and optional token preference state. |
 
 `--editor-friendly` emits a fifth, deliberately limited artifact: standalone
 YAML `groups:` definitions for recompiling group membership. It does not carry
-active bias amounts, compiled token routes, direct one-shot rules, or latent
+active bias amounts, compiled token routes, direct one-shot rules, or preference
 state.
 
 ### Minimal catalog input
@@ -145,6 +145,6 @@ keeps the same JSON format but flattens group rules and removes group metadata.
 ## Verification
 
 - Feature-focused tests cover catalogs, route allocation, reference priors,
-  online group learning, latent preference learning, and typed-write learning.
+  online group learning, token preference learning, and typed-write learning.
 - Full validation should include the ordinary pytest suite plus real-model smoke
   tests when the optional local backends and models are available.

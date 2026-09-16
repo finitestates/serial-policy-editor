@@ -15,9 +15,9 @@ from trajectory_editor.group_control import (
     control_adjustments,
     gamma_poisson_rate,
 )
-from trajectory_editor.latent_features import coordinate_identity_matches, project_token_embeddings
-from trajectory_editor.latent_preference import (
-    LatentPreferenceLearner,
+from trajectory_editor.token_preference_features import coordinate_identity_matches, project_token_embeddings
+from trajectory_editor.token_preference import (
+    TokenPreferenceLearner,
     canonical_policy_kl,
     choice_gradient,
     exact_kl_line_search,
@@ -26,11 +26,11 @@ from trajectory_editor.latent_preference import (
 )
 from trajectory_editor.sampling import (
     ObservationStatistics,
-    calibrated_latent_gain,
+    calibrated_token_preference_gain,
     policy_kl,
 )
 from trajectory_editor.episode_cli import (
-    _apply_latent_coordinate_overrides,
+    _apply_token_preference_coordinate_overrides,
     _sampling_from_args,
     build_parser,
 )
@@ -44,13 +44,13 @@ def _group(name="phrase", routes=((1, 2), (2, 1))):
     )
 
 
-def _latent_observation(sampling, features, logits=None, proposal=0):
+def _token_preference_observation(sampling, features, logits=None, proposal=0):
     values = np.asarray(
         logits if logits is not None else np.linspace(1.2, -0.2, len(features)),
         dtype=np.float64,
     )
     statistics = ObservationStatistics(
-        values, sampling, [], latent_features=features,
+        values, sampling, [], token_preference_features=features,
     )
     return SimpleNamespace(
         boundary=0,
@@ -143,26 +143,26 @@ def test_v2_learning_surface_does_not_depend_on_deployment_strength():
         dtype=np.float32,
     )
     common = dict(
-        latent_preference_z=(0.4, -0.3),
-        latent_learning_scheme="fisher-kl-v2",
-        latent_feature_scheme="whitened-projection-v2",
+        token_preference_vector=(0.4, -0.3),
+        token_preference_learning_scheme="fisher-kl-v2",
+        token_preference_feature_scheme="whitened-projection-v2",
     )
-    low = SamplingConfig(**common, latent_strength=0.5)
-    high = SamplingConfig(**common, latent_strength=8.0)
-    low_stats = _latent_observation(low, features).statistics
-    high_stats = _latent_observation(high, features).statistics
+    low = SamplingConfig(**common, token_preference_strength=0.5)
+    high = SamplingConfig(**common, token_preference_strength=8.0)
+    low_stats = _token_preference_observation(low, features).statistics
+    high_stats = _token_preference_observation(high, features).statistics
     np.testing.assert_allclose(
-        low_stats.pre_latent_probabilities,
-        high_stats.pre_latent_probabilities,
+        low_stats.preference_base_probabilities,
+        high_stats.preference_base_probabilities,
     )
     np.testing.assert_allclose(
         low_stats.learning_probabilities,
         high_stats.learning_probabilities,
     )
     assert policy_kl(
-        low_stats.baseline_probabilities, low_stats.pre_latent_probabilities
+        low_stats.baseline_probabilities, low_stats.preference_base_probabilities
     ) < policy_kl(
-        high_stats.baseline_probabilities, high_stats.pre_latent_probabilities
+        high_stats.baseline_probabilities, high_stats.preference_base_probabilities
     )
 
 
@@ -170,7 +170,7 @@ def test_kl_calibrated_gain_hits_exact_tilt_budget():
     probabilities = np.asarray([0.05, 0.15, 0.3, 0.5], dtype=np.float64)
     scores = np.asarray([-1.2, 0.1, 0.7, 1.6], dtype=np.float64)
     target = 0.08
-    gain = calibrated_latent_gain(
+    gain = calibrated_token_preference_gain(
         probabilities, scores, target, min_gain=0.0, max_gain=8.0
     )
     centered = scores - np.dot(probabilities, scores)
@@ -185,11 +185,11 @@ def test_fisher_kl_update_is_finite_and_within_safety_budget():
         dtype=np.float32,
     )
     sampling = SamplingConfig(
-        latent_learning_scheme="fisher-kl-v2",
-        latent_feature_scheme="whitened-projection-v2",
+        token_preference_learning_scheme="fisher-kl-v2",
+        token_preference_feature_scheme="whitened-projection-v2",
     )
-    observation = _latent_observation(sampling, features, proposal=0)
-    learner = LatentPreferenceLearner(
+    observation = _token_preference_observation(sampling, features, proposal=0)
+    learner = TokenPreferenceLearner(
         features, enabled=True, dimension=2, learning_scheme="fisher-kl-v2",
         learning_metric="fisher", learning_kl=0.02, fisher_mode="diagonal",
         fisher_ridge=1.0e-3, max_step=10.0, max_norm=10.0,
@@ -229,22 +229,22 @@ def test_pairwise_rejection_gradient_fades_when_margin_is_correct():
         dtype=np.float32,
     )
     base = SamplingConfig(
-        latent_learning_scheme="fisher-kl-v2",
-        latent_preference_z=(0.0, 0.0),
+        token_preference_learning_scheme="fisher-kl-v2",
+        token_preference_vector=(0.0, 0.0),
     )
-    observation = _latent_observation(base, features, proposal=2)
-    learner = LatentPreferenceLearner(
+    observation = _token_preference_observation(base, features, proposal=2)
+    learner = TokenPreferenceLearner(
         features, enabled=True, dimension=2, learning_scheme="fisher-kl-v2",
         learning_metric="fisher", learning_kl=0.02, rejection_strength=1.0,
         no_severity_attenuation=True, max_step=10.0, max_norm=10.0,
     )
     zero_margin = learner.update(observation, 1, base)
     positive = SamplingConfig(
-        latent_learning_scheme="fisher-kl-v2",
-        latent_preference_z=(4.0, 0.0),
+        token_preference_learning_scheme="fisher-kl-v2",
+        token_preference_vector=(4.0, 0.0),
     )
     positive_result = learner.update(
-        _latent_observation(positive, features, proposal=2), 1, positive
+        _token_preference_observation(positive, features, proposal=2), 1, positive
     )
     assert zero_margin.loss > positive_result.loss
     assert np.linalg.norm(zero_margin.learning_evidence) > 0.0
@@ -259,10 +259,10 @@ def test_write_v2_aggregates_raw_evidence_before_one_kl_update():
         dtype=np.float32,
     )
     sampling = SamplingConfig(
-        latent_learning_scheme="fisher-kl-v2",
-        latent_feature_scheme="whitened-projection-v2",
+        token_preference_learning_scheme="fisher-kl-v2",
+        token_preference_feature_scheme="whitened-projection-v2",
     )
-    learner = LatentPreferenceLearner(
+    learner = TokenPreferenceLearner(
         features, enabled=True, dimension=2, learning_scheme="fisher-kl-v2",
         learning_metric="fisher", learning_kl=0.02, max_step=10.0, max_norm=10.0,
         no_severity_attenuation=True,
@@ -273,7 +273,7 @@ def test_write_v2_aggregates_raw_evidence_before_one_kl_update():
         ([-0.5, 1.8, 1.0, 0.0, -1.0], 1),
     ):
         values = np.asarray(logits, dtype=np.float64)
-        statistics = ObservationStatistics(values, sampling, [], latent_features=features)
+        statistics = ObservationStatistics(values, sampling, [], token_preference_features=features)
         observations.append(SimpleNamespace(
             boundary=0, proposal_token_id=proposal, logits=values, statistics=statistics,
         ))
@@ -293,17 +293,17 @@ def test_fast_slow_v2_starts_fast_memory_with_configured_relative_weight():
         dtype=np.float32,
     )
     sampling = SamplingConfig(
-        latent_learning_scheme="fisher-kl-v2",
-        latent_feature_scheme="whitened-projection-v2",
+        token_preference_learning_scheme="fisher-kl-v2",
+        token_preference_feature_scheme="whitened-projection-v2",
     )
-    learner = LatentPreferenceLearner(
+    learner = TokenPreferenceLearner(
         features, enabled=True, dimension=2, learning_scheme="fisher-kl-v2",
         learning_metric="fisher", learning_kl=0.02, fast_slow=True,
         fast_strength=0.5, max_step=10.0, max_norm=10.0,
         fast_max_step=10.0, fast_max_norm=10.0, no_severity_attenuation=True,
     )
     result = learner.update(
-        _latent_observation(sampling, features, proposal=0), 2, sampling
+        _token_preference_observation(sampling, features, proposal=0), 2, sampling
     )
     assert result.fast_strength == pytest.approx(0.5)
     assert np.linalg.norm(result.new_fast_z) > 0.0
@@ -321,16 +321,16 @@ def test_fast_slow_auto_influence_is_one_combined_kl_budget(slow, fast):
         dtype=np.float32,
     )
     sampling = SamplingConfig(
-        latent_preference_z=slow, latent_preference_fast_z=fast,
-        latent_fast_strength=0.5, latent_feature_scheme="whitened-projection-v2",
-        latent_influence_mode="kl", latent_influence_kl=0.02,
+        token_preference_vector=slow, token_preference_fast_vector=fast,
+        token_preference_fast_strength=0.5, token_preference_feature_scheme="whitened-projection-v2",
+        token_preference_influence_mode="kl", token_preference_influence_kl=0.02,
     )
     statistics = ObservationStatistics(
-        np.linspace(1.0, -0.5, len(features)), sampling, [], latent_features=features,
+        np.linspace(1.0, -0.5, len(features)), sampling, [], token_preference_features=features,
     )
-    assert statistics.latent_diagnostics["deployment_kl"] == pytest.approx(0.02, abs=1.0e-9)
-    assert statistics.latent_diagnostics["effective_gain"] > 0.0
-    assert statistics.latent_diagnostics["combined_raw_logit_rms"] >= 0.0
+    assert statistics.token_preference_diagnostics["deployment_kl"] == pytest.approx(0.02, abs=1.0e-9)
+    assert statistics.token_preference_diagnostics["effective_gain"] > 0.0
+    assert statistics.token_preference_diagnostics["combined_raw_logit_rms"] >= 0.0
 
 
 def test_gamma_poisson_posterior_mean_and_variance():
@@ -370,10 +370,10 @@ def test_group_route_trie_preserves_overlapping_suffix_prefixes():
 
 def test_v2_sampling_state_round_trip_keeps_math_schemes():
     state = SamplingConfig(
-        latent_feature_scheme="whitened-projection-v2",
-        latent_learning_scheme="fisher-kl-v2",
-        latent_influence_mode="kl",
-        latent_influence_kl=0.03,
+        token_preference_feature_scheme="whitened-projection-v2",
+        token_preference_learning_scheme="fisher-kl-v2",
+        token_preference_influence_mode="kl",
+        token_preference_influence_kl=0.03,
         group_control_scheme="appearance-rate-v2",
         group_controls=(GroupControl(
             "phrase", "promote", 0.1, scheme="appearance-rate-v2",
@@ -385,43 +385,43 @@ def test_v2_sampling_state_round_trip_keeps_math_schemes():
 
 def test_coordinate_identity_resets_nonzero_memory_on_basis_change():
     state = SamplingConfig(
-        latent_preference_z=(0.3, -0.2), latent_preference_fast_z=(0.1, 0.2),
-        latent_feature_scheme="whitened-projection-v2",
+        token_preference_vector=(0.3, -0.2), token_preference_fast_vector=(0.1, 0.2),
+        token_preference_feature_scheme="whitened-projection-v2",
     )
     parser = build_parser()
-    args = parser.parse_args(["--latent-whitening-ridge", "0.01"])
-    args._explicit_options = {"latent_whitening_ridge"}
+    args = parser.parse_args(["--token-preference-whitening-ridge", "0.01"])
+    args._explicit_options = {"token_preference_whitening_ridge"}
     changed = _sampling_from_args(args, state)
     assert not coordinate_identity_matches(changed)
     io = ScriptedIO([])
-    reset = _apply_latent_coordinate_overrides(changed, args, io)
-    assert reset.latent_preference_z == reset.latent_preference_fast_z == ()
+    reset = _apply_token_preference_coordinate_overrides(changed, args, io)
+    assert reset.token_preference_vector == reset.token_preference_fast_vector == ()
     assert any("coordinate system changed" in line for line in io.output)
 
 
 def test_coordinate_identity_same_basis_and_zero_memory_are_stable():
     state = SamplingConfig(
-        latent_preference_z=(0.3, -0.2),
-        latent_feature_scheme="whitened-projection-v2",
+        token_preference_vector=(0.3, -0.2),
+        token_preference_feature_scheme="whitened-projection-v2",
     )
     parser = build_parser()
-    same_args = parser.parse_args(["--latent-feature-scheme", "whitened-projection-v2"])
-    same_args._explicit_options = {"latent_feature_scheme"}
+    same_args = parser.parse_args(["--token-preference-feature-scheme", "whitened-projection-v2"])
+    same_args._explicit_options = {"token_preference_feature_scheme"}
     same = _sampling_from_args(same_args, state)
     assert coordinate_identity_matches(same)
-    assert _apply_latent_coordinate_overrides(same, same_args, ScriptedIO([])) == same
-    empty = replace(state, latent_preference_z=(), latent_coordinate_identity=None,
-                    latent_feature_scheme="random-projection-unit-v1")
-    changed_args = parser.parse_args(["--latent-feature-scheme", "whitened-projection-v2"])
-    changed_args._explicit_options = {"latent_feature_scheme"}
+    assert _apply_token_preference_coordinate_overrides(same, same_args, ScriptedIO([])) == same
+    empty = replace(state, token_preference_vector=(), token_preference_coordinate_identity=None,
+                    token_preference_feature_scheme="random-projection-unit-v1")
+    changed_args = parser.parse_args(["--token-preference-feature-scheme", "whitened-projection-v2"])
+    changed_args._explicit_options = {"token_preference_feature_scheme"}
     changed_empty = _sampling_from_args(changed_args, empty)
-    assert _apply_latent_coordinate_overrides(changed_empty, changed_args, ScriptedIO([])) == changed_empty
+    assert _apply_token_preference_coordinate_overrides(changed_empty, changed_args, ScriptedIO([])) == changed_empty
 
 
 def test_coordinate_identity_allows_later_backend_metadata_discovery():
     state = SamplingConfig(
-        latent_preference_z=(0.3, -0.2),
-        latent_feature_scheme="whitened-projection-v2",
+        token_preference_vector=(0.3, -0.2),
+        token_preference_feature_scheme="whitened-projection-v2",
     )
     assert coordinate_identity_matches(
         state,
@@ -430,8 +430,8 @@ def test_coordinate_identity_allows_later_backend_metadata_discovery():
     )
     known = replace(
         state,
-        latent_coordinate_identity={
-            **state.latent_coordinate_identity.to_dict(),
+        token_preference_coordinate_identity={
+            **state.token_preference_coordinate_identity.to_dict(),
             "model_fingerprint": "old-model",
             "embedding_width": 1024,
         },

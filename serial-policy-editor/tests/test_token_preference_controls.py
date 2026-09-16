@@ -1,4 +1,4 @@
-"""Experimental controls, including the identity of persisted latent coordinates."""
+"""Experimental controls, including the identity of persisted token preference coordinates."""
 
 import math
 from dataclasses import replace
@@ -8,12 +8,12 @@ import numpy as np
 import pytest
 
 from tests.fakes import ScriptedIO
-from tests.test_latent_preference import FEATURES, LatentBackend, _observation
+from tests.test_token_preference import FEATURES, TokenPreferenceBackend, _observation
 from trajectory_editor.bias_presets import load_bias_preset, project_biases
 from trajectory_editor.domain import EditorError, SamplingConfig
 from trajectory_editor.episode_actions import SelectRawRank, Write
 from trajectory_editor.episode_cli import (
-    _apply_latent_seed, _latent_config_from_args, _sampler_override,
+    _apply_token_preference_seed, _token_preference_config_from_args, _sampler_override,
     _sampling_from_args, build_parser, main,
 )
 from trajectory_editor.episode_engine import EpisodeEngine
@@ -23,17 +23,17 @@ from trajectory_editor.episode_lifecycle import (
 )
 from trajectory_editor.episode_policy import EpisodeRunner, _WriteLearningAccumulator
 from trajectory_editor.episode_store import EpisodeStore
-from trajectory_editor.latent_features import DEFAULT_PROJECTION_SEED, project_token_embeddings
-from trajectory_editor.latent_preference import LatentPreferenceConfig, LatentPreferenceLearner
+from trajectory_editor.token_preference_features import DEFAULT_PROJECTION_SEED, project_token_embeddings
+from trajectory_editor.token_preference import TokenPreferenceConfig, TokenPreferenceLearner
 
 
 def learner(**kwargs):
-    return LatentPreferenceLearner(FEATURES, enabled=True, dimension=2, **kwargs)
+    return TokenPreferenceLearner(FEATURES, enabled=True, dimension=2, **kwargs)
 
 
 def test_default_update_matches_local_main_fixture():
     # Captured from b1e696f, before the experimental controls were added.
-    sampling = SamplingConfig(latent_preference_z=(0.12, -0.08))
+    sampling = SamplingConfig(token_preference_vector=(0.12, -0.08))
     result = learner().update(_observation(sampling), 3, sampling)
     assert result.old_policy_rank == 4
     assert result.old_policy_probability == pytest.approx(0.025440951760371408)
@@ -47,26 +47,26 @@ def test_default_update_matches_local_main_fixture():
 
 @pytest.mark.parametrize('decay', [0.0, 0.25, 1.0])
 def test_decay_and_learning_are_separate(decay):
-    sampling = SamplingConfig(latent_preference_z=(0.3, -0.2))
+    sampling = SamplingConfig(token_preference_vector=(0.3, -0.2))
     observation = _observation(sampling)
     base = learner().update(observation, 3, sampling)
     result = learner(decay=decay).update(observation, 3, sampling)
-    expected = (1 - decay) * np.array(sampling.latent_preference_z) + base.learning_delta
+    expected = (1 - decay) * np.array(sampling.token_preference_vector) + base.learning_delta
     assert result.new_z == pytest.approx(expected)
-    assert result.delta == pytest.approx(expected - sampling.latent_preference_z)
-    assert result.decay_norm == pytest.approx(decay * np.linalg.norm(sampling.latent_preference_z))
+    assert result.delta == pytest.approx(expected - sampling.token_preference_vector)
+    assert result.decay_norm == pytest.approx(decay * np.linalg.norm(sampling.token_preference_vector))
     assert result.learning_step_norm == pytest.approx(base.learning_step_norm)
 
 
 @pytest.mark.parametrize('cap', [1, 10, 1000])
 def test_shifted_severity_and_dead_zone_gate_rejection(cap):
-    sampling = SamplingConfig(latent_preference_z=(0.3, -0.2))
+    sampling = SamplingConfig(token_preference_vector=(0.3, -0.2))
     observation = _observation(sampling, proposal_token_id=5)
     model = learner(decay=0.25, dead_zone_rank=3, severity_cap=cap, rejection_strength=10)
     inside = model.update(observation, 1, sampling)
     assert inside.severity == 0
     assert inside.learning_step_norm == 0
-    assert inside.new_z == pytest.approx(np.array(sampling.latent_preference_z) * 0.75)
+    assert inside.new_z == pytest.approx(np.array(sampling.token_preference_vector) * 0.75)
     outside = model.update(observation, 3, sampling)
     assert outside.old_policy_rank == 4
     assert outside.severity == pytest.approx(min(1, math.log1p(1) / math.log1p(cap)))
@@ -111,15 +111,15 @@ def test_fast_slow_independent_dynamics_and_clipping():
 
 
 def test_disabled_neither_learns_nor_decays_and_fast_off_preserves_saved_fast():
-    sampling = SamplingConfig(latent_preference_z=(0.3, -0.2),
-                              latent_preference_fast_z=(0.4, 0.2), latent_fast_strength=0.7)
-    disabled = LatentPreferenceLearner(FEATURES, dimension=2, decay=1, fast_slow=True, fast_decay=1)
+    sampling = SamplingConfig(token_preference_vector=(0.3, -0.2),
+                              token_preference_fast_vector=(0.4, 0.2), token_preference_fast_strength=0.7)
+    disabled = TokenPreferenceLearner(FEATURES, dimension=2, decay=1, fast_slow=True, fast_decay=1)
     result = disabled.update(_observation(sampling), 3, sampling)
     assert result.sampling == sampling
     assert result.update_norm == result.fast_update_norm == result.decay_norm == 0
     result = learner().update(_observation(sampling), 3, sampling)
-    assert result.sampling.latent_preference_fast_z == sampling.latent_preference_fast_z
-    assert result.sampling.latent_fast_strength == sampling.latent_fast_strength
+    assert result.sampling.token_preference_fast_vector == sampling.token_preference_fast_vector
+    assert result.sampling.token_preference_fast_strength == sampling.token_preference_fast_strength
 
 
 @pytest.mark.parametrize('kwargs', [
@@ -132,14 +132,14 @@ def test_disabled_neither_learns_nor_decays_and_fast_off_preserves_saved_fast():
 ])
 def test_invalid_learner_controls(kwargs):
     with pytest.raises(EditorError):
-        LatentPreferenceConfig(**kwargs)
+        TokenPreferenceConfig(**kwargs)
 
 
 @pytest.mark.parametrize('kwargs', [
-    {'latent_preference_z': (1, 2), 'latent_preference_fast_z': (1,)},
-    {'latent_preference_fast_z': (float('inf'),)},
-    {'latent_preference_fast_z': '12'}, {'latent_fast_strength': -1},
-    {'latent_projection_seed': 1 << 63}, {'latent_projection_seed': True},
+    {'token_preference_vector': (1, 2), 'token_preference_fast_vector': (1,)},
+    {'token_preference_fast_vector': (float('inf'),)},
+    {'token_preference_fast_vector': '12'}, {'token_preference_fast_strength': -1},
+    {'token_preference_projection_seed': 1 << 63}, {'token_preference_projection_seed': True},
 ])
 def test_invalid_saved_state(kwargs):
     with pytest.raises(EditorError):
@@ -147,10 +147,10 @@ def test_invalid_saved_state(kwargs):
 
 
 def test_fast_only_sampling_and_state_copies():
-    sampling = SamplingConfig(latent_preference_fast_z=(0.5, -0.3), latent_fast_strength=0.8,
-                              latent_projection_seed=-17)
+    sampling = SamplingConfig(token_preference_fast_vector=(0.5, -0.3), token_preference_fast_strength=0.8,
+                              token_preference_projection_seed=-17)
     observation = _observation(sampling)
-    assert observation.statistics.latent_logit_adjustments == pytest.approx(0.8 * (FEATURES @ np.array([0.5, -0.3])))
+    assert observation.statistics.token_preference_logit_adjustments == pytest.approx(0.8 * (FEATURES @ np.array([0.5, -0.3])))
     assert sampling.policy_active
     assert SamplingConfig.from_record(sampling.to_dict()) == sampling
     assert _sampling_from_args(build_parser().parse_args([]), sampling) == sampling
@@ -165,17 +165,17 @@ def test_seed_projection_signed_determinism_and_old_record_migration():
     positive = project_token_embeddings(embeddings, feature_dimension=3, projection_seed=17)
     assert np.array_equal(negative, same)
     assert not np.array_equal(negative, positive)
-    old = SamplingConfig(latent_preference_z=(0.1, 0.2)).to_dict()
-    for key in ('latent_projection_seed', 'latent_preference_fast_z', 'latent_fast_strength'):
+    old = SamplingConfig(token_preference_vector=(0.1, 0.2)).to_dict()
+    for key in ('token_preference_projection_seed', 'token_preference_fast_vector', 'token_preference_fast_strength'):
         old.pop(key)
-    assert SamplingConfig.from_record(old).latent_projection_seed == DEFAULT_PROJECTION_SEED
+    assert SamplingConfig.from_record(old).token_preference_projection_seed == DEFAULT_PROJECTION_SEED
 
 
 def test_preset_round_trip_includes_both_memories_and_seed(tmp_path):
-    sampling = SamplingConfig(latent_preference_z=(0.5, -0.1), latent_strength=0.8,
-                              latent_preference_fast_z=(0.2, 0.1), latent_fast_strength=0.4,
-                              latent_projection_seed=-17)
-    backend = LatentBackend()
+    sampling = SamplingConfig(token_preference_vector=(0.5, -0.1), token_preference_strength=0.8,
+                              token_preference_fast_vector=(0.2, 0.1), token_preference_fast_strength=0.4,
+                              token_preference_projection_seed=-17)
+    backend = TokenPreferenceBackend()
     engine = EpisodeEngine(backend, initial_token_ids=[7], sampling=sampling)
     with EpisodeStore(tmp_path / 'episodes.sqlite3') as store:
         episode = _create_episode(store, engine, backend_provenance=backend.provenance())
@@ -186,90 +186,90 @@ def test_preset_round_trip_includes_both_memories_and_seed(tmp_path):
 
 def test_cli_profile_resolves_all_controls_and_seed_exclusion():
     parser = build_parser()
-    config = _latent_config_from_args(parser.parse_args(['--latent-fast-slow', '--latent-learning-rate', '.03',
-                                                         '--latent-strength', '.8', '--latent-max-norm', '.7']))
+    config = _token_preference_config_from_args(parser.parse_args(['--token-preference-fast-slow', '--token-preference-learning-rate', '.03',
+                                                         '--token-preference-strength', '.8', '--token-preference-max-norm', '.7']))
     assert config.fast_learning_rate == 0.12
     assert config.fast_strength == 0.4
     assert config.fast_decay == 0.1
     assert config.fast_max_step == config.max_step
     assert config.fast_max_norm == 0.7
-    args = parser.parse_args('''--latent-preference --latent-dimension 64 --latent-learning-rate .03
-        --latent-strength .8 --latent-max-step .15 --latent-max-norm 3 --latent-decay .002
-        --latent-severity-cap 300 --latent-dead-zone-rank 2 --latent-rejection-strength 1
-        --latent-fast-slow --latent-fast-learning-rate .15 --latent-fast-decay .12
-        --latent-fast-strength .4 --latent-fast-max-step .20 --latent-fast-max-norm .8
-        --latent-random-seed'''.split())
-    config = _latent_config_from_args(args)
+    args = parser.parse_args('''--token-preference --token-preference-dimension 64 --token-preference-learning-rate .03
+        --token-preference-strength .8 --token-preference-max-step .15 --token-preference-max-norm 3 --token-preference-decay .002
+        --token-preference-severity-cap 300 --token-preference-dead-zone-rank 2 --token-preference-rejection-strength 1
+        --token-preference-fast-slow --token-preference-fast-learning-rate .15 --token-preference-fast-decay .12
+        --token-preference-fast-strength .4 --token-preference-fast-max-step .20 --token-preference-fast-max-norm .8
+        --token-preference-random-projection-seed'''.split())
+    config = _token_preference_config_from_args(args)
     assert (config.fast_learning_rate, config.fast_decay, config.fast_max_norm) == (.15, .12, .8)
     with pytest.raises(SystemExit):
-        parser.parse_args(['--latent-seed', '1', '--latent-random-seed'])
+        parser.parse_args(['--token-preference-projection-seed', '1', '--token-preference-random-projection-seed'])
 
 
 def test_seed_override_clears_both_coordinates_and_replay_rejects_override():
-    sampling = SamplingConfig(latent_preference_z=(0.2, 0.3), latent_preference_fast_z=(0.1, 0.2),
-                              latent_projection_seed=-17)
+    sampling = SamplingConfig(token_preference_vector=(0.2, 0.3), token_preference_fast_vector=(0.1, 0.2),
+                              token_preference_projection_seed=-17)
     io = ScriptedIO([])
-    assert _apply_latent_seed(sampling, -17, io) is sampling
-    changed = _apply_latent_seed(sampling, 18, io)
-    assert changed.latent_projection_seed == 18
-    assert changed.latent_preference_z == changed.latent_preference_fast_z == ()
+    assert _apply_token_preference_seed(sampling, -17, io) is sampling
+    changed = _apply_token_preference_seed(sampling, 18, io)
+    assert changed.token_preference_projection_seed == 18
+    assert changed.token_preference_vector == changed.token_preference_fast_vector == ()
     assert any('memory reset' in text for text in io.output)
     with pytest.raises(EditorError, match='replay seed'):
-        _apply_latent_seed(sampling, 18, io, replay=True)
+        _apply_token_preference_seed(sampling, 18, io, replay=True)
 
 
 def test_write_sums_evidence_before_clipping_and_decays_once():
-    sampling = SamplingConfig(latent_preference_z=(0.5, 0.2), latent_preference_fast_z=(0.3, 0.1))
+    sampling = SamplingConfig(token_preference_vector=(0.5, 0.2), token_preference_fast_vector=(0.3, 0.1))
     model = learner(decay=0.2, fast_slow=True, fast_decay=0.5,
                     learning_rate=1, fast_learning_rate=2, max_step=0.03, fast_max_step=0.04)
     observations = [_observation(sampling, proposal_token_id=4), _observation(sampling, proposal_token_id=5)]
     individual = [model.update(o, token, sampling) for o, token in zip(observations, [3, 1])]
-    accumulator = _WriteLearningAccumulator(LatentBackend(), sampling, None, model)
+    accumulator = _WriteLearningAccumulator(TokenPreferenceBackend(), sampling, None, model)
     for o, token in zip(observations, [3, 1]):
         accumulator.add(o, token)
-    result = accumulator.finish(2).latent_result
-    for prefix, decay, bound, old in [('', .2, .03, sampling.latent_preference_z),
-                                      ('fast_', .5, .04, sampling.latent_preference_fast_z)]:
+    result = accumulator.finish(2).token_preference_result
+    for prefix, decay, bound, old in [('', .2, .03, sampling.token_preference_vector),
+                                      ('fast_', .5, .04, sampling.token_preference_fast_vector)]:
         evidence = np.sum([getattr(r, prefix + 'learning_evidence') for r in individual], axis=0)
         step = evidence * min(1, bound / np.linalg.norm(evidence))
         actual = result.new_z if not prefix else result.new_fast_z
         assert actual == pytest.approx((1 - decay) * np.array(old) + step)
         assert getattr(result, prefix + 'learning_step_norm') <= bound + 1e-12
-    assert len(accumulator.finish(2).to_dict()['latent_token_observations']) == 2
+    assert len(accumulator.finish(2).to_dict()['token_preference_token_observations']) == 2
 
 
 def test_write_dead_zone_only_forgets_once():
-    sampling = SamplingConfig(latent_preference_z=(0.5, 0.2), latent_preference_fast_z=(0.3, 0.1))
+    sampling = SamplingConfig(token_preference_vector=(0.5, 0.2), token_preference_fast_vector=(0.3, 0.1))
     model = learner(decay=.2, dead_zone_rank=8, fast_slow=True, fast_decay=.5, rejection_strength=3)
-    accumulator = _WriteLearningAccumulator(LatentBackend(), sampling, None, model)
+    accumulator = _WriteLearningAccumulator(TokenPreferenceBackend(), sampling, None, model)
     for token in (1, 3, 5):
         accumulator.add(_observation(sampling), token)
-    result = accumulator.finish(3).latent_result
-    assert result.new_z == pytest.approx(np.array(sampling.latent_preference_z) * .8)
-    assert result.new_fast_z == pytest.approx(np.array(sampling.latent_preference_fast_z) * .5)
+    result = accumulator.finish(3).token_preference_result
+    assert result.new_z == pytest.approx(np.array(sampling.token_preference_vector) * .8)
+    assert result.new_fast_z == pytest.approx(np.array(sampling.token_preference_fast_vector) * .5)
 
 
-class SeedBackend(LatentBackend):
+class SeedBackend(TokenPreferenceBackend):
     def __init__(self):
         super().__init__()
         self.projections = []
 
-    def latent_token_features(self, *, feature_dimension, projection_seed, **kwargs):
+    def token_preference_features(self, *, feature_dimension, projection_seed, **kwargs):
         self.projections.append((feature_dimension, projection_seed))
         return project_token_embeddings(np.arange(40, dtype=np.float32).reshape(8, 5),
                                         feature_dimension=feature_dimension, projection_seed=projection_seed)
 
 
 @pytest.fixture
-def saved_latent_history(tmp_path):
+def saved_token_preference_history(tmp_path):
     path = tmp_path / 'history.sqlite3'
-    initial = SamplingConfig(latent_preference_z=(.2, -.1), latent_strength=.8,
-                             latent_preference_fast_z=(.1, .05), latent_fast_strength=.4,
-                             latent_projection_seed=-17)
-    middle = replace(initial, latent_preference_z=(), latent_preference_fast_z=(.3, -.2),
-                     latent_projection_seed=29)
-    final = replace(initial, latent_preference_z=(.4, .1), latent_preference_fast_z=(.1, -.2),
-                    latent_projection_seed=-31)
+    initial = SamplingConfig(token_preference_vector=(.2, -.1), token_preference_strength=.8,
+                             token_preference_fast_vector=(.1, .05), token_preference_fast_strength=.4,
+                             token_preference_projection_seed=-17)
+    middle = replace(initial, token_preference_vector=(), token_preference_fast_vector=(.3, -.2),
+                     token_preference_projection_seed=29)
+    final = replace(initial, token_preference_vector=(.4, .1), token_preference_fast_vector=(.1, -.2),
+                    token_preference_projection_seed=-31)
     backend = SeedBackend()
     engine = EpisodeEngine(backend, initial_token_ids=[7], sampling=initial)
     with EpisodeStore(path) as store:
@@ -285,8 +285,8 @@ def saved_latent_history(tmp_path):
 
 
 @pytest.mark.parametrize('boundary', [0, 1, 2])
-def test_restore_rewind_fork_use_historical_coordinates(saved_latent_history, boundary):
-    path, *states = saved_latent_history
+def test_restore_rewind_fork_use_historical_coordinates(saved_token_preference_history, boundary):
+    path, *states = saved_token_preference_history
     backend = SeedBackend()
     with EpisodeStore(path) as store:
         restored = _restore_engine(store, 'source', backend, max_tokens=None, sampling_override=None)
@@ -299,12 +299,12 @@ def test_restore_rewind_fork_use_historical_coordinates(saved_latent_history, bo
         _rewind_episode(store, 'source', restored, boundary)
         assert restored.sampling == states[boundary]
         assert restored.observe().statistics.adjusted == pytest.approx(fork.observe().statistics.adjusted)
-        assert fork_backend.projections[-1] == (2, states[boundary].latent_projection_seed)
-        assert backend.projections[-1] == (2, states[boundary].latent_projection_seed)
+        assert fork_backend.projections[-1] == (2, states[boundary].token_preference_projection_seed)
+        assert backend.projections[-1] == (2, states[boundary].token_preference_projection_seed)
 
 
-def test_replay_imports_each_saved_seed_and_never_learns(saved_latent_history):
-    path, initial, middle, final = saved_latent_history
+def test_replay_imports_each_saved_seed_and_never_learns(saved_token_preference_history):
+    path, initial, middle, final = saved_token_preference_history
     backend = SeedBackend()
     with EpisodeStore(path) as store:
         engine, plan = _spr_engine_from_source(store, 'source', backend, sampling=initial, max_tokens=None)
@@ -313,49 +313,49 @@ def test_replay_imports_each_saved_seed_and_never_learns(saved_latent_history):
         _create_episode(store, engine, backend_provenance=backend.provenance(), requested_id='replay')
         model = learner(fast_slow=True, decay=1, fast_decay=1)
         with patch.object(model, 'update', side_effect=AssertionError('replay must not learn')):
-            EpisodeRunner(engine, store, 'replay', latent_learner=model, learn_from_write=True).run(tape=plan)
+            EpisodeRunner(engine, store, 'replay', token_preference_learner=model, learn_from_write=True).run(tape=plan)
         assert engine.sampling == final
         assert store.final_sampling('replay') == final
         assert backend.projections == [(2, -17), (2, 29)]
-        assert not any(i['kind'] in ('latent-preference-update', 'write-learning-update')
+        assert not any(i['kind'] in ('token-preference-update', 'write-learning-update')
                        for i in store.interactions('replay'))
 
 
 def test_live_learner_uses_current_saved_seed_even_after_empty_state_restore():
     backend = SeedBackend()
-    model = LatentPreferenceLearner(feature_provider=backend.latent_token_features, enabled=True, dimension=2)
+    model = TokenPreferenceLearner(feature_provider=backend.token_preference_features, enabled=True, dimension=2)
     for seed in (-17, 29):
-        sampling = SamplingConfig(latent_projection_seed=seed)
+        sampling = SamplingConfig(token_preference_projection_seed=seed)
         model.update(_observation(sampling), 3, sampling)
         assert backend.projections[-1] == (2, seed)
 
 
-def test_random_latent_seed_printed_once_persisted_and_replay_does_not_draw(tmp_path, capsys):
+def test_random_token_preference_seed_printed_once_persisted_and_replay_does_not_draw(tmp_path, capsys):
     path = tmp_path / 'random.sqlite3'
     with patch('trajectory_editor.episode_cli._random_seed', return_value=-123456) as randomize, patch(
         'trajectory_editor.episode_cli._backend', return_value=SeedBackend()
     ), patch('trajectory_editor.episode_cli.TerminalIO', return_value=ScriptedIO(['h 3'])):
         assert main(['--workspace', str(path), '--model', 'fake', '--new-prompt', 'P',
-                     '--episode-id', 'random', '--latent-random-seed', '--plain-ui']) == 0
+                     '--episode-id', 'random', '--token-preference-random-projection-seed', '--plain-ui']) == 0
         randomize.assert_called_once_with()
-    assert capsys.readouterr().out.count('Random latent seed: -123456') == 1
+    assert capsys.readouterr().out.count('Random token preference projection seed: -123456') == 1
     with EpisodeStore(path) as store:
-        assert store.final_sampling('random').latent_projection_seed == -123456
+        assert store.final_sampling('random').token_preference_projection_seed == -123456
     with patch('trajectory_editor.episode_cli._random_seed', side_effect=AssertionError('no reroll')), patch(
         'trajectory_editor.episode_cli._backend', return_value=SeedBackend()
     ), patch('trajectory_editor.episode_cli.TerminalIO', return_value=ScriptedIO(['quit'])):
         assert main(['--workspace', str(path), '--model', 'fake', '--replay', 'random',
                      '--episode-id', 'replayed', '--plain-ui']) == 0
     with EpisodeStore(path) as store:
-        assert store.final_sampling('replayed').latent_projection_seed == -123456
+        assert store.final_sampling('replayed').token_preference_projection_seed == -123456
 
 
 @pytest.mark.parametrize('mode', ['--resume', '--fork-from'])
 @pytest.mark.parametrize('override', [None, -31, 42])
-def test_cli_resume_and_fork_preserve_or_reset_latent_identity(saved_latent_history, mode, override):
-    path, _, _, final = saved_latent_history
+def test_cli_resume_and_fork_preserve_or_reset_token_preference_identity(saved_token_preference_history, mode, override):
+    path, _, _, final = saved_token_preference_history
     io = ScriptedIO(['q', 'quit'])
-    flags = [] if override is None else ['--latent-seed', str(override)]
+    flags = [] if override is None else ['--token-preference-projection-seed', str(override)]
     if mode == '--fork-from':
         flags += ['--episode-id', 'fork']
     with patch('trajectory_editor.episode_cli._backend', return_value=SeedBackend()), patch(
@@ -365,16 +365,16 @@ def test_cli_resume_and_fork_preserve_or_reset_latent_identity(saved_latent_hist
     with EpisodeStore(path) as store:
         saved = store.final_sampling('source' if mode == '--resume' else 'fork')
     if override == 42:
-        assert saved.latent_projection_seed == 42
-        assert saved.latent_preference_z == saved.latent_preference_fast_z == ()
+        assert saved.token_preference_projection_seed == 42
+        assert saved.token_preference_vector == saved.token_preference_fast_vector == ()
         assert any('memory reset' in message for message in io.output)
     else:
         assert saved == final
 
 
-@pytest.mark.parametrize('flags', [['--latent-seed', '42'], ['--latent-seed', '-17'], ['--latent-random-seed']])
-def test_cli_replay_rejects_incompatible_seed_at_any_segment(saved_latent_history, flags, capsys):
-    path, *_ = saved_latent_history
+@pytest.mark.parametrize('flags', [['--token-preference-projection-seed', '42'], ['--token-preference-projection-seed', '-17'], ['--token-preference-random-projection-seed']])
+def test_cli_replay_rejects_incompatible_seed_at_any_segment(saved_token_preference_history, flags, capsys):
+    path, *_ = saved_token_preference_history
     with patch('trajectory_editor.episode_cli._backend', return_value=SeedBackend()), patch(
         'trajectory_editor.episode_cli._random_seed', side_effect=AssertionError('no reroll')):
         assert main(['--workspace', str(path), '--model', 'fake', '--replay', 'source',
@@ -386,19 +386,19 @@ def test_cli_replay_rejects_incompatible_seed_at_any_segment(saved_latent_histor
 
 def test_live_eog_choice_does_not_learn_or_decay(tmp_path):
     backend = SeedBackend()
-    sampling = SamplingConfig(latent_preference_z=(.3, .2), latent_preference_fast_z=(.2, .1))
+    sampling = SamplingConfig(token_preference_vector=(.3, .2), token_preference_fast_vector=(.2, .1))
     runtime = EpisodeEngine(backend, initial_token_ids=[7], sampling=sampling)
     with EpisodeStore(tmp_path / 'eog.sqlite3') as store:
         episode = _create_episode(store, runtime, backend_provenance=backend.provenance())
         policy = type('ChooseEog', (), {'choose': lambda self, engine, obs: SelectRawRank(obs.statistics.raw_rank(0))})()
-        EpisodeRunner(runtime, store, episode, latent_learner=learner(decay=1, fast_slow=True, fast_decay=1)).run(
+        EpisodeRunner(runtime, store, episode, token_preference_learner=learner(decay=1, fast_slow=True, fast_decay=1)).run(
             live_policy=policy, max_live_actions=1)
         assert runtime.sampling == sampling
         assert not store.interactions(episode)
 
 
 def test_no_severity_attenuation_keeps_dead_zone_and_both_channel_limits():
-    sampling = SamplingConfig(latent_preference_z=(.2, .1), latent_preference_fast_z=(.1, .2))
+    sampling = SamplingConfig(token_preference_vector=(.2, .1), token_preference_fast_vector=(.1, .2))
     model = learner(no_severity_attenuation=True, dead_zone_rank=2, severity_cap=1000,
                     learning_rate=100, fast_slow=True, fast_learning_rate=200,
                     rejection_strength=3, decay=.2, fast_decay=.5,
@@ -413,22 +413,22 @@ def test_no_severity_attenuation_keeps_dead_zone_and_both_channel_limits():
         assert result.z_norm <= .1 + 1e-12
         assert result.fast_z_norm <= .08 + 1e-12
         assert result.to_dict()['no_severity_attenuation'] is True
-    config = _latent_config_from_args(build_parser().parse_args(['--latent-no-severity-attenuation']))
+    config = _token_preference_config_from_args(build_parser().parse_args(['--token-preference-no-severity-attenuation']))
     assert config.no_severity_attenuation
     with pytest.raises(EditorError):
-        LatentPreferenceConfig(no_severity_attenuation=1)
+        TokenPreferenceConfig(no_severity_attenuation=1)
 
 
 def test_unattenuated_write_accumulates_full_evidence_but_decays_once():
-    sampling = SamplingConfig(latent_preference_z=(.2, .1))
+    sampling = SamplingConfig(token_preference_vector=(.2, .1))
     model = learner(no_severity_attenuation=True, learning_rate=.1, decay=.5)
-    accumulator = _WriteLearningAccumulator(LatentBackend(), sampling, None, model)
+    accumulator = _WriteLearningAccumulator(TokenPreferenceBackend(), sampling, None, model)
     obs = _observation(sampling)
     for token in (3, 5):
         accumulator.add(obs, token)
-    result = accumulator.finish(2).latent_result
+    result = accumulator.finish(2).token_preference_result
     mean = obs.statistics.policy_probabilities @ FEATURES.astype(np.float64)
     expected_step = .1 * (FEATURES[3] + FEATURES[5] - 2 * mean)
     expected_step *= min(1, model.config.max_step / np.linalg.norm(expected_step))
     assert result.severity == 1
-    assert result.new_z == pytest.approx(.5 * np.array(sampling.latent_preference_z) + expected_step)
+    assert result.new_z == pytest.approx(.5 * np.array(sampling.token_preference_vector) + expected_step)

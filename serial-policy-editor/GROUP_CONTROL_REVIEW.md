@@ -29,7 +29,7 @@ compiled exploratory routes do not enter runtime steering.
   reconstruction, bounded entry/continuation adjustments, and diagnostics.
 - `bias_commands.py`: shared command target resolution and steering mutations.
 - `bias_catalog.py`: canonical runtime routes plus optional exploratory routes.
-- `sampling.py`: composes manual adjustments, lexical references, latent
+- `sampling.py`: composes manual adjustments, lexical references, preference
   preferences, and appearance control before decoder filtering.
 - `bias_presets.py`: complete `biases.json` import/export, including references,
   objectives, vectors, and relevant metadata.
@@ -51,7 +51,7 @@ out-of-bounds manual groups remain unchanged.
 
 Both teacher learners use the refreshed observation after an interactive policy
 edit. Typed evidence is summed before applying a single clip and decay step.
-Latent slow/fast vector serialization remains supported; minimal vector-array
+token preference slow/fast vector serialization remains supported; minimal vector-array
 imports are also accepted with model and projection metadata.
 
 ## Interface changes to review
@@ -60,7 +60,8 @@ imports are also accepted with model and projection metadata.
   Rank and last-token commands retain their old clear/default-step meanings.
 - Canonical tokenization is the compiler default. Use `--explore` for alternate
   decompositions. Recompile an old catalog to obtain the new separation.
-- Full presets use `spe-bias-rules-v3`; v2 remains readable. Enabled adaptive
+- Full presets use `spe-bias-rules-v4`; older preset formats are rejected after
+  the breaking token-preference terminology migration. Enabled adaptive
   objectives cannot be flattened with `--rules-only`.
 - New command-created groups are excluded from the old teacher group fitter.
   A manual JSON group can explicitly opt in with `learnable: true`.

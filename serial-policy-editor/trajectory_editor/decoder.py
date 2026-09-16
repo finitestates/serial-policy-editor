@@ -13,8 +13,8 @@ import numpy as np
 
 from .domain import EditorError
 from .episode_backend import CacheMode, EpisodeBackend, validate_cache_mode
-from .latent_features import (
-    DEFAULT_LATENT_DIMENSION,
+from .token_preference_features import (
+    DEFAULT_TOKEN_PREFERENCE_DIMENSION,
     DEFAULT_PROJECTION_SEED,
     DEFAULT_PROJECTION_CHUNK_SIZE,
     DEFAULT_WHITENING_RIDGE,
@@ -165,9 +165,9 @@ class LlamaCppDecoder:
                 if value >= 0:
                     self._fallback_eog_ids.add(value)
         self._tokens: list[int] = []
-        self._latent_feature_cache: dict[tuple[object, ...], np.ndarray] = {}
-        self._latent_embedding_fingerprint: str | None = None
-        self._latent_embedding_width: int | None = None
+        self._token_preference_feature_cache: dict[tuple[object, ...], np.ndarray] = {}
+        self._token_preference_embedding_fingerprint: str | None = None
+        self._token_preference_embedding_width: int | None = None
 
     def vocabulary_size(self) -> int:
         return self._vocabulary_size
@@ -238,10 +238,10 @@ class LlamaCppDecoder:
             np.float32, copy=True
         )
 
-    def latent_token_features(
+    def token_preference_features(
         self,
         *,
-        feature_dimension: int = DEFAULT_LATENT_DIMENSION,
+        feature_dimension: int = DEFAULT_TOKEN_PREFERENCE_DIMENSION,
         projection_seed: int = DEFAULT_PROJECTION_SEED,
         projection_chunk_size: int = DEFAULT_PROJECTION_CHUNK_SIZE,
         feature_scheme: str = "random-projection-unit-v1",
@@ -249,15 +249,15 @@ class LlamaCppDecoder:
     ) -> np.ndarray:
         """Return fixed projected token embeddings for the loaded GGUF model."""
         if (
-            self._latent_embedding_fingerprint is not None
-            and self._latent_embedding_width is not None
+            self._token_preference_embedding_fingerprint is not None
+            and self._token_preference_embedding_width is not None
         ):
             key = (
-                self._latent_embedding_fingerprint, self._latent_embedding_width,
+                self._token_preference_embedding_fingerprint, self._token_preference_embedding_width,
                 int(feature_dimension), int(projection_seed),
                 feature_scheme, float(whitening_ridge),
             )
-            cached = self._latent_feature_cache.get(key)
+            cached = self._token_preference_feature_cache.get(key)
             if cached is not None:
                 return cached
         binding = getattr(self._llama_cpp, "llama_cpp", self._llama_cpp)
@@ -282,13 +282,13 @@ class LlamaCppDecoder:
             embeddings.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
         )
         fingerprint = embedding_fingerprint(embeddings)
-        self._latent_embedding_fingerprint = fingerprint
-        self._latent_embedding_width = embedding_width
+        self._token_preference_embedding_fingerprint = fingerprint
+        self._token_preference_embedding_width = embedding_width
         key = (
             fingerprint, embedding_width, int(feature_dimension), int(projection_seed),
             feature_scheme, float(whitening_ridge),
         )
-        cached = self._latent_feature_cache.get(key)
+        cached = self._token_preference_feature_cache.get(key)
         if cached is not None:
             return cached
         features = project_token_embeddings(
@@ -299,10 +299,10 @@ class LlamaCppDecoder:
             feature_scheme=feature_scheme,
             whitening_ridge=whitening_ridge,
         )
-        self._latent_feature_cache[key] = features
+        self._token_preference_feature_cache[key] = features
         return features
 
-    def latent_coordinate_identity(
+    def token_preference_coordinate_identity(
         self,
         *,
         feature_dimension: int,
@@ -311,20 +311,20 @@ class LlamaCppDecoder:
         whitening_ridge: float = DEFAULT_WHITENING_RIDGE,
     ):
         """Describe the embedding-backed coordinates after materialization."""
-        self.latent_token_features(
+        self.token_preference_features(
             feature_dimension=feature_dimension,
             projection_seed=projection_seed,
             feature_scheme=feature_scheme,
             whitening_ridge=whitening_ridge,
         )
-        from .latent_features import coordinate_identity
+        from .token_preference_features import coordinate_identity
         return coordinate_identity(
             dimension=feature_dimension,
             projection_seed=projection_seed,
             feature_scheme=feature_scheme,
             whitening_ridge=whitening_ridge,
-            model_fingerprint=self._latent_embedding_fingerprint,
-            embedding_width=self._latent_embedding_width,
+            model_fingerprint=self._token_preference_embedding_fingerprint,
+            embedding_width=self._token_preference_embedding_width,
         )
 
     def tokenize(

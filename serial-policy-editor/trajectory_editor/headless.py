@@ -18,7 +18,7 @@ from .episode_lifecycle import (_create_episode, _restore_engine, _rewind_episod
                                 _fork_engine)
 from .episode_policy import EpisodeRunner
 from .episode_store import EpisodeStore
-from .latent_features import coordinate_identity_matches
+from .token_preference_features import coordinate_identity_matches
 
 
 class Conflict(EditorError):
@@ -66,7 +66,7 @@ class Session:
                 "proposal": {"token_id": o.proposal_token_id, "text": o.proposal_text,
                              "rank": o.proposal_raw_rank},
                 "group_controls": o.statistics.group_control_diagnostics,
-                "latent_influence": o.statistics.latent_diagnostics,
+                "token_preference_influence": o.statistics.token_preference_diagnostics,
                 "candidates": [c.to_dict() for c in self.engine.candidates(o, start_rank=start, count=count)]}
 
     def mutate(self, operation, payload):
@@ -182,17 +182,17 @@ class Session:
                 raise EditorError("Unknown sampler setting")
             sampling = replace(e.sampling, **values)
             if (
-                (e.sampling.latent_preference_z or e.sampling.latent_preference_fast_z)
+                (e.sampling.token_preference_vector or e.sampling.token_preference_fast_vector)
                 and not coordinate_identity_matches(sampling)
             ):
                 self.notices.append(
-                    "Latent coordinate system changed: latent preference memory reset (slow and fast)."
+                    "token preference coordinate system changed: token preference memory reset (slow and fast)."
                 )
                 sampling = replace(
                     sampling,
-                    latent_preference_z=(),
-                    latent_preference_fast_z=(),
-                    latent_coordinate_identity=None,
+                    token_preference_vector=(),
+                    token_preference_fast_vector=(),
+                    token_preference_coordinate_identity=None,
                 )
             if e.ended:
                 raise EditorError("Fork a sealed episode to continue")

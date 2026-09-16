@@ -26,7 +26,7 @@ from .lexical_reference import load_reference
 from .backend_factory import BACKEND_NAMES, create_backend
 from .decoder import KV_CACHE_TYPES, LlamaCppSettings
 from .domain import MAX_SEED, MIN_SEED, EditorError, SamplingConfig
-from .latent_features import coordinate_identity_matches
+from .token_preference_features import coordinate_identity_matches
 from .episode_lifecycle import (
     POLICY_FIELDS, _inherit_budget, _model_continuation, _visible_tokens, _restore_engine,
     _create_episode, _rewind_episode, _fork_engine, _spr_engine_from_source,
@@ -47,11 +47,11 @@ from .episode_projector import project_episode, project_fork_map, project_lineag
 from .episode_store import EpisodeStore
 from .episode_recovery import recover_sampler_record
 from .episode_ui import InteractivePolicy, PolicyViewPreferences
-from .latent_features import (
+from .token_preference_features import (
     DEFAULT_PROJECTION_CHUNK_SIZE, DEFAULT_PROJECTION_SEED,
-    DEFAULT_WHITENING_RIDGE, LATENT_FEATURE_SCHEMES,
+    DEFAULT_WHITENING_RIDGE, TOKEN_PREFERENCE_FEATURE_SCHEMES,
 )
-from .latent_preference import LatentPreferenceConfig, LatentPreferenceLearner, LatentPreferenceResult
+from .token_preference import TokenPreferenceConfig, TokenPreferenceLearner, TokenPreferenceResult
 from .online_learning import LearningResult, OnlineLearner
 from .learning_readout import selection_notice, write_notice, show_learning_details
 from .learning_controls import DECAY_ON, WRITE_REDUCTIONS, REJECTION_TARGETS
@@ -76,24 +76,24 @@ SAMPLER_FIELDS = (
     "bias_step",
 )
 
-LATENT_OVERRIDE_FIELDS = (
-    "latent_feature_scheme", "latent_whitening_ridge", "latent_learning_scheme",
-    "latent_influence_mode", "latent_influence_kl", "latent_min_gain",
-    "latent_max_gain", "latent_dimension", "latent_strength", "latent_fast_strength",
+TOKEN_PREFERENCE_OVERRIDE_FIELDS = (
+    "token_preference_feature_scheme", "token_preference_whitening_ridge", "token_preference_learning_scheme",
+    "token_preference_influence_mode", "token_preference_influence_kl", "token_preference_min_gain",
+    "token_preference_max_gain", "token_preference_dimension", "token_preference_strength", "token_preference_fast_strength",
 )
 
 
 def _sampling_overrides_present(args: argparse.Namespace) -> bool:
-    """Whether CLI input changes either ordinary or latent sampler state."""
+    """Whether CLI input changes either ordinary or preference sampler state."""
     ordinary = any(getattr(args, name, None) is not None for name in SAMPLER_FIELDS)
     explicit = getattr(args, "_explicit_options", set())
-    latent = any(
+    preference = any(
         getattr(args, name, None) is not None and (
-            name not in {"latent_dimension", "latent_strength"} or name in explicit
+            name not in {"token_preference_dimension", "token_preference_strength"} or name in explicit
         )
-        for name in LATENT_OVERRIDE_FIELDS
+        for name in TOKEN_PREFERENCE_OVERRIDE_FIELDS
     )
-    return ordinary or latent
+    return ordinary or preference
 SAMPLER_ALIASES = {
     "temp": "temperature",
     "rep": "repeat_penalty",
@@ -342,78 +342,86 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow enabled learners to learn from live typed writes (off by default)",
     )
-    latent = parser.add_argument_group("latent preference learning")
-    latent.add_argument(
-        "--latent-preference",
-        "--latent-preference-enabled",
-        dest="latent_preference",
+    preference = parser.add_argument_group("token preference learning")
+    preference.add_argument(
+        "--token-preference",
+        "--token-preference-enabled",
+        dest="token_preference",
         action="store_true",
-        help="learn an anonymous latent preference vector from live raw-rank selections (off by default)",
+        help="learn an anonymous token preference vector from live raw-rank selections (off by default)",
     )
-    latent.add_argument("--latent-dimension", type=int, default=64)
-    latent.add_argument("--latent-learning-rate", type=float, default=0.05)
-    latent.add_argument("--latent-strength", type=float, default=1.0)
-    latent.add_argument(
-        "--latent-feature-scheme", choices=LATENT_FEATURE_SCHEMES, default=None,
-        help="latent feature coordinate scheme; v1 is the replay-compatible default",
+    preference.add_argument("--token-preference-dimension", type=int, default=64)
+    preference.add_argument("--token-preference-learning-rate", type=float, default=0.05)
+    preference.add_argument("--token-preference-strength", type=float, default=1.0)
+    preference.add_argument(
+        "--token-preference-feature-scheme", choices=TOKEN_PREFERENCE_FEATURE_SCHEMES, default=None,
+        help="preference feature coordinate scheme; v1 is the replay-compatible default",
     )
-    latent.add_argument("--latent-whitening-ridge", type=float, default=None)
-    latent.add_argument(
-        "--latent-learning-scheme",
+    preference.add_argument("--token-preference-whitening-ridge", type=float, default=None)
+    preference.add_argument(
+        "--token-preference-learning-scheme",
         choices=("sgd-v1", "fisher-kl-v2"), default=None,
-        help="latent memory update geometry",
+        help="token preference memory update geometry",
     )
-    latent.add_argument(
-        "--latent-influence-mode", choices=("manual", "kl"), default=None,
+    preference.add_argument(
+        "--token-preference-influence-mode", choices=("manual", "kl"), default=None,
         help="manual actuator strength or automatic KL-calibrated gain",
     )
-    latent.add_argument("--latent-influence-kl", type=float, default=None)
-    latent.add_argument("--latent-min-gain", type=float, default=None)
-    latent.add_argument("--latent-max-gain", type=float, default=None)
-    latent.add_argument("--latent-max-step", type=float, default=0.25)
-    latent.add_argument("--latent-max-norm", type=float, default=4.0)
-    latent.add_argument("--latent-decay", type=float, default=0.0)
-    _add_learning_experiment_flags(latent, "latent")
-    latent.add_argument("--latent-severity-cap", type=_positive_int, default=1000)
-    latent.add_argument(
-        "--latent-no-severity-attenuation", action="store_true",
+    preference.add_argument("--token-preference-influence-kl", type=float, default=None)
+    preference.add_argument("--token-preference-min-gain", type=float, default=None)
+    preference.add_argument("--token-preference-max-gain", type=float, default=None)
+    preference.add_argument("--token-preference-max-step", type=float, default=0.25)
+    preference.add_argument("--token-preference-max-norm", type=float, default=4.0)
+    preference.add_argument("--token-preference-decay", type=float, default=0.0)
+    _add_learning_experiment_flags(preference, "token-preference")
+    preference.add_argument("--token-preference-severity-cap", type=_positive_int, default=1000)
+    preference.add_argument(
+        "--token-preference-no-severity-attenuation", action="store_true",
         help="use severity 1 outside the dead zone; retain learning step and memory norm limits",
     )
-    latent.add_argument("--latent-dead-zone-rank", type=_positive_int, default=1)
-    latent.add_argument(
-        "--latent-learning-gate", choices=("rank", "sampler"), default="rank",
+    preference.add_argument("--token-preference-dead-zone-rank", type=_positive_int, default=1)
+    preference.add_argument(
+        "--token-preference-learning-gate", choices=("rank", "sampler"), default="rank",
         help="sampler replaces rank severity: learn at full severity only from filtered-out tokens; decay is unchanged",
     )
-    latent.add_argument("--latent-rejection-strength", type=float, default=0.0)
-    latent.add_argument("--latent-fast-slow", action="store_true")
-    latent.add_argument("--latent-fast-learning-rate", type=float)
-    latent.add_argument("--latent-fast-decay", type=float, default=0.10)
-    latent.add_argument("--latent-fast-strength", type=float)
-    latent.add_argument("--latent-fast-max-step", type=float)
-    latent.add_argument("--latent-fast-max-norm", type=float)
-    latent.add_argument(
-        "--latent-learning-metric", choices=("euclidean", "fisher"), default=None
+    preference.add_argument("--token-preference-rejection-strength", type=float, default=0.0)
+    preference.add_argument("--token-preference-fast-slow", action="store_true")
+    preference.add_argument("--token-preference-fast-learning-rate", type=float)
+    preference.add_argument("--token-preference-fast-decay", type=float, default=0.10)
+    preference.add_argument("--token-preference-fast-strength", type=float)
+    preference.add_argument("--token-preference-fast-max-step", type=float)
+    preference.add_argument("--token-preference-fast-max-norm", type=float)
+    preference.add_argument(
+        "--token-preference-learning-metric", choices=("euclidean", "fisher"), default=None
     )
-    latent.add_argument("--latent-learning-kl", type=float, default=None)
-    latent.add_argument(
-        "--latent-fast-learning-kl", type=float, default=None,
+    preference.add_argument("--token-preference-learning-kl", type=float, default=None)
+    preference.add_argument(
+        "--token-preference-fast-learning-kl", type=float, default=None,
         help="fast-memory canonical learning KL budget (defaults to the slow budget)",
     )
-    latent.add_argument("--latent-fisher-ridge", type=float, default=None)
-    latent.add_argument(
-        "--latent-fisher-mode", choices=("diagonal", "full"), default=None
+    preference.add_argument("--token-preference-fisher-ridge", type=float, default=None)
+    preference.add_argument(
+        "--token-preference-fisher-mode", choices=("diagonal", "full"), default=None
     )
-    latent.add_argument("--latent-fisher-mass", type=float, default=None)
-    latent.add_argument("--latent-fisher-max-support", type=_positive_int, default=None)
-    latent_seeds = latent.add_mutually_exclusive_group()
-    latent_seeds.add_argument("--latent-seed", type=int)
-    latent_seeds.add_argument("--latent-random-seed", action="store_true")
-    latent.add_argument(
-        "--latent-projection-chunk-size",
+    preference.add_argument("--token-preference-fisher-mass", type=float, default=None)
+    preference.add_argument("--token-preference-fisher-max-support", type=_positive_int, default=None)
+    token_preference_seeds = preference.add_mutually_exclusive_group()
+    token_preference_seeds.add_argument(
+        "--token-preference-projection-seed",
+        dest="token_preference_projection_seed",
+        type=int,
+    )
+    token_preference_seeds.add_argument(
+        "--token-preference-random-projection-seed",
+        dest="token_preference_random_projection_seed",
+        action="store_true",
+    )
+    preference.add_argument(
+        "--token-preference-projection-chunk-size",
         type=_positive_int,
         default=DEFAULT_PROJECTION_CHUNK_SIZE,
         help=(
-            "rows projected at once when building latent features; lower this "
+            "rows projected at once when building token preference features; lower this "
             "to reduce peak memory at the cost of slower initialization"
         ),
     )
@@ -529,7 +537,7 @@ def _sampling_from_args(
     base = source if source is not None else SamplingConfig()
     if getattr(args, "_model_changed", False):
         base = replace(base, bias_rules=(), bias_groups=(), group_controls=(),
-                       reference_prior_routes=(), latent_preference_z=(), latent_preference_fast_z=())
+                       reference_prior_routes=(), token_preference_vector=(), token_preference_fast_vector=())
     values = {
         name: getattr(args, name)
         if getattr(args, name) is not None
@@ -538,54 +546,54 @@ def _sampling_from_args(
     }
     values.update({
         "group_controls": base.group_controls,
-        "latent_preference_z": base.latent_preference_z,
-        "latent_strength": (
-            args.latent_strength
-            if "latent_strength" in getattr(args, "_explicit_options", set())
-            else base.latent_strength
+        "token_preference_vector": base.token_preference_vector,
+        "token_preference_strength": (
+            args.token_preference_strength
+            if "token_preference_strength" in getattr(args, "_explicit_options", set())
+            else base.token_preference_strength
         ),
-        "latent_preference_fast_z": base.latent_preference_fast_z,
-        "latent_fast_strength": (
-            args.latent_fast_strength
-            if getattr(args, "latent_fast_strength", None) is not None
-            else base.latent_fast_strength
+        "token_preference_fast_vector": base.token_preference_fast_vector,
+        "token_preference_fast_strength": (
+            args.token_preference_fast_strength
+            if getattr(args, "token_preference_fast_strength", None) is not None
+            else base.token_preference_fast_strength
         ),
-        "latent_projection_seed": base.latent_projection_seed,
-        "latent_coordinate_identity": base.latent_coordinate_identity,
-        "latent_feature_scheme": (
-            base.latent_feature_scheme
-            if getattr(args, "latent_feature_scheme", None) is None
-            else args.latent_feature_scheme
+        "token_preference_projection_seed": base.token_preference_projection_seed,
+        "token_preference_coordinate_identity": base.token_preference_coordinate_identity,
+        "token_preference_feature_scheme": (
+            base.token_preference_feature_scheme
+            if getattr(args, "token_preference_feature_scheme", None) is None
+            else args.token_preference_feature_scheme
         ),
-        "latent_whitening_ridge": (
-            base.latent_whitening_ridge
-            if getattr(args, "latent_whitening_ridge", None) is None
-            else args.latent_whitening_ridge
+        "token_preference_whitening_ridge": (
+            base.token_preference_whitening_ridge
+            if getattr(args, "token_preference_whitening_ridge", None) is None
+            else args.token_preference_whitening_ridge
         ),
-        "latent_learning_scheme": (
-            base.latent_learning_scheme
-            if getattr(args, "latent_learning_scheme", None) is None
-            else args.latent_learning_scheme
+        "token_preference_learning_scheme": (
+            base.token_preference_learning_scheme
+            if getattr(args, "token_preference_learning_scheme", None) is None
+            else args.token_preference_learning_scheme
         ),
-        "latent_influence_mode": (
-            base.latent_influence_mode
-            if getattr(args, "latent_influence_mode", None) is None
-            else args.latent_influence_mode
+        "token_preference_influence_mode": (
+            base.token_preference_influence_mode
+            if getattr(args, "token_preference_influence_mode", None) is None
+            else args.token_preference_influence_mode
         ),
-        "latent_influence_kl": (
-            base.latent_influence_kl
-            if getattr(args, "latent_influence_kl", None) is None
-            else args.latent_influence_kl
+        "token_preference_influence_kl": (
+            base.token_preference_influence_kl
+            if getattr(args, "token_preference_influence_kl", None) is None
+            else args.token_preference_influence_kl
         ),
-        "latent_min_gain": (
-            base.latent_min_gain
-            if getattr(args, "latent_min_gain", None) is None
-            else args.latent_min_gain
+        "token_preference_min_gain": (
+            base.token_preference_min_gain
+            if getattr(args, "token_preference_min_gain", None) is None
+            else args.token_preference_min_gain
         ),
-        "latent_max_gain": (
-            base.latent_max_gain
-            if getattr(args, "latent_max_gain", None) is None
-            else args.latent_max_gain
+        "token_preference_max_gain": (
+            base.token_preference_max_gain
+            if getattr(args, "token_preference_max_gain", None) is None
+            else args.token_preference_max_gain
         ),
         "group_control_scheme": (
             base.group_control_scheme
@@ -605,76 +613,76 @@ def _sampling_from_args(
     return SamplingConfig(**values)
 
 
-def _apply_latent_preset(
+def _apply_token_preference_preset(
     sampling: SamplingConfig,
-    preset_latent: SamplingConfig | None,
+    preset_preference: SamplingConfig | None,
 ) -> SamplingConfig:
-    if preset_latent is None:
+    if preset_preference is None:
         return sampling
     return replace(
         sampling,
-        group_controls=preset_latent.group_controls,
-        latent_preference_z=preset_latent.latent_preference_z,
-        latent_strength=preset_latent.latent_strength,
-        latent_preference_fast_z=preset_latent.latent_preference_fast_z,
-        latent_fast_strength=preset_latent.latent_fast_strength,
-        latent_projection_seed=preset_latent.latent_projection_seed,
-        latent_feature_scheme=preset_latent.latent_feature_scheme,
-        latent_whitening_ridge=preset_latent.latent_whitening_ridge,
-        latent_learning_scheme=preset_latent.latent_learning_scheme,
-        latent_influence_mode=preset_latent.latent_influence_mode,
-        latent_influence_kl=preset_latent.latent_influence_kl,
-        latent_min_gain=preset_latent.latent_min_gain,
-        latent_max_gain=preset_latent.latent_max_gain,
-        latent_coordinate_identity=preset_latent.latent_coordinate_identity,
-        group_control_scheme=preset_latent.group_control_scheme,
+        group_controls=preset_preference.group_controls,
+        token_preference_vector=preset_preference.token_preference_vector,
+        token_preference_strength=preset_preference.token_preference_strength,
+        token_preference_fast_vector=preset_preference.token_preference_fast_vector,
+        token_preference_fast_strength=preset_preference.token_preference_fast_strength,
+        token_preference_projection_seed=preset_preference.token_preference_projection_seed,
+        token_preference_feature_scheme=preset_preference.token_preference_feature_scheme,
+        token_preference_whitening_ridge=preset_preference.token_preference_whitening_ridge,
+        token_preference_learning_scheme=preset_preference.token_preference_learning_scheme,
+        token_preference_influence_mode=preset_preference.token_preference_influence_mode,
+        token_preference_influence_kl=preset_preference.token_preference_influence_kl,
+        token_preference_min_gain=preset_preference.token_preference_min_gain,
+        token_preference_max_gain=preset_preference.token_preference_max_gain,
+        token_preference_coordinate_identity=preset_preference.token_preference_coordinate_identity,
+        group_control_scheme=preset_preference.group_control_scheme,
     )
 
 
-def _latent_config_from_args(args: argparse.Namespace) -> LatentPreferenceConfig:
-    return LatentPreferenceConfig(
-        enabled=args.latent_preference, dimension=args.latent_dimension,
-        learning_rate=args.latent_learning_rate, latent_strength=args.latent_strength,
-        max_step=args.latent_max_step, max_norm=args.latent_max_norm,
-        decay=args.latent_decay, severity_cap=args.latent_severity_cap,
-        no_severity_attenuation=args.latent_no_severity_attenuation,
-        dead_zone_rank=args.latent_dead_zone_rank,
-        rejection_strength=args.latent_rejection_strength, fast_slow=args.latent_fast_slow,
-        fast_learning_rate=args.latent_fast_learning_rate, fast_decay=args.latent_fast_decay,
-        fast_strength=args.latent_fast_strength, fast_max_step=args.latent_fast_max_step,
-        fast_max_norm=args.latent_fast_max_norm,
-        learning_gate=args.latent_learning_gate,
-        decay_on=args.latent_decay_on, write_reduction=args.latent_write_reduction,
-        rejection_target=args.latent_rejection_target,
-        learning_scheme=getattr(args, "latent_learning_scheme", None) or "sgd-v1",
-        learning_metric=getattr(args, "latent_learning_metric", None) or "euclidean",
-        learning_kl=getattr(args, "latent_learning_kl", None)
-        if getattr(args, "latent_learning_kl", None) is not None else 0.05,
-        fast_learning_kl=getattr(args, "latent_fast_learning_kl", None),
-        fisher_ridge=getattr(args, "latent_fisher_ridge", None)
-        if getattr(args, "latent_fisher_ridge", None) is not None else 1.0e-3,
-        fisher_mode=getattr(args, "latent_fisher_mode", None) or "diagonal",
-        fisher_mass=getattr(args, "latent_fisher_mass", None)
-        if getattr(args, "latent_fisher_mass", None) is not None else 0.999,
-        fisher_max_support=getattr(args, "latent_fisher_max_support", None)
-        if getattr(args, "latent_fisher_max_support", None) is not None else 2048,
+def _token_preference_config_from_args(args: argparse.Namespace) -> TokenPreferenceConfig:
+    return TokenPreferenceConfig(
+        enabled=args.token_preference, dimension=args.token_preference_dimension,
+        learning_rate=args.token_preference_learning_rate, token_preference_strength=args.token_preference_strength,
+        max_step=args.token_preference_max_step, max_norm=args.token_preference_max_norm,
+        decay=args.token_preference_decay, severity_cap=args.token_preference_severity_cap,
+        no_severity_attenuation=args.token_preference_no_severity_attenuation,
+        dead_zone_rank=args.token_preference_dead_zone_rank,
+        rejection_strength=args.token_preference_rejection_strength, fast_slow=args.token_preference_fast_slow,
+        fast_learning_rate=args.token_preference_fast_learning_rate, fast_decay=args.token_preference_fast_decay,
+        fast_strength=args.token_preference_fast_strength, fast_max_step=args.token_preference_fast_max_step,
+        fast_max_norm=args.token_preference_fast_max_norm,
+        learning_gate=args.token_preference_learning_gate,
+        decay_on=args.token_preference_decay_on, write_reduction=args.token_preference_write_reduction,
+        rejection_target=args.token_preference_rejection_target,
+        learning_scheme=getattr(args, "token_preference_learning_scheme", None) or "sgd-v1",
+        learning_metric=getattr(args, "token_preference_learning_metric", None) or "euclidean",
+        learning_kl=getattr(args, "token_preference_learning_kl", None)
+        if getattr(args, "token_preference_learning_kl", None) is not None else 0.05,
+        fast_learning_kl=getattr(args, "token_preference_fast_learning_kl", None),
+        fisher_ridge=getattr(args, "token_preference_fisher_ridge", None)
+        if getattr(args, "token_preference_fisher_ridge", None) is not None else 1.0e-3,
+        fisher_mode=getattr(args, "token_preference_fisher_mode", None) or "diagonal",
+        fisher_mass=getattr(args, "token_preference_fisher_mass", None)
+        if getattr(args, "token_preference_fisher_mass", None) is not None else 0.999,
+        fisher_max_support=getattr(args, "token_preference_fisher_max_support", None)
+        if getattr(args, "token_preference_fisher_max_support", None) is not None else 2048,
     )
 
 
-def _apply_latent_seed(sampling: SamplingConfig, seed: int | None, io: TerminalIO,
+def _apply_token_preference_seed(sampling: SamplingConfig, seed: int | None, io: TerminalIO,
                        *, replay: bool = False) -> SamplingConfig:
-    if seed is None or seed == sampling.latent_projection_seed:
+    if seed is None or seed == sampling.token_preference_projection_seed:
         return sampling
     if replay:
-        raise EditorError("explicit latent seed conflicts with saved replay seed")
-    if sampling.latent_preference_z or sampling.latent_preference_fast_z:
-        io.write("Latent projection coordinate system changed: latent preference memory reset (slow and fast).")
-    return replace(sampling, latent_projection_seed=seed,
-                   latent_preference_z=(), latent_preference_fast_z=(),
-                   latent_coordinate_identity=None)
+        raise EditorError("explicit token preference projection seed conflicts with saved replay seed")
+    if sampling.token_preference_vector or sampling.token_preference_fast_vector:
+        io.write("token preference projection coordinate system changed: token preference memory reset (slow and fast).")
+    return replace(sampling, token_preference_projection_seed=seed,
+                   token_preference_vector=(), token_preference_fast_vector=(),
+                   token_preference_coordinate_identity=None)
 
 
-def _apply_latent_coordinate_overrides(
+def _apply_token_preference_coordinate_overrides(
     sampling: SamplingConfig,
     args: argparse.Namespace,
     io: TerminalIO,
@@ -684,23 +692,23 @@ def _apply_latent_coordinate_overrides(
     """Reset incompatible memory when a basis-defining CLI option changes."""
     explicit = getattr(args, "_explicit_options", set())
     requested_dimension = (
-        args.latent_dimension if "latent_dimension" in explicit else None
+        args.token_preference_dimension if "token_preference_dimension" in explicit else None
     )
-    if not (sampling.latent_preference_z or sampling.latent_preference_fast_z):
+    if not (sampling.token_preference_vector or sampling.token_preference_fast_vector):
         return sampling
     if coordinate_identity_matches(sampling, dimension=requested_dimension):
         return sampling
     if replay:
-        raise EditorError("explicit latent coordinate override conflicts with saved replay")
+        raise EditorError("explicit token preference coordinate override conflicts with saved replay")
     io.write(
-        "Latent coordinate system changed: latent preference memory reset "
+        "token preference coordinate system changed: token preference memory reset "
         "(slow and fast)."
     )
     return replace(
         sampling,
-        latent_preference_z=(),
-        latent_preference_fast_z=(),
-        latent_coordinate_identity=None,
+        token_preference_vector=(),
+        token_preference_fast_vector=(),
+        token_preference_coordinate_identity=None,
     )
 
 
@@ -774,11 +782,11 @@ def _apply_catalog_reference_prior(
 def _sampler_override(current: SamplingConfig, raw: str) -> SamplingConfig:
     values = {name: getattr(current, name) for name in SAMPLER_FIELDS}
     values.update({
-        "latent_preference_z": current.latent_preference_z,
-        "latent_strength": current.latent_strength,
-        "latent_preference_fast_z": current.latent_preference_fast_z,
-        "latent_fast_strength": current.latent_fast_strength,
-        "latent_projection_seed": current.latent_projection_seed,
+        "token_preference_vector": current.token_preference_vector,
+        "token_preference_strength": current.token_preference_strength,
+        "token_preference_fast_vector": current.token_preference_fast_vector,
+        "token_preference_fast_strength": current.token_preference_fast_strength,
+        "token_preference_projection_seed": current.token_preference_projection_seed,
     })
     pieces = raw.replace(",", " ").split()
     if not pieces:
@@ -933,7 +941,7 @@ def _interactive_policy(
         context_characters=args.context_chars,
         manual_acceptance=args.manual_acceptance,
         view_preferences=preferences,
-        learning_enabled=args.online_learning or args.latent_preference,
+        learning_enabled=args.online_learning or args.token_preference,
         store=store,
         episode_id=episode_id,
         seamless=io.supports_live_choices,
@@ -953,22 +961,22 @@ def _sampler_summary(config: SamplingConfig) -> str:
         summary += " groups=" + ",".join(
             f"{group.name}:{group.bias:g}" for group in config.bias_groups
         )
-    if (config.latent_preference_z or config.latent_preference_fast_z
-            or config.latent_projection_seed != DEFAULT_PROJECTION_SEED):
-        norm = sum(value * value for value in config.latent_preference_z) ** 0.5
-        fast_norm = sum(value * value for value in config.latent_preference_fast_z) ** 0.5
-        summary += (f" latent_norm={norm:g} latent_strength={config.latent_strength:g}"
-                    f" latent_fast_norm={fast_norm:g} latent_fast_strength={config.latent_fast_strength:g}"
-                    f" latent_seed={config.latent_projection_seed}")
+    if (config.token_preference_vector or config.token_preference_fast_vector
+            or config.token_preference_projection_seed != DEFAULT_PROJECTION_SEED):
+        norm = sum(value * value for value in config.token_preference_vector) ** 0.5
+        fast_norm = sum(value * value for value in config.token_preference_fast_vector) ** 0.5
+        summary += (f" token_preference_norm={norm:g} token_preference_strength={config.token_preference_strength:g}"
+                    f" token_preference_fast_norm={fast_norm:g} token_preference_fast_strength={config.token_preference_fast_strength:g}"
+                    f" token_preference_projection_seed={config.token_preference_projection_seed}")
     return summary
 
 
 def _online_learning_notice(io, result, *, token_text=None, episode_id=None):
-    selection_notice(io, result, latent=False, token_text=token_text, episode_id=episode_id)
+    selection_notice(io, result, preference=False, token_text=token_text, episode_id=episode_id)
 
 
-def _latent_preference_notice(io, result, *, token_text=None, episode_id=None):
-    selection_notice(io, result, latent=True, token_text=token_text, episode_id=episode_id)
+def _token_preference_notice(io, result, *, token_text=None, episode_id=None):
+    selection_notice(io, result, preference=True, token_text=token_text, episode_id=episode_id)
 
 
 def _write_learning_notice(io, result, *, token_text=None, episode_id=None):
@@ -1280,15 +1288,15 @@ def main(argv: list[str] | None = None) -> int:
 
                 args.new_prompt = _read_initial_prompt()
 
-            latent_config = _latent_config_from_args(args)
-            if args.latent_random_seed:
+            token_preference_config = _token_preference_config_from_args(args)
+            if args.token_preference_random_projection_seed:
                 if args.replay is not None and not args.fixed_config:
-                    raise EditorError("source-following replay restores saved latent seeds; --latent-random-seed requires --fixed-config")
-                args.latent_seed = _random_seed()
-                print(f"Random latent seed: {args.latent_seed}", flush=True)
-            if args.latent_seed is not None:
+                    raise EditorError("source-following replay restores saved token preference projection seeds; --token-preference-random-projection-seed requires --fixed-config")
+                args.token_preference_projection_seed = _random_seed()
+                print(f"Random token preference projection seed: {args.token_preference_projection_seed}", flush=True)
+            if args.token_preference_projection_seed is not None:
                 # Validate even if learning is disabled and before creating records.
-                SamplingConfig(latent_projection_seed=args.latent_seed)
+                SamplingConfig(token_preference_projection_seed=args.token_preference_projection_seed)
 
             if args.random_seed:
                 args.seed = _random_seed()
@@ -1318,12 +1326,12 @@ def main(argv: list[str] | None = None) -> int:
                 args.bias_rules = ()
                 args.bias_groups = ()
                 io.write("Model changed: token-ID biases reset; load a matching preset to apply biases.")
-            preset_latent = None
+            preset_preference = None
             if args.biases is not None:
                 preset = load_bias_preset(args.biases, backend, provenance)
                 args.bias_rules = preset.bias_rules
                 args.bias_groups = preset.bias_groups
-                preset_latent = preset
+                preset_preference = preset
                 args._bias_preset = preset
             requested_id = args.episode_id
             parent_id: str | None = None
@@ -1358,10 +1366,10 @@ def main(argv: list[str] | None = None) -> int:
                     else source_sampling
                 )
                 sampling = _apply_catalog_reference_prior(sampling, catalog, args)
-                sampling = _apply_latent_preset(sampling, preset_latent)
-                sampling = _apply_latent_coordinate_overrides(sampling, args, io)
-                sampling = _apply_latent_seed(
-                    sampling, args.latent_seed, io,
+                sampling = _apply_token_preference_preset(sampling, preset_preference)
+                sampling = _apply_token_preference_coordinate_overrides(sampling, args, io)
+                sampling = _apply_token_preference_seed(
+                    sampling, args.token_preference_projection_seed, io,
                     replay=args.replay is not None and not args.fixed_config,
                 )
                 explicit = sampling != source_sampling
@@ -1391,10 +1399,10 @@ def main(argv: list[str] | None = None) -> int:
                 sampling = _apply_catalog_reference_prior(
                     _sampling_from_args(args), catalog, args
                 )
-                sampling = _apply_latent_preset(sampling, preset_latent)
-                sampling = _apply_latent_coordinate_overrides(sampling, args, io)
-                sampling = _apply_latent_seed(
-                    sampling, args.latent_seed, io,
+                sampling = _apply_token_preference_preset(sampling, preset_preference)
+                sampling = _apply_token_preference_coordinate_overrides(sampling, args, io)
+                sampling = _apply_token_preference_seed(
+                    sampling, args.token_preference_projection_seed, io,
                     replay=args.replay is not None and not args.fixed_config,
                 )
                 engine = EpisodeEngine(
@@ -1419,8 +1427,8 @@ def main(argv: list[str] | None = None) -> int:
                 sampling = _apply_catalog_reference_prior(
                     _sampling_from_args(args, source_sampling), catalog, args
                 )
-                sampling = _apply_latent_preset(sampling, preset_latent)
-                sampling = _apply_latent_coordinate_overrides(
+                sampling = _apply_token_preference_preset(sampling, preset_preference)
+                sampling = _apply_token_preference_coordinate_overrides(
                     sampling, args, io,
                     replay=args.replay is not None and not args.fixed_config,
                 )
@@ -1428,33 +1436,33 @@ def main(argv: list[str] | None = None) -> int:
                 # like explicit sampler flags. Unspecified fields follow source.
                 if args.bias_groups is not None:
                     overrides["group_controls"] = sampling.group_controls
-                latent_override = _sampling_overrides_present(args)
+                token_preference_override = _sampling_overrides_present(args)
                 for name in POLICY_FIELDS:
                     reference_override = name.startswith("reference_prior_") and (
                         args.reference is not None or args.reference_prior is not None
                         or args.reference_prior_strength is not None or args.reference_strength is not None
                         or (catalog is not None and catalog.reference_prior_routes)
                     )
-                    if preset_latent is not None or model_changed or reference_override or latent_override:
+                    if preset_preference is not None or model_changed or reference_override or token_preference_override:
                         overrides[name] = getattr(sampling, name)
-                sampling = _apply_latent_seed(
-                    sampling, args.latent_seed, io,
+                sampling = _apply_token_preference_seed(
+                    sampling, args.token_preference_projection_seed, io,
                     replay=args.replay is not None and not args.fixed_config,
                 )
                 replay_prefix = None
                 if model_changed:
                     replay_prefix = backend.tokenize(store.get_episode(args.replay)["initial_text"], add_bos=True, special=True)
-                if args.latent_seed is not None and not args.fixed_config:
+                if args.token_preference_projection_seed is not None and not args.fixed_config:
                     saved_steps = store.replay_until(args.replay, args.until)
                     if (
-                        source_sampling.latent_projection_seed != args.latent_seed
+                        source_sampling.token_preference_projection_seed != args.token_preference_projection_seed
                         or any(
                             step.get("sampling") is not None
-                            and step["sampling"].latent_projection_seed != args.latent_seed
+                            and step["sampling"].token_preference_projection_seed != args.token_preference_projection_seed
                             for step in saved_steps
                         )
                     ):
-                        raise EditorError("explicit latent seed conflicts with a saved replay segment")
+                        raise EditorError("explicit token preference projection seed conflicts with a saved replay segment")
                 engine, pending_tape = _spr_engine_from_source(
                     store,
                     args.replay,
@@ -1468,12 +1476,12 @@ def main(argv: list[str] | None = None) -> int:
                     stream_fingerprint=source_segment["stream_fingerprint"] if model_changed else None,
                     coordinate_offset=source_segment["coordinate_offset"] if model_changed else None,
                 )
-                if args.latent_seed is not None and pending_tape.follow_source_sampling:
+                if args.token_preference_projection_seed is not None and pending_tape.follow_source_sampling:
                     states = [step.sampling for step in pending_tape]
                     states.append(pending_tape.final_sampling)
-                    if any(state is not None and state.latent_projection_seed != args.latent_seed
+                    if any(state is not None and state.token_preference_projection_seed != args.token_preference_projection_seed
                            for state in states):
-                        raise EditorError("explicit latent seed conflicts with a saved replay segment")
+                        raise EditorError("explicit token preference projection seed conflicts with a saved replay segment")
                 episode_id = _create_episode(
                     store,
                     engine,
@@ -1502,10 +1510,10 @@ def main(argv: list[str] | None = None) -> int:
                 sampling = _apply_catalog_reference_prior(
                     _sampling_from_args(args, source_sampling), catalog, args
                 )
-                sampling = _apply_latent_preset(sampling, preset_latent)
-                sampling = _apply_latent_coordinate_overrides(sampling, args, io)
-                sampling = _apply_latent_seed(
-                    sampling, args.latent_seed, io,
+                sampling = _apply_token_preference_preset(sampling, preset_preference)
+                sampling = _apply_token_preference_coordinate_overrides(sampling, args, io)
+                sampling = _apply_token_preference_seed(
+                    sampling, args.token_preference_projection_seed, io,
                     replay=args.replay is not None and not args.fixed_config,
                 )
                 engine = EpisodeEngine(
@@ -1529,15 +1537,15 @@ def main(argv: list[str] | None = None) -> int:
                     mode="fork",
                 )
 
-            latent_learner = None
-            if args.latent_preference:
-                latent_learner = LatentPreferenceLearner(
+            token_preference_learner = None
+            if args.token_preference:
+                token_preference_learner = TokenPreferenceLearner(
                         feature_provider=lambda *, feature_dimension, projection_seed,
                         feature_scheme="random-projection-unit-v1",
-                        whitening_ridge=DEFAULT_WHITENING_RIDGE: backend.latent_token_features(
+                        whitening_ridge=DEFAULT_WHITENING_RIDGE: backend.token_preference_features(
                             feature_dimension=feature_dimension,
                             projection_seed=projection_seed,
-                            projection_chunk_size=args.latent_projection_chunk_size,
+                            projection_chunk_size=args.token_preference_projection_chunk_size,
                             **(
                                 {}
                                 if feature_scheme == "random-projection-unit-v1"
@@ -1547,8 +1555,8 @@ def main(argv: list[str] | None = None) -> int:
                                 }
                             ),
                         ),
-                    config=replace(latent_config,
-                                   projection_seed=engine.sampling.latent_projection_seed),
+                    config=replace(token_preference_config,
+                                   projection_seed=engine.sampling.token_preference_projection_seed),
                 )
 
             open_live_session = getattr(io, "live_session", None)
@@ -1566,8 +1574,8 @@ def main(argv: list[str] | None = None) -> int:
                     on_learning_update=lambda result: _online_learning_notice(
                         io, result, token_text=backend.token_text, episode_id=episode_id
                     ),
-                    latent_learner=latent_learner,
-                    on_latent_learning_update=lambda result: _latent_preference_notice(
+                    token_preference_learner=token_preference_learner,
+                    on_token_preference_learning_update=lambda result: _token_preference_notice(
                         io, result, token_text=backend.token_text, episode_id=episode_id
                     ),
                     learn_from_write=args.learn_from_write,

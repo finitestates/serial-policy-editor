@@ -8,7 +8,7 @@ import pytest
 
 from tests.fakes import ScriptedIO
 from tests.test_menu_expansion import LargeBackend
-from tests.test_latent_preference import LatentBackend
+from tests.test_token_preference import TokenPreferenceBackend
 from trajectory_editor.bias_rules import BiasGroup, BiasRule
 from trajectory_editor.candidate_columns import CandidateColumns
 from trajectory_editor.domain import Candidate, EditorError, SamplingConfig
@@ -81,10 +81,10 @@ def test_policy_order_ties_share_rank_tiebreak_and_expansion_is_stable():
     (False, SamplingConfig(bias_rules=(BiasRule(routes=((1,),), bias=1),)), True),
     (False, SamplingConfig(bias_groups=(BiasGroup('zero', (BiasRule(routes=((1,),), bias=0),)),)), True),
     (False, SamplingConfig(repeat_penalty=1.1), True),
-    (False, SamplingConfig(latent_preference_fast_z=(.1, .2), latent_fast_strength=.5), True),
+    (False, SamplingConfig(token_preference_fast_vector=(.1, .2), token_preference_fast_strength=.5), True),
 ])
 def test_automatic_view_uses_learning_and_restored_policy(learning, state, expected):
-    runtime = EpisodeEngine(LatentBackend(), initial_token_ids=[7], sampling=state)
+    runtime = EpisodeEngine(TokenPreferenceBackend(), initial_token_ids=[7], sampling=state)
     io = ViewIO(['1'])
     InteractivePolicy(io=io, learning_enabled=learning).choose(runtime, runtime.observe())
     assert io.views[0]['show_policy_rank'] is expected
@@ -94,7 +94,7 @@ def test_automatic_view_uses_learning_and_restored_policy(learning, state, expec
 @pytest.mark.parametrize('flags,expected', [([], None), (['--policy-view'], True),
                                          (['--show-policy-rank'], True), (['--no-policy-view'], False)])
 def test_cli_explicit_visibility_and_session_preferences_survive_new_adapters(flags, expected):
-    args = build_parser().parse_args(flags + ['--latent-preference'])
+    args = build_parser().parse_args(flags + ['--token-preference'])
     runtime = promoted_engine()
     first_io = ViewIO(['V', 'v', '1'])
     first = _interactive_policy(args, None, 'first', first_io)

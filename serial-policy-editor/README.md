@@ -169,7 +169,7 @@ decision. Pressing Enter still explicitly commits that choice. Pass
 
 Policy diagnostics appear automatically when either learner is enabled, bias
 rules/groups are configured, or the restored sampler has active adjustments
-(including fast-only latent memory). They appear before the first learning
+(including fast-only token preference memory). They appear before the first learning
 update, even while the values are zero. Use `--policy-view` to show them
 explicitly or `--no-policy-view` to hide them. `--show-policy-rank` remains an
 alias for `--policy-view`.
@@ -177,7 +177,7 @@ alias for `--policy-view`.
 | Column | Meaning |
 | --- | --- |
 | `Δrank` | Raw rank minus policy rank: positive means promoted, negative means demoted. |
-| `Δlogit` | Adjusted logit minus raw logit, including penalties, biases, priors, and both latent memories. |
+| `Δlogit` | Adjusted logit minus raw logit, including penalties, biases, priors, and both preference memories. |
 | `pol-rank` | Full-vocabulary rank under the adjusted policy. |
 | `raw-p` | Raw-model probability before temperature and filtering. |
 | `pol-p` | Adjusted policy probability before temperature and filtering. |
@@ -789,24 +789,24 @@ off; membership and numeric edits preserve your explicit choice. Clear any
 appearance objectives before enabling learning for that group.
 See [teacher learning controls](STEERING.md#teacher-preference-learning).
 
-### Opt-in latent preference learning
+### Opt-in token preference learning
 
-The latent preference learner is independent of group objectives. It derives a
+The token preference learner is independent of group objectives. It derives a
 fixed 64-dimensional, unit-normalized feature vector for every vocabulary
 token from the loaded model's token/output embedding through a deterministic
-projection. It learns only an anonymous vector `z`; there are no named latent
+projection. It learns only an anonymous vector `z`; there are no named preference
 dimensions and no token-specific learned values:
 
 ```text
-latent logit adjustment = latent strength * dot(z, token feature)
+preference logit adjustment = preference strength * dot(z, token feature)
 ```
 
 Enable it alongside or instead of group learning for a live session:
 
 ```bash
 policy-editor --model /path/to/model.gguf --biases groups.json \
-  --latent-preference --latent-strength 1.0 \
-  --latent-learning-rate 0.05 --latent-max-step 0.25 --latent-max-norm 4.0
+  --token-preference --token-preference-strength 1.0 \
+  --token-preference-learning-rate 0.05 --token-preference-max-step 0.25 --token-preference-max-norm 4.0
 ```
 
 It updates only after live numeric `SelectRawRank` choices. The update moves
@@ -814,24 +814,24 @@ It updates only after live numeric `SelectRawRank` choices. The update moves
 policy-weighted feature mean, using the same bounded rank severity as the
 named-group learner. The vector is stored in sampler segments, included in
 full `--biases-only` exports, and consumed during replay without rerunning the
-learner. If the model changes, its latent state is discarded because the
-fixed feature space is model-specific. `--latent-dimension` can reduce the
+learner. If the model changes, its token preference state is discarded because the
+fixed feature space is model-specific. `--token-preference-dimension` can reduce the
 projection size for a small experiment; 64 is the default.
 
 Feature construction is chunked by default to cap its temporary projection
-buffer. Use `--latent-projection-chunk-size` to lower the peak further (at the
+buffer. Use `--token-preference-projection-chunk-size` to lower the peak further (at the
 cost of slower initialization) or raise it when startup speed matters more
 than peak memory. The setting does not change the learned feature space and is
 not persisted in presets.
 
 Typed answers can optionally provide the same kind of live supervision. Add
 `--learn-from-write` alongside `--online-learning` and/or
-`--latent-preference` to let the enabled learners consume a live `Write`
+`--token-preference` to let the enabled learners consume a live `Write`
 action. Each typed token is evaluated using the observation immediately before
-it. By default, latent learning sums the token evidence, then applies step clipping,
+it. By default, token preference learning sums the token evidence, then applies step clipping,
 decay, and state norm clipping once for the whole atomic Write. Consistent
 evidence can accumulate; opposing evidence can cancel. This replaces the old
-latent averaging behavior. Manual-group learning also sums its evidence and clips/decays once.
+preference averaging behavior. Manual-group learning also sums its evidence and clips/decays once.
 Neither learner changes the policy midway through the text. Accept, EOG,
 and replay remain non-learning paths.
 
@@ -841,43 +841,43 @@ learning/decay/clipping breakdown, and explained slow/fast memory sizes. The rep
 opens on demand without generating tokens. See [reading learning feedback](STEERING.md#reading-learning-feedback).
 
 Three further experiments are available for both learners:
-`--latent-decay-on rejection` skips decay on agreement; `evidence` also skips it
-inside the learning dead zone. `--latent-write-reduction mean` or `sqrt` tempers
-long typed corrections. `--latent-rejection-target sampler` uses the actual sampler's
+`--token-preference-decay-on rejection` skips decay on agreement; `evidence` also skips it
+inside the learning dead zone. `--token-preference-write-reduction mean` or `sqrt` tempers
+long typed corrections. `--token-preference-rejection-target sampler` uses the actual sampler's
 weighted alternatives as the negative target when rejection strength is nonzero.
-Use `--learning-` in place of `--latent-` for manual group fitting. Defaults remain
+Use `--learning-` in place of `--token-preference-` for manual group fitting. Defaults remain
 `update`, `sum`, and `proposal`. See [semantics](STEERING.md#teacher-learning-experiments)
 and [paired trial commands](CONFIG_TRIALS.md#14--protect-memory-on-acceptance-or-on-all-gate-skips).
 
-Additional experimental latent controls are optional:
+Additional experimental token preference controls are optional:
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--latent-decay` | `0` | Fraction of old memory forgotten per committed learning intervention, from 0 to 1. |
-| `--latent-severity-cap` | `1000` | Positive rank distance above the dead zone where severity reaches 1. |
-| `--latent-no-severity-attenuation` | off | Give every selection outside the dead zone severity 1, bypassing the logarithmic attenuation. |
-| `--latent-dead-zone-rank` | `1` | Policy ranks at or better than this rank produce no learning evidence. |
-| `--latent-rejection-strength` | `0` | Nonnegative rejection pressure when the proposal differs from the chosen token; the negative target defaults to that proposal. |
-| `--latent-fast-slow` | off | Also learn an independent fast vector in the same feature space. |
-| `--latent-seed` | `9137` for new episodes | Signed 64-bit projection seed; restored episodes keep their saved seed. |
-| `--latent-random-seed` | off | Draw and print one concrete latent seed at launch; mutually exclusive with `--latent-seed`. |
-| `--latent-feature-scheme whitened-projection-v2` | v1 | Center and whiten the projected feature vocabulary, with one global norm scale. |
-| `--latent-learning-scheme fisher-kl-v2` | v1 | Use a damped Fisher direction and an exact canonical-policy KL line search. |
-| `--latent-learning-metric fisher` | euclidean | Compatibility alias for the Fisher learner. |
-| `--latent-learning-kl` | `0.05` | Exact canonical preference-policy KL budget per correction or atomic Write. |
-| `--latent-fast-learning-kl` | slow budget | Separate fast-memory adaptation budget; deployment still uses one combined influence budget. |
-| `--latent-fisher-mode diagonal` | diagonal | Diagonal Fisher is the inexpensive default; `full` uses configured policy support. |
-| `--latent-fisher-ridge` | `0.001` | Damping used by the Fisher solve. |
-| `--latent-influence-mode kl` | manual | Calibrate the combined latent intervention to `--latent-influence-kl`. |
-| `--latent-influence-kl` | `0.05` | Nominal total latent deployment KL target in automatic influence mode. |
+| `--token-preference-decay` | `0` | Fraction of old memory forgotten per committed learning intervention, from 0 to 1. |
+| `--token-preference-severity-cap` | `1000` | Positive rank distance above the dead zone where severity reaches 1. |
+| `--token-preference-no-severity-attenuation` | off | Give every selection outside the dead zone severity 1, bypassing the logarithmic attenuation. |
+| `--token-preference-dead-zone-rank` | `1` | Policy ranks at or better than this rank produce no learning evidence. |
+| `--token-preference-rejection-strength` | `0` | Nonnegative rejection pressure when the proposal differs from the chosen token; the negative target defaults to that proposal. |
+| `--token-preference-fast-slow` | off | Also learn an independent fast vector in the same feature space. |
+| `--token-preference-projection-seed` | `9137` for new episodes | Signed 64-bit projection seed; restored episodes keep their saved seed. |
+| `--token-preference-random-projection-seed` | off | Draw and print one concrete token preference projection seed at launch; mutually exclusive with `--token-preference-projection-seed`. |
+| `--token-preference-feature-scheme whitened-projection-v2` | v1 | Center and whiten the projected feature vocabulary, with one global norm scale. |
+| `--token-preference-learning-scheme fisher-kl-v2` | v1 | Use a damped Fisher direction and an exact canonical-policy KL line search. |
+| `--token-preference-learning-metric fisher` | euclidean | Compatibility alias for the Fisher learner. |
+| `--token-preference-learning-kl` | `0.05` | Exact canonical preference-policy KL budget per correction or atomic Write. |
+| `--token-preference-fast-learning-kl` | slow budget | Separate fast-memory adaptation budget; deployment still uses one combined influence budget. |
+| `--token-preference-fisher-mode diagonal` | diagonal | Diagonal Fisher is the inexpensive default; `full` uses configured policy support. |
+| `--token-preference-fisher-ridge` | `0.001` | Damping used by the Fisher solve. |
+| `--token-preference-influence-mode kl` | manual | Calibrate the combined token preference intervention to `--token-preference-influence-kl`. |
+| `--token-preference-influence-kl` | `0.05` | Nominal total preference deployment KL target in automatic influence mode. |
 
 Severity is `min(1, log1p(max(0, policy_rank - dead_zone_rank)) /
 log1p(severity_cap))`. With the default rejection target, strength 1 gives a chosen-versus-proposal
 pairwise direction; values above 1 add stronger rejection pressure. Selecting
 the sampled proposal retains the expectation-based direction. The dead zone
 gates all learning evidence; by default, enabled learners still decay once per event.
-`--latent-no-severity-attenuation` sets severity to 1 outside the dead zone
-and leaves it zero inside. It applies to both latent channels and typed-write
+`--token-preference-no-severity-attenuation` sets severity to 1 outside the dead zone
+and leaves it zero inside. It applies to both token preference channels and typed-write
 evidence; the severity cap is ignored in this mode. It does not remove the
 step or norm limits, alter decay, or change the named-group learner. Lowering
 the severity cap also strengthens smaller misses; cap 1 already gives full
@@ -890,33 +890,33 @@ the learning step limit.
 
 The v2 learner keeps preference memory separate from its deployment actuator.
 It learns from the canonical policy `q(z) ∝ p0 exp(Fz)`, where `p0` is the
-pre-latent policy, so changing `--latent-strength` does not change the evidence
+base policy before token preference actuation, so changing `--token-preference-strength` does not change the evidence
 being learned. The Fisher matrix selects the natural-gradient direction, while
-`--latent-learning-kl` is enforced by an exact policy-KL line search; the
+`--token-preference-learning-kl` is enforced by an exact policy-KL line search; the
 reported `predicted_fisher_kl` is only the quadratic estimate. Rejections use a
 pairwise logistic loss, so a well-separated chosen/proposal pair naturally
 receives less additional pressure.
 
 In automatic influence mode, slow and fast scores are first combined and one
-global gain is calibrated against the pre-latent policy. Thus the requested
-influence describes the total latent intervention. The fast strength is the
-relative fast-channel weight in this mode; `--latent-strength` is the user
+global gain is calibrated against the base policy before token preference actuation. Thus the requested
+influence describes the total token preference intervention. The fast strength is the
+relative fast-channel weight in this mode; `--token-preference-strength` is the user
 multiplier applied to the calibrated actuator. Learning notices expose both
 the exact learning KL and the actual deployment KL, along with gain and safety
 clamps.
 
-With `--latent-fast-slow`, omitted fast controls resolve to:
+With `--token-preference-fast-slow`, omitted fast controls resolve to:
 
 | Flag | Initial experimental default |
 | --- | --- |
-| `--latent-fast-learning-rate` | 4 times the slow learning rate |
-| `--latent-fast-decay` | `0.10` |
-| `--latent-fast-strength` | Half the slow strength |
-| `--latent-fast-max-step` | The slow max step |
-| `--latent-fast-max-norm` | The smaller of 1 and the slow max norm |
+| `--token-preference-fast-learning-rate` | 4 times the slow learning rate |
+| `--token-preference-fast-decay` | `0.10` |
+| `--token-preference-fast-strength` | Half the slow strength |
+| `--token-preference-fast-max-step` | The slow max step |
+| `--token-preference-fast-max-norm` | The smaller of 1 and the slow max norm |
 
-The existing controls govern the slow vector, `latent_preference_z`. Fast
-memory uses `latent_preference_fast_z`; both contribute to sampler logits
+The existing controls govern the slow vector, `token_preference_vector`. Fast
+memory uses `token_preference_fast_vector`; both contribute to sampler logits
 using their own strengths and share one projection. Restored fast state still
 contributes to inference when fast learning is off; it is then left unchanged.
 Saved nonempty vectors determine the feature dimension. Interaction payloads
@@ -926,15 +926,15 @@ channel, plus per-token rejection information for Writes.
 The concrete projection seed is persisted with the vectors in sampler
 segments and full bias presets. Old records without a seed use 9137. Ordinary
 replay follows each original segment's seed and vectors and never rerolls a
-latent seed or performs fresh learning. Conflicting explicit seeds (including
+token preference projection seed or performs fresh learning. Conflicting explicit seeds (including
 conflicts in later segments) are rejected; randomizing the projection seed
 during replay requires `--fixed-config`. An explicit `--biases` preset replaces
-its corresponding steering fields, including latent vectors and seed, in every
+its corresponding steering fields, including token preference vectors and seed, in every
 replay segment. An explicit `--reference` similarly overrides reference state;
 other fields continue to follow the source. Changing the seed on
-resume, fork, or fixed-config replay clears both latent vectors and prints a
+resume, fork, or fixed-config replay clears both token preference vectors and prints a
 reset notice, because their coordinates would otherwise have changed meaning.
-The same versioned-coordinate check applies to latent dimension, feature
+The same versioned-coordinate check applies to preference dimension, feature
 scheme, and whitening ridge. The saved identity includes the model embedding
 fingerprint when the backend exposes it; incompatible nonzero slow/fast memory
 is reset for explicit CLI/headless setting changes, while a loaded-model

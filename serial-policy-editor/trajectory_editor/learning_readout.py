@@ -62,7 +62,7 @@ def _channel_details(result, *, fast=False):
     clipped_step = not math.isclose(raw_norm, step_norm, rel_tol=1e-7, abs_tol=1e-10)
     # Reconstruct the state immediately before memory bounds were applied.
     bounded = _norm([(1-decay)*a + b - c for a, b, c in zip(old, step, new)])
-    strength = result.sampling.latent_fast_strength if fast else result.sampling.latent_strength
+    strength = result.sampling.token_preference_fast_strength if fast else result.sampling.token_preference_strength
     norm = getattr(result, prefix + 'z_norm')
     return [
         f'{"Fast" if fast else "Slow"} memory ({len(old)} dimensions):',
@@ -77,11 +77,11 @@ def _channel_details(result, *, fast=False):
     ]
 
 
-def _latent_details(result):
+def _token_preference_details(result):
     lines = _channel_details(result)
     if result.old_fast_z:
         lines.extend(_channel_details(result, fast=True))
-    elif result.sampling.latent_preference_fast_z:
+    elif result.sampling.token_preference_fast_vector:
         lines.append('Saved fast memory also steers output; fast learning is off.')
     if result.learning_scheme == 'fisher-kl-v2':
         lines.extend([
@@ -103,16 +103,16 @@ def _latent_details(result):
             f'rejection gradient norm: {result.rejection_gradient_norm:.4g}.',
             f'  Safety clips: step {"yes" if result.step_clipped else "no"}; '
             f'norm {"yes" if result.norm_clipped else "no"}.',
-            f'  Influence: mode {result.sampling.latent_influence_mode}; '
-            f'target {result.sampling.latent_influence_kl:.4g}; '
-            f'deployment KL {result.latent_deployment_kl:.4g}; '
-            f'global gain {result.latent_effective_gain:.4g}; '
-            f'user multiplier {result.latent_user_multiplier:.4g}; '
-            f'gain capped {"yes" if result.latent_gain_capped else "no"}.',
-            f'  Raw contribution RMS: slow {result.latent_slow_raw_rms:.4g}; '
-            f'fast {result.latent_fast_raw_rms:.4g}; combined {result.latent_combined_raw_rms:.4g}; '
-            f'logit RMS {result.latent_effective_logit_rms:.4g}; '
-            f'top-N range {result.latent_top_logit_min:.4g} .. {result.latent_top_logit_max:.4g}.',
+            f'  Influence: mode {result.sampling.token_preference_influence_mode}; '
+            f'target {result.sampling.token_preference_influence_kl:.4g}; '
+            f'deployment KL {result.token_preference_deployment_kl:.4g}; '
+            f'global gain {result.token_preference_effective_gain:.4g}; '
+            f'user multiplier {result.token_preference_user_multiplier:.4g}; '
+            f'gain capped {"yes" if result.token_preference_gain_capped else "no"}.',
+            f'  Raw contribution RMS: slow {result.token_preference_slow_raw_rms:.4g}; '
+            f'fast {result.token_preference_fast_raw_rms:.4g}; combined {result.token_preference_combined_raw_rms:.4g}; '
+            f'logit RMS {result.token_preference_effective_logit_rms:.4g}; '
+            f'top-N range {result.token_preference_top_logit_min:.4g} .. {result.token_preference_top_logit_max:.4g}.',
         ])
     lines.extend([
         'New learning and decay are vector movements; their sizes do not simply add.',
@@ -141,10 +141,10 @@ def _group_details(result):
     return lines
 
 
-def _movement(result, latent):
-    if result.update_norm == 0 and (not latent or result.fast_update_norm == 0):
+def _movement(result, preference):
+    if result.update_norm == 0 and (not preference or result.fast_update_norm == 0):
         return 'unchanged'
-    if latent:
+    if preference:
         learning = result.learning_step_norm + result.fast_learning_step_norm
         decay = result.decay_norm + result.fast_decay_norm
         if not learning and not decay:
@@ -161,19 +161,19 @@ def _publish(io, key, title, sections, summary):
     io.write(summary)
 
 
-def selection_notice(io, result, *, latent, token_text=None, episode_id=None):
-    label = 'Latent' if latent else 'Groups'
+def selection_notice(io, result, *, preference, token_text=None, episode_id=None):
+    label = 'token preference' if preference else 'Groups'
     reason = _reason(result)
     if result.enabled and result.severity > 0:
         reason = 'sampler excluded' if result.learning_gate == 'sampler' else f'severity {result.severity:.3g}'
     if result.learning_gate == 'rank' and result.severity == 0 and result.enabled:
         reason = f'no evidence: rank ≤{result.dead_zone_rank}'
-    if not latent and result.enabled and not result.evidence:
+    if not preference and result.enabled and not result.evidence:
         reason = 'no eligible groups'
     details = _choice_details(result, token_text)
-    details.extend(_latent_details(result) if latent else _group_details(result))
-    summary = f'{label} [learning]: {reason} · {_movement(result, latent)}'
-    if latent:
+    details.extend(_token_preference_details(result) if preference else _group_details(result))
+    summary = f'{label} [learning]: {reason} · {_movement(result, preference)}'
+    if preference:
         summary += f' · z {result.z_norm:.4g}'
         if result.old_fast_z:
             summary += ' (slow)'
@@ -187,7 +187,7 @@ def write_notice(io, result, *, token_text=None, episode_id=None):
     summaries = []
     for label, aggregate, tokens in (
         ('Groups', result.group_result, result.group_token_results),
-        ('Latent', result.latent_result, result.latent_token_results),
+        ('token preference', result.token_preference_result, result.token_preference_token_results),
     ):
         if aggregate is None:
             continue
@@ -205,10 +205,10 @@ def write_notice(io, result, *, token_text=None, episode_id=None):
             for t in tokens:
                 lines.append(f'  {_token(t.chosen_token_id, token_text)}: rank {t.old_policy_rank}; '
                              f'{"different choice" if t.proposal_rejected else "matched proposal"}; {_reason(t)}.')
-        lines.extend(_latent_details(aggregate) if label == 'Latent' else _group_details(aggregate))
+        lines.extend(_token_preference_details(aggregate) if label == 'token preference' else _group_details(aggregate))
         sections[label] = lines
         summaries.append(f'{label.lower()} {count}/{result.token_count} evidence, '
-                         f'{_movement(aggregate, label == "Latent")}')
+                         f'{_movement(aggregate, label == "token preference")}')
     _publish(io, (episode_id, 'write', result.boundary_after),
              f'Teaching Write @ boundaries {result.boundary_before}–{result.boundary_after}',
              sections, 'Write [learning]: ' + ' · '.join(summaries))

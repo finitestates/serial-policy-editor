@@ -7,11 +7,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping
 
-from .latent_features import (
+from .token_preference_features import (
     DEFAULT_PROJECTION_SEED,
     DEFAULT_WHITENING_RIDGE,
-    LATENT_FEATURE_SCHEMES,
-    LatentCoordinateIdentity,
+    TOKEN_PREFERENCE_FEATURE_SCHEMES,
+    TokenPreferenceCoordinateIdentity,
     coordinate_identity,
 )
 
@@ -41,19 +41,19 @@ class SamplingConfig:
     bias_rules: tuple = ()
     bias_groups: tuple = ()
     group_controls: tuple = ()
-    latent_preference_z: tuple = ()
-    latent_strength: float = 1.0
-    latent_preference_fast_z: tuple = ()
-    latent_fast_strength: float = 0.0
-    latent_projection_seed: int = DEFAULT_PROJECTION_SEED
-    latent_feature_scheme: str = "random-projection-unit-v1"
-    latent_whitening_ridge: float = DEFAULT_WHITENING_RIDGE
-    latent_learning_scheme: str = "sgd-v1"
-    latent_influence_mode: str = "manual"
-    latent_influence_kl: float = 0.05
-    latent_min_gain: float = 0.0
-    latent_max_gain: float = 8.0
-    latent_coordinate_identity: LatentCoordinateIdentity | Mapping[str, Any] | None = None
+    token_preference_vector: tuple = ()
+    token_preference_strength: float = 1.0
+    token_preference_fast_vector: tuple = ()
+    token_preference_fast_strength: float = 0.0
+    token_preference_projection_seed: int = DEFAULT_PROJECTION_SEED
+    token_preference_feature_scheme: str = "random-projection-unit-v1"
+    token_preference_whitening_ridge: float = DEFAULT_WHITENING_RIDGE
+    token_preference_learning_scheme: str = "sgd-v1"
+    token_preference_influence_mode: str = "manual"
+    token_preference_influence_kl: float = 0.05
+    token_preference_min_gain: float = 0.0
+    token_preference_max_gain: float = 8.0
+    token_preference_coordinate_identity: TokenPreferenceCoordinateIdentity | Mapping[str, Any] | None = None
     group_control_scheme: str = "appearance-feedback-v1"
     reference_prior_routes: tuple = ()
     reference_prior_scope: str = "active"
@@ -96,7 +96,7 @@ class SamplingConfig:
         if any(c.group not in {g.name for g in groups} for c in controls):
             raise EditorError("group control refers to a missing group")
         object.__setattr__(self, "group_controls", controls)
-        for name in ("latent_preference_z", "latent_preference_fast_z"):
+        for name in ("token_preference_vector", "token_preference_fast_vector"):
             raw = getattr(self, name)
             if isinstance(raw, (str, bytes, bytearray)):
                 raise EditorError(f"{name} must be a numeric vector")
@@ -107,69 +107,69 @@ class SamplingConfig:
             if any(not math.isfinite(value) for value in vector):
                 raise EditorError(f"{name} must contain finite numbers")
             object.__setattr__(self, name, vector)
-        if (self.latent_preference_z and self.latent_preference_fast_z
-                and len(self.latent_preference_z) != len(self.latent_preference_fast_z)):
-            raise EditorError("slow and fast latent vectors must have the same dimension")
-        identity = self.latent_coordinate_identity
-        if identity is not None and not isinstance(identity, LatentCoordinateIdentity):
+        if (self.token_preference_vector and self.token_preference_fast_vector
+                and len(self.token_preference_vector) != len(self.token_preference_fast_vector)):
+            raise EditorError("slow and fast token preference vectors must have the same dimension")
+        identity = self.token_preference_coordinate_identity
+        if identity is not None and not isinstance(identity, TokenPreferenceCoordinateIdentity):
             try:
-                identity = LatentCoordinateIdentity.from_mapping(identity)
+                identity = TokenPreferenceCoordinateIdentity.from_mapping(identity)
             except (KeyError, TypeError, ValueError) as exc:
-                raise EditorError("latent coordinate identity is malformed") from exc
-            object.__setattr__(self, "latent_coordinate_identity", identity)
+                raise EditorError("token preference coordinate identity is malformed") from exc
+            object.__setattr__(self, "token_preference_coordinate_identity", identity)
         if (
-            self.latent_feature_scheme == "random-projection-unit-v1"
-            and (self.latent_preference_z or self.latent_preference_fast_z)
+            self.token_preference_feature_scheme == "random-projection-unit-v1"
+            and (self.token_preference_vector or self.token_preference_fast_vector)
         ):
-            dimension = len(self.latent_preference_z or self.latent_preference_fast_z)
+            dimension = len(self.token_preference_vector or self.token_preference_fast_vector)
             object.__setattr__(
                 self,
-                "latent_coordinate_identity",
+                "token_preference_coordinate_identity",
                 coordinate_identity(
                     dimension=dimension,
-                    projection_seed=self.latent_projection_seed,
-                    feature_scheme=self.latent_feature_scheme,
-                    whitening_ridge=self.latent_whitening_ridge,
+                    projection_seed=self.token_preference_projection_seed,
+                    feature_scheme=self.token_preference_feature_scheme,
+                    whitening_ridge=self.token_preference_whitening_ridge,
                 ),
             )
-        elif identity is None and (self.latent_preference_z or self.latent_preference_fast_z):
-            dimension = len(self.latent_preference_z or self.latent_preference_fast_z)
+        elif identity is None and (self.token_preference_vector or self.token_preference_fast_vector):
+            dimension = len(self.token_preference_vector or self.token_preference_fast_vector)
             object.__setattr__(
                 self,
-                "latent_coordinate_identity",
+                "token_preference_coordinate_identity",
                 coordinate_identity(
                     dimension=dimension,
-                    projection_seed=self.latent_projection_seed,
-                    feature_scheme=self.latent_feature_scheme,
-                    whitening_ridge=self.latent_whitening_ridge,
+                    projection_seed=self.token_preference_projection_seed,
+                    feature_scheme=self.token_preference_feature_scheme,
+                    whitening_ridge=self.token_preference_whitening_ridge,
                 ),
             )
-        for name in ("latent_strength", "latent_fast_strength"):
+        for name in ("token_preference_strength", "token_preference_fast_strength"):
             value = getattr(self, name)
             if (type(value) not in (int, float)
                     or not math.isfinite(float(value)) or value < 0.0):
                 raise EditorError(f"{name} must be a finite nonnegative number")
             object.__setattr__(self, name, float(value))
-        if (type(self.latent_projection_seed) is not int
-                or not MIN_SEED <= self.latent_projection_seed <= MAX_SEED):
-            raise EditorError("latent projection seed must be a signed 64-bit integer")
-        if self.latent_feature_scheme not in LATENT_FEATURE_SCHEMES:
+        if (type(self.token_preference_projection_seed) is not int
+                or not MIN_SEED <= self.token_preference_projection_seed <= MAX_SEED):
+            raise EditorError("preference projection seed must be a signed 64-bit integer")
+        if self.token_preference_feature_scheme not in TOKEN_PREFERENCE_FEATURE_SCHEMES:
             raise EditorError(
-                "latent_feature_scheme must be random-projection-unit-v1 or "
+                "token_preference_feature_scheme must be random-projection-unit-v1 or "
                 "whitened-projection-v2"
             )
         if (
-            type(self.latent_whitening_ridge) not in (int, float)
-            or not math.isfinite(float(self.latent_whitening_ridge))
-            or self.latent_whitening_ridge < 0.0
+            type(self.token_preference_whitening_ridge) not in (int, float)
+            or not math.isfinite(float(self.token_preference_whitening_ridge))
+            or self.token_preference_whitening_ridge < 0.0
         ):
-            raise EditorError("latent_whitening_ridge must be finite and nonnegative")
-        object.__setattr__(self, "latent_whitening_ridge", float(self.latent_whitening_ridge))
-        if self.latent_learning_scheme not in {"sgd-v1", "fisher-kl-v2"}:
-            raise EditorError("unsupported latent_learning_scheme")
-        if self.latent_influence_mode not in {"manual", "kl"}:
-            raise EditorError("latent_influence_mode must be manual or kl")
-        for name in ("latent_influence_kl", "latent_min_gain", "latent_max_gain"):
+            raise EditorError("token_preference_whitening_ridge must be finite and nonnegative")
+        object.__setattr__(self, "token_preference_whitening_ridge", float(self.token_preference_whitening_ridge))
+        if self.token_preference_learning_scheme not in {"sgd-v1", "fisher-kl-v2"}:
+            raise EditorError("unsupported token_preference_learning_scheme")
+        if self.token_preference_influence_mode not in {"manual", "kl"}:
+            raise EditorError("token_preference_influence_mode must be manual or kl")
+        for name in ("token_preference_influence_kl", "token_preference_min_gain", "token_preference_max_gain"):
             value = getattr(self, name)
             if (
                 type(value) not in (int, float)
@@ -178,8 +178,8 @@ class SamplingConfig:
             ):
                 raise EditorError(f"{name} must be finite and nonnegative")
             object.__setattr__(self, name, float(value))
-        if self.latent_max_gain < self.latent_min_gain:
-            raise EditorError("latent_max_gain must be at least latent_min_gain")
+        if self.token_preference_max_gain < self.token_preference_min_gain:
+            raise EditorError("token_preference_max_gain must be at least token_preference_min_gain")
         if self.group_control_scheme not in {
             "appearance-feedback-v1", "appearance-rate-v2"
         }:
@@ -309,8 +309,8 @@ class SamplingConfig:
             or bool(self.bias_rules)
             or any(group.enabled and group.bias != 0.0 for group in self.bias_groups)
             or any(c.enabled for c in self.group_controls)
-            or bool(self.latent_preference_z)
-            or bool(self.latent_preference_fast_z)
+            or bool(self.token_preference_vector)
+            or bool(self.token_preference_fast_vector)
             or self.reference_prior_active
         )
 
@@ -436,37 +436,37 @@ class SamplingConfig:
             bias_rules=value.get("bias_rules", ()),
             bias_groups=value.get("bias_groups", ()),
             group_controls=value.get("group_controls", ()),
-            latent_preference_z=value.get(
-                "latent_preference_z", defaults.latent_preference_z
+            token_preference_vector=value.get(
+                "token_preference_vector", defaults.token_preference_vector
             ),
-            latent_preference_fast_z=value.get("latent_preference_fast_z", ()),
-            latent_fast_strength=value.get("latent_fast_strength", 0.0),
-            latent_projection_seed=value.get("latent_projection_seed", DEFAULT_PROJECTION_SEED),
-            latent_feature_scheme=value.get(
-                "latent_feature_scheme", defaults.latent_feature_scheme
+            token_preference_fast_vector=value.get("token_preference_fast_vector", ()),
+            token_preference_fast_strength=value.get("token_preference_fast_strength", 0.0),
+            token_preference_projection_seed=value.get("token_preference_projection_seed", DEFAULT_PROJECTION_SEED),
+            token_preference_feature_scheme=value.get(
+                "token_preference_feature_scheme", defaults.token_preference_feature_scheme
             ),
-            latent_whitening_ridge=value.get(
-                "latent_whitening_ridge", defaults.latent_whitening_ridge
+            token_preference_whitening_ridge=value.get(
+                "token_preference_whitening_ridge", defaults.token_preference_whitening_ridge
             ),
-            latent_learning_scheme=value.get(
-                "latent_learning_scheme", defaults.latent_learning_scheme
+            token_preference_learning_scheme=value.get(
+                "token_preference_learning_scheme", defaults.token_preference_learning_scheme
             ),
-            latent_influence_mode=value.get(
-                "latent_influence_mode", defaults.latent_influence_mode
+            token_preference_influence_mode=value.get(
+                "token_preference_influence_mode", defaults.token_preference_influence_mode
             ),
-            latent_influence_kl=value.get(
-                "latent_influence_kl", defaults.latent_influence_kl
+            token_preference_influence_kl=value.get(
+                "token_preference_influence_kl", defaults.token_preference_influence_kl
             ),
-            latent_min_gain=value.get("latent_min_gain", defaults.latent_min_gain),
-            latent_max_gain=value.get("latent_max_gain", defaults.latent_max_gain),
-            latent_coordinate_identity=value.get(
-                "latent_coordinate_identity", defaults.latent_coordinate_identity
+            token_preference_min_gain=value.get("token_preference_min_gain", defaults.token_preference_min_gain),
+            token_preference_max_gain=value.get("token_preference_max_gain", defaults.token_preference_max_gain),
+            token_preference_coordinate_identity=value.get(
+                "token_preference_coordinate_identity", defaults.token_preference_coordinate_identity
             ),
             group_control_scheme=value.get(
                 "group_control_scheme", defaults.group_control_scheme
             ),
-            latent_strength=value.get(
-                "latent_strength", defaults.latent_strength
+            token_preference_strength=value.get(
+                "token_preference_strength", defaults.token_preference_strength
             ),
             reference_prior_routes=value.get(
                 "reference_prior_routes", defaults.reference_prior_routes
@@ -495,14 +495,14 @@ class SamplingConfig:
         # Scheme fields were introduced after the original v1 records. Missing
         # fields mean the original mathematics, never an implicit upgrade.
         for name, default in (
-            ("latent_feature_scheme", "random-projection-unit-v1"),
-            ("latent_whitening_ridge", DEFAULT_WHITENING_RIDGE),
-            ("latent_learning_scheme", "sgd-v1"),
-            ("latent_influence_mode", "manual"),
-            ("latent_influence_kl", 0.05),
-            ("latent_min_gain", 0.0),
-            ("latent_max_gain", 8.0),
-            ("latent_coordinate_identity", None),
+            ("token_preference_feature_scheme", "random-projection-unit-v1"),
+            ("token_preference_whitening_ridge", DEFAULT_WHITENING_RIDGE),
+            ("token_preference_learning_scheme", "sgd-v1"),
+            ("token_preference_influence_mode", "manual"),
+            ("token_preference_influence_kl", 0.05),
+            ("token_preference_min_gain", 0.0),
+            ("token_preference_max_gain", 8.0),
+            ("token_preference_coordinate_identity", None),
             ("group_control_scheme", "appearance-feedback-v1"),
         ):
             value.setdefault(name, default)
@@ -548,15 +548,15 @@ class SamplingConfig:
             **({"group_controls": [c.to_dict() for c in self.group_controls]} if self.group_controls else {}),
             **(
                 {
-                    "latent_preference_z": list(self.latent_preference_z),
-                    "latent_strength": self.latent_strength,
-                    "latent_preference_fast_z": list(self.latent_preference_fast_z),
-                    "latent_fast_strength": self.latent_fast_strength,
-                    "latent_projection_seed": self.latent_projection_seed,
+                    "token_preference_vector": list(self.token_preference_vector),
+                    "token_preference_strength": self.token_preference_strength,
+                    "token_preference_fast_vector": list(self.token_preference_fast_vector),
+                    "token_preference_fast_strength": self.token_preference_fast_strength,
+                    "token_preference_projection_seed": self.token_preference_projection_seed,
                 }
-                if (self.latent_preference_z or self.latent_strength != 1.0
-                    or self.latent_preference_fast_z or self.latent_fast_strength != 0.0
-                    or self.latent_projection_seed != DEFAULT_PROJECTION_SEED)
+                if (self.token_preference_vector or self.token_preference_strength != 1.0
+                    or self.token_preference_fast_vector or self.token_preference_fast_strength != 0.0
+                    or self.token_preference_projection_seed != DEFAULT_PROJECTION_SEED)
                 else {}
             ),
             **({"bias_step": self.bias_step} if self.bias_step != 0.5 else {}),
@@ -572,16 +572,16 @@ class SamplingConfig:
             "policy_scheme": SAMPLING_POLICY_SCHEME,
             "seed": self.seed,
             "rng_scheme": RNG_SCHEME,
-            "latent_feature_scheme": self.latent_feature_scheme,
-            "latent_whitening_ridge": self.latent_whitening_ridge,
-            "latent_learning_scheme": self.latent_learning_scheme,
-            "latent_influence_mode": self.latent_influence_mode,
-            "latent_influence_kl": self.latent_influence_kl,
-            "latent_min_gain": self.latent_min_gain,
-            "latent_max_gain": self.latent_max_gain,
-            "latent_coordinate_identity": (
-                self.latent_coordinate_identity.to_dict()
-                if self.latent_coordinate_identity is not None else None
+            "token_preference_feature_scheme": self.token_preference_feature_scheme,
+            "token_preference_whitening_ridge": self.token_preference_whitening_ridge,
+            "token_preference_learning_scheme": self.token_preference_learning_scheme,
+            "token_preference_influence_mode": self.token_preference_influence_mode,
+            "token_preference_influence_kl": self.token_preference_influence_kl,
+            "token_preference_min_gain": self.token_preference_min_gain,
+            "token_preference_max_gain": self.token_preference_max_gain,
+            "token_preference_coordinate_identity": (
+                self.token_preference_coordinate_identity.to_dict()
+                if self.token_preference_coordinate_identity is not None else None
             ),
             "group_control_scheme": self.group_control_scheme,
             "reference_prior_routes": [

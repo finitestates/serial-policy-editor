@@ -155,7 +155,7 @@ Ordinary multi-token targets use canonical path support. Exact rank-prefix and
 
 ## Teacher preference learning
 
-`--latent-preference` still learns its vector from live raw-rank selections;
+`--token-preference` still learns its vector from live raw-rank selections;
 `--learn-from-write` additionally learns from typed spans. Slow/fast vectors,
 projection seed, and strengths remain ordinary serializable learner weights.
 Group objectives do not use rank severity or interpret autonomous samples as
@@ -202,13 +202,13 @@ precommit observation before either learner runs.
 
 ### Adaptive Dead Zones: experimental sampler eligibility gate
 
-Use `--latent-learning-gate sampler` for the latent learner and
+Use `--token-preference-learning-gate sampler` for the token preference learner and
 `--learning-gate sampler` for the manual group fitter. Both default to `rank`,
 which preserves the existing rank dead zone and severity behavior.
 
 ```bash
-policy-editor --model model.gguf --latent-preference \
-  --latent-learning-gate sampler --latent-rejection-strength 1
+policy-editor --model model.gguf --token-preference \
+  --token-preference-learning-gate sampler --token-preference-rejection-strength 1
 ```
 
 Sampler mode replaces rank severity with a binary decision at each precommit
@@ -267,7 +267,7 @@ persistent episode records remain available through the normal projection tools.
 
 ### Teacher-learning experiments
 
-All three controls are opt-in and available for both learners. Use the `--latent-`
+All three controls are opt-in and available for both learners. Use the `--token-preference-`
 prefix for preference learning, or `--learning-` for fitting learnable manual groups.
 They do not change appearance controllers. Existing defaults remain unchanged.
 
@@ -277,10 +277,10 @@ They do not change appearance controllers. Existing defaults remain unchanged.
 | `write-reduction` | `sum`, `mean`, `sqrt` | How a typed span's admitted evidence is scaled |
 | `rejection-target` | `proposal`, `sampler` | What a rejected proposal contrasts against |
 
-**Conditional decay.** `--latent-decay-on rejection` skips decay whenever the
+**Conditional decay.** `--token-preference-decay-on rejection` skips decay whenever the
 teacher's chosen token matches the captured proposal, including coincidental
 agreement inside a write. A disagreement can still decay memory even if its token
-is inside the dead zone. `--latent-decay-on evidence` requires positive gate severity:
+is inside the dead zone. `--token-preference-decay-on evidence` requires positive gate severity:
 with Adaptive Dead Zones, only an excluded choice permits decay. With rank gating,
 only a choice beyond the rank dead zone permits it. Evidence here means admission
 by the gate, even if a zero learning rate, clipping, or cancellation of gradients
@@ -303,7 +303,7 @@ are unaffected by `write-reduction`.
 **Sampler rejection target.** With nonzero rejection strength, `sampler` replaces
 the sampled proposal's negative features with the probability-weighted features of
 the actual surviving sampler candidates, frozen at the precommit observation. This
-includes temperature, truncation, and steering. At rejection strength 1, the latent
+includes temperature, truncation, and steering. At rejection strength 1, the preference
 direction for a disagreement is `features(chosen) - E_sampler[features]`. The manual
 group fitter uses the corresponding group-feature difference. This should reduce
 dependence on which one of several plausible tokens happened to be sampled.
@@ -325,16 +325,15 @@ policy-editor --workspace episodes.sqlite3 --project '#1' --biases-only > biases
 policy-editor --model model.gguf --new-prompt 'Another story' --biases biases.json
 ```
 
-The `spe-bias-rules-v3` preset contains model identity, manual rules, group
-definitions, group objectives, reference routes/settings, and latent vectors
-with their metadata. No source YAML is required to reload it. Old v2 presets
-remain readable. Model-specific token IDs must address the same tokenizer.
+The `spe-bias-rules-v4` preset contains model identity, manual rules, group
+definitions, group objectives, reference routes/settings, and token preference vectors
+with their metadata. No source YAML is required to reload it. Older preset
+formats are intentionally rejected after the breaking terminology migration.
+Model-specific token IDs must address the same tokenizer.
 
-The standard weight arrays remain `latent_preference_z` and optional
-`latent_preference_fast_z`, with `latent_projection_seed`, `latent_strength`,
-and `latent_fast_strength`. For a minimal preference-only input, the loader also
-accepts `format: spe-preference-weights-v1`, model metadata, and a `weights` array
-plus the same seed/strength metadata. Empty arrays represent empty memory.
+The standard weight arrays remain `token_preference_vector` and optional
+`token_preference_fast_vector`, with `token_preference_projection_seed`, `token_preference_strength`,
+and `token_preference_fast_strength`. Empty arrays represent empty memory.
 
 Full episode snapshots retain the original history origin, so the same prefix
 reconstructs identical control during rewind, fork, resume, and replay. Portable

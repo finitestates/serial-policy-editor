@@ -22,7 +22,7 @@ from .episode_actions import (
 )
 from .episode_backend import EpisodeBackend, require_episode_backend
 from .episode_hash import token_prefix_sha256, validate_fingerprint
-from .latent_features import coordinate_identity_matches
+from .token_preference_features import coordinate_identity_matches
 from .sampling import (
     SparseDistribution,
     ObservationStatistics,
@@ -218,46 +218,46 @@ class EpisodeEngine:
         # do not change token spellings, so their classifications remain valid.
         self._token_boundaries: dict[int, frozenset[str]] = {}
 
-    def _latent_features(self) -> np.ndarray | None:
-        """Load fixed token features only when a saved latent state needs them."""
-        if not (self.sampling.latent_preference_z or self.sampling.latent_preference_fast_z):
+    def _token_preference_features(self) -> np.ndarray | None:
+        """Load fixed token features only when a saved token preference state needs them."""
+        if not (self.sampling.token_preference_vector or self.sampling.token_preference_fast_vector):
             return None
-        provider = getattr(self.backend, "latent_token_features", None)
+        provider = getattr(self.backend, "token_preference_features", None)
         if not callable(provider):
             raise EditorError(
-                "the loaded backend does not expose token embeddings for latent preference"
+                "the loaded backend does not expose token embeddings for token preference"
             )
         kwargs = dict(
-            feature_dimension=len(self.sampling.latent_preference_z or self.sampling.latent_preference_fast_z),
-            projection_seed=self.sampling.latent_projection_seed,
+            feature_dimension=len(self.sampling.token_preference_vector or self.sampling.token_preference_fast_vector),
+            projection_seed=self.sampling.token_preference_projection_seed,
         )
-        if self.sampling.latent_feature_scheme != "random-projection-unit-v1":
+        if self.sampling.token_preference_feature_scheme != "random-projection-unit-v1":
             kwargs.update(
-                feature_scheme=self.sampling.latent_feature_scheme,
-                whitening_ridge=self.sampling.latent_whitening_ridge,
+                feature_scheme=self.sampling.token_preference_feature_scheme,
+                whitening_ridge=self.sampling.token_preference_whitening_ridge,
             )
         try:
             features = provider(**kwargs)
-            identity_method = getattr(self.backend, "latent_coordinate_identity", None)
-            self._latent_coordinate_identity = (
+            identity_method = getattr(self.backend, "token_preference_coordinate_identity", None)
+            self._token_preference_coordinate_identity = (
                 identity_method(**kwargs) if callable(identity_method) else None
             )
             if (
-                self.sampling.latent_preference_z
-                or self.sampling.latent_preference_fast_z
+                self.sampling.token_preference_vector
+                or self.sampling.token_preference_fast_vector
             ) and callable(identity_method) and not coordinate_identity_matches(
                 self.sampling,
                 dimension=features.shape[1],
-                model_fingerprint=self._latent_coordinate_identity.model_fingerprint,
-                embedding_width=self._latent_coordinate_identity.embedding_width,
+                model_fingerprint=self._token_preference_coordinate_identity.model_fingerprint,
+                embedding_width=self._token_preference_coordinate_identity.embedding_width,
             ):
                 raise EditorError(
-                    "latent coordinate system does not match the loaded model; "
-                    "reset latent preference memory before continuing"
+                    "token preference coordinate system does not match the loaded model; "
+                    "reset token preference memory before continuing"
                 )
             return features
         except (TypeError, ValueError, RuntimeError) as exc:
-            raise EditorError(f"could not load latent token features: {exc}") from exc
+            raise EditorError(f"could not load preference token features: {exc}") from exc
 
     @property
     def sampling(self) -> SamplingConfig:
@@ -284,8 +284,8 @@ class EpisodeEngine:
         if any(token >= self.backend.vocabulary_size() for token in bias_tokens):
             raise EditorError("bias token id is outside the model vocabulary")
         self._sampling = value
-        if not (value.latent_preference_z or value.latent_preference_fast_z):
-            self._latent_coordinate_identity = None
+        if not (value.token_preference_vector or value.token_preference_fast_vector):
+            self._token_preference_coordinate_identity = None
         self._invalidate_observation()
 
     @property
@@ -407,8 +407,8 @@ class EpisodeEngine:
             self.sampling,
             key[0],
             self._classify_token_boundary,
-            latent_features=self._latent_features(),
-            latent_coordinate_identity=getattr(self, "_latent_coordinate_identity", None),
+            token_preference_features=self._token_preference_features(),
+            token_preference_coordinate_identity=getattr(self, "_token_preference_coordinate_identity", None),
             render_tokens=self.backend.render,
         )
         logits = statistics.logits

@@ -8,7 +8,7 @@ from trajectory_editor.episode_engine import EpisodeEngine, ReplayExpectation
 from trajectory_editor.episode_policy import EpisodeRunner, TapeStep
 from trajectory_editor.episode_store import EpisodeStore
 from trajectory_editor.episode_cli import build_parser
-from trajectory_editor.latent_preference import LatentPreferenceLearner
+from trajectory_editor.token_preference import TokenPreferenceLearner
 from trajectory_editor.online_learning import OnlineLearner
 
 
@@ -28,7 +28,7 @@ FEATURES = np.asarray(
 
 
 class WriteBackend(ConformingFakeBackend):
-    def latent_token_features(self, *, feature_dimension: int, projection_seed: int):
+    def token_preference_features(self, *, feature_dimension: int, projection_seed: int):
         del projection_seed
         assert feature_dimension == FEATURES.shape[1]
         return FEATURES
@@ -52,7 +52,7 @@ def _group() -> BiasGroup:
 
 
 def _run_write(
-    tmp_path, *, learner=None, latent_learner=None, replay=False, learn_from_write=True
+    tmp_path, *, learner=None, token_preference_learner=None, replay=False, learn_from_write=True
 ):
     sampling = SamplingConfig(
         bias_groups=(_group(),) if learner is not None else (),
@@ -76,7 +76,7 @@ def _run_write(
             store,
             episode_id,
             learner=learner,
-            latent_learner=latent_learner,
+            token_preference_learner=token_preference_learner,
             learn_from_write=learn_from_write,
         )
         result = runner.run(
@@ -123,11 +123,11 @@ def test_write_learning_averages_tokens_and_persists_one_boundary(tmp_path):
     assert all(item["loss"] > 0.0 for item in payload["tokens"])
 
 
-def test_write_learning_combines_named_and_latent_updates(tmp_path):
+def test_write_learning_combines_named_and_token_preference_updates(tmp_path):
     runtime, interactions, _segment, _ = _run_write(
         tmp_path,
         learner=OnlineLearner(enabled=True, learning_rate=0.5),
-        latent_learner=LatentPreferenceLearner(
+        token_preference_learner=TokenPreferenceLearner(
             FEATURES,
             enabled=True,
             dimension=2,
@@ -136,17 +136,17 @@ def test_write_learning_combines_named_and_latent_updates(tmp_path):
     )
 
     assert runtime.sampling.bias_groups[0].bias > 0.0
-    assert runtime.sampling.latent_preference_z
+    assert runtime.sampling.token_preference_vector
     payload = interactions[-1]["payload"]
     assert "group_update" in payload
-    assert "latent_update" in payload
+    assert "token_preference_update" in payload
 
 
 def test_write_learning_does_not_run_during_replay(tmp_path):
     runtime, interactions, _segment, result = _run_write(
         tmp_path,
         learner=OnlineLearner(enabled=True),
-        latent_learner=LatentPreferenceLearner(
+        token_preference_learner=TokenPreferenceLearner(
             FEATURES,
             enabled=True,
             dimension=2,
@@ -155,7 +155,7 @@ def test_write_learning_does_not_run_during_replay(tmp_path):
     )
 
     assert result.replayed_actions == 1
-    assert runtime.sampling.latent_preference_z == ()
+    assert runtime.sampling.token_preference_vector == ()
     assert runtime.sampling.bias_groups[0].bias == 0.0
     assert interactions == []
 

@@ -250,7 +250,7 @@ def test_complete_steering_preset_roundtrip_and_portable_history(tmp_path):
     b = ConformingFakeBackend()
     state = SamplingConfig(bias_groups=(group(),), group_controls=(GroupControl("concrete", "maintain", .1, history_start=17),),
                            reference_prior_routes=(((3,), 1.), ((2,), .5)), reference_prior_scope="global", reference_prior_mode="lexical",
-                           latent_preference_z=(.1, .2), latent_preference_fast_z=(.2, .1), latent_fast_strength=.4)
+                           token_preference_vector=(.1, .2), token_preference_fast_vector=(.2, .1), token_preference_fast_strength=.4)
     # Persist a complete sampler without requiring model embeddings for this serialization test.
     with EpisodeStore(tmp_path / 'store.db') as store:
         eid = store.create_episode(initial_text='P', initial_token_ids=[7], sampling=state, stream_fingerprint='0' * 64,
@@ -259,7 +259,7 @@ def test_complete_steering_preset_roundtrip_and_portable_history(tmp_path):
         path.write_text(project_biases(store, eid))
         restored = load_bias_preset(path, b, b.provenance())
     assert restored == replace(state, group_controls=(replace(state.group_controls[0], history_start=None),))
-    restored = replace(restored, latent_preference_z=(), latent_preference_fast_z=())
+    restored = replace(restored, token_preference_vector=(), token_preference_fast_vector=())
     e = EpisodeEngine(b, initial_token_ids=[7, 1], sampling=restored)
     assert e.sampling.group_controls[0].history_start == 2
 
@@ -375,9 +375,9 @@ def test_reference_validation_and_minimal_preference_array(tmp_path):
         with pytest.raises(EditorError):
             compile_reference(bad, b)
     path = tmp_path / 'weights.json'
-    path.write_text(json.dumps(dict(format='spe-preference-weights-v1', model=b.provenance(), weights=[.1, .2], latent_projection_seed=42)))
+    path.write_text(json.dumps(dict(format='spe-bias-rules-v4', model=b.provenance(), token_preference_vector=[.1, .2], token_preference_projection_seed=42)))
     loaded = load_bias_preset(path, b, b.provenance())
-    assert loaded.latent_preference_z == (.1, .2) and loaded.latent_projection_seed == 42
+    assert loaded.token_preference_vector == (.1, .2) and loaded.token_preference_projection_seed == 42
 
 
 def test_control_rewind_and_replay_restore_exact_policy(tmp_path):

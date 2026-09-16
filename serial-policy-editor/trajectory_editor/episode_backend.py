@@ -45,8 +45,8 @@ class EpisodeBackend(Protocol):
 
     # Backends may expose branch_to_prefix(prefix_token_ids) as a private
     # optimization. The episode core falls back to reset() when it is absent.
-    # Backends may also expose latent_token_features(...) for the optional
-    # latent preference learner; ordinary episode operation does not require it.
+    # Backends may also expose token_preference_features(...) for the optional
+    # token preference learner; ordinary episode operation does not require it.
 
 
 def require_episode_backend(backend: EpisodeBackend) -> None:

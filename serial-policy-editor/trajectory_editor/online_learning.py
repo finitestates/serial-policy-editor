@@ -217,7 +217,7 @@ class OnlineLearner:
             sampling,
             observation.prefix_token_ids,
             observation.statistics.boundaries,
-            latent_features=getattr(observation.statistics, "latent_features", None),
+            token_preference_features=getattr(observation.statistics, "token_preference_features", None),
             render_tokens=getattr(observation.statistics, "render_tokens", None),
         )
 

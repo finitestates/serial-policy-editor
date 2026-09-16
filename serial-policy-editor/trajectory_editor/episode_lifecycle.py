@@ -9,7 +9,7 @@ from .episode_policy import TapeStep, ReplayPlan
 
 POLICY_FIELDS = tuple(
     f.name for f in fields(SamplingConfig)
-    if f.name.startswith(("reference_prior_", "latent_"))
+    if f.name.startswith(("reference_prior_", "token_preference_"))
     or f.name == "group_control_scheme"
 ) + ("group_controls",)
 
@@ -38,8 +38,8 @@ def _model_continuation(store, source_id, backend, provenance):
         backend, sampling=replace(
             SamplingConfig.from_record(segment["sampling"]),
             bias_rules=(), bias_groups=(), group_controls=(), reference_prior_routes=(),
-            latent_preference_z=(), latent_preference_fast_z=(),
-            latent_coordinate_identity=None,
+            token_preference_vector=(), token_preference_fast_vector=(),
+            token_preference_coordinate_identity=None,
         ),
         initial_text=source["initial_text"] + source["visible_text"],
         max_tokens=source["max_tokens"],

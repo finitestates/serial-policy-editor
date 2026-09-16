@@ -7,21 +7,21 @@ import numpy as np
 import pytest
 
 from tests.fakes import ScriptedIO
-from tests.test_latent_preference import FEATURES, LatentBackend
+from tests.test_token_preference import FEATURES, TokenPreferenceBackend
 from trajectory_editor.bias_rules import BiasGroup, BiasRule
 from trajectory_editor.domain import EditorError, SamplingConfig
 from trajectory_editor.episode_cli import (
-    _latent_config_from_args, _latent_preference_notice, _online_learning_notice,
+    _token_preference_config_from_args, _token_preference_notice, _online_learning_notice,
     _write_learning_notice, build_parser, main,
 )
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_actions import Write
 from trajectory_editor.episode_policy import _WriteLearningAccumulator
-from trajectory_editor.latent_preference import LatentPreferenceConfig, LatentPreferenceLearner
+from trajectory_editor.token_preference import TokenPreferenceConfig, TokenPreferenceLearner
 from trajectory_editor.online_learning import OnlineLearningConfig, OnlineLearner
 
 
-class GateBackend(LatentBackend):
+class GateBackend(TokenPreferenceBackend):
     def last_logits(self):
         return np.asarray([-20., 5., 4., 3., -1., -2., -3., -4.])
 
@@ -36,7 +36,7 @@ def engine(**settings):
 def learners(**settings):
     values = dict(enabled=True, learning_gate='sampler', learning_rate=.1)
     values.update(settings)
-    return (OnlineLearner(**values), LatentPreferenceLearner(FEATURES, dimension=2, **values))
+    return (OnlineLearner(**values), TokenPreferenceLearner(FEATURES, dimension=2, **values))
 
 
 @pytest.mark.parametrize('settings,eligible', [
@@ -85,15 +85,15 @@ def test_membership_does_not_mistake_probability_underflow_for_filtering():
 
 
 def test_sampler_gate_leaves_decay_and_fast_slow_limits_independent():
-    runtime = engine(latent_preference_z=(.2, .1), latent_preference_fast_z=(.1, .2), latent_fast_strength=.5)
-    model = LatentPreferenceLearner(FEATURES, enabled=True, learning_gate='sampler',
+    runtime = engine(token_preference_vector=(.2, .1), token_preference_fast_vector=(.1, .2), token_preference_fast_strength=.5)
+    model = TokenPreferenceLearner(FEATURES, enabled=True, learning_gate='sampler',
                                     fast_slow=True, decay=.2, fast_decay=.5)
     result = model.update(runtime.observe(), 3, runtime.sampling)
     assert result.learning_step_norm == result.fast_learning_step_norm == 0
     assert result.new_z == pytest.approx((.16, .08))
     assert result.new_fast_z == pytest.approx((.05, .1))
     runtime.sampling = replace(runtime.sampling, top_k=1)
-    model = LatentPreferenceLearner(FEATURES, enabled=True, learning_gate='sampler', fast_slow=True,
+    model = TokenPreferenceLearner(FEATURES, enabled=True, learning_gate='sampler', fast_slow=True,
                                     learning_rate=100, fast_learning_rate=100,
                                     max_step=.03, fast_max_step=.02, max_norm=.1, fast_max_norm=.1)
     result = model.update(runtime.observe(), 3, runtime.sampling)
@@ -104,32 +104,32 @@ def test_sampler_gate_leaves_decay_and_fast_slow_limits_independent():
 
 @pytest.mark.parametrize('tokens', ([1, 3, 2], [1, 2]))
 def test_write_gates_each_token_and_aggregates_decay_once(tokens):
-    runtime = engine(top_k=2, latent_preference_z=(.2, .1),
-                     latent_preference_fast_z=(.1, .2), latent_fast_strength=.5)
+    runtime = engine(top_k=2, token_preference_vector=(.2, .1),
+                     token_preference_fast_vector=(.1, .2), token_preference_fast_strength=.5)
     runtime.sampling = replace(runtime.sampling,
         bias_groups=(replace(runtime.sampling.bias_groups[0], bias=.2),))
     group_model = OnlineLearner(enabled=True, learning_gate='sampler', decay=.2, learning_rate=.1)
-    latent_model = LatentPreferenceLearner(FEATURES, enabled=True, learning_gate='sampler',
+    token_preference_model = TokenPreferenceLearner(FEATURES, enabled=True, learning_gate='sampler',
                                            fast_slow=True, decay=.2, fast_decay=.5)
-    accumulator = _WriteLearningAccumulator(runtime.backend, runtime.sampling, group_model, latent_model)
+    accumulator = _WriteLearningAccumulator(runtime.backend, runtime.sampling, group_model, token_preference_model)
     for token in tokens:
         accumulator.add(runtime.observe(), token)
     result = accumulator.finish(len(tokens))
     assert [t.sampler_eligible for t in result.tokens] == [t != 3 for t in tokens]
-    for r in accumulator.latent_results:
+    for r in accumulator.token_preference_results:
         assert r.severity == float(r.chosen_token_id == 3)
     raw_group = sum(r.evidence['target'] for r in accumulator.group_results)
     assert result.group_result.new_group_weights['target'] == pytest.approx(.8 * .2 + raw_group)
-    raw_slow = np.sum([r.learning_evidence for r in accumulator.latent_results], axis=0)
-    raw_fast = np.sum([r.fast_learning_evidence for r in accumulator.latent_results], axis=0)
+    raw_slow = np.sum([r.learning_evidence for r in accumulator.token_preference_results], axis=0)
+    raw_fast = np.sum([r.fast_learning_evidence for r in accumulator.token_preference_results], axis=0)
     fast_norm = np.linalg.norm(raw_fast)
-    if fast_norm > latent_model.config.fast_max_step:
-        raw_fast *= latent_model.config.fast_max_step / fast_norm
-    assert result.latent_result.new_z == pytest.approx(.8 * np.array((.2, .1)) + raw_slow)
-    assert result.latent_result.new_fast_z == pytest.approx(.5 * np.array((.1, .2)) + raw_fast)
+    if fast_norm > token_preference_model.config.fast_max_step:
+        raw_fast *= token_preference_model.config.fast_max_step / fast_norm
+    assert result.token_preference_result.new_z == pytest.approx(.8 * np.array((.2, .1)) + raw_slow)
+    assert result.token_preference_result.new_fast_z == pytest.approx(.5 * np.array((.1, .2)) + raw_fast)
     payload = result.to_dict()
     assert payload['group_update']['sampler_eligible'] is None  # No misleading first-token summary.
-    assert payload['latent_update']['sampler_probability'] is None
+    assert payload['token_preference_update']['sampler_probability'] is None
     assert [t['sampler_eligible'] for t in payload['tokens']] == [t != 3 for t in tokens]
     io = ScriptedIO([])
     _write_learning_notice(io, result)
@@ -148,17 +148,17 @@ def test_real_write_gate_observes_preceding_written_tokens():
         temperature=1, top_k=1, top_p=1, min_p=0))
     assert 2 not in runtime.observe().statistics.distribution.ids
     accumulator = _WriteLearningAccumulator(runtime.backend, runtime.sampling, None,
-        LatentPreferenceLearner(FEATURES, dimension=2, enabled=True, learning_gate='sampler'))
+        TokenPreferenceLearner(FEATURES, dimension=2, enabled=True, learning_gate='sampler'))
     runtime.apply(Write(' A B', 'exact'), on_precommit_observation=accumulator.add)
     result = accumulator.finish(runtime.boundary)
     assert [t.token_id for t in result.tokens] == [1, 2]
     assert all(t.sampler_eligible for t in result.tokens)
-    assert result.latent_result.learning_step_norm == 0
+    assert result.token_preference_result.learning_step_norm == 0
 
 
 def test_default_rank_behavior_and_disabled_learners_are_preserved():
     runtime = engine()
-    for learner in (OnlineLearner(enabled=True), LatentPreferenceLearner(FEATURES, enabled=True, dimension=2)):
+    for learner in (OnlineLearner(enabled=True), TokenPreferenceLearner(FEATURES, enabled=True, dimension=2)):
         result = learner.update(runtime.observe(), 3, runtime.sampling)
         assert result.learning_gate == 'rank' and result.sampler_eligible
         assert result.severity > 0 and result.update_norm > 0
@@ -169,10 +169,10 @@ def test_default_rank_behavior_and_disabled_learners_are_preserved():
 def test_cli_flags_validate_and_reach_both_learners(tmp_path):
     parser = build_parser()
     defaults = parser.parse_args([])
-    assert defaults.learning_gate == defaults.latent_learning_gate == 'rank'
-    args = parser.parse_args(['--learning-gate', 'sampler', '--latent-learning-gate', 'sampler'])
-    assert _latent_config_from_args(args).learning_gate == 'sampler'
-    for factory in (OnlineLearningConfig, LatentPreferenceConfig):
+    assert defaults.learning_gate == defaults.token_preference_learning_gate == 'rank'
+    args = parser.parse_args(['--learning-gate', 'sampler', '--token-preference-learning-gate', 'sampler'])
+    assert _token_preference_config_from_args(args).learning_gate == 'sampler'
+    for factory in (OnlineLearningConfig, TokenPreferenceConfig):
         with pytest.raises(EditorError, match='gate'):
             factory(learning_gate='unknown')
     io = ScriptedIO(['q', 'quit'])
@@ -180,19 +180,19 @@ def test_cli_flags_validate_and_reach_both_learners(tmp_path):
     with patch('trajectory_editor.episode_cli.TerminalIO', return_value=io), \
          patch('trajectory_editor.episode_cli._backend', return_value=backend), \
          patch('trajectory_editor.episode_cli.OnlineLearner', wraps=OnlineLearner) as group_spy, \
-         patch('trajectory_editor.episode_cli.LatentPreferenceLearner', wraps=LatentPreferenceLearner) as latent_spy:
+         patch('trajectory_editor.episode_cli.TokenPreferenceLearner', wraps=TokenPreferenceLearner) as token_preference_spy:
         assert main(['--model', str(tmp_path / 'model.gguf'), '--workspace', str(tmp_path / 'run.db'),
-                     '--new-prompt', 'P', '--online-learning', '--latent-preference', '--latent-dimension', '2',
-                     '--learning-gate', 'sampler', '--latent-learning-gate', 'sampler']) == 0
+                     '--new-prompt', 'P', '--online-learning', '--token-preference', '--token-preference-dimension', '2',
+                     '--learning-gate', 'sampler', '--token-preference-learning-gate', 'sampler']) == 0
     assert group_spy.call_args.kwargs['learning_gate'] == 'sampler'
-    assert latent_spy.call_args.kwargs['config'].learning_gate == 'sampler'
+    assert token_preference_spy.call_args.kwargs['config'].learning_gate == 'sampler'
 
 
 def test_single_update_notices_explain_gate():
     for settings, message in (({}, 'already eligible'), ({'top_k': 2}, 'excluded')):
         runtime = engine(**settings)
         io = ScriptedIO([])
-        group_model, latent_model = learners()
+        group_model, token_preference_model = learners()
         _online_learning_notice(io, group_model.update(runtime.observe(), 3, runtime.sampling))
-        _latent_preference_notice(io, latent_model.update(runtime.observe(), 3, runtime.sampling))
+        _token_preference_notice(io, token_preference_model.update(runtime.observe(), 3, runtime.sampling))
         assert all(message in line for line in io.output)

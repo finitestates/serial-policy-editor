@@ -1,4 +1,4 @@
-"""Experimental latent preference learning over fixed model token features."""
+"""Experimental token preference learning over fixed model token features."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from typing import Any
 import numpy as np
 
 from .domain import MAX_SEED, MIN_SEED, EditorError, SamplingConfig
-from .latent_features import (
-    DEFAULT_LATENT_DIMENSION,
+from .token_preference_features import (
+    DEFAULT_TOKEN_PREFERENCE_DIMENSION,
     DEFAULT_PROJECTION_SEED,
     coordinate_identity,
 )
@@ -74,7 +74,7 @@ def canonical_policy(base_probabilities, features, z):
 
 
 def canonical_policy_kl(base_probabilities, features, old_z, new_z) -> float:
-    """Measure exact ``KL(q_new || q_old)`` in a canonical latent policy."""
+    """Measure exact ``KL(q_new || q_old)`` in a canonical preference policy."""
     base = np.asarray(base_probabilities, dtype=np.float64)
     values = np.asarray(features, dtype=np.float64)
     old_vector = np.asarray(old_z, dtype=np.float64)
@@ -190,13 +190,13 @@ def _finite_number(value: Any, name: str, *, nonnegative: bool = False) -> float
 
 
 @dataclass(frozen=True)
-class LatentPreferenceConfig:
-    """Conservative controls for the optional latent learner."""
+class TokenPreferenceConfig:
+    """Conservative controls for the optional token preference learner."""
 
     enabled: bool = False
-    dimension: int = DEFAULT_LATENT_DIMENSION
+    dimension: int = DEFAULT_TOKEN_PREFERENCE_DIMENSION
     learning_rate: float = 0.05
-    latent_strength: float = 1.0
+    token_preference_strength: float = 1.0
     max_step: float = 0.25
     max_norm: float = 4.0
     projection_seed: int = DEFAULT_PROJECTION_SEED
@@ -216,7 +216,7 @@ class LatentPreferenceConfig:
     write_reduction: str = "sum"
     rejection_target: str = "proposal"
     learning_scheme: str = "sgd-v1"
-    latent_learning_scheme: str | None = None
+    token_preference_learning_scheme: str | None = None
     learning_metric: str = "euclidean"
     learning_kl: float = 0.05
     fast_learning_kl: float | None = None
@@ -227,64 +227,64 @@ class LatentPreferenceConfig:
 
     def __post_init__(self) -> None:
         if type(self.enabled) is not bool:
-            raise EditorError("latent preference enabled must be a boolean")
+            raise EditorError("token preference enabled must be a boolean")
         if self.learning_gate not in ("rank", "sampler"):
-            raise EditorError("latent learning gate must be rank or sampler")
-        if self.latent_learning_scheme is not None:
-            if self.learning_scheme != "sgd-v1" and self.learning_scheme != self.latent_learning_scheme:
-                raise EditorError("learning_scheme and latent_learning_scheme disagree")
-            object.__setattr__(self, "learning_scheme", self.latent_learning_scheme)
+            raise EditorError("token preference learning gate must be rank or sampler")
+        if self.token_preference_learning_scheme is not None:
+            if self.learning_scheme != "sgd-v1" and self.learning_scheme != self.token_preference_learning_scheme:
+                raise EditorError("learning_scheme and token_preference_learning_scheme disagree")
+            object.__setattr__(self, "learning_scheme", self.token_preference_learning_scheme)
         if self.learning_scheme not in ("sgd-v1", "fisher-kl-v2"):
-            raise EditorError("unsupported latent learning scheme")
+            raise EditorError("unsupported token preference learning scheme")
         if self.learning_metric not in ("euclidean", "fisher"):
-            raise EditorError("latent learning_metric must be euclidean or fisher")
+            raise EditorError("token preference learning_metric must be euclidean or fisher")
         if self.fisher_mode not in ("diagonal", "full"):
-            raise EditorError("latent fisher_mode must be diagonal or full")
+            raise EditorError("preference fisher_mode must be diagonal or full")
         validate_controls(self.decay_on, self.write_reduction, self.rejection_target)
         if type(self.dimension) is not int or self.dimension < 1:
-            raise EditorError("latent preference dimension must be positive")
-        _finite_number(self.learning_rate, "latent learning_rate", nonnegative=True)
-        _finite_number(self.latent_strength, "latent strength", nonnegative=True)
-        _finite_number(self.max_step, "latent max_step", nonnegative=True)
-        _finite_number(self.max_norm, "latent max_norm", nonnegative=True)
+            raise EditorError("token preference dimension must be positive")
+        _finite_number(self.learning_rate, "token preference learning_rate", nonnegative=True)
+        _finite_number(self.token_preference_strength, "preference strength", nonnegative=True)
+        _finite_number(self.max_step, "preference max_step", nonnegative=True)
+        _finite_number(self.max_norm, "preference max_norm", nonnegative=True)
         if (type(self.projection_seed) is not int
                 or not MIN_SEED <= self.projection_seed <= MAX_SEED):
-            raise EditorError("latent projection seed must be a signed 64-bit integer")
+            raise EditorError("preference projection seed must be a signed 64-bit integer")
         if type(self.no_severity_attenuation) is not bool:
-            raise EditorError("latent no_severity_attenuation must be a boolean")
+            raise EditorError("preference no_severity_attenuation must be a boolean")
         if type(self.fast_slow) is not bool:
-            raise EditorError("latent fast_slow must be a boolean")
+            raise EditorError("preference fast_slow must be a boolean")
         for name in ("severity_cap", "dead_zone_rank"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
-                raise EditorError(f"latent {name} must be a positive integer")
+                raise EditorError(f"preference {name} must be a positive integer")
         for name in ("decay", "fast_decay"):
-            value = _finite_number(getattr(self, name), f"latent {name}")
+            value = _finite_number(getattr(self, name), f"preference {name}")
             if not 0.0 <= value <= 1.0:
-                raise EditorError(f"latent {name} must be between 0 and 1")
-        _finite_number(self.rejection_strength, "latent rejection_strength", nonnegative=True)
-        _finite_number(self.learning_kl, "latent learning_kl", nonnegative=True)
+                raise EditorError(f"preference {name} must be between 0 and 1")
+        _finite_number(self.rejection_strength, "preference rejection_strength", nonnegative=True)
+        _finite_number(self.learning_kl, "token preference learning_kl", nonnegative=True)
         if self.fast_learning_kl is not None:
-            _finite_number(self.fast_learning_kl, "latent fast_learning_kl", nonnegative=True)
-        _finite_number(self.fisher_ridge, "latent fisher_ridge", nonnegative=True)
-        _finite_number(self.fisher_mass, "latent fisher_mass")
+            _finite_number(self.fast_learning_kl, "preference fast_learning_kl", nonnegative=True)
+        _finite_number(self.fisher_ridge, "preference fisher_ridge", nonnegative=True)
+        _finite_number(self.fisher_mass, "preference fisher_mass")
         if not 0.0 < self.fisher_mass <= 1.0:
-            raise EditorError("latent fisher_mass must be in (0, 1]")
+            raise EditorError("preference fisher_mass must be in (0, 1]")
         if type(self.fisher_max_support) is not int or self.fisher_max_support < 1:
-            raise EditorError("latent fisher_max_support must be positive")
+            raise EditorError("preference fisher_max_support must be positive")
         defaults = dict(fast_learning_rate=4.0 * self.learning_rate,
-                        fast_strength=0.5 * self.latent_strength,
+                        fast_strength=0.5 * self.token_preference_strength,
                         fast_max_step=self.max_step, fast_max_norm=min(1.0, self.max_norm))
         for name, default in defaults.items():
             value = default if getattr(self, name) is None else getattr(self, name)
-            _finite_number(value, f"latent {name}", nonnegative=True)
+            _finite_number(value, f"preference {name}", nonnegative=True)
             object.__setattr__(self, name, value)
         if self.fast_learning_kl is None:
             object.__setattr__(self, "fast_learning_kl", float(self.learning_kl))
 
 
 @dataclass(frozen=True)
-class LatentPreferenceResult:
-    """One attempted live latent correction and its diagnostics."""
+class TokenPreferenceResult:
+    """One attempted live token preference correction and its diagnostics."""
 
     sampling: SamplingConfig
     observation_boundary: int
@@ -356,20 +356,20 @@ class LatentPreferenceResult:
     learning_policy: str = "deployed"
     learning_policy_rank: int | None = None
     learning_policy_probability: float | None = None
-    latent_rank_before: int | None = None
-    latent_rank_after: int | None = None
-    latent_pre_post_kl: float = 0.0
-    latent_effective_logit_rms: float = 0.0
-    latent_top_logit_min: float = 0.0
-    latent_top_logit_max: float = 0.0
-    latent_effective_gain: float = 0.0
-    latent_user_multiplier: float = 1.0
-    latent_slow_raw_rms: float = 0.0
-    latent_fast_raw_rms: float = 0.0
-    latent_combined_raw_rms: float = 0.0
-    latent_deployment_kl: float = 0.0
-    latent_gain_capped: bool = False
-    latent_relative_fast_weight: float = 0.0
+    token_preference_rank_before: int | None = None
+    token_preference_rank_after: int | None = None
+    token_preference_pre_post_kl: float = 0.0
+    token_preference_effective_logit_rms: float = 0.0
+    token_preference_top_logit_min: float = 0.0
+    token_preference_top_logit_max: float = 0.0
+    token_preference_effective_gain: float = 0.0
+    token_preference_user_multiplier: float = 1.0
+    token_preference_slow_raw_rms: float = 0.0
+    token_preference_fast_raw_rms: float = 0.0
+    token_preference_combined_raw_rms: float = 0.0
+    token_preference_deployment_kl: float = 0.0
+    token_preference_gain_capped: bool = False
+    token_preference_relative_fast_weight: float = 0.0
 
     @property
     def updated_sampling(self) -> SamplingConfig:
@@ -445,24 +445,24 @@ class LatentPreferenceResult:
             "learning_policy": self.learning_policy,
             "learning_policy_rank": self.learning_policy_rank,
             "learning_policy_probability": self.learning_policy_probability,
-            "latent_rank_before": self.latent_rank_before,
-            "latent_rank_after": self.latent_rank_after,
-            "latent_pre_post_kl": self.latent_pre_post_kl,
-            "latent_effective_logit_rms": self.latent_effective_logit_rms,
-            "latent_top_logit_min": self.latent_top_logit_min,
-            "latent_top_logit_max": self.latent_top_logit_max,
-            "latent_effective_gain": self.latent_effective_gain,
-            "latent_user_multiplier": self.latent_user_multiplier,
-            "latent_slow_raw_rms": self.latent_slow_raw_rms,
-            "latent_fast_raw_rms": self.latent_fast_raw_rms,
-            "latent_combined_raw_rms": self.latent_combined_raw_rms,
-            "latent_deployment_kl": self.latent_deployment_kl,
-            "latent_gain_capped": self.latent_gain_capped,
-            "latent_relative_fast_weight": self.latent_relative_fast_weight,
+            "token_preference_rank_before": self.token_preference_rank_before,
+            "token_preference_rank_after": self.token_preference_rank_after,
+            "token_preference_pre_post_kl": self.token_preference_pre_post_kl,
+            "token_preference_effective_logit_rms": self.token_preference_effective_logit_rms,
+            "token_preference_top_logit_min": self.token_preference_top_logit_min,
+            "token_preference_top_logit_max": self.token_preference_top_logit_max,
+            "token_preference_effective_gain": self.token_preference_effective_gain,
+            "token_preference_user_multiplier": self.token_preference_user_multiplier,
+            "token_preference_slow_raw_rms": self.token_preference_slow_raw_rms,
+            "token_preference_fast_raw_rms": self.token_preference_fast_raw_rms,
+            "token_preference_combined_raw_rms": self.token_preference_combined_raw_rms,
+            "token_preference_deployment_kl": self.token_preference_deployment_kl,
+            "token_preference_gain_capped": self.token_preference_gain_capped,
+            "token_preference_relative_fast_weight": self.token_preference_relative_fast_weight,
         }
 
 
-class LatentPreferenceLearner:
+class TokenPreferenceLearner:
     """Update anonymous slow and optional fast memory over fixed token features.
 
     Both memories and their coordinate seed live in SamplingConfig. The current
@@ -475,16 +475,16 @@ class LatentPreferenceLearner:
         feature_matrix: np.ndarray | None = None,
         *,
         feature_provider: FeatureProvider | None = None,
-        config: LatentPreferenceConfig | None = None,
+        config: TokenPreferenceConfig | None = None,
         **settings: Any,
     ) -> None:
         if config is not None and settings:
-            raise TypeError("pass either config or latent-preference settings")
+            raise TypeError("pass either config or token-preference settings")
         if feature_matrix is None and feature_provider is None:
-            raise TypeError("latent preference requires fixed token features")
+            raise TypeError("token preference requires fixed token features")
         if feature_matrix is not None and feature_provider is not None:
             raise TypeError("pass either feature_matrix or feature_provider")
-        self.config = config or LatentPreferenceConfig(**settings)
+        self.config = config or TokenPreferenceConfig(**settings)
         self._feature_matrix = feature_matrix
         self._feature_provider = feature_provider
 
@@ -501,23 +501,23 @@ class LatentPreferenceLearner:
             assert self._feature_provider is not None
             kwargs = dict(
                 feature_dimension=dimension,
-                projection_seed=sampling.latent_projection_seed,
+                projection_seed=sampling.token_preference_projection_seed,
             )
-            if sampling.latent_feature_scheme != "random-projection-unit-v1":
+            if sampling.token_preference_feature_scheme != "random-projection-unit-v1":
                 kwargs.update(
-                    feature_scheme=sampling.latent_feature_scheme,
-                    whitening_ridge=sampling.latent_whitening_ridge,
+                    feature_scheme=sampling.token_preference_feature_scheme,
+                    whitening_ridge=sampling.token_preference_whitening_ridge,
                 )
             values = self._feature_provider(**kwargs)
         values = np.asarray(values, dtype=np.float32)
         expected = (vocabulary_size, dimension)
         if values.shape != expected:
             raise EditorError(
-                "latent token features must have shape "
+                "preference token features must have shape "
                 f"{expected}, got {values.shape}"
             )
         if not np.all(np.isfinite(values)):
-            raise EditorError("latent token features must be finite")
+            raise EditorError("preference token features must be finite")
         return values
 
     def _severity(self, policy_rank: int) -> float:
@@ -580,7 +580,7 @@ class LatentPreferenceLearner:
         try:
             natural = np.linalg.solve(damped, direction)
         except np.linalg.LinAlgError as exc:
-            raise EditorError("latent Fisher solve failed") from exc
+            raise EditorError("preference Fisher solve failed") from exc
         eigenvalues = np.linalg.eigvalsh(damped)
         smallest = max(float(np.min(eigenvalues)), np.finfo(np.float64).tiny)
         condition = float(np.max(eigenvalues) / smallest)
@@ -596,9 +596,9 @@ class LatentPreferenceLearner:
         """
         if not self.config.fast_slow:
             return 0.0
-        if not sampling.latent_preference_fast_z:
+        if not sampling.token_preference_fast_vector:
             return float(self.config.fast_strength)
-        return float(sampling.latent_fast_strength)
+        return float(sampling.token_preference_fast_strength)
 
     def _v2_direction(
         self, features, statistics, canonical_z, chosen_token_id, proposal, rejected,
@@ -609,7 +609,7 @@ class LatentPreferenceLearner:
             dtype=np.float64,
         )
         if probabilities.shape != (features.shape[0],):
-            base = np.asarray(statistics.pre_latent_logits, dtype=np.float64)
+            base = np.asarray(statistics.preference_base_logits, dtype=np.float64)
             canonical_logits = base.copy()
             if canonical_z.size:
                 canonical_logits += np.asarray(features @ canonical_z, dtype=np.float64)
@@ -667,7 +667,7 @@ class LatentPreferenceLearner:
         observation,
         chosen_token_id: int,
         sampling: SamplingConfig,
-    ) -> LatentPreferenceResult:
+    ) -> TokenPreferenceResult:
         if type(chosen_token_id) is not int or not 0 <= chosen_token_id < len(
             observation.logits
         ):
@@ -684,13 +684,13 @@ class LatentPreferenceLearner:
                     else self._severity(old_policy_rank))
         loss = self._loss(old_policy_probability)
         dimension = len(
-            sampling.latent_preference_z or sampling.latent_preference_fast_z
+            sampling.token_preference_vector or sampling.token_preference_fast_vector
         ) or self.config.dimension
-        old_z = np.asarray(sampling.latent_preference_z, dtype=np.float64)
+        old_z = np.asarray(sampling.token_preference_vector, dtype=np.float64)
         if old_z.size == 0:
             old_z = np.zeros(dimension, dtype=np.float64)
 
-        features = getattr(statistics, "latent_features", None)
+        features = getattr(statistics, "token_preference_features", None)
         if features is None:
             features = self._features(len(observation.logits), sampling, dimension)
         else:
@@ -698,7 +698,7 @@ class LatentPreferenceLearner:
             expected = (len(observation.logits), dimension)
             if features.shape != expected:
                 raise EditorError(
-                    "observation latent features do not match learner dimension"
+                    "observation token preference features do not match learner dimension"
                 )
         # Persist the exact basis identity alongside newly learned memory.  A
         # later scheme/seed/ridge change can then reset this memory instead of
@@ -706,39 +706,39 @@ class LatentPreferenceLearner:
         provider_identity = None
         if self._feature_provider is not None:
             owner = getattr(self._feature_provider, "__self__", None)
-            identity_method = getattr(owner, "latent_coordinate_identity", None)
+            identity_method = getattr(owner, "token_preference_coordinate_identity", None)
             if callable(identity_method):
                 provider_identity = identity_method(
                     feature_dimension=features.shape[1],
-                    projection_seed=sampling.latent_projection_seed,
-                    feature_scheme=sampling.latent_feature_scheme,
-                    whitening_ridge=sampling.latent_whitening_ridge,
+                    projection_seed=sampling.token_preference_projection_seed,
+                    feature_scheme=sampling.token_preference_feature_scheme,
+                    whitening_ridge=sampling.token_preference_whitening_ridge,
                 )
-        current_identity = getattr(statistics, "latent_coordinate_identity", None) or provider_identity or coordinate_identity(
+        current_identity = getattr(statistics, "token_preference_coordinate_identity", None) or provider_identity or coordinate_identity(
             dimension=features.shape[1],
-            projection_seed=sampling.latent_projection_seed,
-            feature_scheme=sampling.latent_feature_scheme,
-            whitening_ridge=sampling.latent_whitening_ridge,
+            projection_seed=sampling.token_preference_projection_seed,
+            feature_scheme=sampling.token_preference_feature_scheme,
+            whitening_ridge=sampling.token_preference_whitening_ridge,
         )
-        latent_before_logits = np.asarray(
-            getattr(statistics, "pre_latent_logits", statistics.logits),
+        token_preference_before_logits = np.asarray(
+            getattr(statistics, "preference_base_logits", statistics.logits),
             dtype=np.float64,
         )
-        latent_after_logits = latent_before_logits + np.asarray(
-            getattr(statistics, "latent_logit_adjustments", np.zeros(len(latent_before_logits))),
+        token_preference_after_logits = token_preference_before_logits + np.asarray(
+            getattr(statistics, "token_preference_logit_adjustments", np.zeros(len(token_preference_before_logits))),
             dtype=np.float64,
         )
-        latent_rank_before = 1 + int(np.count_nonzero(
-            latent_before_logits > latent_before_logits[chosen_token_id]
+        token_preference_rank_before = 1 + int(np.count_nonzero(
+            token_preference_before_logits > token_preference_before_logits[chosen_token_id]
         )) + int(np.count_nonzero(
-            latent_before_logits[:chosen_token_id] == latent_before_logits[chosen_token_id]
+            token_preference_before_logits[:chosen_token_id] == token_preference_before_logits[chosen_token_id]
         ))
-        latent_rank_after = 1 + int(np.count_nonzero(
-            latent_after_logits > latent_after_logits[chosen_token_id]
+        token_preference_rank_after = 1 + int(np.count_nonzero(
+            token_preference_after_logits > token_preference_after_logits[chosen_token_id]
         )) + int(np.count_nonzero(
-            latent_after_logits[:chosen_token_id] == latent_after_logits[chosen_token_id]
+            token_preference_after_logits[:chosen_token_id] == token_preference_after_logits[chosen_token_id]
         ))
-        latent_diagnostics = getattr(statistics, "latent_diagnostics", {})
+        token_preference_diagnostics = getattr(statistics, "token_preference_diagnostics", {})
         proposal = observation.proposal_token_id
         rejected = proposal != chosen_token_id
         scheme = (
@@ -746,12 +746,12 @@ class LatentPreferenceLearner:
             if self.config.learning_metric == "fisher"
             else self.config.learning_scheme
         )
-        if scheme == "sgd-v1" and sampling.latent_learning_scheme != "sgd-v1":
+        if scheme == "sgd-v1" and sampling.token_preference_learning_scheme != "sgd-v1":
             # A restored v2 state remains v2 even when a caller constructs a
             # learner with only its legacy defaults.
-            scheme = sampling.latent_learning_scheme
+            scheme = sampling.token_preference_learning_scheme
         old_fast_z = np.asarray(
-            sampling.latent_preference_fast_z or (0.0,) * dimension,
+            sampling.token_preference_fast_vector or (0.0,) * dimension,
             dtype=np.float64,
         )
         fast_relative_weight = self._fast_relative_weight(sampling)
@@ -808,7 +808,7 @@ class LatentPreferenceLearner:
                 if requested_learning_kl > 0.0 and approximate > 1.0e-24 else 0.0
             )
             alpha, exact_learning_kl, predicted_fisher_kl, kl_line_search_iterations = exact_kl_line_search(
-                statistics.pre_latent_probabilities,
+                statistics.preference_base_probabilities,
                 features,
                 canonical_z,
                 effective_direction,
@@ -875,7 +875,7 @@ class LatentPreferenceLearner:
             measured_delta = (new_z - old_z) if norm_clipped else learning_delta
             measured_state = canonical_z + measured_delta
             exact_learning_kl = canonical_policy_kl(
-                statistics.pre_latent_probabilities,
+                statistics.preference_base_probabilities,
                 features,
                 canonical_z,
                 measured_state,
@@ -896,7 +896,7 @@ class LatentPreferenceLearner:
                 fast_requested_learning_kl = fast_target
                 fast_direction = fast_relative_weight * severity * natural
                 fast_alpha, _fast_exact, _fast_predicted, _fast_iterations = exact_kl_line_search(
-                    statistics.pre_latent_probabilities,
+                    statistics.preference_base_probabilities,
                     features,
                     canonical_z,
                     fast_direction,
@@ -927,7 +927,7 @@ class LatentPreferenceLearner:
                 )
                 fast_canonical_delta = fast_relative_weight * fast_measured_delta
                 fast_exact_learning_kl = canonical_policy_kl(
-                    statistics.pre_latent_probabilities,
+                    statistics.preference_base_probabilities,
                     features,
                     canonical_z,
                     canonical_z + fast_canonical_delta,
@@ -936,36 +936,36 @@ class LatentPreferenceLearner:
                     fast_canonical_delta @ fisher @ fast_canonical_delta
                 )
         fast_tuple = (tuple(float(v) for v in new_fast_z)
-                      if sampling.latent_preference_fast_z or np.any(new_fast_z) else ())
+                      if sampling.token_preference_fast_vector or np.any(new_fast_z) else ())
         # Keep a zero-initialized learner inactive until it has a nonzero
         # correction, avoiding unnecessary embedding materialization.
-        if not sampling.latent_preference_z and not np.any(new_z):
+        if not sampling.token_preference_vector and not np.any(new_z):
             new_z_tuple: tuple[float, ...] = ()
         else:
             new_z_tuple = tuple(float(value) for value in new_z)
         state_identity = (
             current_identity
             if self.enabled and (new_z_tuple or fast_tuple)
-            else sampling.latent_coordinate_identity
+            else sampling.token_preference_coordinate_identity
         )
         effective_strength = (
-            self.config.latent_strength
+            self.config.token_preference_strength
             if self.enabled
-            else sampling.latent_strength
+            else sampling.token_preference_strength
         )
         updated = replace(
             sampling,
-            latent_preference_z=new_z_tuple,
-            latent_strength=effective_strength,
-            latent_learning_scheme=(scheme if self.enabled else sampling.latent_learning_scheme),
-            latent_preference_fast_z=fast_tuple,
-            latent_coordinate_identity=state_identity,
-            latent_fast_strength=(self.config.fast_strength
+            token_preference_vector=new_z_tuple,
+            token_preference_strength=effective_strength,
+            token_preference_learning_scheme=(scheme if self.enabled else sampling.token_preference_learning_scheme),
+            token_preference_fast_vector=fast_tuple,
+            token_preference_coordinate_identity=state_identity,
+            token_preference_fast_strength=(self.config.fast_strength
                                   if self.enabled and self.config.fast_slow
-                                  else sampling.latent_fast_strength),
+                                  else sampling.token_preference_fast_strength),
         )
         actual_delta = new_z - old_z
-        return LatentPreferenceResult(
+        return TokenPreferenceResult(
             sampling=updated,
             observation_boundary=observation.boundary,
             chosen_token_id=chosen_token_id,
@@ -1001,7 +1001,7 @@ class LatentPreferenceLearner:
             fast_update_norm=float(np.linalg.norm(new_fast_z - old_fast_z)),
             fast_z_norm=float(np.linalg.norm(new_fast_z)) if self.config.fast_slow else 0.0,
             fast_decay=self.config.fast_decay if self.config.fast_slow else 0.0,
-            fast_strength=updated.latent_fast_strength if self.config.fast_slow else 0.0,
+            fast_strength=updated.token_preference_fast_strength if self.config.fast_slow else 0.0,
             fast_learning_delta=tuple(float(v) for v in fast_learning_delta) if self.config.fast_slow else (),
             fast_learning_step_norm=float(np.linalg.norm(fast_learning_delta)),
             fast_decay_norm=fast_decay_norm,
@@ -1029,7 +1029,7 @@ class LatentPreferenceLearner:
                 if scheme == "fisher-kl-v2" and fisher is not None else ()
             ),
             canonical_base_probabilities=tuple(
-                float(v) for v in statistics.pre_latent_probabilities
+                float(v) for v in statistics.preference_base_probabilities
             ) if scheme == "fisher-kl-v2" else (),
             pairwise_margin=pair_margin,
             pairwise_loss=pair_loss,
@@ -1041,20 +1041,20 @@ class LatentPreferenceLearner:
             learning_policy=learning_policy,
             learning_policy_rank=learning_policy_rank,
             learning_policy_probability=learning_policy_probability,
-            latent_rank_before=latent_rank_before,
-            latent_rank_after=latent_rank_after,
-            latent_pre_post_kl=float(latent_diagnostics.get("pre_post_latent_kl", 0.0)),
-            latent_effective_logit_rms=float(latent_diagnostics.get("effective_logit_rms", 0.0)),
-            latent_top_logit_min=float(latent_diagnostics.get("top_latent_logit_min", 0.0)),
-            latent_top_logit_max=float(latent_diagnostics.get("top_latent_logit_max", 0.0)),
-            latent_effective_gain=float(latent_diagnostics.get("effective_gain", 0.0)),
-            latent_user_multiplier=float(latent_diagnostics.get("user_multiplier", 1.0)),
-            latent_slow_raw_rms=float(latent_diagnostics.get("slow_raw_logit_rms", 0.0)),
-            latent_fast_raw_rms=float(latent_diagnostics.get("fast_raw_logit_rms", 0.0)),
-            latent_combined_raw_rms=float(latent_diagnostics.get("combined_raw_logit_rms", 0.0)),
-            latent_deployment_kl=float(latent_diagnostics.get("deployment_kl", 0.0)),
-            latent_gain_capped=bool(latent_diagnostics.get("gain_capped", False)),
-            latent_relative_fast_weight=float(latent_diagnostics.get("relative_fast_weight", 0.0)),
+            token_preference_rank_before=token_preference_rank_before,
+            token_preference_rank_after=token_preference_rank_after,
+            token_preference_pre_post_kl=float(token_preference_diagnostics.get("pre_post_token_preference_kl", 0.0)),
+            token_preference_effective_logit_rms=float(token_preference_diagnostics.get("effective_logit_rms", 0.0)),
+            token_preference_top_logit_min=float(token_preference_diagnostics.get("top_token_preference_logit_min", 0.0)),
+            token_preference_top_logit_max=float(token_preference_diagnostics.get("top_token_preference_logit_max", 0.0)),
+            token_preference_effective_gain=float(token_preference_diagnostics.get("effective_gain", 0.0)),
+            token_preference_user_multiplier=float(token_preference_diagnostics.get("user_multiplier", 1.0)),
+            token_preference_slow_raw_rms=float(token_preference_diagnostics.get("slow_raw_logit_rms", 0.0)),
+            token_preference_fast_raw_rms=float(token_preference_diagnostics.get("fast_raw_logit_rms", 0.0)),
+            token_preference_combined_raw_rms=float(token_preference_diagnostics.get("combined_raw_logit_rms", 0.0)),
+            token_preference_deployment_kl=float(token_preference_diagnostics.get("deployment_kl", 0.0)),
+            token_preference_gain_capped=bool(token_preference_diagnostics.get("gain_capped", False)),
+            token_preference_relative_fast_weight=float(token_preference_diagnostics.get("relative_fast_weight", 0.0)),
         )
 
     def _channel(self, old_z, raw_delta, decay, max_step, max_norm):
@@ -1078,12 +1078,12 @@ class LatentPreferenceLearner:
 
     def aggregate(
         self,
-        results: list[LatentPreferenceResult],
+        results: list[TokenPreferenceResult],
         sampling: SamplingConfig,
         *,
         base_probabilities=None,
         features=None,
-    ) -> LatentPreferenceResult:
+    ) -> TokenPreferenceResult:
         """Reduce a Write's token evidence, then clip and conditionally decay once."""
         first = results[0]
         scale, evidence_tokens = write_scale(self.config.write_reduction, results)
@@ -1218,21 +1218,21 @@ class LatentPreferenceLearner:
                     )
             z = (
                 tuple(float(v) for v in new_z)
-                if sampling.latent_preference_z or np.any(new_z) else ()
+                if sampling.token_preference_vector or np.any(new_z) else ()
             )
             fast_tuple = (
                 tuple(float(v) for v in fast_z)
-                if sampling.latent_preference_fast_z or np.any(fast_z) else ()
+                if sampling.token_preference_fast_vector or np.any(fast_z) else ()
             )
             updated = replace(
                 sampling,
-                latent_preference_z=z,
-                latent_preference_fast_z=fast_tuple,
-                latent_learning_scheme=(
+                token_preference_vector=z,
+                token_preference_fast_vector=fast_tuple,
+                token_preference_learning_scheme=(
                     "fisher-kl-v2" if self.enabled
-                    else sampling.latent_learning_scheme
+                    else sampling.token_preference_learning_scheme
                 ),
-                latent_coordinate_identity=first.sampling.latent_coordinate_identity,
+                token_preference_coordinate_identity=first.sampling.token_preference_coordinate_identity,
             )
             pair_margins = [
                 r.pairwise_margin for r in admitted
@@ -1304,13 +1304,13 @@ class LatentPreferenceLearner:
         old_z = np.asarray(first.old_z)
         new_z, step, decay_norm = self._channel(
             old_z, evidence, effective_decay, self.config.max_step, self.config.max_norm)
-        z = tuple(float(v) for v in new_z) if sampling.latent_preference_z or np.any(new_z) else ()
+        z = tuple(float(v) for v in new_z) if sampling.token_preference_vector or np.any(new_z) else ()
         updated = replace(
             first.sampling,
-            latent_preference_z=z,
-            latent_learning_scheme=(
+            token_preference_vector=z,
+            token_preference_learning_scheme=(
                 first.learning_scheme
-                if self.enabled else first.sampling.latent_learning_scheme
+                if self.enabled else first.sampling.token_preference_learning_scheme
             ),
         )
         extra = {}
@@ -1320,8 +1320,8 @@ class LatentPreferenceLearner:
             new_fast, fast_step, fast_decay_norm = self._channel(
                 old_fast, fast_evidence, effective_fast_decay,
                 self.config.fast_max_step, self.config.fast_max_norm)
-            fast_z = tuple(float(v) for v in new_fast) if sampling.latent_preference_fast_z or np.any(new_fast) else ()
-            updated = replace(updated, latent_preference_fast_z=fast_z)
+            fast_z = tuple(float(v) for v in new_fast) if sampling.token_preference_fast_vector or np.any(new_fast) else ()
+            updated = replace(updated, token_preference_fast_vector=fast_z)
             extra = dict(new_fast_z=fast_z, fast_delta=tuple(new_fast - old_fast),
                          fast_update_norm=float(np.linalg.norm(new_fast - old_fast)),
                          fast_z_norm=float(np.linalg.norm(new_fast)),

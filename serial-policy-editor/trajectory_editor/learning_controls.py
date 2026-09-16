@@ -1,4 +1,4 @@
-"""Shared experiment semantics for the group and latent teacher learners."""
+"""Shared experiment semantics for the group and preference teacher learners."""
 
 import math
 

@@ -7,7 +7,7 @@ and numeric configuration validation; quality still needs real-model trials.
 
 The main distinction: appearance objectives keep working during `h` holds;
 teacher learners update on live rank selections, plus typed writes only when
-enabled. Online learning fits named manual groups; latent learning spreads
+enabled. Online learning fits named manual groups; token preference learning spreads
 preferences through model token features, so its effects can reach words you
 never put in a group.
 
@@ -188,37 +188,37 @@ corrections. If 03 feels inert and this works, severity attenuation is a better
 first suspect than the step limit. Watch for one group dominating after a few
 choices.
 
-## Shared latent settings for 05–16
+## Shared preference settings for 05–16
 
 ```bash
-LATENT=(
-  --latent-preference
-  --latent-dimension 64          # length of preference memory / token features
-  --latent-seed 9137             # fixed feature-projection seed, separate from sampler seed
-  --latent-learning-rate 0.05    # amount of new preference evidence
-  --latent-strength 1           # how strongly stored memory changes logits
-  --latent-max-step 0.25         # cap on one slow-memory learning step's vector length
-  --latent-max-norm 4            # cap on total slow-memory vector length
-  --latent-decay 0               # fraction of old slow memory forgotten per learning update
-  --latent-dead-zone-rank 1      # no new learning evidence for policy rank 1
-  --latent-severity-cap 1000     # scale at which rank correction reaches full severity
-  --latent-rejection-strength 0 # no extra negative-proposal term
+TOKEN_PREFERENCE=(
+  --token-preference
+  --token-preference-dimension 64          # length of preference memory / token features
+  --token-preference-projection-seed 9137   # fixed feature-projection seed, separate from sampler seed
+  --token-preference-learning-rate 0.05    # amount of new preference evidence
+  --token-preference-strength 1           # how strongly stored memory changes logits
+  --token-preference-max-step 0.25         # cap on one slow-memory learning step's vector length
+  --token-preference-max-norm 4            # cap on total slow-memory vector length
+  --token-preference-decay 0               # fraction of old slow memory forgotten per learning update
+  --token-preference-dead-zone-rank 1      # no new learning evidence for policy rank 1
+  --token-preference-severity-cap 1000     # scale at which rank correction reaches full severity
+  --token-preference-rejection-strength 0 # no extra negative-proposal term
 )
 ```
 
 Later flags override earlier scalar values, so each recipe below shows its
-changes to this shared baseline. Latent step/norm limits are vector lengths,
+changes to this shared baseline. token preference step/norm limits are vector lengths,
 not per-token logit limits. Strength changes influence, learning rate changes
 acquisition; they aren't interchangeable in a running policy.
 
-## 05 — Conservative latent learner
+## 05 — Conservative token preference learner
 
 ```bash
-trial 05-latent-default "${LATENT[@]}"
+trial 05-token-preference-default "${TOKEN_PREFERENCE[@]}"
 ```
 
 **Expect:** subtle, accumulating effects after repeated deliberate choices.
-This is the baseline for all the following latent comparisons. Generalization
+This is the baseline for all the following preference comparisons. Generalization
 can be useful or surprising: token-feature similarity does not guarantee the
 specific stylistic similarity you had in mind.
 
@@ -226,7 +226,7 @@ specific stylistic similarity you had in mind.
 
 ```bash
 # Only lower the severity scale from 1000 to 50.
-trial 06-latent-sensitive "${LATENT[@]}" --latent-severity-cap 50
+trial 06-token-preference-sensitive "${TOKEN_PREFERENCE[@]}" --token-preference-severity-cap 50
 ```
 
 **Expect:** faster response to normal candidate-list corrections, without making
@@ -238,7 +238,7 @@ versus about 0.57. This is my first adjustment if the default feels too quiet.
 
 ```bash
 # Only remove severity attenuation. Policy rank 1 still produces no evidence.
-trial 07-latent-full "${LATENT[@]}" --latent-no-severity-attenuation
+trial 07-token-preference-full "${TOKEN_PREFERENCE[@]}" --token-preference-no-severity-attenuation
 ```
 
 **Expect:** the strongest response of 05/06/07 to near-top choices. Useful for
@@ -251,8 +251,8 @@ the 0.25 step and 4 total-memory limits.
 ```bash
 # Compare with 06. 0.5 adds half-strength negative-proposal evidence
 # when your chosen token differs from the sampler's proposal.
-trial 08-latent-rejection "${LATENT[@]}" \
-  --latent-severity-cap 50 --latent-rejection-strength 0.5
+trial 08-token-preference-rejection "${TOKEN_PREFERENCE[@]}" \
+  --token-preference-severity-cap 50 --token-preference-rejection-strength 0.5
 ```
 
 **Expect:** more decisive movement away from recurring unwanted proposals.
@@ -267,11 +267,11 @@ often you correct the same tendency again, and whether coherence suffers.
 # Compare with 06. Keep its slow channel and add a fast channel:
 # 0.20 = four times the slow learning rate; 0.10 = forget 10% per update;
 # 0.5 = fast memory's logit strength; 0.25 / 1 = fast step / total norm caps.
-trial 09-latent-fast-slow "${LATENT[@]}" \
-  --latent-severity-cap 50 --latent-fast-slow \
-  --latent-fast-learning-rate 0.20 --latent-fast-decay 0.10 \
-  --latent-fast-strength 0.5 --latent-fast-max-step 0.25 \
-  --latent-fast-max-norm 1
+trial 09-token-preference-fast-slow "${TOKEN_PREFERENCE[@]}" \
+  --token-preference-severity-cap 50 --token-preference-fast-slow \
+  --token-preference-fast-learning-rate 0.20 --token-preference-fast-decay 0.10 \
+  --token-preference-fast-strength 0.5 --token-preference-fast-max-step 0.25 \
+  --token-preference-fast-max-norm 1
 ```
 
 **Expect:** recent preferences take effect sooner while slower accumulated taste
@@ -284,11 +284,11 @@ just because you generated 7 tokens, ran a hold, or waited.**
 
 ```bash
 # Exactly 09, plus permission to learn from live t/x writes.
-trial 10-latent-writes "${LATENT[@]}" \
-  --latent-severity-cap 50 --latent-fast-slow \
-  --latent-fast-learning-rate 0.20 --latent-fast-decay 0.10 \
-  --latent-fast-strength 0.5 --latent-fast-max-step 0.25 \
-  --latent-fast-max-norm 1 --learn-from-write
+trial 10-token-preference-writes "${TOKEN_PREFERENCE[@]}" \
+  --token-preference-severity-cap 50 --token-preference-fast-slow \
+  --token-preference-fast-learning-rate 0.20 --token-preference-fast-decay 0.10 \
+  --token-preference-fast-strength 0.5 --token-preference-fast-max-step 0.25 \
+  --token-preference-fast-max-norm 1 --learn-from-write
 ```
 
 **Expect:** your inserted prose can teach local wording preferences without
@@ -297,14 +297,14 @@ whole write is summed, then clipped and decayed once: a long paste is not a
 proportionally larger guaranteed lesson and can hit the step cap. For a fair
 09/10 comparison, type the same spans in both; only 10 learns from them.
 
-## 11 — Combined: atmosphere objective + motion fitter + latent memory
+## 11 — Combined: atmosphere objective + motion fitter + token preference memory
 
 ```bash
 # Deliberately give each system a different role.
 # Atmosphere: adaptive 2x baseline-odds objective, activated below.
 # Motion: online manual fitter, rate 0.05, step 0.25, bounds +/-4,
 #         full severity outside policy rank 1, no rejection or decay.
-# Latent: recipe 09, for preferences beyond these named groups.
+# token preference: recipe 09, for preferences beyond these named groups.
 trial 11-combined --groups config-trials/groups.yaml \
   --group-level 1 \
   --online-learning --learnable-groups motion \
@@ -312,20 +312,20 @@ trial 11-combined --groups config-trials/groups.yaml \
   --learning-min-bias -4 --learning-max-bias 4 \
   --learning-dead-zone-rank 1 --learning-no-severity-attenuation \
   --learning-rejection-strength 0 --learning-decay 0 \
-  "${LATENT[@]}" --latent-severity-cap 50 --latent-fast-slow \
-  --latent-fast-learning-rate 0.20 --latent-fast-decay 0.10 \
-  --latent-fast-strength 0.5 --latent-fast-max-step 0.25 \
-  --latent-fast-max-norm 1
+  "${TOKEN_PREFERENCE[@]}" --token-preference-severity-cap 50 --token-preference-fast-slow \
+  --token-preference-fast-learning-rate 0.20 --token-preference-fast-decay 0.10 \
+  --token-preference-fast-strength 0.5 --token-preference-fast-max-step 0.25 \
+  --token-preference-fast-max-norm 1
 ```
 
 Inside SPE, enter `b atmosphere +` and `b motion learn on`, then teach through
 rank selections. Don't activate a motion appearance objective: that would exclude motion from
 the fitter. **Expect:** atmosphere survives unattended holds, motion learns your
-choice of action words, and latent memory generalizes your other preferences.
+choice of action words, and token preference memory generalizes your other preferences.
 This is the integration trial after the isolated ones, with the greatest chance
 of systems amplifying or counteracting one another. It isn't a clean one-dial
 comparison with 09. If it feels oversteered, first repeat it with
-`--latent-strength 0.5 --latent-fast-strength 0.25` to test reduced latent influence.
+`--token-preference-strength 0.5 --token-preference-fast-strength 0.25` to test reduced token preference influence.
 
 ## 12 — Bonus: relative lexical taste, without learning
 
@@ -356,14 +356,14 @@ If the isolated result is useful, add the light reference to 11 in a new run.
 ```bash
 # Your fixed-rank gate: ignore policy ranks 1–5, learn fully beyond them,
 # with a chosen-versus-proposed feature direction when they differ.
-trial 13-rank-gate "${LATENT[@]}" \
-  --latent-dead-zone-rank 5 --latent-no-severity-attenuation \
-  --latent-rejection-strength 1
+trial 13-rank-gate "${TOKEN_PREFERENCE[@]}" \
+  --token-preference-dead-zone-rank 5 --token-preference-no-severity-attenuation \
+  --token-preference-rejection-strength 1
 
 # Replace that cutoff with actual sampler eligibility. The other launch
-# settings, including sampler seed and latent memory limits, stay the same.
-trial 13-sampler-gate "${LATENT[@]}" \
-  --latent-learning-gate sampler --latent-rejection-strength 1
+# settings, including sampler seed and token preference memory limits, stay the same.
+trial 13-sampler-gate "${TOKEN_PREFERENCE[@]}" \
+  --token-preference-learning-gate sampler --token-preference-rejection-strength 1
 ```
 
 **Expect:** the second run learns from tokens your sampler could not emit, while
@@ -391,13 +391,13 @@ with the entire vocabulary eligible, this mode supplies no new evidence.
 # Slow decay 0; fast decay 0.10 forgets 10% of old fast memory WHEN triggered.
 # Fast rate 0.20, strength 0.50, max step 0.25, max norm 1.0.
 DECAY_TRIAL=(
-  "${LATENT[@]}" --latent-learning-gate sampler --latent-rejection-strength 1
-  --latent-fast-slow --latent-fast-learning-rate 0.20 --latent-fast-decay 0.10
-  --latent-fast-strength 0.50 --latent-fast-max-step 0.25 --latent-fast-max-norm 1.0
+  "${TOKEN_PREFERENCE[@]}" --token-preference-learning-gate sampler --token-preference-rejection-strength 1
+  --token-preference-fast-slow --token-preference-fast-learning-rate 0.20 --token-preference-fast-decay 0.10
+  --token-preference-fast-strength 0.50 --token-preference-fast-max-step 0.25 --token-preference-fast-max-norm 1.0
 )
-trial 14-decay-update "${DECAY_TRIAL[@]}" --latent-decay-on update
-trial 14-decay-rejection "${DECAY_TRIAL[@]}" --latent-decay-on rejection
-trial 14-decay-evidence "${DECAY_TRIAL[@]}" --latent-decay-on evidence
+trial 14-decay-update "${DECAY_TRIAL[@]}" --token-preference-decay-on update
+trial 14-decay-rejection "${DECAY_TRIAL[@]}" --token-preference-decay-on rejection
+trial 14-decay-evidence "${DECAY_TRIAL[@]}" --token-preference-decay-on evidence
 ```
 
 **Expect:** `update` forgets on every teaching action as before. `rejection`
@@ -419,12 +419,12 @@ with `--learning-decay-on update`; use the same `b GROUP learn on` setup.
 # Same gate and rejection strength, with no decay in this comparison.
 # N counts only written tokens admitted by the gate; agreements/skips don't dilute.
 WRITE_TRIAL=(
-  "${LATENT[@]}" --latent-learning-gate sampler --latent-rejection-strength 1
+  "${TOKEN_PREFERENCE[@]}" --token-preference-learning-gate sampler --token-preference-rejection-strength 1
   --learn-from-write
 )
-trial 15-write-sum "${WRITE_TRIAL[@]}" --latent-write-reduction sum
-trial 15-write-sqrt "${WRITE_TRIAL[@]}" --latent-write-reduction sqrt
-trial 15-write-mean "${WRITE_TRIAL[@]}" --latent-write-reduction mean
+trial 15-write-sum "${WRITE_TRIAL[@]}" --token-preference-write-reduction sum
+trial 15-write-sqrt "${WRITE_TRIAL[@]}" --token-preference-write-reduction sqrt
+trial 15-write-mean "${WRITE_TRIAL[@]}" --token-preference-write-reduction mean
 ```
 
 **Expect:** `sum` gives a longer correction more influence until clipping caps it;
@@ -441,12 +441,12 @@ as atomic units. Manual group equivalents use `--learning-write-reduction`.
 ```bash
 # Rejection strength 1 is essential here: at 0 the target has no effect.
 # Both runs learn only excluded teacher choices, with the same update limits.
-trial 16-target-proposal "${LATENT[@]}" \
-  --latent-learning-gate sampler --latent-rejection-strength 1 \
-  --latent-rejection-target proposal
-trial 16-target-sampler "${LATENT[@]}" \
-  --latent-learning-gate sampler --latent-rejection-strength 1 \
-  --latent-rejection-target sampler
+trial 16-target-proposal "${TOKEN_PREFERENCE[@]}" \
+  --token-preference-learning-gate sampler --token-preference-rejection-strength 1 \
+  --token-preference-rejection-target proposal
+trial 16-target-sampler "${TOKEN_PREFERENCE[@]}" \
+  --token-preference-learning-gate sampler --token-preference-rejection-strength 1 \
+  --token-preference-rejection-target sampler
 ```
 
 **Expect:** `proposal` contrasts your correction with the one token drawn.
@@ -472,11 +472,11 @@ the previous behavior by default (`update`, `sum`, `proposal`).
    after divergence those numbers can name different words.
 3. Use the same prompt and sampler seed for the first pass. Repeat favorites
    with `--seed 74` and `--seed 75` appended to their `trial` commands. Keep
-   `--latent-seed 9137` fixed so you aren't changing two random systems at once.
+   `--token-preference-projection-seed 9137` fixed so you aren't changing two random systems at once.
 4. Report the trial name, approximately how many corrections it needed, whether
    your preferred style survived the long hold, unwanted repetition/wording,
    and whether teaching felt slower. For group trials, include `b` diagnostics;
-   for latent trials, note whether memory norms plateaued near their caps.
+   for preference trials, note whether memory norms plateaued near their caps.
 
 Rank severity uses the **adjusted policy rank**, even though you choose tokens
 by raw rank. With dead zone `d` and severity scale `c`, it is zero at ranks
@@ -493,9 +493,9 @@ but isn't a complete record of your learner launch settings; retain the command.
 To save a favorite result, find its episode number with `--list`, then export:
 
 ```bash
-policy-editor --workspace config-trials/09-latent-fast-slow.sqlite3 --list
+policy-editor --workspace config-trials/09-token-preference-fast-slow.sqlite3 --list
 # Replace '#1' below with the episode you actually want.
-policy-editor --workspace config-trials/09-latent-fast-slow.sqlite3 \
+policy-editor --workspace config-trials/09-token-preference-fast-slow.sqlite3 \
   --project '#1' --biases-only > config-trials/favorite-biases.json
 ```
 
@@ -503,9 +503,9 @@ policy-editor --workspace config-trials/09-latent-fast-slow.sqlite3 \
 
 - `--learning-epsilon`: finite-difference probe size for fallback paths, not
   learning strength. Normal fixed-group fitting uses analytical gradients.
-- `--latent-projection-chunk-size`: construction memory/speed tradeoff, not
+- `--token-preference-projection-chunk-size`: construction memory/speed tradeoff, not
   intended preference strength.
-- Latent dimension and projection seed: useful later for robustness, but they
+- token preference dimension and projection seed: useful later for robustness, but they
   change the feature representation. Changing projection seed resets saved
   preference memory; compare fresh runs. More dimensions aren't automatically
   stronger learning.
@@ -517,4 +517,4 @@ Sources in this checkout: [steering semantics](STEERING.md),
 [CLI options](trajectory_editor/episode_cli.py),
 [group controller](trajectory_editor/group_control.py),
 [manual group fitter](trajectory_editor/online_learning.py), and
-[latent learner](trajectory_editor/latent_preference.py).
+[token preference learner](trajectory_editor/token_preference.py).
