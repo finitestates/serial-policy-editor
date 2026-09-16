@@ -1285,6 +1285,43 @@ def _print_list(store: EpisodeStore) -> None:
     print(store.workspace_list(include_finished=True))
 
 
+class _SwitchableEpisodeStore:
+    """Keep the setup menu's workspace choice inside one managed context."""
+
+    def __init__(self, path: Path | str) -> None:
+        self._path = Path(path)
+        self._store: EpisodeStore | None = None
+
+    def __enter__(self):
+        self._store = EpisodeStore(self._path)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self._store is not None:
+            self._store.close()
+            self._store = None
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    def switch_workspace(self, path: Path | str) -> None:
+        selected = Path(path)
+        if selected == self._path:
+            return
+        replacement = EpisodeStore(selected)
+        previous = self._store
+        self._store = replacement
+        self._path = selected
+        if previous is not None:
+            previous.close()
+
+    def __getattr__(self, name: str):
+        if self._store is None:
+            raise RuntimeError("episode workspace is not open")
+        return getattr(self._store, name)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     arguments = list(sys.argv[1:] if argv is None else argv)
@@ -1298,7 +1335,7 @@ def main(argv: list[str] | None = None) -> int:
             raise EditorError("--until requires --replay")
         if args.fixed_config and args.replay is None:
             raise EditorError("--fixed-config requires --replay")
-        with EpisodeStore(args.workspace) as store, ExitStack() as ui_stack:
+        with _SwitchableEpisodeStore(args.workspace) as store, ExitStack() as ui_stack:
             for field in ("resume", "fork_from", "replay", "project", "lineage"):
                 value = getattr(args, field)
                 if value:

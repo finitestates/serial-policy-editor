@@ -81,6 +81,11 @@ common sampler settings, budget, seed, and learner toggles there. Type `show`
 to review the selection and `go` to start. The same menu can be opened for an
 otherwise flag-configured interactive launch with `--setup-menu`; scripted and
 non-interactive launches continue to use the command-line interface directly.
+The `workspace` command shows or switches the SQLite workspace, `ls` lists its
+episodes, a bare `#N` (or `N`) prints episode information, and `fm [#N]` opens a
+read-only fork map to help construct a later `source fork ... at N` command.
+Typing `sampler` without arguments prints all sampler settings and their
+planned values.
 
 Use `--seed N` for a reproducible sampler seed, or `--random-seed` to choose
 and print a new seed from the supported signed 64-bit range.  The two options

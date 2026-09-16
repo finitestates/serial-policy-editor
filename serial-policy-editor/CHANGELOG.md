@@ -9,6 +9,12 @@
   model/backend, steering artifacts, common sampler settings, budgets, seeds,
   and learner toggles before the existing launch path begins. `--setup-menu`
   opens it explicitly; headless and flag-driven workflows remain available.
+- Begin the typed `RuntimePlan` boundary behind the setup menu, preserving
+  explicit-versus-inherited launch settings while projecting the finalized plan
+  into the existing replay-aware launcher.
+- Let setup switch workspaces, list and inspect episodes by `#N`/`N`, and show
+  read-only fork maps with `fm [#N]`; a bare `sampler` now explains all
+  available sampler settings and their planned values.
 
 ## 0.4.2 — 2026-09-16
 
