@@ -1,11 +1,11 @@
-# Serial Policy Editor 0.4.0
+# Serial Policy Editor 0.4.2
 
 Serial Policy Editor (SPE) is a terminal editor for steering a local language
 model one token, text insertion, or delegated span at a time. Save your choices,
 rewind or fork a continuation, and replay the recorded editing procedure in a
 new context.
 
-**0.4.0 introduces adaptive group objectives and standalone lexical references.**
+**0.4.2 introduces adaptive group objectives, standalone lexical references, and activation-vector analysis.**
 Load relative term weights with `--reference`, define groups with YAML or
 commands, and activate promote, suppress, or maintain objectives with bare
 `b target +`, `-`, or `=`. Numeric amounts remain manual; `off` clears an

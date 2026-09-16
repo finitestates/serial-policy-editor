@@ -153,6 +153,7 @@ class TerminalIO:
         policy_active: bool = False,
         show_policy_rank: bool = False,
         sort_by_policy: bool = False,
+        logit_view: str = "none",
     ) -> str | None:
         if not self._live_choices:
             raise RuntimeError("live choice input is not available")
@@ -174,6 +175,7 @@ class TerminalIO:
             policy_active=policy_active,
             show_policy_rank=show_policy_rank,
             sort_by_policy=sort_by_policy,
+            logit_view=logit_view,
         )
         if self._live_session is not None:
             return self._live_session.read_choice(ChoiceViewState(choice, **options))
@@ -268,6 +270,7 @@ class CommandKind(str, Enum):
     CONTEXT = "context"
     POLICY_VIEW = "policy-view"
     POLICY_COLUMN = "policy-column"
+    LOGIT_VIEW = "logit-view"
     REVIEW_BACK = "review-back"
     REVIEW_FORWARD = "review-forward"
     REVIEW_EXIT = "review-exit"
@@ -377,8 +380,11 @@ HELP_TEXT = """Commands:
   c [N|all]          page more of the current context (default: 2000 chars)
   v                  toggle raw top-N / full-vocabulary policy top-N
   V                  toggle policy diagnostics independently of ordering
+  l                  cycle logit columns: none / all / raw / effective / delta
                      Δrank = raw rank - policy rank; positive means promoted.
                      Δlogit = adjusted - raw logit (all current policy effects).
+                     raw-logit is the backend surface; eff-logit is the
+                     pre-temperature policy surface.
                      These compare surfaces at this context, not the last update.
                      pol-p is before temperature/filtering; decode-p is final.
                      numeric selections accept any raw rank in the vocabulary
@@ -904,6 +910,8 @@ def parse_command(
         return TeacherCommand(CommandKind.CONTEXT, context_characters=characters)
     if command == "V" or lower in {"policy-column", "policy-columns", "policy-rank-column"}:
         return TeacherCommand(CommandKind.POLICY_COLUMN, invoked_as=command)
+    if lower in {"l", "logit", "logits", "logit-view"}:
+        return TeacherCommand(CommandKind.LOGIT_VIEW, invoked_as=command)
     if lower in {"v", "policy-view", "policy-sort"}:
         return TeacherCommand(CommandKind.POLICY_VIEW, invoked_as=lower)
     if lower == "n" or lower.startswith("n "):
@@ -933,6 +941,7 @@ def display_choice(
     policy_active: bool = False,
     show_policy_rank: bool = False,
     sort_by_policy: bool = False,
+    logit_view: str = "none",
 ) -> None:
     io.write("\n" + "=" * 72)
     remaining = (
@@ -961,6 +970,7 @@ def display_choice(
         heading=True,
         show_policy_rank=show_policy_rank,
         sort_by_policy=sort_by_policy,
+        logit_view=logit_view,
     )
     display_actions(io)
 
@@ -973,6 +983,7 @@ def display_candidates(
     target_token_id: int | None = None,
     show_policy_rank: bool = False,
     sort_by_policy: bool = False,
+    logit_view: str = "none",
 ) -> None:
     ordered = tuple(candidates)
     if sort_by_policy:
@@ -987,7 +998,7 @@ def display_candidates(
                 ),
             )
         )
-    columns = CandidateColumns(policy=show_policy_rank)
+    columns = CandidateColumns(policy=show_policy_rank, logit_view=logit_view)
     if heading:
         io.write(f"\n  rank{columns.heading}  text")
     for candidate in ordered:
@@ -1005,6 +1016,6 @@ def display_actions(io: IO) -> None:
     io.write(
         "\nActions: accept | rank | t TEXT | x TEXT | h [N] | h . [N] | h | [N] | "
         "[ / ] review | f [N|+N|-N] | m [N] | /TERM | "
-        "ms [+|- [N]] | c [N|all] | v order | V policy columns | "
+        "ms [+|- [N]] | c [N|all] | v order | V policy columns | l logits | "
         "n [note-before] | p [note-after] | e | e! | q | ?"
     )

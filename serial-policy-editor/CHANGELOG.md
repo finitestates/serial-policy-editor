@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.2 — 2026-09-16
 
 - Rename the current projected token-feature learner and controls from
   “latent” to “token preference”; reserve “activation vector” for future

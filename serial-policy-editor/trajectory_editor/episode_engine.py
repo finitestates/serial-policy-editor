@@ -23,6 +23,7 @@ from .episode_actions import (
 from .episode_backend import EpisodeBackend, require_episode_backend
 from .episode_hash import token_prefix_sha256, validate_fingerprint
 from .token_preference_features import coordinate_identity_matches
+from .vector_artifacts import _supported_kwargs
 from .sampling import (
     SparseDistribution,
     ObservationStatistics,
@@ -232,17 +233,15 @@ class EpisodeEngine:
         kwargs = dict(
             feature_dimension=len(self.sampling.token_preference_vector or self.sampling.token_preference_fast_vector),
             projection_seed=self.sampling.token_preference_projection_seed,
+            feature_scheme=self.sampling.token_preference_feature_scheme,
+            whitening_ridge=self.sampling.token_preference_whitening_ridge,
         )
-        if self.sampling.token_preference_feature_scheme != "random-projection-unit-v1":
-            kwargs.update(
-                feature_scheme=self.sampling.token_preference_feature_scheme,
-                whitening_ridge=self.sampling.token_preference_whitening_ridge,
-            )
         try:
-            features = provider(**kwargs)
+            features = provider(**_supported_kwargs(provider, kwargs))
             identity_method = getattr(self.backend, "token_preference_coordinate_identity", None)
             self._token_preference_coordinate_identity = (
-                identity_method(**kwargs) if callable(identity_method) else None
+                identity_method(**_supported_kwargs(identity_method, kwargs))
+                if callable(identity_method) else None
             )
             if (
                 self.sampling.token_preference_vector
@@ -613,6 +612,8 @@ class EpisodeEngine:
                 policy_rank=statistics.policy_rank(int(token_id)),
                 policy_probability=float(statistics.policy_probabilities[token_id]),
                 policy_logit_adjustment=float(statistics.adjusted[token_id] - statistics.logits[token_id]),
+                raw_logit=float(statistics.logits[token_id]),
+                effective_logit=float(statistics.adjusted[token_id]),
             )
             for token_id, probability in zip(ordered, probabilities)
         )

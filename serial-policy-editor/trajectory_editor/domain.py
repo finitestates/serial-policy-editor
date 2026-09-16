@@ -30,7 +30,7 @@ MAX_SEED = (1 << 63) - 1
 
 @dataclass(frozen=True)
 class SamplingConfig:
-    temperature: float = 0.8
+    temperature: float = 1.0
     top_k: int = 40
     top_p: float = 0.95
     min_p: float = 0.05
@@ -765,6 +765,8 @@ class Candidate:
     policy_rank: int | None = None
     policy_probability: float | None = None
     policy_logit_adjustment: float | None = None
+    raw_logit: float | None = None
+    effective_logit: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -779,6 +781,8 @@ class Candidate:
             "policy_rank": self.policy_rank,
             "policy_probability": self.policy_probability,
             "policy_logit_adjustment": self.policy_logit_adjustment,
+            "raw_logit": self.raw_logit,
+            "effective_logit": self.effective_logit,
         }
 
 

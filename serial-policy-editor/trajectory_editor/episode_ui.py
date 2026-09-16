@@ -92,6 +92,7 @@ class PolicyViewPreferences:
 
     show: bool | None = None
     sort_by_policy: bool = False
+    logit_view: str = "none"
 
 
 class InteractivePolicy:
@@ -105,6 +106,7 @@ class InteractivePolicy:
         context_characters: int = 0,
         manual_acceptance: bool = False,
         show_policy_rank: bool | None = None,
+        logit_view: str = "none",
         view_preferences: PolicyViewPreferences | None = None,
         learning_enabled: bool = False,
         store: EpisodeStore | None = None,
@@ -123,7 +125,7 @@ class InteractivePolicy:
         self.manual_acceptance = bool(manual_acceptance)
         self.view_preferences = (
             view_preferences if view_preferences is not None
-            else PolicyViewPreferences(show=show_policy_rank)
+            else PolicyViewPreferences(show=show_policy_rank, logit_view=logit_view)
         )
         self.learning_enabled = learning_enabled
         self.store = store
@@ -297,6 +299,7 @@ class InteractivePolicy:
             display_candidates(
                 self.io, candidates, heading=True, target_token_id=lens.token_id,
                 show_policy_rank=self._show_policy_diagnostics(engine),
+                logit_view=self.view_preferences.logit_view,
             )
 
     def _review(
@@ -430,6 +433,7 @@ class InteractivePolicy:
                     policy_active=engine.sampling.policy_active,
                     show_policy_rank=policy_columns,
                     sort_by_policy=policy_sort and not search_lens_active,
+                    logit_view=self.view_preferences.logit_view,
                 )
                 plain_redraw = False
             if live:
@@ -462,6 +466,7 @@ class InteractivePolicy:
                     policy_active=engine.sampling.policy_active,
                     show_policy_rank=policy_columns,
                     sort_by_policy=policy_sort and not search_lens_active,
+                    logit_view=self.view_preferences.logit_view,
                 )
             else:
                 raw = self.io.read("\nTeacher action> ")
@@ -745,6 +750,21 @@ class InteractivePolicy:
                 continue
             if command.kind == CommandKind.POLICY_COLUMN:
                 self.view_preferences.show = not policy_columns
+                plain_redraw = True
+                continue
+            if command.kind == CommandKind.LOGIT_VIEW:
+                views = ("none", "all", "raw", "effective", "delta")
+                current = self.view_preferences.logit_view
+                try:
+                    next_view = views[(views.index(current) + 1) % len(views)]
+                except ValueError:
+                    next_view = views[0]
+                self.view_preferences.logit_view = next_view
+                feedback = ChoiceFeedback(
+                    "status",
+                    "LOGIT VIEW",
+                    (f"columns: {next_view}",),
+                )
                 plain_redraw = True
                 continue
             if command.kind == CommandKind.REVIEW_BACK:

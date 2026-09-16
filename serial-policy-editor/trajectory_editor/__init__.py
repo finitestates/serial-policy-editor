@@ -29,6 +29,8 @@ from .token_preference import (
 from .token_preference_features import TokenPreferenceCoordinateIdentity
 from .vector_artifacts import TokenPreferenceVectorArtifact
 from .activation_vectors import ActivationVectorArtifact
+from .trajectory_compare import compare_episodes, render_compare_report
+from .vector_impact import impact_vector, render_impact_report
 from .online_learning import LearningResult, OnlineLearner, OnlineLearningConfig
 from .version import VERSION
 
@@ -57,6 +59,8 @@ __all__ = [
     "TokenPreferenceCoordinateIdentity",
     "TokenPreferenceVectorArtifact",
     "ActivationVectorArtifact",
+    "compare_episodes",
+    "impact_vector",
     "OnlineLearner",
     "OnlineLearningConfig",
     "SelectRawRank",
@@ -65,6 +69,8 @@ __all__ = [
     "Write",
     "WriteLearningResult",
     "project_episode",
+    "render_compare_report",
+    "render_impact_report",
     "VERSION",
 ]
 

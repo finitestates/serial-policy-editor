@@ -540,7 +540,8 @@ def _one_line(text: str, width: int) -> str:
 def _render_writing(choice: ChoiceSet, candidates: tuple[Candidate, ...],
                     preview: ActionPreview, width: int, height: int,
                     offset: int, sort_by_policy: bool,
-                    show_policy_rank: bool = False) -> StyleAndTextTuples:
+                    show_policy_rank: bool = False,
+                    logit_view: str = "none") -> StyleAndTextTuples:
     _, budget = _writing_sizes(height)
     rows = _context_rows(_safe_context_text(choice.context_text_tail),
                          _safe_rendered_text(preview.appended_text or ""), width - 1)
@@ -565,7 +566,9 @@ def _render_writing(choice: ChoiceSet, candidates: tuple[Candidate, ...],
     heading = ("Candidates · Δrank / Δlogit / text" if show_policy_rank
                else "Candidates · rank / raw probability / text")
     fragments.append(("class:table-header", _one_line(heading, width) + "\n"))
-    columns = CandidateColumns(policy=True, width=36)
+    columns = CandidateColumns(
+        policy=show_policy_rank, logit_view=logit_view, width=36
+    )
     shown = _ordered_candidates(candidates, sort_by_policy=sort_by_policy)[:3]
     for candidate in shown:
         fragments.append(("class:table-row", _one_line(
@@ -590,6 +593,7 @@ def _render_choice(
     policy_active: bool = False,
     show_policy_rank: bool = False,
     sort_by_policy: bool = False,
+    logit_view: str = "none",
     display_candidates: tuple[Candidate, ...] | None = None,
     search_lens_active: bool = False,
     resolve_candidate: Callable[[int], Candidate] | None = None,
@@ -609,7 +613,8 @@ def _render_choice(
     )
     if expanded_editor and _is_writing(command_text):
         return _render_writing(choice, tuple(candidates if display_candidates is None else display_candidates),
-                               preview, width, height, context_offset, sort_by_policy, show_policy_rank)
+                               preview, width, height, context_offset, sort_by_policy,
+                               show_policy_rank, logit_view)
     context = _safe_context_text(choice.context_text_tail)
     proposal = (
         _safe_rendered_text(preview.appended_text)
@@ -741,7 +746,9 @@ def _render_choice(
         )
 
     fragments.extend([("class:rule", rule + "\n")])
-    columns = CandidateColumns(policy=show_policy_rank, width=width)
+    columns = CandidateColumns(
+        policy=show_policy_rank, logit_view=logit_view, width=width
+    )
     fragments.append((
         "class:table-header", f"    rank{columns.heading}  text\n",
     ))
@@ -1045,6 +1052,7 @@ class ChoiceViewState:
     policy_active: bool = False
     show_policy_rank: bool = False
     sort_by_policy: bool = False
+    logit_view: str = "none"
 
 
 class LiveChoiceView:
@@ -1394,7 +1402,8 @@ class LiveChoiceView:
             state.choice, state.candidates, self.command_buffer.text,
             state.remaining_tokens, state.resolve_insertion, state.target_token_id,
             state.feedback, state.policy_active, state.show_policy_rank,
-            state.sort_by_policy, state.display_candidates, state.search_lens_active,
+            state.sort_by_policy, state.logit_view, state.display_candidates,
+            state.search_lens_active,
             state.resolve_candidate, self.context_offset,
             self.expanded_editor and _is_writing(self.command_buffer.text),
             terminal_size=self.terminal_size(),
@@ -1422,6 +1431,7 @@ def read_live_choice(
     policy_active: bool = False,
     show_policy_rank: bool = False,
     sort_by_policy: bool = False,
+    logit_view: str = "none",
 ) -> str | None:
     """Standalone adapter; interactive episodes use a persistent LiveChoiceView."""
     state = ChoiceViewState(
@@ -1432,6 +1442,7 @@ def read_live_choice(
         seamless=seamless, reactivate_on_review_enter=reactivate_on_review_enter,
         search_lens_active=search_lens_active, policy_active=policy_active,
         show_policy_rank=show_policy_rank, sort_by_policy=sort_by_policy,
+        logit_view=logit_view,
     )
     view = LiveChoiceView(state)
     application: Application[str | None] = Application(

@@ -264,6 +264,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="hide automatic policy diagnostics; V can toggle them during the session",
     )
     parser.add_argument(
+        "--logit-view",
+        choices=("none", "raw", "effective", "delta", "all"),
+        default="none",
+        help=(
+            "show raw, effective, or effective-delta logits in episode candidate rows "
+            "(default: none; l cycles the view)"
+        ),
+    )
+    parser.add_argument(
         "--bias-catalog",
         type=Path,
         help="load a model-matched human-readable bias catalog for b name and b @name",
@@ -984,7 +993,10 @@ def _interactive_policy(
 ) -> InteractivePolicy:
     preferences = getattr(args, "_policy_view_preferences", None)
     if preferences is None:
-        preferences = PolicyViewPreferences(show=args.show_policy_rank)
+        preferences = PolicyViewPreferences(
+            show=args.show_policy_rank,
+            logit_view=args.logit_view,
+        )
         args._policy_view_preferences = preferences
     return InteractivePolicy(
         io=io,

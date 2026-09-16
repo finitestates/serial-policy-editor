@@ -8,6 +8,7 @@ from .domain import Candidate
 @dataclass(frozen=True)
 class CandidateColumns:
     policy: bool = False
+    logit_view: str = "none"
     width: int | None = None
 
     def _fits(self, threshold: int) -> bool:
@@ -16,8 +17,16 @@ class CandidateColumns:
     @property
     def columns(self) -> tuple[tuple[str, int], ...]:
         columns = []
+        if self.logit_view in {"raw", "all"}:
+            columns.append(('raw-logit', 10))
+        if self.logit_view in {"effective", "all"}:
+            columns.append(('eff-logit', 10))
+        if self.logit_view in {"delta", "all"}:
+            columns.append(('Δlogit', 9))
         if self.policy:
-            columns += [('Δrank', 6), ('Δlogit', 8)]
+            columns.append(('Δrank', 6))
+            if self.logit_view not in {"delta", "all"}:
+                columns.append(('Δlogit', 8))
             if self._fits(92):
                 columns.append(('pol-rank', 8))
         if not self.policy or self._fits(68):
@@ -36,12 +45,18 @@ class CandidateColumns:
 
     def values(self, candidate: Candidate) -> str:
         def value(label: str) -> str:
-            if label == 'Δrank':
-                return (f'{candidate.rank - candidate.policy_rank:+d}'
-                        if candidate.policy_rank is not None else '--')
+            if label == 'raw-logit':
+                return (f'{candidate.raw_logit:+.3f}'
+                        if candidate.raw_logit is not None else '--')
+            if label == 'eff-logit':
+                return (f'{candidate.effective_logit:+.3f}'
+                        if candidate.effective_logit is not None else '--')
             if label == 'Δlogit':
                 return (f'{candidate.policy_logit_adjustment:+.3f}'
                         if candidate.policy_logit_adjustment is not None else '--')
+            if label == 'Δrank':
+                return (f'{candidate.rank - candidate.policy_rank:+d}'
+                        if candidate.policy_rank is not None else '--')
             if label == 'pol-rank':
                 return str(candidate.policy_rank) if candidate.policy_rank is not None else '--'
             if label == 'token-id':

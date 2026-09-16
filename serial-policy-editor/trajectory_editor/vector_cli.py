@@ -24,6 +24,17 @@ from .decoder import LlamaCppSettings
 from .domain import EditorError
 from .episode_store import EpisodeStore
 from .token_preference_features import DEFAULT_PROJECTION_CHUNK_SIZE
+from .trajectory_compare import (
+    DEFAULT_ACTIVATION_STRENGTHS,
+    compare_episodes,
+    render_compare_report,
+)
+from .vector_impact import (
+    DEFAULT_IMPACT_STRENGTHS,
+    impact_vector,
+    load_vector_artifact,
+    render_impact_report,
+)
 from .transformers_backend import TransformersSettings
 from .vector_artifacts import (
     FORMAT,
@@ -107,6 +118,126 @@ def build_parser() -> argparse.ArgumentParser:
     blend.add_argument("artifacts", type=Path, nargs="+")
     blend.add_argument("--weights", type=float, nargs="+")
     blend.add_argument("--output", type=Path)
+
+    compare = commands.add_parser(
+        "compare",
+        help="compare recorded episodes as reference and counterfactual trajectories",
+    )
+    compare.add_argument(
+        "--workspace",
+        type=Path,
+        required=True,
+        help="episode workspace SQLite database",
+    )
+    compare.add_argument(
+        "--episodes",
+        nargs="+",
+        required=True,
+        metavar="EPISODE_ID",
+        help="reference episode first, followed by one or more candidates",
+    )
+    compare.add_argument(
+        "--content",
+        action="store_true",
+        help="compute mean fixed token-feature contrasts (requires --model)",
+    )
+    compare.add_argument(
+        "--activation",
+        action="store_true",
+        help="compute hidden-state activation contrasts (requires --model)",
+    )
+    compare.add_argument(
+        "--feature-dimension",
+        type=_positive_int,
+        default=64,
+        help="dimension for model-backed content contrasts",
+    )
+    compare.add_argument(
+        "--capture-position",
+        choices=("first", "last"),
+        default="last",
+        help="activation position used for model-backed contrasts",
+    )
+    compare.add_argument(
+        "--no-normalize-activation",
+        action="store_true",
+        help="retain the raw activation delta instead of unit-normalizing it",
+    )
+    compare.add_argument(
+        "--activation-strengths",
+        type=float,
+        nargs="+",
+        default=list(DEFAULT_ACTIVATION_STRENGTHS),
+        metavar="MULTIPLIER",
+        help="signed activation multipliers to report in the strength sweep",
+    )
+    compare.add_argument(
+        "--include-vectors",
+        action="store_true",
+        help="include full numeric vectors in the JSON report",
+    )
+    _add_backend_args(compare)
+    _add_report_args(compare)
+
+    impact = commands.add_parser(
+        "impact",
+        help="measure one vector's matched logit effect across episode contexts",
+    )
+    impact.add_argument(
+        "--vector",
+        type=Path,
+        required=True,
+        help="activation or token-preference vector artifact",
+    )
+    impact.add_argument(
+        "--workspace",
+        type=Path,
+        required=True,
+        help="episode workspace SQLite database",
+    )
+    impact.add_argument(
+        "--episodes",
+        nargs="+",
+        required=True,
+        metavar="EPISODE_ID",
+        help="saved episodes to use as teacher-forced evaluation contexts",
+    )
+    impact.add_argument(
+        "--strengths",
+        type=float,
+        nargs="+",
+        default=list(DEFAULT_IMPACT_STRENGTHS),
+        metavar="MULTIPLIER",
+        help="signed vector multipliers to sweep (default: -1 -.5 0 .5 1)",
+    )
+    impact.add_argument(
+        "--top",
+        type=_positive_int,
+        default=10,
+        help="top/bottom affected tokens per context and strength",
+    )
+    impact.add_argument(
+        "--include-eog",
+        action="store_true",
+        help="allow EOG tokens in top/bottom token summaries",
+    )
+    impact.add_argument(
+        "--include-vectors",
+        action="store_true",
+        help="include full-vocabulary mean delta arrays in the JSON report",
+    )
+    impact.add_argument(
+        "--max-positions",
+        type=_positive_int,
+        help="cap recorded context positions per episode",
+    )
+    impact.add_argument(
+        "--rollout",
+        action="store_true",
+        help="also compare sampled baseline/vector rollouts (includes autoregressive effects)",
+    )
+    _add_backend_args(impact, require_model=True)
+    _add_report_args(impact)
 
     apply = actions.add_parser("apply", help="apply a standalone vector to a v4 bias preset")
     apply.add_argument("artifact", type=Path)
@@ -547,6 +678,60 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     backend = None
     try:
+        if args.kind == "impact":
+            artifact = load_vector_artifact(args.vector)
+            backend = _load_backend(args)
+            with EpisodeStore(args.workspace) as store:
+                report = impact_vector(
+                    store,
+                    args.episodes,
+                    backend,
+                    artifact,
+                    strengths=args.strengths,
+                    top=args.top,
+                    include_eog=args.include_eog,
+                    include_vectors=args.include_vectors,
+                    projection_chunk_size=args.projection_chunk_size,
+                    max_positions=args.max_positions,
+                    rollout=args.rollout,
+                )
+            if args.format == "json":
+                _render(report, args.output, "json", render_impact_report)
+            else:
+                _write_text(render_impact_report(report), args.output)
+            return 0
+        if args.kind == "compare":
+            if (args.content or args.activation) and args.model is None:
+                raise EditorError(
+                    "--model is required when --content or --activation is requested"
+                )
+            if args.model is not None and not (args.content or args.activation):
+                raise EditorError(
+                    "--model is only used with --content or --activation"
+                )
+            if args.model is not None:
+                backend = _load_backend(args)
+            with EpisodeStore(args.workspace) as store:
+                report = compare_episodes(
+                    store,
+                    args.episodes,
+                    backend=backend,
+                    include_content=args.content,
+                    include_activation=args.activation,
+                    feature_dimension=args.feature_dimension,
+                    projection_chunk_size=args.projection_chunk_size,
+                    capture_position=args.capture_position,
+                    normalize_activation=not args.no_normalize_activation,
+                    activation_strengths=args.activation_strengths,
+                    include_vectors=args.include_vectors,
+                )
+            # Keep the format identifier visible to programmatic consumers even
+            # when the human renderer is selected.
+            if args.format == "json":
+                _render(report, args.output, "json", render_compare_report)
+            else:
+                _write_text(render_compare_report(report), args.output)
+            return 0
         if args.kind == "activation":
             if args.action == "create":
                 backend = _load_backend(args)
