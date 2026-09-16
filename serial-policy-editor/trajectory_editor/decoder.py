@@ -302,6 +302,31 @@ class LlamaCppDecoder:
         self._latent_feature_cache[key] = features
         return features
 
+    def latent_coordinate_identity(
+        self,
+        *,
+        feature_dimension: int,
+        projection_seed: int,
+        feature_scheme: str = "random-projection-unit-v1",
+        whitening_ridge: float = DEFAULT_WHITENING_RIDGE,
+    ):
+        """Describe the embedding-backed coordinates after materialization."""
+        self.latent_token_features(
+            feature_dimension=feature_dimension,
+            projection_seed=projection_seed,
+            feature_scheme=feature_scheme,
+            whitening_ridge=whitening_ridge,
+        )
+        from .latent_features import coordinate_identity
+        return coordinate_identity(
+            dimension=feature_dimension,
+            projection_seed=projection_seed,
+            feature_scheme=feature_scheme,
+            whitening_ridge=whitening_ridge,
+            model_fingerprint=self._latent_embedding_fingerprint,
+            embedding_width=self._latent_embedding_width,
+        )
+
     def tokenize(
         self, text: str, *, add_bos: bool = False, special: bool = False
     ) -> list[int]:

@@ -543,6 +543,18 @@ class InteractivePolicy:
                                          f"target {1000*row['target_rate']:.2f} /1000 tokens; pressure {row['pressure']:+.3f}")
                         else:
                             lines.append(f"{row['group']}: {row['direction']} waiting for scope or disabled")
+                    latent = observation.statistics.latent_diagnostics
+                    if latent.get("deployment_kl", 0.0) or latent.get("z_norm", 0.0):
+                        lines.append(
+                            f"Latent influence: mode {engine.sampling.latent_influence_mode}; "
+                            f"target {engine.sampling.latent_influence_kl:.4g}; "
+                            f"actual KL {latent.get('deployment_kl', 0.0):.4g}; "
+                            f"gain {latent.get('effective_gain', 0.0):.4g}; "
+                            f"logit RMS {latent.get('effective_logit_rms', 0.0):.4g} "
+                            f"(slow {latent.get('slow_raw_logit_rms', 0.0):.4g}; "
+                            f"fast {latent.get('fast_raw_logit_rms', 0.0):.4g}); "
+                            f"capped {'yes' if latent.get('gain_capped', False) else 'no'}"
+                        )
                     if engine.sampling.reference_prior_routes:
                         lines.append(f"Lexical reference: {len(engine.sampling.reference_prior_routes)} routes; "
                                      f"strength {engine.sampling.reference_prior_strength:g}")

@@ -499,10 +499,12 @@ class ObservationStatistics:
         boundaries=None,
         latent_features=None,
         render_tokens=None,
+        latent_coordinate_identity=None,
     ):
         self.logits = _validated_logits(logits).copy()
         self.boundaries = boundaries
         self.latent_features = latent_features
+        self.latent_coordinate_identity = latent_coordinate_identity
         self.render_tokens = render_tokens
         penalties_active = config.history_penalties_active
         if penalties_active:
@@ -551,6 +553,14 @@ class ObservationStatistics:
             "pre_post_latent_kl": 0.0,
             "top_latent_logit_min": 0.0,
             "top_latent_logit_max": 0.0,
+            "slow_raw_logit_rms": 0.0,
+            "fast_raw_logit_rms": 0.0,
+            "combined_raw_logit_rms": 0.0,
+            "effective_gain": 0.0,
+            "user_multiplier": float(config.latent_strength),
+            "gain_capped": False,
+            "deployment_kl": 0.0,
+            "relative_fast_weight": 0.0,
         }
         if latent_z or fast_z:
             if latent_features is None:
@@ -572,23 +582,20 @@ class ObservationStatistics:
                 features @ np.asarray(fast_z, dtype=np.float32)
                 if fast_z else np.zeros(len(self.logits), dtype=np.float32)
             )
+            relative_fast_weight = float(config.latent_fast_strength) if fast_z else 0.0
+            combined_scores = np.asarray(slow_scores, dtype=np.float64) + (
+                relative_fast_weight * np.asarray(fast_scores, dtype=np.float64)
+            )
             if config.latent_influence_mode == "kl":
-                slow_auto_gain = calibrated_latent_gain(
+                auto_gain = calibrated_latent_gain(
                     self.pre_latent_probabilities,
-                    np.asarray(slow_scores, dtype=np.float64),
+                    combined_scores,
                     config.latent_influence_kl,
                     min_gain=config.latent_min_gain,
                     max_gain=config.latent_max_gain,
-                ) if latent_z else 0.0
-                fast_auto_gain = calibrated_latent_gain(
-                    self.pre_latent_probabilities,
-                    np.asarray(fast_scores, dtype=np.float64),
-                    config.latent_influence_kl,
-                    min_gain=config.latent_min_gain,
-                    max_gain=config.latent_max_gain,
-                ) if fast_z else 0.0
-                slow_strength = float(config.latent_strength) * slow_auto_gain
-                fast_strength = float(config.latent_fast_strength) * fast_auto_gain
+                ) if np.any(combined_scores) else 0.0
+                slow_strength = float(config.latent_strength) * auto_gain
+                fast_strength = float(config.latent_strength) * auto_gain * relative_fast_weight
             else:
                 slow_strength = float(config.latent_strength)
                 fast_strength = float(config.latent_fast_strength)
@@ -616,11 +623,15 @@ class ObservationStatistics:
             self.latent_features = features
             self.latent_logit_adjustments = latent_adjustments
             self.latent_raw_scores = np.asarray(slow_scores, dtype=np.float64)
-            if latent_z:
-                self.learning_logits += np.asarray(slow_scores, dtype=np.float64)
+            if latent_z or fast_z:
+                # The internal learner sees the complete memory state, while
+                # deployment may apply a different user gain.
+                self.learning_logits += combined_scores
                 self.learning_probabilities = _softmax(self.learning_logits)
             self.latent_effective_strength = slow_strength
-            raw_rms = float(np.sqrt(np.mean(np.asarray(slow_scores, dtype=np.float64) ** 2)))
+            slow_raw_rms = float(np.sqrt(np.mean(np.asarray(slow_scores, dtype=np.float64) ** 2)))
+            fast_raw_rms = float(np.sqrt(np.mean(np.asarray(fast_scores, dtype=np.float64) ** 2)))
+            raw_rms = float(np.sqrt(np.mean(combined_scores ** 2)))
             effective_rms = float(np.sqrt(np.mean(latent_adjustments ** 2)))
             self.latent_diagnostics = {
                 "z_norm": float(np.linalg.norm(np.asarray(latent_z, dtype=np.float64)))
@@ -629,6 +640,17 @@ class ObservationStatistics:
                 "effective_logit_rms": effective_rms,
                 "effective_strength": slow_strength,
                 "effective_fast_strength": fast_strength,
+                "slow_raw_logit_rms": slow_raw_rms,
+                "fast_raw_logit_rms": fast_raw_rms,
+                "combined_raw_logit_rms": raw_rms,
+                "effective_gain": float(auto_gain) if config.latent_influence_mode == "kl" else 1.0,
+                "user_multiplier": float(config.latent_strength),
+                "gain_capped": bool(
+                    config.latent_influence_mode == "kl" and auto_gain in {
+                        float(config.latent_min_gain), float(config.latent_max_gain)
+                    }
+                ),
+                "relative_fast_weight": relative_fast_weight,
                 "pre_post_latent_kl": 0.0,
                 "top_latent_logit_min": float(np.min(latent_adjustments)),
                 "top_latent_logit_max": float(np.max(latent_adjustments)),
@@ -642,6 +664,9 @@ class ObservationStatistics:
             self.latent_diagnostics["pre_post_latent_kl"] = policy_kl(
                 self.baseline_probabilities, self.pre_latent_probabilities
             )
+            self.latent_diagnostics["deployment_kl"] = self.latent_diagnostics[
+                "pre_post_latent_kl"
+            ]
         from .group_control import control_adjustments
         self.group_control_biases, self.group_control_diagnostics = control_adjustments(
             config.group_controls, config.bias_groups, () if history_token_ids is None else history_token_ids,

@@ -39,6 +39,7 @@ def _model_continuation(store, source_id, backend, provenance):
             SamplingConfig.from_record(segment["sampling"]),
             bias_rules=(), bias_groups=(), group_controls=(), reference_prior_routes=(),
             latent_preference_z=(), latent_preference_fast_z=(),
+            latent_coordinate_identity=None,
         ),
         initial_text=source["initial_text"] + source["visible_text"],
         max_tokens=source["max_tokens"],

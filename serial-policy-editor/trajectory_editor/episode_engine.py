@@ -22,6 +22,7 @@ from .episode_actions import (
 )
 from .episode_backend import EpisodeBackend, require_episode_backend
 from .episode_hash import token_prefix_sha256, validate_fingerprint
+from .latent_features import coordinate_identity_matches
 from .sampling import (
     SparseDistribution,
     ObservationStatistics,
@@ -236,7 +237,25 @@ class EpisodeEngine:
                 whitening_ridge=self.sampling.latent_whitening_ridge,
             )
         try:
-            return provider(**kwargs)
+            features = provider(**kwargs)
+            identity_method = getattr(self.backend, "latent_coordinate_identity", None)
+            self._latent_coordinate_identity = (
+                identity_method(**kwargs) if callable(identity_method) else None
+            )
+            if (
+                self.sampling.latent_preference_z
+                or self.sampling.latent_preference_fast_z
+            ) and callable(identity_method) and not coordinate_identity_matches(
+                self.sampling,
+                dimension=features.shape[1],
+                model_fingerprint=self._latent_coordinate_identity.model_fingerprint,
+                embedding_width=self._latent_coordinate_identity.embedding_width,
+            ):
+                raise EditorError(
+                    "latent coordinate system does not match the loaded model; "
+                    "reset latent preference memory before continuing"
+                )
+            return features
         except (TypeError, ValueError, RuntimeError) as exc:
             raise EditorError(f"could not load latent token features: {exc}") from exc
 
@@ -265,6 +284,8 @@ class EpisodeEngine:
         if any(token >= self.backend.vocabulary_size() for token in bias_tokens):
             raise EditorError("bias token id is outside the model vocabulary")
         self._sampling = value
+        if not (value.latent_preference_z or value.latent_preference_fast_z):
+            self._latent_coordinate_identity = None
         self._invalidate_observation()
 
     @property
@@ -387,6 +408,7 @@ class EpisodeEngine:
             key[0],
             self._classify_token_boundary,
             latent_features=self._latent_features(),
+            latent_coordinate_identity=getattr(self, "_latent_coordinate_identity", None),
             render_tokens=self.backend.render,
         )
         logits = statistics.logits

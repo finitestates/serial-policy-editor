@@ -174,6 +174,8 @@ class _WriteLearningAccumulator:
         self.tokens: list[WriteTokenLearning] = []
         self.group_results: list[LearningResult] = []
         self.latent_results: list[LatentPreferenceResult] = []
+        self.latent_base_probabilities = None
+        self.latent_features = None
 
     @property
     def enabled(self) -> bool:
@@ -189,6 +191,14 @@ class _WriteLearningAccumulator:
             if self.learner is not None
             else None
         )
+        if self.latent_learner is not None and self.latent_base_probabilities is None:
+            base = getattr(observation.statistics, "pre_latent_probabilities", None)
+            if base is not None:
+                import numpy as np
+                self.latent_base_probabilities = np.asarray(base, dtype=np.float64).copy()
+            features = getattr(observation.statistics, "latent_features", None)
+            if features is not None:
+                self.latent_features = np.asarray(features, dtype=np.float32)
         latent_result = (
             self.latent_learner.update(observation, token_id, self.sampling)
             if self.latent_learner is not None
@@ -237,7 +247,12 @@ class _WriteLearningAccumulator:
             return None
         latent_learner = self.latent_learner
         assert latent_learner is not None
-        aggregate = latent_learner.aggregate(self.latent_results, self.sampling)
+        aggregate = latent_learner.aggregate(
+            self.latent_results,
+            self.sampling,
+            base_probabilities=self.latent_base_probabilities,
+            features=self.latent_features,
+        )
         return replace(
             aggregate,
             old_policy_rank=self._mean_int([r.old_policy_rank for r in self.latent_results]),
@@ -263,6 +278,7 @@ class _WriteLearningAccumulator:
                 latent_fast_strength=latent_result.sampling.latent_fast_strength,
                 latent_projection_seed=latent_result.sampling.latent_projection_seed,
                 latent_learning_scheme=latent_result.sampling.latent_learning_scheme,
+                latent_coordinate_identity=latent_result.sampling.latent_coordinate_identity,
             )
         return WriteLearningResult(
             sampling=updated,
@@ -343,6 +359,7 @@ class EpisodeRunner:
                 latent_fast_strength=latent_result.sampling.latent_fast_strength,
                 latent_projection_seed=latent_result.sampling.latent_projection_seed,
                 latent_learning_scheme=latent_result.sampling.latent_learning_scheme,
+                latent_coordinate_identity=latent_result.sampling.latent_coordinate_identity,
             )
         if updated_sampling != old_sampling:
             self.engine.sampling = updated_sampling

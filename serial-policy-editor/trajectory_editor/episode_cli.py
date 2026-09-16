@@ -26,6 +26,7 @@ from .lexical_reference import load_reference
 from .backend_factory import BACKEND_NAMES, create_backend
 from .decoder import KV_CACHE_TYPES, LlamaCppSettings
 from .domain import MAX_SEED, MIN_SEED, EditorError, SamplingConfig
+from .latent_features import coordinate_identity_matches
 from .episode_lifecycle import (
     POLICY_FIELDS, _inherit_budget, _model_continuation, _visible_tokens, _restore_engine,
     _create_episode, _rewind_episode, _fork_engine, _spr_engine_from_source,
@@ -74,6 +75,25 @@ SAMPLER_FIELDS = (
     "bias_groups",
     "bias_step",
 )
+
+LATENT_OVERRIDE_FIELDS = (
+    "latent_feature_scheme", "latent_whitening_ridge", "latent_learning_scheme",
+    "latent_influence_mode", "latent_influence_kl", "latent_min_gain",
+    "latent_max_gain", "latent_dimension", "latent_strength", "latent_fast_strength",
+)
+
+
+def _sampling_overrides_present(args: argparse.Namespace) -> bool:
+    """Whether CLI input changes either ordinary or latent sampler state."""
+    ordinary = any(getattr(args, name, None) is not None for name in SAMPLER_FIELDS)
+    explicit = getattr(args, "_explicit_options", set())
+    latent = any(
+        getattr(args, name, None) is not None and (
+            name not in {"latent_dimension", "latent_strength"} or name in explicit
+        )
+        for name in LATENT_OVERRIDE_FIELDS
+    )
+    return ordinary or latent
 SAMPLER_ALIASES = {
     "temp": "temperature",
     "rep": "repeat_penalty",
@@ -375,6 +395,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--latent-learning-metric", choices=("euclidean", "fisher"), default=None
     )
     latent.add_argument("--latent-learning-kl", type=float, default=None)
+    latent.add_argument(
+        "--latent-fast-learning-kl", type=float, default=None,
+        help="fast-memory canonical learning KL budget (defaults to the slow budget)",
+    )
     latent.add_argument("--latent-fisher-ridge", type=float, default=None)
     latent.add_argument(
         "--latent-fisher-mode", choices=("diagonal", "full"), default=None
@@ -515,10 +539,19 @@ def _sampling_from_args(
     values.update({
         "group_controls": base.group_controls,
         "latent_preference_z": base.latent_preference_z,
-        "latent_strength": base.latent_strength,
+        "latent_strength": (
+            args.latent_strength
+            if "latent_strength" in getattr(args, "_explicit_options", set())
+            else base.latent_strength
+        ),
         "latent_preference_fast_z": base.latent_preference_fast_z,
-        "latent_fast_strength": base.latent_fast_strength,
+        "latent_fast_strength": (
+            args.latent_fast_strength
+            if getattr(args, "latent_fast_strength", None) is not None
+            else base.latent_fast_strength
+        ),
         "latent_projection_seed": base.latent_projection_seed,
+        "latent_coordinate_identity": base.latent_coordinate_identity,
         "latent_feature_scheme": (
             base.latent_feature_scheme
             if getattr(args, "latent_feature_scheme", None) is None
@@ -593,6 +626,7 @@ def _apply_latent_preset(
         latent_influence_kl=preset_latent.latent_influence_kl,
         latent_min_gain=preset_latent.latent_min_gain,
         latent_max_gain=preset_latent.latent_max_gain,
+        latent_coordinate_identity=preset_latent.latent_coordinate_identity,
         group_control_scheme=preset_latent.group_control_scheme,
     )
 
@@ -616,6 +650,7 @@ def _latent_config_from_args(args: argparse.Namespace) -> LatentPreferenceConfig
         learning_metric=getattr(args, "latent_learning_metric", None) or "euclidean",
         learning_kl=getattr(args, "latent_learning_kl", None)
         if getattr(args, "latent_learning_kl", None) is not None else 0.05,
+        fast_learning_kl=getattr(args, "latent_fast_learning_kl", None),
         fisher_ridge=getattr(args, "latent_fisher_ridge", None)
         if getattr(args, "latent_fisher_ridge", None) is not None else 1.0e-3,
         fisher_mode=getattr(args, "latent_fisher_mode", None) or "diagonal",
@@ -635,7 +670,38 @@ def _apply_latent_seed(sampling: SamplingConfig, seed: int | None, io: TerminalI
     if sampling.latent_preference_z or sampling.latent_preference_fast_z:
         io.write("Latent projection coordinate system changed: latent preference memory reset (slow and fast).")
     return replace(sampling, latent_projection_seed=seed,
-                   latent_preference_z=(), latent_preference_fast_z=())
+                   latent_preference_z=(), latent_preference_fast_z=(),
+                   latent_coordinate_identity=None)
+
+
+def _apply_latent_coordinate_overrides(
+    sampling: SamplingConfig,
+    args: argparse.Namespace,
+    io: TerminalIO,
+    *,
+    replay: bool = False,
+) -> SamplingConfig:
+    """Reset incompatible memory when a basis-defining CLI option changes."""
+    explicit = getattr(args, "_explicit_options", set())
+    requested_dimension = (
+        args.latent_dimension if "latent_dimension" in explicit else None
+    )
+    if not (sampling.latent_preference_z or sampling.latent_preference_fast_z):
+        return sampling
+    if coordinate_identity_matches(sampling, dimension=requested_dimension):
+        return sampling
+    if replay:
+        raise EditorError("explicit latent coordinate override conflicts with saved replay")
+    io.write(
+        "Latent coordinate system changed: latent preference memory reset "
+        "(slow and fast)."
+    )
+    return replace(
+        sampling,
+        latent_preference_z=(),
+        latent_preference_fast_z=(),
+        latent_coordinate_identity=None,
+    )
 
 
 def _apply_catalog_reference_prior(
@@ -1281,7 +1347,7 @@ def main(argv: list[str] | None = None) -> int:
 
             if args.resume is not None:
                 # Only explicit CLI sampler flags override the stored segment.
-                explicit = any(getattr(args, name) is not None for name in SAMPLER_FIELDS)
+                explicit = _sampling_overrides_present(args)
                 segment = store.sampling_segment(
                     args.resume, len(_visible_tokens(store, args.resume))
                 )
@@ -1293,6 +1359,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 sampling = _apply_catalog_reference_prior(sampling, catalog, args)
                 sampling = _apply_latent_preset(sampling, preset_latent)
+                sampling = _apply_latent_coordinate_overrides(sampling, args, io)
                 sampling = _apply_latent_seed(
                     sampling, args.latent_seed, io,
                     replay=args.replay is not None and not args.fixed_config,
@@ -1325,6 +1392,7 @@ def main(argv: list[str] | None = None) -> int:
                     _sampling_from_args(args), catalog, args
                 )
                 sampling = _apply_latent_preset(sampling, preset_latent)
+                sampling = _apply_latent_coordinate_overrides(sampling, args, io)
                 sampling = _apply_latent_seed(
                     sampling, args.latent_seed, io,
                     replay=args.replay is not None and not args.fixed_config,
@@ -1352,17 +1420,22 @@ def main(argv: list[str] | None = None) -> int:
                     _sampling_from_args(args, source_sampling), catalog, args
                 )
                 sampling = _apply_latent_preset(sampling, preset_latent)
+                sampling = _apply_latent_coordinate_overrides(
+                    sampling, args, io,
+                    replay=args.replay is not None and not args.fixed_config,
+                )
                 # Explicit steering imports apply to every replay segment, just
                 # like explicit sampler flags. Unspecified fields follow source.
                 if args.bias_groups is not None:
                     overrides["group_controls"] = sampling.group_controls
+                latent_override = _sampling_overrides_present(args)
                 for name in POLICY_FIELDS:
                     reference_override = name.startswith("reference_prior_") and (
                         args.reference is not None or args.reference_prior is not None
                         or args.reference_prior_strength is not None or args.reference_strength is not None
                         or (catalog is not None and catalog.reference_prior_routes)
                     )
-                    if preset_latent is not None or model_changed or reference_override:
+                    if preset_latent is not None or model_changed or reference_override or latent_override:
                         overrides[name] = getattr(sampling, name)
                 sampling = _apply_latent_seed(
                     sampling, args.latent_seed, io,
@@ -1371,6 +1444,17 @@ def main(argv: list[str] | None = None) -> int:
                 replay_prefix = None
                 if model_changed:
                     replay_prefix = backend.tokenize(store.get_episode(args.replay)["initial_text"], add_bos=True, special=True)
+                if args.latent_seed is not None and not args.fixed_config:
+                    saved_steps = store.replay_until(args.replay, args.until)
+                    if (
+                        source_sampling.latent_projection_seed != args.latent_seed
+                        or any(
+                            step.get("sampling") is not None
+                            and step["sampling"].latent_projection_seed != args.latent_seed
+                            for step in saved_steps
+                        )
+                    ):
+                        raise EditorError("explicit latent seed conflicts with a saved replay segment")
                 engine, pending_tape = _spr_engine_from_source(
                     store,
                     args.replay,
@@ -1414,11 +1498,12 @@ def main(argv: list[str] | None = None) -> int:
                     prefix = backend.tokenize(source["initial_text"] + retained, add_bos=True, special=True)
                 segment = store.sampling_segment(args.fork_from, target)
                 source_sampling = SamplingConfig.from_record(segment["sampling"])
-                explicit = any(getattr(args, name) is not None for name in SAMPLER_FIELDS)
+                explicit = _sampling_overrides_present(args)
                 sampling = _apply_catalog_reference_prior(
                     _sampling_from_args(args, source_sampling), catalog, args
                 )
                 sampling = _apply_latent_preset(sampling, preset_latent)
+                sampling = _apply_latent_coordinate_overrides(sampling, args, io)
                 sampling = _apply_latent_seed(
                     sampling, args.latent_seed, io,
                     replay=args.replay is not None and not args.fixed_config,

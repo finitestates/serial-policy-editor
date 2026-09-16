@@ -11,6 +11,8 @@ from .latent_features import (
     DEFAULT_PROJECTION_SEED,
     DEFAULT_WHITENING_RIDGE,
     LATENT_FEATURE_SCHEMES,
+    LatentCoordinateIdentity,
+    coordinate_identity,
 )
 
 
@@ -51,6 +53,7 @@ class SamplingConfig:
     latent_influence_kl: float = 0.05
     latent_min_gain: float = 0.0
     latent_max_gain: float = 8.0
+    latent_coordinate_identity: LatentCoordinateIdentity | Mapping[str, Any] | None = None
     group_control_scheme: str = "appearance-feedback-v1"
     reference_prior_routes: tuple = ()
     reference_prior_scope: str = "active"
@@ -107,6 +110,40 @@ class SamplingConfig:
         if (self.latent_preference_z and self.latent_preference_fast_z
                 and len(self.latent_preference_z) != len(self.latent_preference_fast_z)):
             raise EditorError("slow and fast latent vectors must have the same dimension")
+        identity = self.latent_coordinate_identity
+        if identity is not None and not isinstance(identity, LatentCoordinateIdentity):
+            try:
+                identity = LatentCoordinateIdentity.from_mapping(identity)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise EditorError("latent coordinate identity is malformed") from exc
+            object.__setattr__(self, "latent_coordinate_identity", identity)
+        if (
+            self.latent_feature_scheme == "random-projection-unit-v1"
+            and (self.latent_preference_z or self.latent_preference_fast_z)
+        ):
+            dimension = len(self.latent_preference_z or self.latent_preference_fast_z)
+            object.__setattr__(
+                self,
+                "latent_coordinate_identity",
+                coordinate_identity(
+                    dimension=dimension,
+                    projection_seed=self.latent_projection_seed,
+                    feature_scheme=self.latent_feature_scheme,
+                    whitening_ridge=self.latent_whitening_ridge,
+                ),
+            )
+        elif identity is None and (self.latent_preference_z or self.latent_preference_fast_z):
+            dimension = len(self.latent_preference_z or self.latent_preference_fast_z)
+            object.__setattr__(
+                self,
+                "latent_coordinate_identity",
+                coordinate_identity(
+                    dimension=dimension,
+                    projection_seed=self.latent_projection_seed,
+                    feature_scheme=self.latent_feature_scheme,
+                    whitening_ridge=self.latent_whitening_ridge,
+                ),
+            )
         for name in ("latent_strength", "latent_fast_strength"):
             value = getattr(self, name)
             if (type(value) not in (int, float)
@@ -422,6 +459,9 @@ class SamplingConfig:
             ),
             latent_min_gain=value.get("latent_min_gain", defaults.latent_min_gain),
             latent_max_gain=value.get("latent_max_gain", defaults.latent_max_gain),
+            latent_coordinate_identity=value.get(
+                "latent_coordinate_identity", defaults.latent_coordinate_identity
+            ),
             group_control_scheme=value.get(
                 "group_control_scheme", defaults.group_control_scheme
             ),
@@ -462,6 +502,7 @@ class SamplingConfig:
             ("latent_influence_kl", 0.05),
             ("latent_min_gain", 0.0),
             ("latent_max_gain", 8.0),
+            ("latent_coordinate_identity", None),
             ("group_control_scheme", "appearance-feedback-v1"),
         ):
             value.setdefault(name, default)
@@ -538,6 +579,10 @@ class SamplingConfig:
             "latent_influence_kl": self.latent_influence_kl,
             "latent_min_gain": self.latent_min_gain,
             "latent_max_gain": self.latent_max_gain,
+            "latent_coordinate_identity": (
+                self.latent_coordinate_identity.to_dict()
+                if self.latent_coordinate_identity is not None else None
+            ),
             "group_control_scheme": self.group_control_scheme,
             "reference_prior_routes": [
                 {"route": list(route), "weight": weight}

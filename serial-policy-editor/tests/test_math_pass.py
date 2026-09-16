@@ -1,6 +1,8 @@
 """Numerical coverage for the versioned v2 policy mathematics."""
 
 from types import SimpleNamespace
+import math
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -13,10 +15,12 @@ from trajectory_editor.group_control import (
     control_adjustments,
     gamma_poisson_rate,
 )
-from trajectory_editor.latent_features import project_token_embeddings
+from trajectory_editor.latent_features import coordinate_identity_matches, project_token_embeddings
 from trajectory_editor.latent_preference import (
     LatentPreferenceLearner,
+    canonical_policy_kl,
     choice_gradient,
+    exact_kl_line_search,
     fisher_matrix,
     pairwise_logistic_gradient,
 )
@@ -25,6 +29,12 @@ from trajectory_editor.sampling import (
     calibrated_latent_gain,
     policy_kl,
 )
+from trajectory_editor.episode_cli import (
+    _apply_latent_coordinate_overrides,
+    _sampling_from_args,
+    build_parser,
+)
+from tests.fakes import ScriptedIO
 
 
 def _group(name="phrase", routes=((1, 2), (2, 1))):
@@ -192,6 +202,27 @@ def test_fisher_kl_update_is_finite_and_within_safety_budget():
     assert np.all(np.isfinite(result.new_z))
 
 
+@pytest.mark.parametrize("fisher_mode", ["diagonal", "full"])
+def test_exact_learning_kl_bound_corrects_fisher_underestimate(fisher_mode):
+    features = np.asarray(
+        [[-3.0, 0.0], [2.0, 0.0], [0.0, 4.0], [-1.0, -3.0], [0.2, 0.1]],
+        dtype=np.float32,
+    )
+    base = np.asarray([0.55, 0.20, 0.10, 0.10, 0.05], dtype=np.float64)
+    direction = np.asarray([1.0, 0.0])
+    fisher = fisher_matrix(features, base)
+    fisher_guess = math.sqrt(2.0 * 0.2 / float(direction @ fisher @ direction))
+    assert canonical_policy_kl(base, features, np.zeros(2), fisher_guess * direction) > 0.2
+    alpha, exact, predicted, iterations = exact_kl_line_search(
+        base, features, np.zeros(2), direction, 0.2,
+        fisher=np.diag(np.diag(fisher)) if fisher_mode == "diagonal" else fisher,
+    )
+    assert iterations > 0
+    assert exact <= 0.2 + 1.0e-9
+    assert predicted > 0.0
+    assert alpha < fisher_guess
+
+
 def test_pairwise_rejection_gradient_fades_when_margin_is_correct():
     features = np.asarray(
         [[0.0, 0.0], [1.0, 0.0], [-1.0, 0.0], [0.0, 1.0]],
@@ -220,6 +251,86 @@ def test_pairwise_rejection_gradient_fades_when_margin_is_correct():
     assert np.linalg.norm(positive_result.learning_evidence) < np.linalg.norm(
         zero_margin.learning_evidence
     )
+
+
+def test_write_v2_aggregates_raw_evidence_before_one_kl_update():
+    features = np.asarray(
+        [[-1.0, 0.0], [1.0, 0.2], [0.7, 1.0], [-0.2, -1.0], [0.0, 0.4]],
+        dtype=np.float32,
+    )
+    sampling = SamplingConfig(
+        latent_learning_scheme="fisher-kl-v2",
+        latent_feature_scheme="whitened-projection-v2",
+    )
+    learner = LatentPreferenceLearner(
+        features, enabled=True, dimension=2, learning_scheme="fisher-kl-v2",
+        learning_metric="fisher", learning_kl=0.02, max_step=10.0, max_norm=10.0,
+        no_severity_attenuation=True,
+    )
+    observations = []
+    for logits, proposal in (
+        ([1.2, 0.8, 0.2, -0.7, -1.0], 0),
+        ([-0.5, 1.8, 1.0, 0.0, -1.0], 1),
+    ):
+        values = np.asarray(logits, dtype=np.float64)
+        statistics = ObservationStatistics(values, sampling, [], latent_features=features)
+        observations.append(SimpleNamespace(
+            boundary=0, proposal_token_id=proposal, logits=values, statistics=statistics,
+        ))
+    results = [learner.update(observation, chosen, sampling)
+               for observation, chosen in zip(observations, (3, 2))]
+    aggregate = learner.aggregate(results, sampling)
+    summed_steps = np.sum([result.learning_delta for result in results], axis=0)
+    assert not np.allclose(aggregate.learning_delta, summed_steps)
+    assert aggregate.exact_learning_kl <= aggregate.requested_learning_kl + 1.0e-9
+    assert aggregate.write_evidence_tokens == 2
+    assert aggregate.kl_line_search_iterations > 0
+
+
+def test_fast_slow_v2_starts_fast_memory_with_configured_relative_weight():
+    features = np.asarray(
+        [[-1.0, 0.0], [1.0, 0.2], [0.7, 1.0], [-0.2, -1.0], [0.0, 0.4]],
+        dtype=np.float32,
+    )
+    sampling = SamplingConfig(
+        latent_learning_scheme="fisher-kl-v2",
+        latent_feature_scheme="whitened-projection-v2",
+    )
+    learner = LatentPreferenceLearner(
+        features, enabled=True, dimension=2, learning_scheme="fisher-kl-v2",
+        learning_metric="fisher", learning_kl=0.02, fast_slow=True,
+        fast_strength=0.5, max_step=10.0, max_norm=10.0,
+        fast_max_step=10.0, fast_max_norm=10.0, no_severity_attenuation=True,
+    )
+    result = learner.update(
+        _latent_observation(sampling, features, proposal=0), 2, sampling
+    )
+    assert result.fast_strength == pytest.approx(0.5)
+    assert np.linalg.norm(result.new_fast_z) > 0.0
+    assert result.fast_requested_learning_kl == pytest.approx(0.02)
+
+
+@pytest.mark.parametrize("slow, fast", [
+    ((1.0, 0.0), (0.5, 0.0)),
+    ((1.0, 0.0), (-0.5, 0.0)),
+    ((1.0, 0.0), (0.0, 0.5)),
+])
+def test_fast_slow_auto_influence_is_one_combined_kl_budget(slow, fast):
+    features = np.asarray(
+        [[-1.0, 0.0], [1.0, 0.2], [0.7, 1.0], [-0.2, -1.0], [0.0, 0.4]],
+        dtype=np.float32,
+    )
+    sampling = SamplingConfig(
+        latent_preference_z=slow, latent_preference_fast_z=fast,
+        latent_fast_strength=0.5, latent_feature_scheme="whitened-projection-v2",
+        latent_influence_mode="kl", latent_influence_kl=0.02,
+    )
+    statistics = ObservationStatistics(
+        np.linspace(1.0, -0.5, len(features)), sampling, [], latent_features=features,
+    )
+    assert statistics.latent_diagnostics["deployment_kl"] == pytest.approx(0.02, abs=1.0e-9)
+    assert statistics.latent_diagnostics["effective_gain"] > 0.0
+    assert statistics.latent_diagnostics["combined_raw_logit_rms"] >= 0.0
 
 
 def test_gamma_poisson_posterior_mean_and_variance():
@@ -270,3 +381,38 @@ def test_v2_sampling_state_round_trip_keeps_math_schemes():
         bias_groups=(_group(),),
     )
     assert SamplingConfig.from_record(state.to_dict()) == state
+
+
+def test_coordinate_identity_resets_nonzero_memory_on_basis_change():
+    state = SamplingConfig(
+        latent_preference_z=(0.3, -0.2), latent_preference_fast_z=(0.1, 0.2),
+        latent_feature_scheme="whitened-projection-v2",
+    )
+    parser = build_parser()
+    args = parser.parse_args(["--latent-whitening-ridge", "0.01"])
+    args._explicit_options = {"latent_whitening_ridge"}
+    changed = _sampling_from_args(args, state)
+    assert not coordinate_identity_matches(changed)
+    io = ScriptedIO([])
+    reset = _apply_latent_coordinate_overrides(changed, args, io)
+    assert reset.latent_preference_z == reset.latent_preference_fast_z == ()
+    assert any("coordinate system changed" in line for line in io.output)
+
+
+def test_coordinate_identity_same_basis_and_zero_memory_are_stable():
+    state = SamplingConfig(
+        latent_preference_z=(0.3, -0.2),
+        latent_feature_scheme="whitened-projection-v2",
+    )
+    parser = build_parser()
+    same_args = parser.parse_args(["--latent-feature-scheme", "whitened-projection-v2"])
+    same_args._explicit_options = {"latent_feature_scheme"}
+    same = _sampling_from_args(same_args, state)
+    assert coordinate_identity_matches(same)
+    assert _apply_latent_coordinate_overrides(same, same_args, ScriptedIO([])) == same
+    empty = replace(state, latent_preference_z=(), latent_coordinate_identity=None,
+                    latent_feature_scheme="random-projection-unit-v1")
+    changed_args = parser.parse_args(["--latent-feature-scheme", "whitened-projection-v2"])
+    changed_args._explicit_options = {"latent_feature_scheme"}
+    changed_empty = _sampling_from_args(changed_args, empty)
+    assert _apply_latent_coordinate_overrides(changed_empty, changed_args, ScriptedIO([])) == changed_empty

@@ -861,6 +861,15 @@ Additional experimental latent controls are optional:
 | `--latent-fast-slow` | off | Also learn an independent fast vector in the same feature space. |
 | `--latent-seed` | `9137` for new episodes | Signed 64-bit projection seed; restored episodes keep their saved seed. |
 | `--latent-random-seed` | off | Draw and print one concrete latent seed at launch; mutually exclusive with `--latent-seed`. |
+| `--latent-feature-scheme whitened-projection-v2` | v1 | Center and whiten the projected feature vocabulary, with one global norm scale. |
+| `--latent-learning-scheme fisher-kl-v2` | v1 | Use a damped Fisher direction and an exact canonical-policy KL line search. |
+| `--latent-learning-metric fisher` | euclidean | Compatibility alias for the Fisher learner. |
+| `--latent-learning-kl` | `0.05` | Exact canonical preference-policy KL budget per correction or atomic Write. |
+| `--latent-fast-learning-kl` | slow budget | Separate fast-memory adaptation budget; deployment still uses one combined influence budget. |
+| `--latent-fisher-mode diagonal` | diagonal | Diagonal Fisher is the inexpensive default; `full` uses configured policy support. |
+| `--latent-fisher-ridge` | `0.001` | Damping used by the Fisher solve. |
+| `--latent-influence-mode kl` | manual | Calibrate the combined latent intervention to `--latent-influence-kl`. |
+| `--latent-influence-kl` | `0.05` | Nominal total latent deployment KL target in automatic influence mode. |
 
 Severity is `min(1, log1p(max(0, policy_rank - dead_zone_rank)) /
 log1p(severity_cap))`. With the default rejection target, strength 1 gives a chosen-versus-proposal
@@ -878,6 +887,23 @@ Disabled learners neither learn nor decay. Step clipping bounds new learning;
 norm clipping bounds the combined state after forgetting and learning. Net
 update norms include forgetting and any state clipping, so they can exceed
 the learning step limit.
+
+The v2 learner keeps preference memory separate from its deployment actuator.
+It learns from the canonical policy `q(z) ∝ p0 exp(Fz)`, where `p0` is the
+pre-latent policy, so changing `--latent-strength` does not change the evidence
+being learned. The Fisher matrix selects the natural-gradient direction, while
+`--latent-learning-kl` is enforced by an exact policy-KL line search; the
+reported `predicted_fisher_kl` is only the quadratic estimate. Rejections use a
+pairwise logistic loss, so a well-separated chosen/proposal pair naturally
+receives less additional pressure.
+
+In automatic influence mode, slow and fast scores are first combined and one
+global gain is calibrated against the pre-latent policy. Thus the requested
+influence describes the total latent intervention. The fast strength is the
+relative fast-channel weight in this mode; `--latent-strength` is the user
+multiplier applied to the calibrated actuator. Learning notices expose both
+the exact learning KL and the actual deployment KL, along with gain and safety
+clamps.
 
 With `--latent-fast-slow`, omitted fast controls resolve to:
 
@@ -908,6 +934,12 @@ replay segment. An explicit `--reference` similarly overrides reference state;
 other fields continue to follow the source. Changing the seed on
 resume, fork, or fixed-config replay clears both latent vectors and prints a
 reset notice, because their coordinates would otherwise have changed meaning.
+The same versioned-coordinate check applies to latent dimension, feature
+scheme, and whitening ridge. The saved identity includes the model embedding
+fingerprint when the backend exposes it; incompatible nonzero slow/fast memory
+is reset for explicit CLI/headless setting changes, while a loaded-model
+fingerprint mismatch is rejected before the new basis is used. Ordinary
+rewind/replay restores the historical identity and vectors exactly.
 
 Export all active steering and vectors with `--project EPISODE --biases-only`,
 and reload with `--biases biases.json`. See [Steering](STEERING.md#export-and-import-biasesjson)

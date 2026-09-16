@@ -26,6 +26,7 @@ from .latent_preference import (
     LatentPreferenceLearner,
     LatentPreferenceResult,
 )
+from .latent_features import LatentCoordinateIdentity
 from .online_learning import LearningResult, OnlineLearner, OnlineLearningConfig
 from .version import VERSION
 
@@ -51,6 +52,7 @@ __all__ = [
     "LatentPreferenceConfig",
     "LatentPreferenceLearner",
     "LatentPreferenceResult",
+    "LatentCoordinateIdentity",
     "OnlineLearner",
     "OnlineLearningConfig",
     "SelectRawRank",

@@ -83,6 +83,37 @@ def _latent_details(result):
         lines.extend(_channel_details(result, fast=True))
     elif result.sampling.latent_preference_fast_z:
         lines.append('Saved fast memory also steers output; fast learning is off.')
+    if result.learning_scheme == 'fisher-kl-v2':
+        lines.extend([
+            'v2 exact policy-KL update:',
+            f'  Gradient norm: {result.raw_gradient_norm:.4g}; Fisher mode: {result.fisher_mode}; '
+            f'condition estimate: {result.fisher_condition_estimate:.4g}.',
+            f'  Requested learning KL: {result.requested_learning_kl:.4g}; '
+            f'predicted Fisher KL: {result.predicted_fisher_kl:.4g}; '
+            f'exact learning KL: {result.exact_learning_kl:.4g} '
+            f'({result.kl_line_search_iterations} line-search iterations).',
+            *([
+                f'  Fast learning KL budget: {result.fast_requested_learning_kl:.4g}; '
+                f'predicted Fisher KL: {result.fast_predicted_fisher_kl:.4g}; '
+                f'exact fast learning KL: {result.fast_exact_learning_kl:.4g} '
+                f'({result.fast_kl_line_search_iterations} line-search iterations).',
+            ] if result.fast_requested_learning_kl > 0.0 or result.fast_exact_learning_kl > 0.0 else []),
+            f'  Pairwise margin: {"unavailable" if result.pairwise_margin is None else f"{result.pairwise_margin:.4g}"}; '
+            f'pairwise loss: {result.pairwise_loss:.4g}; '
+            f'rejection gradient norm: {result.rejection_gradient_norm:.4g}.',
+            f'  Safety clips: step {"yes" if result.step_clipped else "no"}; '
+            f'norm {"yes" if result.norm_clipped else "no"}.',
+            f'  Influence: mode {result.sampling.latent_influence_mode}; '
+            f'target {result.sampling.latent_influence_kl:.4g}; '
+            f'deployment KL {result.latent_deployment_kl:.4g}; '
+            f'global gain {result.latent_effective_gain:.4g}; '
+            f'user multiplier {result.latent_user_multiplier:.4g}; '
+            f'gain capped {"yes" if result.latent_gain_capped else "no"}.',
+            f'  Raw contribution RMS: slow {result.latent_slow_raw_rms:.4g}; '
+            f'fast {result.latent_fast_raw_rms:.4g}; combined {result.latent_combined_raw_rms:.4g}; '
+            f'logit RMS {result.latent_effective_logit_rms:.4g}; '
+            f'top-N range {result.latent_top_logit_min:.4g} .. {result.latent_top_logit_max:.4g}.',
+        ])
     lines.extend([
         'New learning and decay are vector movements; their sizes do not simply add.',
         'Z norm is memory magnitude, not confidence or the number of preferences learned.',

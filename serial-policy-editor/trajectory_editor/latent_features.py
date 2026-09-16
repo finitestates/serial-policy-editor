@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import math
+from dataclasses import dataclass
+from typing import Any, Mapping
 
 import numpy as np
 
@@ -16,6 +18,137 @@ LATENT_FEATURE_SCHEMES = (
     "random-projection-unit-v1",
     "whitened-projection-v2",
 )
+
+
+@dataclass(frozen=True)
+class LatentCoordinateIdentity:
+    """The immutable coordinate system in which a latent memory is expressed.
+
+    A preference vector is not portable across feature bases.  The model and
+    embedding fields are optional because lightweight providers often do not
+    expose a model fingerprint; the basis-defining projection fields remain
+    fully checked in that case.
+    """
+
+    model_fingerprint: str | None
+    embedding_width: int | None
+    dimension: int
+    projection_seed: int
+    feature_scheme: str
+    whitening_scheme: str
+    whitening_ridge: float
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "LatentCoordinateIdentity":
+        if not isinstance(value, Mapping):
+            raise ValueError("latent coordinate identity must be an object")
+        return cls(
+            model_fingerprint=value.get("model_fingerprint"),
+            embedding_width=value.get("embedding_width"),
+            dimension=int(value["dimension"]),
+            projection_seed=int(value["projection_seed"]),
+            feature_scheme=str(value["feature_scheme"]),
+            whitening_scheme=str(value.get("whitening_scheme", "none-v1")),
+            whitening_ridge=float(value.get("whitening_ridge", 0.0)),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "model_fingerprint": self.model_fingerprint,
+            "embedding_width": self.embedding_width,
+            "dimension": self.dimension,
+            "projection_seed": self.projection_seed,
+            "feature_scheme": self.feature_scheme,
+            "whitening_scheme": self.whitening_scheme,
+            "whitening_ridge": self.whitening_ridge,
+        }
+
+    @property
+    def basis_key(self) -> tuple[Any, ...]:
+        """Fields that change token-feature coordinates."""
+        return (
+            self.model_fingerprint,
+            self.embedding_width,
+            self.dimension,
+            self.projection_seed,
+            self.feature_scheme,
+            self.whitening_scheme,
+            self.whitening_ridge,
+        )
+
+
+def coordinate_identity(
+    *,
+    dimension: int,
+    projection_seed: int,
+    feature_scheme: str,
+    whitening_ridge: float,
+    model_fingerprint: str | None = None,
+    embedding_width: int | None = None,
+) -> LatentCoordinateIdentity:
+    """Build the canonical identity for a feature request."""
+    return LatentCoordinateIdentity(
+        model_fingerprint=model_fingerprint,
+        embedding_width=embedding_width,
+        dimension=int(dimension),
+        projection_seed=int(projection_seed),
+        feature_scheme=str(feature_scheme),
+        whitening_scheme=(
+            "eigh-ridge-global-scale-v2"
+            if feature_scheme == "whitened-projection-v2" else "none-v1"
+        ),
+        whitening_ridge=(float(whitening_ridge)
+                         if feature_scheme == "whitened-projection-v2" else 0.0),
+    )
+
+
+def sampling_coordinate_identity(
+    sampling,
+    *,
+    dimension: int | None = None,
+    model_fingerprint: str | None = None,
+    embedding_width: int | None = None,
+) -> LatentCoordinateIdentity:
+    """Return the identity requested by a sampling configuration."""
+    if dimension is None:
+        vectors = (
+            getattr(sampling, "latent_preference_z", ())
+            or getattr(sampling, "latent_preference_fast_z", ())
+        )
+        stored = getattr(sampling, "latent_coordinate_identity", None)
+        dimension = len(vectors) or (stored.dimension if stored is not None else DEFAULT_LATENT_DIMENSION)
+    return coordinate_identity(
+        dimension=dimension,
+        projection_seed=sampling.latent_projection_seed,
+        feature_scheme=sampling.latent_feature_scheme,
+        whitening_ridge=sampling.latent_whitening_ridge,
+        model_fingerprint=model_fingerprint,
+        embedding_width=embedding_width,
+    )
+
+
+def coordinate_identity_matches(
+    sampling,
+    *,
+    dimension: int | None = None,
+    model_fingerprint: str | None = None,
+    embedding_width: int | None = None,
+) -> bool:
+    """Check whether persisted coordinates match the currently requested basis."""
+    stored = getattr(sampling, "latent_coordinate_identity", None)
+    if stored is None:
+        return True
+    requested = sampling_coordinate_identity(
+        sampling,
+        dimension=dimension,
+        model_fingerprint=model_fingerprint,
+        embedding_width=embedding_width,
+    )
+    # Unknown current fingerprints do not invalidate an identity whose model
+    # fingerprint is also unknown.  A known mismatch is always incompatible.
+    if stored.model_fingerprint is not None and requested.model_fingerprint is not None:
+        return stored.basis_key == requested.basis_key
+    return stored.basis_key[1:] == requested.basis_key[1:]
 
 
 def embedding_fingerprint(embeddings: np.ndarray) -> str:
