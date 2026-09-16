@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add episode-pair activation tooling: derive portable output-layer vectors
+  from positive/negative replay or fork episodes, or export escaped paired
+  prompt files plus provenance for llama.cpp's `llama-cvector-generator`.
+
 ## 0.4.2 — 2026-09-16
 
 - Rename the current projected token-feature learner and controls from

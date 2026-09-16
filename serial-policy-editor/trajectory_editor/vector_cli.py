@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from dataclasses import replace
@@ -43,6 +44,9 @@ from .vector_artifacts import (
     blend_artifacts,
     materialize_features,
 )
+
+
+ACTIVATION_PAIRS_FORMAT = "spe-activation-pairs-v1"
 
 
 def _positive_int(value: str) -> int:
@@ -265,6 +269,76 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--strength", type=float, default=1.0)
     create.add_argument("--output", type=Path)
 
+    derive = activation_actions.add_parser(
+        "derive",
+        help="derive an output-layer vector from paired positive and negative episodes",
+    )
+    derive.add_argument(
+        "--workspace",
+        type=Path,
+        required=True,
+        help="episode workspace SQLite database",
+    )
+    derive.add_argument(
+        "--positive",
+        nargs="+",
+        required=True,
+        metavar="EPISODE_ID",
+        help="episodes demonstrating the desired behavior",
+    )
+    derive.add_argument(
+        "--negative",
+        nargs="+",
+        required=True,
+        metavar="EPISODE_ID",
+        help="baseline or contrasting episodes, paired by position",
+    )
+    _add_backend_args(derive, require_model=True)
+    derive.add_argument(
+        "--capture-position",
+        choices=("first", "last"),
+        default="last",
+        help="activation position captured from each episode text",
+    )
+    derive.add_argument(
+        "--no-normalize",
+        action="store_true",
+        help="retain the mean activation difference magnitude",
+    )
+    derive.add_argument("--strength", type=float, default=1.0)
+    derive.add_argument("--output", type=Path)
+
+    export_pairs = activation_actions.add_parser(
+        "export-pairs",
+        help="export paired episodes as cvector-generator prompt files",
+    )
+    export_pairs.add_argument(
+        "--workspace",
+        type=Path,
+        required=True,
+        help="episode workspace SQLite database",
+    )
+    export_pairs.add_argument(
+        "--positive",
+        nargs="+",
+        required=True,
+        metavar="EPISODE_ID",
+        help="episodes demonstrating the desired behavior",
+    )
+    export_pairs.add_argument(
+        "--negative",
+        nargs="+",
+        required=True,
+        metavar="EPISODE_ID",
+        help="baseline or contrasting episodes, paired by position",
+    )
+    export_pairs.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="directory for positive.txt, negative.txt, and manifest.json",
+    )
+
     import_cvector = activation_actions.add_parser(
         "import-cvector",
         help="import a llama.cpp cvector-generator GGUF as a portable artifact",
@@ -366,6 +440,142 @@ def _prompt_value(args: argparse.Namespace, text_name: str, file_name: str, labe
     if not value:
         raise EditorError(f"{label} must be nonempty")
     return value
+
+
+def _episode_prompt_record(store: EpisodeStore, requested_id: str) -> dict[str, Any]:
+    episode_id = store.resolve_id(requested_id)
+    episode = store.get_episode(episode_id)
+    visible_tokens = [
+        row for row in store.tokens(episode_id) if bool(row["realized_visible"])
+    ]
+    actions = store.actions(episode_id)
+    text = str(episode["initial_text"]) + str(episode["visible_text"])
+    return {
+        "requested_id": requested_id,
+        "episode_id": episode_id,
+        "label": store.label(episode_id),
+        "parent_episode_id": episode.get("parent_episode_id"),
+        "fork_boundary": episode.get("fork_boundary"),
+        "status": str(episode["status"]),
+        "visible_token_count": len(visible_tokens),
+        "action_kinds": [str(row["kind"]) for row in actions],
+        "text": text,
+        "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    }
+
+
+def _activation_episode_pairs(
+    store: EpisodeStore,
+    positive_ids: list[str],
+    negative_ids: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if len(positive_ids) != len(negative_ids):
+        raise EditorError(
+            "activation positive and negative episode lists must have the same length"
+        )
+    if not positive_ids:
+        raise EditorError("at least one positive/negative episode pair is required")
+    positive = [_episode_prompt_record(store, value) for value in positive_ids]
+    negative = [_episode_prompt_record(store, value) for value in negative_ids]
+    return positive, negative
+
+
+def _episode_pair_source(
+    workspace: Path,
+    positive: list[dict[str, Any]],
+    negative: list[dict[str, Any]],
+) -> dict[str, Any]:
+    def metadata(record: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: record[key]
+            for key in (
+                "requested_id",
+                "episode_id",
+                "label",
+                "parent_episode_id",
+                "fork_boundary",
+                "status",
+                "visible_token_count",
+                "action_kinds",
+                "text_sha256",
+            )
+        }
+
+    return {
+        "type": "episode-pairs",
+        "workspace": str(workspace),
+        "positive": [metadata(record) for record in positive],
+        "negative": [metadata(record) for record in negative],
+    }
+
+
+def _cvector_escape(text: str) -> str:
+    """Encode one episode as a single cvector-generator prompt-file line."""
+    result: list[str] = []
+    for character in text:
+        codepoint = ord(character)
+        if character == "\\":
+            result.append("\\\\")
+        elif character == "\n":
+            result.append("\\n")
+        elif character == "\r":
+            result.append("\\r")
+        elif character == "\t":
+            result.append("\\t")
+        elif codepoint < 0x20:
+            result.append(f"\\x{codepoint:02x}")
+        else:
+            result.append(character)
+    return "".join(result)
+
+
+def _export_activation_pairs(
+    workspace: Path,
+    output_dir: Path,
+    positive: list[dict[str, Any]],
+    negative: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if output_dir.exists() and not output_dir.is_dir():
+        raise EditorError(f"activation pair output is not a directory: {output_dir}")
+    manifest = {
+        "format": ACTIVATION_PAIRS_FORMAT,
+        "workspace": str(workspace),
+        "positive_file": "positive.txt",
+        "negative_file": "negative.txt",
+        "pair_count": len(positive),
+        "pairs": [
+            {
+                "positive": {
+                    key: value
+                    for key, value in record.items()
+                    if key != "text"
+                },
+                "negative": {
+                    key: value
+                    for key, value in counterpart.items()
+                    if key != "text"
+                },
+            }
+            for record, counterpart in zip(positive, negative)
+        ],
+    }
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "positive.txt").write_text(
+            "\n".join(_cvector_escape(record["text"]) for record in positive) + "\n",
+            encoding="utf-8",
+        )
+        (output_dir / "negative.txt").write_text(
+            "\n".join(_cvector_escape(record["text"]) for record in negative) + "\n",
+            encoding="utf-8",
+        )
+        (output_dir / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise EditorError(f"could not write activation pair files: {exc}") from exc
+    return manifest
 
 
 def _extract(args: argparse.Namespace) -> TokenPreferenceVectorArtifact:
@@ -733,6 +943,33 @@ def main(argv: list[str] | None = None) -> int:
                 _write_text(render_compare_report(report), args.output)
             return 0
         if args.kind == "activation":
+            if args.action == "export-pairs":
+                with EpisodeStore(args.workspace) as store:
+                    positive, negative = _activation_episode_pairs(
+                        store, args.positive, args.negative
+                    )
+                manifest = _export_activation_pairs(
+                    args.workspace, args.output_dir, positive, negative
+                )
+                _write_text(json.dumps(manifest, ensure_ascii=False, indent=2), None)
+                return 0
+            if args.action == "derive":
+                with EpisodeStore(args.workspace) as store:
+                    positive, negative = _activation_episode_pairs(
+                        store, args.positive, args.negative
+                    )
+                backend = _load_backend(args)
+                artifact = ActivationVectorArtifact.from_prompt_pairs(
+                    backend,
+                    backend.provenance(include_model_sha256=False),
+                    [(left["text"], right["text"]) for left, right in zip(positive, negative)],
+                    capture_position=args.capture_position,
+                    normalize=not args.no_normalize,
+                    strength=args.strength,
+                    source=_episode_pair_source(args.workspace, positive, negative),
+                )
+                _write_text(artifact.to_json(), args.output)
+                return 0
             if args.action == "create":
                 backend = _load_backend(args)
                 artifact = ActivationVectorArtifact.from_prompt_pair(

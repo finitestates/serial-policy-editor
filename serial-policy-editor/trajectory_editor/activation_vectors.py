@@ -16,7 +16,7 @@ import math
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -494,6 +494,96 @@ class ActivationVectorArtifact:
                 "normalized": bool(normalize),
                 "raw_delta_norm": raw_norm,
             },
+        )
+
+    @classmethod
+    def from_prompt_pairs(
+        cls,
+        backend: Any,
+        provenance: Mapping[str, Any],
+        pairs: Sequence[tuple[str, str]],
+        *,
+        capture_position: str = "last",
+        normalize: bool = True,
+        strength: float = 1.0,
+        source: Mapping[str, Any] | None = None,
+    ) -> "ActivationVectorArtifact":
+        """Average positive-minus-negative activation differences.
+
+        Each pair is captured independently, then the raw differences are
+        averaged before optional unit normalization.  Averaging the raw
+        differences keeps a long or unusually energetic example from being
+        silently given a larger direction merely because it was normalized
+        first.
+        """
+        if not pairs:
+            raise EditorError("at least one activation prompt pair is required")
+        if capture_position not in CAPTURE_POSITIONS:
+            raise EditorError("activation capture position must be first or last")
+        capture = getattr(backend, "activation_snapshot", None)
+        width_method = getattr(backend, "activation_width", None)
+        if not callable(capture) or not callable(width_method):
+            raise EditorError(
+                "the loaded backend does not expose output activation snapshots"
+            )
+
+        deltas: list[np.ndarray] = []
+        pair_norms: list[float] = []
+        try:
+            width = int(width_method())
+            if width < 1:
+                raise ValueError("activation width must be positive")
+            kwargs = {"layer": OUTPUT_LAYER, "position": capture_position}
+            for positive_prompt, negative_prompt in pairs:
+                if not isinstance(positive_prompt, str) or not positive_prompt:
+                    raise ValueError("positive prompts must be nonempty strings")
+                if not isinstance(negative_prompt, str) or not negative_prompt:
+                    raise ValueError("negative prompts must be nonempty strings")
+                positive = np.asarray(
+                    capture(positive_prompt, **_supported_kwargs(capture, kwargs)),
+                    dtype=np.float64,
+                )
+                negative = np.asarray(
+                    capture(negative_prompt, **_supported_kwargs(capture, kwargs)),
+                    dtype=np.float64,
+                )
+                if positive.ndim != 1 or negative.ndim != 1 or positive.shape != negative.shape:
+                    raise ValueError(
+                        "activation snapshots must be equal one-dimensional vectors"
+                    )
+                if positive.shape[0] != width:
+                    raise ValueError(
+                        f"activation snapshot width {positive.shape[0]} does not match backend width {width}"
+                    )
+                if not np.all(np.isfinite(positive)) or not np.all(np.isfinite(negative)):
+                    raise ValueError("activation snapshots must be finite")
+                delta = positive - negative
+                deltas.append(delta)
+                pair_norms.append(float(np.linalg.norm(delta)))
+        except (RuntimeError, TypeError, ValueError) as exc:
+            raise EditorError(f"could not capture activation pairs: {exc}") from exc
+
+        aggregate = np.mean(np.stack(deltas, axis=0), axis=0)
+        aggregate_norm = float(np.linalg.norm(aggregate))
+        if normalize and aggregate_norm > 0.0:
+            aggregate = aggregate / aggregate_norm
+        source_payload = dict(source or {})
+        source_payload.setdefault("type", "prompt-pairs")
+        source_payload.update(
+            {
+                "pair_count": len(deltas),
+                "capture_position": capture_position,
+                "normalized": bool(normalize),
+                "pair_delta_norms": pair_norms,
+                "aggregate_delta_norm": aggregate_norm,
+            }
+        )
+        return cls(
+            model=model_identity(provenance, activation_width=width),
+            vector=tuple(float(value) for value in aggregate),
+            strength=strength,
+            method="prompt-pairs-mean-v1",
+            source=source_payload,
         )
 
     def to_dict(self) -> dict[str, Any]:
