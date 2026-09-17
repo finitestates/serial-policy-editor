@@ -869,7 +869,24 @@ not persisted in presets.
 
 ### Offline vector workbench
 
-`policy-editor-vector` manages standalone, model-matched token preference
+SPE uses “vector” as an umbrella term for several deliberately different
+control surfaces. They are typed in the portable artifact rather than being
+presented as generic “activation vectors”:
+
+| Vector kind | Coordinate space | Runtime effect |
+| --- | --- | --- |
+| `hidden-state-vector` | Decoder-block output residual at selected layers | Changes the model’s internal residual stream before later layers run. |
+| `output-head-steering-vector` | Final hidden representation | Projects through the output head into a vocabulary-wide logit adjustment. |
+| Token-preference vector | SPE’s deterministic projected token-feature coordinates | Adjusts token logits directly through the preference learner surface. |
+| Native cvector GGUF | llama.cpp’s layerwise control-vector format | Imports native hidden-state directions, preserving `direction.N` layer slots. |
+
+The first two are model-state controls; only the output-head kind has a
+static vocabulary-logit explanation. Token-preference vectors and learner
+state are not hidden-state vectors, and manual/group biases are separate
+logit-space controls. The controller stack and replay records preserve these
+distinctions.
+
+`policy-editor-vector` manages standalone, model-matched token-preference
 artifacts. Extract a vector from an episode or a v4 preset, inspect its
 coordinate identity and norms, and explain which vocabulary tokens it favors:
 
@@ -988,6 +1005,31 @@ per prompt, then the artifact creator selects `first` or `last` for the
 prompt-pair direction. Its native control-vector runtime supports layers
 `1..N-1`, matching llama.cpp's cvector convention; the final output-layer
 representation remains a separate output-head coordinate.
+
+There is also a narrow native worker for installations where the Python
+binding's private capture symbols are not a comfortable compatibility boundary.
+Build it against the llama.cpp checkout used by SPE, then ask the workbench to
+use it for capture:
+
+```bash
+bash tools/build_spe_llama_worker.sh
+policy-editor-vector hidden-state create \
+  --model model.gguf --backend llama.cpp \
+  --worker build/spe-llama-worker \
+  --prompt-a "I am calm." \
+  --prompt-b "I am angry." \
+  --layer-range 8 12 --output calm-vs-angry.json
+```
+
+The worker is a one-shot native compatibility process, not an inference
+server. It links directly to the selected llama.cpp build, captures the
+requested residual layers, and writes a small versioned JSON response. The
+workbench validates that response and converts it into the same portable
+`spe-steering-vector-v1` artifact used by the normal backend. If llama.cpp's
+internal capture interface changes, rebuilding the worker fails at its build
+boundary instead of leaving a runtime symbol lookup silently pointed at the
+wrong ABI. Set `SPE_LLAMA_CPP_ROOT` or `SPE_LLAMA_CPP_BUILD` when the checkout
+or build is not adjacent to the SPE repository.
 
 `export-pairs` plus `llama-cvector-generator` remains available when you want
 llama.cpp's PCA/mean training workflow or a native GGUF cvector:

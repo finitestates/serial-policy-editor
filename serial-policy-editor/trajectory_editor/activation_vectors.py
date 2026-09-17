@@ -828,6 +828,146 @@ class SteeringVectorArtifact:
             layer_end=layer_end,
         )
 
+    @classmethod
+    def from_llama_worker_response(
+        cls,
+        response: Mapping[str, Any],
+        *,
+        model_path: Path,
+        worker_path: Path,
+        prompt_a: str,
+        prompt_b: str,
+        layer_start: int,
+        layer_end: int,
+        capture_position: str = "last",
+        normalize: bool = True,
+        strength: float = 1.0,
+    ) -> "SteeringVectorArtifact":
+        """Convert a native worker response into the portable SPE artifact."""
+
+        if not isinstance(response, Mapping):
+            raise EditorError("llama.cpp worker response must be an object")
+        if response.get("protocol") != "spe-llama-worker-v1":
+            raise EditorError("llama.cpp worker returned an unsupported protocol")
+        if response.get("operation") != "hidden-state-pair":
+            raise EditorError("llama.cpp worker returned an unsupported operation")
+        backend = response.get("backend")
+        model_data = response.get("model")
+        target = response.get("target")
+        directions_data = response.get("directions")
+        norms_data = response.get("raw_delta_norms")
+        if not isinstance(backend, Mapping) or backend.get("name") != "llama.cpp":
+            raise EditorError("llama.cpp worker response has invalid backend metadata")
+        if not isinstance(model_data, Mapping):
+            raise EditorError("llama.cpp worker response requires model metadata")
+        if not isinstance(target, Mapping):
+            raise EditorError("llama.cpp worker response requires target metadata")
+        if target.get("site") != HIDDEN_STATE_SITE:
+            raise EditorError("llama.cpp worker returned an unsupported hidden-state site")
+        if target.get("layer_numbering") != HIDDEN_STATE_LAYER_NUMBERING:
+            raise EditorError("llama.cpp worker layer numbering must be one-based")
+        if target.get("position") != capture_position:
+            raise EditorError("llama.cpp worker position does not match the request")
+        if target.get("layer_start") != layer_start or target.get("layer_end") != layer_end:
+            raise EditorError("llama.cpp worker layer range does not match the request")
+        if response.get("normalized") is not bool(normalize):
+            raise EditorError("llama.cpp worker normalization does not match the request")
+        if not isinstance(directions_data, Mapping) or not isinstance(norms_data, Mapping):
+            raise EditorError("llama.cpp worker response requires directions and norms")
+
+        def positive_int(value: Any, label: str) -> int:
+            if type(value) is not int or value < 1:
+                raise EditorError(f"llama.cpp worker {label} must be a positive integer")
+            return value
+
+        width = positive_int(model_data.get("hidden_state_width"), "hidden-state width")
+        layer_count = positive_int(
+            model_data.get("hidden_state_layer_count"), "hidden-state layer count"
+        )
+        if layer_end > layer_count:
+            raise EditorError("llama.cpp worker layer range exceeds the model")
+        expected_layers = {str(layer) for layer in range(layer_start, layer_end + 1)}
+        if set(directions_data) != expected_layers or set(norms_data) != expected_layers:
+            raise EditorError("llama.cpp worker returned an incomplete layer range")
+
+        directions = np.zeros((layer_count, width), dtype=np.float64)
+        raw_norms: list[float] = []
+        for layer in range(layer_start, layer_end + 1):
+            key = str(layer)
+            try:
+                values = np.asarray(directions_data[key], dtype=np.float64)
+            except (TypeError, ValueError) as exc:
+                raise EditorError(f"llama.cpp worker layer {layer} is not numeric") from exc
+            if values.ndim != 1 or values.shape[0] != width:
+                raise EditorError(
+                    f"llama.cpp worker layer {layer} width does not match the model"
+                )
+            if not np.all(np.isfinite(values)):
+                raise EditorError("llama.cpp worker returned non-finite directions")
+            try:
+                raw_norm = float(norms_data[key])
+            except (TypeError, ValueError) as exc:
+                raise EditorError(f"llama.cpp worker layer {layer} norm is invalid") from exc
+            if not math.isfinite(raw_norm) or raw_norm < 0.0:
+                raise EditorError("llama.cpp worker returned an invalid direction norm")
+            directions[layer - 1] = values
+            raw_norms.append(raw_norm)
+
+        try:
+            model_stat = model_path.stat()
+        except OSError as exc:
+            raise EditorError(f"could not inspect worker model: {exc}") from exc
+        if not model_path.is_file():
+            raise EditorError(f"worker model does not exist: {model_path}")
+        reported_filename = model_data.get("filename")
+        if reported_filename is not None and Path(str(reported_filename)).name != model_path.name:
+            raise EditorError("llama.cpp worker model does not match the requested model")
+
+        model = {
+            "backend": "llama.cpp",
+            "filename": model_path.name,
+            "file_size_bytes": int(model_stat.st_size),
+            "hidden_state_width": width,
+            "hidden_state_layer_count": layer_count,
+        }
+        for field in ("vocabulary_size", "model_type"):
+            value = model_data.get(field)
+            if value is not None:
+                model[field] = value
+        source = {
+            "type": "hidden-state-prompt-pair",
+            "producer": "spe-llama-worker",
+            "protocol": response["protocol"],
+            "worker_path": str(worker_path),
+            "model_path": str(model_path.resolve()),
+            "worker_backend": dict(backend),
+            "prompt_a": prompt_a,
+            "prompt_b": prompt_b,
+            "capture_position": capture_position,
+            "normalized_per_layer": bool(normalize),
+            "layer_start": layer_start,
+            "layer_end": layer_end,
+            "layer_delta_norms": raw_norms,
+        }
+        prompts = response.get("prompts")
+        if isinstance(prompts, Mapping):
+            source["prompt_token_counts"] = {
+                key: prompts[key]
+                for key in ("a_token_count", "b_token_count")
+                if key in prompts
+            }
+        return cls(
+            model=model,
+            vector=tuple(float(value) for value in directions.reshape(-1)),
+            layer=CONTROL_VECTOR_LAYER,
+            position=CONTROL_VECTOR_POSITION,
+            strength=strength,
+            method="hidden-state-prompt-pair-llama-worker-v1",
+            source=source,
+            layer_start=layer_start,
+            layer_end=layer_end,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         result = {
             "format": FORMAT,

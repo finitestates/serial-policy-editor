@@ -39,6 +39,7 @@ from .vector_impact import (
     render_impact_report,
 )
 from .transformers_backend import TransformersSettings
+from .llama_worker import capture_hidden_state_pair
 from .vector_artifacts import (
     FORMAT,
     TokenPreferenceVectorArtifact,
@@ -341,6 +342,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hidden_create.add_argument("--no-normalize", action="store_true")
     hidden_create.add_argument("--strength", type=float, default=1.0)
+    hidden_create.add_argument(
+        "--worker",
+        type=Path,
+        help="use a native llama.cpp hidden-state worker instead of the Python backend",
+    )
     hidden_create.add_argument("--output", type=Path)
 
     export_pairs = hidden_state_actions.add_parser(
@@ -1023,24 +1029,55 @@ def main(argv: list[str] | None = None) -> int:
                 _write_text(artifact.to_json(), args.output)
                 return 0
             if args.kind == "hidden-state" and args.action == "create":
-                backend = _load_backend(args)
                 if args.layer is not None:
                     layer_start = layer_end = args.layer
                 else:
                     layer_start, layer_end = args.layer_range
                 if layer_end < layer_start:
                     raise EditorError("hidden-state layer range end must be at least its start")
-                artifact = SteeringVectorArtifact.from_hidden_state_prompt_pair(
-                    backend,
-                    backend.provenance(include_model_sha256=False),
-                    _prompt_value(args, "prompt_a", "prompt_a_file", "prompt A"),
-                    _prompt_value(args, "prompt_b", "prompt_b_file", "prompt B"),
-                    layer_start=layer_start,
-                    layer_end=layer_end,
-                    capture_position=args.capture_position,
-                    normalize=not args.no_normalize,
-                    strength=args.strength,
-                )
+                prompt_a = _prompt_value(args, "prompt_a", "prompt_a_file", "prompt A")
+                prompt_b = _prompt_value(args, "prompt_b", "prompt_b_file", "prompt B")
+                if args.worker is not None:
+                    if args.backend != "llama.cpp":
+                        raise EditorError("--worker is only supported with the llama.cpp backend")
+                    response = capture_hidden_state_pair(
+                        args.worker,
+                        args.model,
+                        prompt_a,
+                        prompt_b,
+                        layer_start=layer_start,
+                        layer_end=layer_end,
+                        position=args.capture_position,
+                        normalize=not args.no_normalize,
+                        n_ctx=args.n_ctx,
+                        n_threads=args.n_threads,
+                        n_gpu_layers=args.n_gpu_layers,
+                    )
+                    artifact = SteeringVectorArtifact.from_llama_worker_response(
+                        response,
+                        model_path=args.model,
+                        worker_path=args.worker,
+                        prompt_a=prompt_a,
+                        prompt_b=prompt_b,
+                        layer_start=layer_start,
+                        layer_end=layer_end,
+                        capture_position=args.capture_position,
+                        normalize=not args.no_normalize,
+                        strength=args.strength,
+                    )
+                else:
+                    backend = _load_backend(args)
+                    artifact = SteeringVectorArtifact.from_hidden_state_prompt_pair(
+                        backend,
+                        backend.provenance(include_model_sha256=False),
+                        prompt_a,
+                        prompt_b,
+                        layer_start=layer_start,
+                        layer_end=layer_end,
+                        capture_position=args.capture_position,
+                        normalize=not args.no_normalize,
+                        strength=args.strength,
+                    )
                 _write_text(artifact.to_json(), args.output)
                 return 0
             if args.kind == "hidden-state" and args.action == "import-cvector":
