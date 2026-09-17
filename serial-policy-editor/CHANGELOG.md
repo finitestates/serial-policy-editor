@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.6 — 2026-09-17
+
+- Add direct llama.cpp residual-stream capture for selected layers and token
+  positions, including efficient range capture and prompt-pair hidden-state
+  vector creation. The existing `cvector-generator` export/import workflow
+  remains available for PCA and mean-based vector training.
+- Complete the first portable hidden-state control path across llama.cpp and
+  Transformers with explicit one-based decoder-block residual coordinates,
+  model metadata, replay-safe artifacts, and real llama.cpp smoke coverage.
+- Simplify teacher learning semantics: every explicit teacher-selected token
+  is authoritative supervision, learnable groups use selection-gated positive
+  updates, and each token in a typed write is learned as its own sequential
+  event.
+- Share compiled observation data and normalized group matchers across the
+  sequential learner update path without changing the bounded update rules.
+
 ## 0.4.4 — 2026-09-16
 
 - Replace the ambiguous public `activation` vector surface with explicit

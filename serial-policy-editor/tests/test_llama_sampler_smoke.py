@@ -10,6 +10,8 @@ import pytest
 
 from tests.fakes import ScriptedIO
 from trajectory_editor.domain import SamplingConfig
+from trajectory_editor.activation_vectors import SteeringVectorArtifact
+from trajectory_editor.decoder import LlamaCppDecoder, LlamaCppSettings
 from trajectory_editor.episode_cli import main
 from trajectory_editor.episode_store import EpisodeStore
 from trajectory_editor import episode_engine
@@ -173,3 +175,46 @@ def test_real_replay_override_yields_to_edge_edits(tmp_path, model, fixed):
     with EpisodeStore(path) as store:
         assert store.final_sampling('replay') == EDITED
         assert len([t for t in store.tokens('replay') if t['realized_visible']]) == 3
+
+
+def test_real_llama_hidden_state_capture_and_prompt_pair(model):
+    backend = LlamaCppDecoder(
+        model,
+        LlamaCppSettings(
+            n_ctx=256,
+            n_batch=64,
+            n_gpu_layers=0,
+            n_threads=2,
+            n_threads_batch=2,
+        ),
+    )
+    try:
+        capabilities = backend.hidden_state_capabilities()
+        assert capabilities['site'] == 'decoder-block-output-residual'
+        assert capabilities['layer_numbering'] == 'one-based'
+        assert capabilities['layer_count'] == backend.activation_control_vector_layer_count()
+        assert capabilities['width'] == backend.activation_width()
+
+        rows = backend.hidden_state_snapshots(
+            'A calm lake.', layer_start=1, layer_end=2, position='all'
+        )
+        assert set(rows) == {1, 2}
+        assert rows[1].ndim == 2 and rows[1].shape[1] == backend.activation_width()
+        assert rows[2].shape == rows[1].shape
+        assert np.isfinite(rows[1]).all() and np.isfinite(rows[2]).all()
+
+        artifact = SteeringVectorArtifact.from_hidden_state_prompt_pair(
+            backend,
+            backend.provenance(include_model_sha256=False),
+            'A calm lake.',
+            'A crowded city.',
+            layer_start=1,
+            layer_end=2,
+            capture_position='last',
+        )
+        assert artifact.layer == 'control-vector'
+        assert artifact.layer_start == 1 and artifact.layer_end == 2
+        assert len(artifact.vector) == backend.activation_width() * capabilities['layer_count']
+        assert artifact.source['layer_delta_norms']
+    finally:
+        backend.close()

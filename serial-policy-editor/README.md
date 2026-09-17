@@ -1,11 +1,11 @@
-# Serial Policy Editor 0.4.4
+# Serial Policy Editor 0.4.6
 
 Serial Policy Editor (SPE) is a terminal editor for steering a local language
 model one token, text insertion, or delegated span at a time. Save your choices,
 rewind or fork a continuation, and replay the recorded editing procedure in a
 new context.
 
-**0.4.4 separates hidden-state control from output-head steering throughout the public vector tooling.**
+**0.4.6 adds direct hidden-state vector capture for llama.cpp alongside the Transformers backend.**
 Load relative term weights with `--reference`, define groups with YAML or
 commands, and activate promote, suppress, or maintain objectives with bare
 `b target +`, `-`, or `=`. Numeric amounts remain manual; `off` clears an
@@ -945,10 +945,11 @@ correct. Evaluate derived vectors with `output-head validate`, `explain` (for
 output-head vectors), and the `impact`/`compare` workbench reports before
 using them on new episodes.
 
-Transformers can create hidden-state vectors directly at an arbitrary decoder
-block. The first supported site is the residual stream immediately after the
-selected block; one width-sized direction is stored for every text layer, with
-only the requested range active. Layer numbers are one-based in this command:
+Both backends can create hidden-state vectors directly at the decoder-block
+residual boundary. The first supported site is the residual stream immediately
+after the selected block; one width-sized direction is stored for every text
+layer, with only the requested range active. Layer numbers are one-based in
+this command:
 
 ```bash
 policy-editor-vector hidden-state create \
@@ -969,8 +970,27 @@ use full attention. The portable target remains the decoder block-output
 residual stream; lower-level attention or recurrent-state vectors require an
 explicit backend-specific coordinate.
 
-For llama.cpp's native layerwise hidden-state control vectors, import the GGUF
-emitted by `llama-cvector-generator`:
+For llama.cpp, `hidden-state create` captures the selected per-token residual
+states directly through llama.cpp's native layer-input extraction API:
+
+```bash
+policy-editor-vector hidden-state create \
+  --model model.gguf --backend llama.cpp \
+  --prompt-a "I am calm." \
+  --prompt-b "I am angry." \
+  --layer-range 8 12 --output calm-vs-angry.json
+policy-editor-vector hidden-state validate calm-vs-angry.json \
+  --model model.gguf --backend llama.cpp
+```
+
+The llama.cpp adapter captures all requested token positions in one evaluation
+per prompt, then the artifact creator selects `first` or `last` for the
+prompt-pair direction. Its native control-vector runtime supports layers
+`1..N-1`, matching llama.cpp's cvector convention; the final output-layer
+representation remains a separate output-head coordinate.
+
+`export-pairs` plus `llama-cvector-generator` remains available when you want
+llama.cpp's PCA/mean training workflow or a native GGUF cvector:
 
 ```bash
 policy-editor-vector hidden-state import-cvector control_vector.gguf \

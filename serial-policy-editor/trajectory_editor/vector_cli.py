@@ -315,7 +315,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     hidden_state = commands.add_parser(
         "hidden-state",
-        help="import and manage layerwise hidden-state control vectors",
+        help="create, import, and manage layerwise hidden-state control vectors",
     )
     hidden_state_actions = hidden_state.add_subparsers(dest="action", required=True)
 

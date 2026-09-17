@@ -268,10 +268,223 @@ class LlamaCppDecoder:
 
     def activation_control_vector_layer_count(self) -> int:
         """Return the number of direction slots emitted by cvector-generator."""
+        return self._control_vector_layer_count()
+
+    def _model_layer_count(self) -> int:
         getter = getattr(self._llama_cpp, "llama_model_n_layer", None)
         if callable(getter):
-            return max(1, int(getter(self._model._model.model)) - 1)
+            count = int(getter(self._model._model.model))
+            if count < 1:
+                raise RuntimeError("llama.cpp reported no decoder layers")
+            return count
         raise RuntimeError("installed llama.cpp binding does not expose model layer count")
+
+    def _control_vector_layer_count(self) -> int:
+        """Return the residual layers supported by llama.cpp control vectors.
+
+        llama.cpp reserves layer slot zero for the input embedding and its
+        control-vector adapter stores directions for layers 1 through
+        ``n_layer - 1``. This is also the range emitted by cvector-generator.
+        """
+        return max(1, self._model_layer_count() - 1)
+
+    def hidden_state_width(self) -> int:
+        """Return the residual-stream width used by native control vectors."""
+        return self.activation_width()
+
+    def hidden_state_layer_count(self) -> int:
+        """Return the one-based residual layers directly capturable and steerable."""
+        return self._control_vector_layer_count()
+
+    def hidden_state_layer_types(self) -> tuple[str, ...]:
+        return tuple("decoder" for _ in range(self.hidden_state_layer_count()))
+
+    def hidden_state_capabilities(self) -> dict[str, Any]:
+        """Describe llama.cpp's native residual-stream capture coordinate."""
+        return {
+            "site": "decoder-block-output-residual",
+            "layer_numbering": "one-based",
+            "layer_count": self.hidden_state_layer_count(),
+            "width": self.hidden_state_width(),
+            "position_policies": ["first", "last", "current", "all"],
+            "layer_types": list(self.hidden_state_layer_types()),
+            "native_module_path": "llama.cpp layer input tap N",
+            "modality": "text",
+            "final_layer_policy": "excluded-from-control-vector-runtime",
+        }
+
+    def _hidden_state_capture_symbols(self):
+        """Resolve llama.cpp's internal per-layer extraction extension.
+
+        These functions are currently exported by llama.cpp's extension header
+        rather than the stable public header. The local build exposes their
+        C++ symbols; accepting public names as well keeps this compatible with
+        a future C-ABI promotion.
+        """
+        binding = getattr(self._llama_cpp, "llama_cpp", self._llama_cpp)
+        library = getattr(binding, "_lib", None)
+        if library is None:
+            raise RuntimeError(
+                "installed llama-cpp-python does not expose the native layer-capture library"
+            )
+
+        def resolve(public_name: str, mangled_name: str, restype, argtypes):
+            function = getattr(self._llama_cpp, public_name, None)
+            if not callable(function):
+                function = getattr(library, public_name, None)
+            if function is None:
+                function = getattr(library, mangled_name, None)
+            if function is None:
+                raise RuntimeError(
+                    "installed llama.cpp build does not expose " + public_name
+                )
+            function.argtypes = argtypes
+            function.restype = restype
+            return function
+
+        context_type = ctypes.c_void_p
+        setter = resolve(
+            "llama_set_embeddings_layer_inp",
+            "_Z30llama_set_embeddings_layer_inpP13llama_contextjb",
+            None,
+            [context_type, ctypes.c_uint32, ctypes.c_bool],
+        )
+        getter = resolve(
+            "llama_get_embeddings_layer_inp",
+            "_Z30llama_get_embeddings_layer_inpP13llama_contextj",
+            ctypes.POINTER(ctypes.c_float),
+            [context_type, ctypes.c_uint32],
+        )
+        return setter, getter
+
+    def _capture_hidden_state_rows(
+        self, text: str, layers: tuple[int, ...]
+    ) -> dict[int, np.ndarray]:
+        """Capture all token rows for selected residual layers in an isolated context."""
+        if not layers:
+            raise RuntimeError("at least one hidden-state layer must be selected")
+        layer_count = self.hidden_state_layer_count()
+        if any(
+            type(layer) is not int or layer < 1 or layer > layer_count
+            for layer in layers
+        ):
+            raise RuntimeError(
+                f"hidden-state layer must be between 1 and {layer_count}"
+            )
+        if not isinstance(text, str) or not text:
+            raise RuntimeError("hidden-state snapshot prompt must be nonempty")
+
+        setter, getter = self._hidden_state_capture_symbols()
+        model = self._activation_embedding_model()
+        tokens = model.tokenize(text.encode("utf-8"), add_bos=True, special=False)
+        if not tokens:
+            raise RuntimeError("hidden-state snapshot prompt produced no tokens")
+        if len(tokens) > int(model.n_batch):
+            raise RuntimeError(
+                f"hidden-state snapshot has {len(tokens)} tokens; "
+                f"the capture batch supports {int(model.n_batch)}"
+            )
+
+        context = model._ctx.ctx if hasattr(model, "_ctx") else model.ctx
+        width = int(model.n_embd())
+        enabled: list[int] = []
+        try:
+            for layer in layers:
+                setter(context, layer, True)
+                enabled.append(layer)
+
+            model._batch.reset()
+            model._ctx.kv_cache_clear()
+            model._batch.add_sequence(tokens, 0, True)
+            result = model._ctx.decode(model._batch)
+            if result not in (None, 0):
+                raise RuntimeError(
+                    f"llama.cpp hidden-state capture failed (error {result})"
+                )
+
+            captured: dict[int, np.ndarray] = {}
+            for layer in layers:
+                pointer = getter(context, layer)
+                if not pointer:
+                    raise RuntimeError(
+                        f"llama.cpp returned no hidden-state capture for layer {layer}"
+                    )
+                values = np.ctypeslib.as_array(
+                    pointer, shape=(len(tokens) * width,)
+                ).astype(np.float32, copy=True)
+                values = values.reshape(len(tokens), width)
+                if not np.all(np.isfinite(values)):
+                    raise RuntimeError(
+                        f"llama.cpp hidden-state capture for layer {layer} is not finite"
+                    )
+                captured[layer] = values
+            return captured
+        finally:
+            for layer in enabled:
+                try:
+                    setter(context, layer, False)
+                except (OSError, RuntimeError, TypeError):
+                    pass
+            try:
+                model._batch.reset()
+                model._ctx.kv_cache_clear()
+                model.reset()
+            except (AttributeError, RuntimeError, TypeError):
+                pass
+
+    def hidden_state_snapshot(
+        self,
+        text: str,
+        *,
+        layer: int,
+        position: str = "last",
+    ) -> np.ndarray:
+        """Capture a residual-stream state at a native llama.cpp layer."""
+        if position not in {"first", "last", "current", "all"}:
+            raise RuntimeError(
+                "hidden-state snapshot position must be first, last, current, or all"
+            )
+        states = self._capture_hidden_state_rows(text, (layer,))[layer]
+        if position == "all":
+            return states
+        return np.asarray(
+            states[0 if position == "first" else -1], dtype=np.float32
+        ).copy()
+
+    def hidden_state_snapshots(
+        self,
+        text: str,
+        *,
+        layer_start: int,
+        layer_end: int,
+        position: str = "last",
+    ) -> dict[int, np.ndarray]:
+        """Capture selected residual layers with one llama.cpp evaluation."""
+        if position not in {"first", "last", "current", "all"}:
+            raise RuntimeError(
+                "hidden-state snapshot position must be first, last, current, or all"
+            )
+        layer_count = self.hidden_state_layer_count()
+        if (
+            type(layer_start) is not int
+            or type(layer_end) is not int
+            or layer_start < 1
+            or layer_end < layer_start
+            or layer_end > layer_count
+        ):
+            raise RuntimeError(
+                f"hidden-state layer range must be between 1 and {layer_count}"
+            )
+        rows = self._capture_hidden_state_rows(
+            text, tuple(range(layer_start, layer_end + 1))
+        )
+        if position == "all":
+            return rows
+        index = 0 if position == "first" else -1
+        return {
+            layer: np.asarray(values[index], dtype=np.float32).copy()
+            for layer, values in rows.items()
+        }
 
     def set_activation_control_vector(
         self,
@@ -347,8 +560,8 @@ class LlamaCppDecoder:
         """Capture one final hidden-state position for a prompt.
 
         llama.cpp exposes the final representation through its embedding
-        context.  The first cross-backend contract therefore uses the output
-        layer; internal-layer capture remains a separate future capability.
+        context. Internal residual capture is provided separately by
+        ``hidden_state_snapshot``.
         """
         if layer != "output":
             raise RuntimeError("llama.cpp activation snapshots currently support layer=output only")
@@ -570,6 +783,8 @@ class LlamaCppDecoder:
             "model_type": model_type,
             "activation_width": self.activation_width(),
             "activation_layer_count": self.activation_control_vector_layer_count(),
+            "hidden_state_width": self.hidden_state_width(),
+            "hidden_state_layer_count": self.hidden_state_layer_count(),
             "llama_cpp_python_version": getattr(self._llama_cpp, "__version__", None),
             "numpy_version": np.__version__,
             "python_version": sys.version,

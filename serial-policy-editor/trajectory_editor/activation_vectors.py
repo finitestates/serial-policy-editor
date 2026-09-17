@@ -748,17 +748,44 @@ class SteeringVectorArtifact:
 
         directions = np.zeros((layer_count, width), dtype=np.float64)
         raw_norms: list[float] = []
+        bulk_capture = getattr(backend, "hidden_state_snapshots", None)
+
+        def capture_prompt(prompt: str) -> Mapping[int, Any]:
+            if callable(bulk_capture):
+                captured = bulk_capture(
+                    prompt,
+                    **_supported_kwargs(
+                        bulk_capture,
+                        {
+                            "layer_start": layer_start,
+                            "layer_end": layer_end,
+                            "position": capture_position,
+                        },
+                    ),
+                )
+                if not isinstance(captured, Mapping):
+                    raise ValueError("bulk hidden-state capture must return a mapping")
+                return captured
+            return {
+                layer: capture(
+                    prompt,
+                    **_supported_kwargs(
+                        capture, {"layer": layer, "position": capture_position}
+                    ),
+                )
+                for layer in range(layer_start, layer_end + 1)
+            }
+
         try:
+            first_states = capture_prompt(prompt_a)
+            second_states = capture_prompt(prompt_b)
             for layer in range(layer_start, layer_end + 1):
-                kwargs = {"layer": layer, "position": capture_position}
-                first = np.asarray(
-                    capture(prompt_a, **_supported_kwargs(capture, kwargs)),
-                    dtype=np.float64,
-                )
-                second = np.asarray(
-                    capture(prompt_b, **_supported_kwargs(capture, kwargs)),
-                    dtype=np.float64,
-                )
+                if layer not in first_states or layer not in second_states:
+                    raise ValueError(
+                        f"bulk hidden-state capture omitted layer {layer}"
+                    )
+                first = np.asarray(first_states[layer], dtype=np.float64)
+                second = np.asarray(second_states[layer], dtype=np.float64)
                 if first.ndim != 1 or second.ndim != 1 or first.shape != second.shape:
                     raise ValueError(
                         f"hidden-state layer {layer} snapshots must be equal one-dimensional vectors"
