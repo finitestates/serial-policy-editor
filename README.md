@@ -9,22 +9,6 @@ SPE supports **llama.cpp (GGUF)** and **Hugging Face Transformers (local model
 directories)**. A SQLite workspace keeps episodes, editing actions, and token
 evidence for resumption, replay, and text or evidence projection.
 
-**0.4.0 separates lexical references, adaptive group objectives, and teacher
-preference learning.** Load relative term weights with `--reference`, define
-groups with `--groups` or commands, then use `b group +`, `-`, or `=` to ask for
-more, less, or approximately the current appearance rate. Explicit numeric
-biases remain available, and `biases.json` carries the complete steering state.
-Canonical token routes serve runtime steering; optional compiler exploration
-preserves alternate decompositions for inspection.
-
-The release also includes slow/fast preference memory, persisted projection
-seeds, configurable learning severity and rejection, policy diagnostics, and
-lower-memory feature construction. It retains the terminal editor, browser
-preview, and replay workflows. The default hold is 100 tokens.
-
-See the [steering guide](serial-policy-editor/STEERING.md) and
-[0.4.0 release notes](serial-policy-editor/RELEASE_NOTES_0.4.0.md).
-
 ## Getting started
 
 The installable Python project is in [`serial-policy-editor/`](serial-policy-editor/).
@@ -41,25 +25,12 @@ For Transformers, use:
 python -m pip install -e '.[transformers]'
 ```
 
-Once installed, you can open the program a few different ways:
+Once installed, you can run the program a few different ways, but the most straightforward method is to use the interactive menu:
 ```bash
-policy-editor --backend llama.cpp --model /path/to/model.gguf \
-  --new-prompt 'Once upon a time'
-```
-Or
-```bash
-policy-editor --backend transformers --model /path/to/transformers/directory \
-  --new-prompt 'It was a dark and stormy'
+policy-editor
 ```
 
-You can omit `--new-prompt` and you will be asked for one interactively. Type your prompt, then press **Escape**, followed by **Enter**, to submit it. The backend doesn't need to be specified for llama.cpp, but does need to be provided if you are using transformers.
-
-So, assuming you are using llama.cpp, the fastest way to start the program is just:
-```bash
-policy-editor --model /path/to/model.gguf
-```
-
-For more info, just enter:
+For more info about the program, just enter:
 ```bash
 policy-editor --help
 ```
@@ -67,8 +38,9 @@ Or
 ```bash
 policy-editor -h
 ```
-To see a full list of command line flags. There are quite a number, but I've tried to minimize the amount of flags you need to use for basic episode management.
+To see a full list of command line flags (these options are also accessible via the interactive menu).
 
+The following is some basic information about using the program. For more detailed notes, there is a [more technical README](serial-policy-editor/README.md):
 
 ## Basic command usage
 Once an episode is live, nearly everything uses the **Enter** key before it does anything with a few notable exceptions: 
@@ -161,10 +133,8 @@ The user in this program is referred to as "Teacher" as a reference to Teacher-f
 
 ## Documentation
 
-- [Installation, first session, and complete user guide](serial-policy-editor/README.md)
 - [Replay semantics](serial-policy-editor/README.md#serial-policy-replay)
 - [Troubleshooting and backing up work](serial-policy-editor/README.md#troubleshooting)
-- [Testing and real-model smoke checks](serial-policy-editor/README.md#tests)
 - [Changelog](serial-policy-editor/CHANGELOG.md)
 - [Lexical references, group objectives, and learner weights](serial-policy-editor/STEERING.md)
 - [Group/catalog YAML reference](serial-policy-editor/BIAS_CATALOG_YAML.md)
@@ -172,8 +142,6 @@ The user in this program is referred to as "Teacher" as a reference to Teacher-f
 - [0.4.0 release notes](serial-policy-editor/RELEASE_NOTES_0.4.0.md)
 - [0.3.8 release notes](serial-policy-editor/RELEASE_NOTES_0.3.8.md)
 - [0.3.6 release notes](serial-policy-editor/RELEASE_NOTES_0.3.6.md)
-- [Historical architecture overview (0.3.3)](serial-policy-editor/ARCHITECTURE_0.3.3.md)
-- [Scope of the reduced editor](serial-policy-editor/CUT_NOTES.md)
 
 The repository contains source and tests. Model weights, local workspaces,
 virtual environments, and historical local archives are not release inputs.
