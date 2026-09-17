@@ -46,11 +46,12 @@ async function choices() {
   $('live').hidden=false; $('no-choices').hidden=true; $('proposal').textContent=tokenText(o.proposal.text);
   $('candidates').replaceChildren();
   for(const c of o.candidates) {
-    const b=document.createElement('button'); b.className='candidate'; b.style.setProperty('--prob',`${Math.min(100,c.raw_probability*100)}%`);
+    const backendProbability=c.model_probability ?? c.raw_probability;
+    const b=document.createElement('button'); b.className='candidate'; b.style.setProperty('--prob',`${Math.min(100,backendProbability*100)}%`);
     b.title=`Token ${c.token_id} · sampler probability ${(c.decoder_probability*100).toFixed(3)}%`;
     const r=document.createElement('span'); r.className='rank'; r.textContent=c.rank;
     const t=document.createElement('code'); t.textContent=c.is_eog?'[End generation]':tokenText(c.text);
-    const p=document.createElement('small'); p.textContent=`${(c.raw_probability*100).toFixed(2)}%`;
+    const p=document.createElement('small'); p.textContent=`${(backendProbability*100).toFixed(2)}%`;
     b.append(r,t,p); b.onclick=()=>act({kind:'select-raw-rank',rank:c.rank}); $('candidates').append(b);
   }
 }

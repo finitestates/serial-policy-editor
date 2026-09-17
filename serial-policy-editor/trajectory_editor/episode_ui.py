@@ -8,6 +8,7 @@ never compiled into a replay tape.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
@@ -18,6 +19,9 @@ from .episode_actions import (
     EndGeneration,
     Finish,
     Hold,
+    Phrase,
+    PHRASE_DEFAULT_MAX_SHIFT,
+    PHRASE_DEFAULT_MAX_TOKENS,
     PolicyAction,
     SelectRawRank,
     Write,
@@ -103,6 +107,8 @@ class InteractivePolicy:
         menu_size: int = 12,
         search_radius: int = 3,
         default_hold_tokens: int = 100,
+        phrase_max_tokens: int = PHRASE_DEFAULT_MAX_TOKENS,
+        phrase_max_shift: float = PHRASE_DEFAULT_MAX_SHIFT,
         context_characters: int = 0,
         manual_acceptance: bool = False,
         show_policy_rank: bool | None = None,
@@ -115,12 +121,20 @@ class InteractivePolicy:
         catalog: BiasCatalog | None = None,
         group_level: float = 1.0,
     ) -> None:
-        if min(menu_size, search_radius, default_hold_tokens) < 1:
+        if min(menu_size, search_radius, default_hold_tokens, phrase_max_tokens) < 1:
             raise EditorError("menu, search, and hold sizes must be positive")
+        if (
+            type(phrase_max_shift) not in (int, float)
+            or not math.isfinite(float(phrase_max_shift))
+            or phrase_max_shift < 0.0
+        ):
+            raise EditorError("phrase max shift must be finite and nonnegative")
         self.io = io or TerminalIO()
         self.menu_size = menu_size
         self.search_radius = search_radius
         self.default_hold_tokens = default_hold_tokens
+        self.phrase_max_tokens = phrase_max_tokens
+        self.phrase_max_shift = float(phrase_max_shift)
         self.context_characters = context_characters
         self.manual_acceptance = bool(manual_acceptance)
         self.view_preferences = (
@@ -147,6 +161,11 @@ class InteractivePolicy:
     ) -> None:
         if self.store is not None and self.episode_id is not None:
             self.store.record_interaction(self.episode_id, boundary, kind, payload)
+
+    def action_rejected(self, action: PolicyAction, reason: str) -> None:
+        """Receive a live action rejection without leaving the current edge."""
+        if isinstance(action, Phrase):
+            self.io.write(f"[{action.kind} rejected] {reason}")
 
     @staticmethod
     def _resolve_write(engine: EpisodeEngine, text: str, mode: object) -> str:
@@ -611,6 +630,15 @@ class InteractivePolicy:
                     return SelectRawRank(int(edit.selected_rank))
                 assert edit.supplied_text is not None and edit.insert_mode is not None
                 return Write(edit.supplied_text, edit.insert_mode.value)
+            if command.kind == CommandKind.PHRASE:
+                assert command.phrase_text is not None and command.phrase_mode is not None
+                return Phrase(
+                    command.phrase_text,
+                    command.phrase_mode,
+                    force=command.phrase_force,
+                    max_tokens=self.phrase_max_tokens,
+                    max_shift=self.phrase_max_shift,
+                )
             if command.kind == CommandKind.HOLD:
                 return Hold(
                     int(command.hold_tokens or self.default_hold_tokens),

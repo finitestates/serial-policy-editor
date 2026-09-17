@@ -258,6 +258,7 @@ class TerminalIO:
 class CommandKind(str, Enum):
     BIAS = "bias"
     EDIT = "edit"
+    PHRASE = "phrase"
     HOLD = "hold"
     NOTE_BEFORE = "note-before"
     NOTE_AFTER = "note-after"
@@ -294,6 +295,9 @@ class ForkAddress:
 class TeacherCommand:
     kind: CommandKind
     action: EditAction | None = None
+    phrase_text: str | None = None
+    phrase_mode: str | None = None
+    phrase_force: bool = False
     hold_tokens: int | None = None
     hold_boundary: str | None = None
     note: str | None = None
@@ -338,7 +342,7 @@ class TeacherCommand:
 HELP_TEXT = """Commands:
   Tab / Shift-Tab   move down/up through the current table's visual order;
                     a search lens cycles only within its neighborhood
-                    the first Tab selects the sampled proposal's raw rank
+                    the first Tab selects the sampled proposal's backend rank (legacy: raw rank)
                     Enter remains the only commit action
                     --manual-acceptance leaves the command blank instead
   accept             commit the sampled proposal
@@ -363,6 +367,10 @@ HELP_TEXT = """Commands:
   t TEXT            insert continuation text (adds a joining space if needed)
   x TEXT            insert exact text
                     after `t ` or `x `, Tab inserts a literal tab character
+  check TEXT        probe and commit a continuation phrase if every token is within the configured shift bound
+  checkx TEXT       probe and commit an exact phrase without implicit whitespace
+  force TEXT        force a continuation phrase with temporary per-token policy shifts
+  forcex TEXT       force an exact phrase without implicit whitespace
   learning           explain the latest teaching update (no tokens generated)
   h [N]              release control for N tokens (default: configured limit)
   h . [N]            hold through first token containing . ! ?, capped at N
@@ -370,24 +378,24 @@ HELP_TEXT = """Commands:
                     matching tokens stay whole; no lookahead or trailing tokens
   m                  return to the main table without disclosing rows
   m N                return to the main table and reveal N more ranked rows
-  /TERM              find one exact token and show its raw-rank neighborhood
+  /TERM              find one exact token and show its backend-rank neighborhood (legacy: raw rank)
   /"\\n"              JSON escapes preserve exact whitespace/control characters
-  ms N               explore the neighborhood of raw rank N
+  ms N               explore the neighborhood of backend rank N
   Ctrl+G             explore the numeric rank currently in the input
   ms                 return to the active token-search neighborhood
-  ms + [N]           expand toward larger ranks / lower raw probability
-  ms - [N]           expand toward smaller ranks / higher raw probability
+  ms + [N]           expand toward larger ranks / lower backend probability
+  ms - [N]           expand toward smaller ranks / higher backend probability
   c [N|all]          page more of the current context (default: 2000 chars)
   v                  toggle raw top-N / full-vocabulary policy top-N
   V                  toggle policy diagnostics independently of ordering
   l                  cycle logit columns: none / all / raw / effective / delta
-                     Δrank = raw rank - policy rank; positive means promoted.
-                     Δlogit = adjusted - raw logit (all current policy effects).
-                     raw-logit is the backend surface; eff-logit is the
+                     Δrank = backend rank - policy rank; positive means promoted.
+                     Δlogit = adjusted - backend logit (all current policy effects).
+                     backend-logit (displayed as legacy raw-logit) is the returned model surface; eff-logit is the
                      pre-temperature policy surface.
                      These compare surfaces at this context, not the last update.
                      pol-p is before temperature/filtering; decode-p is final.
-                     numeric selections accept any raw rank in the vocabulary
+                     numeric selections accept any backend rank in the vocabulary
   [ / ]              review the previous/next durable token boundary
                       bare f forks the reviewed boundary; Esc returns live
   f                  fork a child from the current boundary
@@ -791,6 +799,28 @@ def parse_command(
             invoked_as=lower,
             force=True,
         )
+    phrase_command = raw.lstrip()
+    phrase_lower = phrase_command.lower()
+    for spelling, force, mode in (
+        ("checkx", False, "exact"),
+        ("check", False, "continuation"),
+        ("forcex", True, "exact"),
+        ("force", True, "continuation"),
+    ):
+        prefix = spelling + " "
+        if phrase_lower == spelling:
+            raise EditorError(f"{spelling} requires phrase text")
+        if phrase_lower.startswith(prefix):
+            text = phrase_command[len(prefix):]
+            if not text:
+                raise EditorError(f"{spelling} requires phrase text")
+            return TeacherCommand(
+                CommandKind.PHRASE,
+                phrase_text=text,
+                phrase_mode=mode,
+                phrase_force=force,
+                invoked_as=spelling,
+            )
     if lower == "accept":
         return TeacherCommand(CommandKind.EDIT, action=EditAction.accept())
     if command.isdigit():
@@ -955,7 +985,7 @@ def display_choice(
     )
     io.write(
         f"Sampled proposal: {choice.proposal_text!r} "
-        f"(id={choice.proposal_token_id}, raw={choice.proposal_raw_probability:.2%}, "
+        f"(id={choice.proposal_token_id}, backend={choice.proposal_raw_probability:.2%}, "
         f"decoder={choice.proposal_decoder_probability:.2%}"
         + (
             f", policy-rank={choice.proposal_policy_rank}"

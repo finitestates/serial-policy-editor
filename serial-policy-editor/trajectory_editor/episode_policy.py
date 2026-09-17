@@ -8,7 +8,7 @@ import math
 from typing import Protocol
 
 from .domain import SamplingConfig
-from .episode_actions import Accept, PolicyAction, SelectRawRank, Write
+from .episode_actions import Accept, Phrase, PolicyAction, SelectRawRank, Write
 from .episode_engine import ActionOutcome, EpisodeEngine, Observation, ReplayExpectation, InstructionRejected
 from .episode_store import EpisodeStore
 from .token_preference import TokenPreferenceLearner, TokenPreferenceResult
@@ -388,6 +388,8 @@ class EpisodeRunner:
         self,
         accumulator: _WriteLearningAccumulator,
         outcome: ActionOutcome,
+        *,
+        interaction_kind: str = "write-learning-update",
     ) -> WriteLearningResult | None:
         """Record the per-token learning summary for an atomic live Write."""
         if outcome.status != "completed":
@@ -407,7 +409,7 @@ class EpisodeRunner:
         self.store.record_interaction(
             self.episode_id,
             outcome.boundary_after,
-            "write-learning-update",
+            interaction_kind,
             result.to_dict(),
         )
         if self.on_write_learning_update is not None:
@@ -541,7 +543,10 @@ class EpisodeRunner:
                         self.learner,
                         self.token_preference_learner,
                     )
-                    if self.learn_from_write and isinstance(action, Write)
+                    if (
+                        (self.learn_from_write and isinstance(action, Write))
+                        or isinstance(action, Phrase)
+                    )
                     else None
                 )
                 if write_accumulator is not None and write_accumulator.enabled:
@@ -552,13 +557,36 @@ class EpisodeRunner:
                     )
                 else:
                     write_token_callback = None
-                outcome = self.engine.apply(
-                    action,
-                    on_token_commit=write_token_callback,
-                )
+                try:
+                    outcome = self.engine.apply(
+                        action,
+                        on_token_commit=write_token_callback,
+                    )
+                except InstructionRejected as exc:
+                    if not isinstance(action, Phrase):
+                        raise
+                    self.store.record_interaction(
+                        self.episode_id,
+                        self.engine.boundary,
+                        "phrase-rejected",
+                        {"action": action.to_dict(), "reason": str(exc)},
+                    )
+                    rejected = getattr(live_policy, "action_rejected", None)
+                    if callable(rejected):
+                        rejected(action, str(exc))
+                    live_actions += 1
+                    continue
                 live_actions += 1
                 if write_accumulator is not None:
-                    self._learn_live_write(write_accumulator, outcome)
+                    self._learn_live_write(
+                        write_accumulator,
+                        outcome,
+                        interaction_kind=(
+                            "phrase-learning-update"
+                            if isinstance(action, Phrase)
+                            else "write-learning-update"
+                        ),
+                    )
                 else:
                     self._learn_live_selection(observation, action, outcome)
                 self.store.record_action(self.episode_id, ordinal, outcome)

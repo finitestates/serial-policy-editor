@@ -18,6 +18,8 @@ learning from typed writes. Full `biases.json` presets preserve references,
 groups, objectives, and learner vectors. The persistent terminal editor,
 multiline input, browser preview, and replay workflows remain available.
 The default hold is 100 tokens; use `--hold-default` to choose another value.
+Phrase checks default to 16 tokens and a maximum required policy shift of 6.0;
+use `--phrase-max-tokens` and `--phrase-max-shift` to change those limits.
 
 Start with [installation](#install) and the [first-session walkthrough](#your-first-session).
 The rest of this guide covers the [editor](#the-editor), [live-edge menu](#live-edge-menu),
@@ -182,6 +184,12 @@ The familiar interaction UI is preserved. Important commands include:
   rank, including selection of the sampled proposal
 - `t TEXT` insert continuation text with automatic spacing
 - `x TEXT` insert exact text without automatic spacing
+- `check TEXT` probe and commit a continuation phrase when every token is within
+  the configured policy-shift bound
+- `checkx TEXT` do the same without implicit whitespace
+- `force TEXT` commit a continuation phrase using temporary per-token policy
+  shifts, then clear them
+- `forcex TEXT` force an exact phrase without implicit whitespace
 - `/TERM` search the full vocabulary and display the target token's raw-rank neighborhood
 - `m N` reveal more candidates (raw top-N by default, policy top-N in policy order)
 - `V` toggle policy diagnostics without reordering
@@ -206,7 +214,7 @@ not look ahead. Periods in abbreviations and decimals also match.
 Boundary checks reuse recorded token text and cache classifications per token ID
 within the engine, without additional decoding or rescanning the growing hold.
 
-By default, the sampled proposal's raw rank is prefilled at each teacher
+By default, the sampled proposal's backend rank is prefilled at each teacher
 decision. Pressing Enter still explicitly commits that choice. Pass
 `--manual-acceptance` to leave each command blank instead.
 
@@ -219,25 +227,57 @@ alias for `--policy-view`.
 
 | Column | Meaning |
 | --- | --- |
-| `Δrank` | Raw rank minus policy rank: positive means promoted, negative means demoted. |
-| `Δlogit` | Adjusted logit minus raw logit, including penalties, biases, priors, and both preference memories. |
+| `Δrank` | Backend rank minus policy rank: positive means promoted, negative means demoted. |
+| `Δlogit` | Adjusted logit minus backend logit, including penalties, biases, priors, and both preference memories. |
 | `pol-rank` | Full-vocabulary rank under the adjusted policy. |
-| `raw-p` | Raw-model probability before temperature and filtering. |
+| `raw-p` / `backend-p` | Returned backend/model probability before temperature and filtering. `raw-p` and `raw_probability` are retained display/API aliases. |
 | `pol-p` | Adjusted policy probability before temperature and filtering. |
 | `decode-p` | Final sampling probability after temperature and filtering. |
 
-The deltas compare the raw model with the **current policy at the same
+The deltas compare the returned backend surface with the **current policy at the same
 context**, not specifically the last learning update. A token can have a
 positive adjustment yet be removed by decoder filtering. Narrow terminals
 retain the two deltas and token text before secondary columns; plain mode
 shows the full table. The expanded writing view also retains the deltas.
 
-Ordering stays raw by default. In policy order, the table fetches the actual
+Ordering stays backend-ranked by default. In policy order, the table fetches the actual
 policy top-N across the whole vocabulary, so strongly promoted tokens outside
-the raw top-N become visible. Numeric selections always refer to absolute raw
-rank, and search neighborhoods retain raw ordering. `V` and `v` preferences
+the backend top-N become visible. Numeric selections always refer to absolute backend
+rank, and search neighborhoods retain backend ordering. `V` and `v` preferences
 persist across decisions and live edges for the session; they do not modify
 sampler state, replay, or learning.
+
+### Candidate filtering and draw kernels
+
+The sampler has a formal boundary between candidate filtering and token
+drawing. Temperature, top-k, typical-p, tail-free, top-p, and min-p produce a
+deterministic candidate set; the draw kernel then chooses from that set.
+Typical and tail-free are disabled at their neutral value `1.0`:
+
+```text
+sampler typical_p=.95 tail_free_z=.95
+sampler draw_kernel=gumbel-max
+```
+
+`categorical` is the default kernel and uses SPE's deterministic prefix
+quantile. `gumbel-max` uses a deterministic per-token Gumbel draw from the
+same seed, stream fingerprint, and sampling coordinate, so replay remains
+stable without depending on candidate-array order.
+
+Classifier-free guidance is available as a model-phase prefix controller. It
+runs a second copy of the active backend for an unconditional prompt and
+applies `unconditional + scale * (conditional - unconditional)` for the first
+configured number of generated tokens:
+
+```bash
+policy-editor --model model.gguf --new-prompt "A scene" \
+  --cfg-unconditional-prompt "" --cfg-scale 1.8 --cfg-prefix-tokens 8
+```
+
+An empty unconditional prompt is valid and is the usual baseline; a short
+neutral instruction can be used instead. After the prefix count is consumed,
+the unconditional branch is dropped and ordinary autoregressive decoding continues. The CFG settings are part of the
+runtime intent and sampler record, so replay can reproduce the schedule.
 
 ## Live-edge menu
 

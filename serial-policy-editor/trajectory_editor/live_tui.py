@@ -211,6 +211,20 @@ def action_preview(
             valid=True,
         )
 
+    for spelling, label, detail in (
+        ("check", "phrase check", "Press Enter to probe and commit a continuation phrase."),
+        ("checkx", "exact phrase check", "Press Enter to probe and commit the exact phrase."),
+        ("force", "phrase force", "Press Enter to force a continuation phrase with temporary shifts."),
+        ("forcex", "exact phrase force", "Press Enter to force the exact phrase with temporary shifts."),
+    ):
+        if lower == spelling or lower.startswith(spelling + " "):
+            return ActionPreview(
+                kind="effect",
+                label=label,
+                detail=detail if lower != spelling else f"Type text after {spelling}.",
+                valid=lower != spelling,
+            )
+
     try:
         fork_address = parse_fork_address(raw)
     except EditorError as exc:

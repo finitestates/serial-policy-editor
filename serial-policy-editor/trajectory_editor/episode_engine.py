@@ -16,6 +16,7 @@ from .episode_actions import (
     EndGeneration,
     Finish,
     Hold,
+    Phrase,
     PolicyAction,
     SelectRawRank,
     Write,
@@ -144,6 +145,7 @@ class ActionOutcome:
     status: str = "completed"
     divergence: Divergence | None = None
     replay_eog_token_id: int | None = None
+    diagnostics: Mapping[str, Any] | None = None
 
     def expectation(self) -> ReplayExpectation:
         return ReplayExpectation(
@@ -175,12 +177,22 @@ class EpisodeEngine:
         coordinate_offset: int = 0,
         backend_positioned: bool = False,
         controller_pipeline: ControllerPipeline | None = None,
+        guidance_backend: EpisodeBackend | None = None,
+        guidance_initial_token_ids: Sequence[int] | None = None,
+        guidance_generated_prefix: Sequence[int] | None = None,
+        guidance_tokens_consumed: int = 0,
     ) -> None:
         if max_tokens is not None and (type(max_tokens) is not int or max_tokens < 1):
             raise EditorError("max_tokens must be a positive integer")
         if type(coordinate_offset) is not int or coordinate_offset < 0:
             raise EditorError("coordinate_offset must be a nonnegative integer")
+        if type(guidance_tokens_consumed) is not int or guidance_tokens_consumed < 0:
+            raise EditorError("guidance_tokens_consumed must be a nonnegative integer")
         require_episode_backend(backend)
+        if guidance_backend is not None:
+            require_episode_backend(guidance_backend)
+            if guidance_backend.vocabulary_size() != backend.vocabulary_size():
+                raise EditorError("CFG guidance backend vocabulary does not match the primary backend")
         if initial_token_ids is None:
             if not isinstance(initial_text, str) or not initial_text:
                 raise EditorError("an initial write or token ledger is required")
@@ -210,6 +222,39 @@ class EpisodeEngine:
             else backend.render(list(tokens), special=True)
         )
         self.initial_token_ids = tuple(tokens)
+        self.guidance_backend = guidance_backend
+        self.guidance_initial_token_ids: tuple[int, ...] = ()
+        self.guidance_generated_prefix = tuple(
+            int(value) for value in (guidance_generated_prefix or ())
+        )
+        if guidance_backend is not None and any(
+            value < 0 or value >= guidance_backend.vocabulary_size()
+            for value in self.guidance_generated_prefix
+        ):
+            raise EditorError("CFG generated prefix contains an invalid token id")
+        self.guidance_tokens_consumed = guidance_tokens_consumed
+        if self.sampling.cfg_unconditional_prompt is not None:
+            if guidance_backend is None:
+                raise EditorError(
+                    "CFG is configured but no unconditional guidance backend was provided"
+                )
+            if guidance_initial_token_ids is None:
+                guidance_tokens = guidance_backend.tokenize(
+                    self.sampling.cfg_unconditional_prompt,
+                    add_bos=initial_token_ids is None and add_bos,
+                    special=special,
+                )
+            else:
+                guidance_tokens = [int(value) for value in guidance_initial_token_ids]
+            if not guidance_tokens:
+                raise EditorError("CFG unconditional prompt produced no tokens")
+            if any(
+                value < 0 or value >= guidance_backend.vocabulary_size()
+                for value in guidance_tokens
+            ):
+                raise EditorError("CFG unconditional prompt contains an invalid token id")
+            guidance_backend.reset(list(guidance_tokens))
+            self.guidance_initial_token_ids = tuple(guidance_tokens)
         self.visible_token_ids: list[int] = []
         self.terminal_token_id: int | None = None
         self.terminal_reason: str | None = None
@@ -217,6 +262,7 @@ class EpisodeEngine:
         self.stream_fingerprint = fingerprint
         self._observation: Observation | None = None
         self._observation_key: tuple | None = None
+        self._ephemeral_logit_biases: dict[int, float] = {}
         self._activation_validation_key: tuple | None = None
         self._activation_runtime_key: tuple | None = None
         self.controller_pipeline = controller_pipeline or ControllerPipeline()
@@ -357,6 +403,7 @@ class EpisodeEngine:
             )
         retained = list(self.visible_token_ids[:boundary])
         self._invalidate_observation()
+        self._ephemeral_logit_biases = {}
         prefix = [*self.initial_token_ids, *retained]
         branch = getattr(self.backend, "branch_to_prefix", None)
         if callable(branch):
@@ -486,6 +533,7 @@ class EpisodeEngine:
         return (
             tuple(self.token_ids), self.sampling, self.coordinate_offset,
             self.stream_fingerprint,
+            tuple(sorted(self._ephemeral_logit_biases.items())),
         )
 
     def _validate_observation(self, observation: Observation) -> None:
@@ -511,6 +559,32 @@ class EpisodeEngine:
         logits = np.asarray(self.backend.last_logits(), dtype=np.float64)
         if logits.ndim != 1 or len(logits) != self.backend.vocabulary_size():
             raise RuntimeError("backend logits do not match its vocabulary")
+        model_phase_diagnostics = None
+        if self._cfg_active():
+            if self.guidance_backend is None:
+                raise EditorError("CFG prefix guidance requires an unconditional guidance backend")
+            guidance_prefix = [
+                *self.guidance_initial_token_ids,
+                *self.guidance_generated_prefix,
+                *self.visible_token_ids,
+            ]
+            self.guidance_backend.reset(guidance_prefix)
+            unconditional = np.asarray(self.guidance_backend.last_logits(), dtype=np.float64)
+            if unconditional.shape != logits.shape or not np.all(np.isfinite(unconditional)):
+                raise RuntimeError("CFG unconditional logits do not match the primary backend")
+            logits = unconditional + float(self.sampling.cfg_scale) * (logits - unconditional)
+            if not np.all(np.isfinite(logits)):
+                raise RuntimeError("CFG guidance produced non-finite logits")
+            model_phase_diagnostics = {
+                "name": "classifier-free guidance",
+                "scale": float(self.sampling.cfg_scale),
+                "prefix_tokens": int(self.sampling.cfg_prefix_tokens),
+                "tokens_consumed": int(
+                    self.guidance_tokens_consumed + len(self.visible_token_ids)
+                ),
+                "branch_scope": "conditional-only hidden-state controls",
+                "unconditional_logit_rms": float(np.sqrt(np.mean(unconditional ** 2))),
+            }
         activation_logit_adjustments = None
         if (
             self.sampling.activation_vector_layer == "output"
@@ -576,6 +650,8 @@ class EpisodeEngine:
             token_preference_coordinate_identity=getattr(self, "_token_preference_coordinate_identity", None),
             render_tokens=self.backend.render,
             activation_logit_adjustments=activation_logit_adjustments,
+            model_phase_diagnostics=model_phase_diagnostics,
+            ephemeral_logit_biases=self._ephemeral_logit_biases,
         )
         logits = statistics.logits
         distribution = statistics.distribution
@@ -585,6 +661,7 @@ class EpisodeEngine:
             seed=self.sampling.seed,
             stream_fingerprint=self.stream_fingerprint,
             aligned_step=coordinate,
+            kernel=self.sampling.draw_kernel,
         )
         observation = Observation(
             boundary=self.boundary,
@@ -604,6 +681,14 @@ class EpisodeEngine:
         self._observation = observation
         self._observation_key = key
         return observation
+
+    def _cfg_active(self) -> bool:
+        return bool(
+            self.sampling.cfg_unconditional_prompt is not None
+            and self.sampling.cfg_prefix_tokens > 0
+            and self.guidance_tokens_consumed + len(self.visible_token_ids)
+            < self.sampling.cfg_prefix_tokens
+        )
 
     def candidates(
         self, observation: Observation, *, start_rank: int = 1, count: int = 12
@@ -739,6 +824,175 @@ class EpisodeEngine:
             self.visible_token_ids.append(token_id)
         return evidence
 
+    @staticmethod
+    def _phrase_required_shift(observation: Observation, token_id: int) -> float:
+        """Return the additive policy shift needed to make ``token_id`` rank 1."""
+        values = np.asarray(observation.statistics.policy_logits, dtype=np.float64)
+        target = float(values[token_id])
+        if len(values) <= 1:
+            return 0.0
+        competitors = np.concatenate((values[:token_id], values[token_id + 1:]))
+        return max(0.0, float(np.max(competitors)) - target + 1e-6)
+
+    def _phrase_step_diagnostic(
+        self, observation: Observation, token_id: int, required_shift: float,
+        *, applied_shift: float = 0.0,
+    ) -> dict[str, Any]:
+        statistics = observation.statistics
+        return {
+            "boundary": observation.boundary,
+            "sampling_coordinate": observation.sampling_coordinate,
+            "token_id": int(token_id),
+            "text": self.backend.token_text(token_id),
+            "model_rank": int(statistics.model_rank(token_id)),
+            "policy_rank": int(statistics.policy_rank(token_id)),
+            "model_probability": float(statistics.model_probabilities([token_id])[0]),
+            "policy_probability": float(statistics.policy_probabilities[token_id]),
+            "sampler_eligible": bool(np.any(observation.distribution.ids == int(token_id))),
+            "sampler_probability": float(observation.distribution.probability(token_id)),
+            "required_policy_shift": float(required_shift),
+            "applied_policy_shift": float(applied_shift),
+            "within_bound": bool(required_shift <= 0.0),
+        }
+
+    def _apply_phrase(
+        self,
+        action: Phrase,
+        *,
+        expectation: ReplayExpectation | None,
+        divergence_policy: str,
+        replay: bool,
+        on_token_commit: Callable[[Observation, int], None] | None,
+    ) -> ActionOutcome:
+        """Apply a phrase as sequential teacher selections."""
+        before = self.boundary
+        planned, resolved_text = self._write_tokens(Write(action.text, action.mode))
+        if len(planned) > action.max_tokens:
+            raise InstructionRejected(
+                f"{action.kind} has {len(planned)} tokens; max is {action.max_tokens}"
+            )
+        if self.remaining is not None and len(planned) > self.remaining:
+            raise TokenBudgetExceeded("phrase exceeds the remaining token budget")
+        if any(self.backend.is_eog(token_id) for token_id in planned):
+            raise InstructionRejected("phrase text resolves to an EOG token")
+
+        expected_ids = expectation.resolved_token_ids if expectation else ()
+        divergence = None
+        if expectation is not None and tuple(planned) != expected_ids:
+            mismatch_index = next(
+                (
+                    index
+                    for index in range(max(len(planned), len(expected_ids)))
+                    if (planned[index] if index < len(planned) else None)
+                    != (expected_ids[index] if index < len(expected_ids) else None)
+                ),
+                0,
+            )
+            divergence = self._token_mismatch(
+                action,
+                before,
+                expected_ids[mismatch_index] if mismatch_index < len(expected_ids) else None,
+                planned[mismatch_index] if mismatch_index < len(planned) else None,
+            )
+            if divergence_policy == "handoff":
+                return ActionOutcome(
+                    action=action,
+                    boundary_before=before,
+                    boundary_after=before,
+                    resolved_text=resolved_text,
+                    resolved_token_ids=tuple(planned),
+                    visible_token_ids=(),
+                    terminal_token_id=None,
+                    stop_reason="divergence",
+                    evidence=(),
+                    status="handed-off",
+                    divergence=divergence,
+                )
+
+        def probe() -> list[dict[str, Any]]:
+            details: list[dict[str, Any]] = []
+            try:
+                for token_id in planned:
+                    observation = self.observe()
+                    required = self._phrase_required_shift(observation, token_id)
+                    if required > float(action.max_shift):
+                        text = self.backend.token_text(token_id)
+                        raise InstructionRejected(
+                            f"check phrase rejected at token {len(details) + 1} {text!r}: "
+                            f"requires policy shift +{required:.4g}, "
+                            f"bound is +{float(action.max_shift):.4g}"
+                        )
+                    details.append(self._phrase_step_diagnostic(observation, token_id, required))
+                    self._commit_token(observation, token_id)
+                return details
+            finally:
+                self.rewind_to(before)
+
+        if not action.force:
+            # The dry run is separate from the committing pass so live learner
+            # updates still affect each subsequent token.
+            probe()
+
+        evidence: list[TokenEvidence] = []
+        visible: list[int] = []
+        resolved: list[int] = []
+        details: list[dict[str, Any]] = []
+        try:
+            for token_id in planned:
+                natural = self.observe()
+                required = self._phrase_required_shift(natural, token_id)
+                applied = required if action.force else 0.0
+                detail = self._phrase_step_diagnostic(
+                    natural, token_id, required, applied_shift=applied
+                )
+                detail["within_bound"] = bool(required <= float(action.max_shift))
+                if action.force:
+                    self._ephemeral_logit_biases = {int(token_id): float(required)}
+                    self._invalidate_observation()
+                    forced = self.observe()
+                    item = self._commit_token(forced, token_id)
+                    self._ephemeral_logit_biases = {}
+                    self._invalidate_observation()
+                else:
+                    item = self._commit_token(natural, token_id)
+                evidence.append(item)
+                resolved.append(token_id)
+                if item.realized_visible:
+                    visible.append(token_id)
+                details.append(detail)
+                if not replay and on_token_commit is not None:
+                    # Learners see the natural policy surface, not the force
+                    # overlay, so the recorded shift remains informative.
+                    on_token_commit(natural, token_id)
+        finally:
+            self._ephemeral_logit_biases = {}
+            self._invalidate_observation()
+
+        diagnostics = {
+            "operation": action.kind,
+            "supplied_text": action.text,
+            "resolved_text": resolved_text,
+            "mode": action.mode,
+            "max_tokens": action.max_tokens,
+            "max_shift": float(action.max_shift),
+            "shift_metric": "policy-rank-1",
+            "tokens": details,
+        }
+        return ActionOutcome(
+            action=action,
+            boundary_before=before,
+            boundary_after=self.boundary,
+            resolved_text=resolved_text,
+            resolved_token_ids=tuple(resolved),
+            visible_token_ids=tuple(visible),
+            terminal_token_id=None,
+            stop_reason="completed",
+            evidence=tuple(evidence),
+            status="completed-with-divergence" if divergence is not None else "completed",
+            divergence=divergence,
+            diagnostics=diagnostics,
+        )
+
     def apply(
         self,
         action: PolicyAction,
@@ -769,6 +1023,14 @@ class EpisodeEngine:
         ):
             raise TokenBudgetExceeded(
                 f"hold requests {action.limit} tokens but only {self.remaining} remain"
+            )
+        if isinstance(action, Phrase):
+            return self._apply_phrase(
+                action,
+                expectation=expectation,
+                divergence_policy=divergence_policy,
+                replay=replay,
+                on_token_commit=on_token_commit,
             )
         before = self.boundary
         evidence: list[TokenEvidence] = []

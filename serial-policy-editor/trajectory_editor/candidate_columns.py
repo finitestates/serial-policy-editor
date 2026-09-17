@@ -62,7 +62,7 @@ class CandidateColumns:
             if label == 'token-id':
                 return str(candidate.token_id)
             probability = {
-                'raw-p': candidate.raw_probability,
+                'raw-p': candidate.model_probability,
                 'pol-p': candidate.policy_probability,
                 'decode-p': candidate.decoder_probability,
             }[label]

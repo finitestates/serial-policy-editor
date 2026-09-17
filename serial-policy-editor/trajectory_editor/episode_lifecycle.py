@@ -13,7 +13,12 @@ POLICY_FIELDS = tuple(
     or f.name == "group_control_scheme"
 ) + ("group_controls",)
 
-SAMPLER_FIELDS = ("temperature", "top_k", "top_p", "min_p", "repeat_penalty", "repeat_last_n", "presence_penalty", "frequency_penalty", "seed", "bias_step", "bias_rules", "bias_groups")
+SAMPLER_FIELDS = (
+    "temperature", "top_k", "top_p", "min_p", "typical_p", "tail_free_z",
+    "draw_kernel", "cfg_unconditional_prompt", "cfg_scale", "cfg_prefix_tokens",
+    "repeat_penalty", "repeat_last_n", "presence_penalty", "frequency_penalty",
+    "seed", "bias_step", "bias_rules", "bias_groups",
+)
 
 def _inherit_budget(store, episode_id, engine, boundary, *, rebase=False, notice=print):
     state = store.budget_at(episode_id, boundary)
@@ -28,7 +33,7 @@ def _inherit_budget(store, episode_id, engine, boundary, *, rebase=False, notice
                                   if rebase and checkpoint is not None else checkpoint)
 
 
-def _model_continuation(store, source_id, backend, provenance):
+def _model_continuation(store, source_id, backend, provenance, *, guidance_backend=None):
     source = store.get_episode(source_id)
     boundary = len(_visible_tokens(store, source_id))
     segment = store.sampling_segment(source_id, boundary)
@@ -46,6 +51,9 @@ def _model_continuation(store, source_id, backend, provenance):
         ),
         initial_text=source["initial_text"] + source["visible_text"],
         max_tokens=source["max_tokens"],
+        guidance_backend=guidance_backend,
+        guidance_generated_prefix=_visible_tokens(store, source_id),
+        guidance_tokens_consumed=boundary,
     )
     _inherit_budget(store, source_id, engine, boundary, rebase=True)
     identifier = _create_episode(
@@ -72,6 +80,9 @@ def _restore_engine(
     *,
     max_tokens: int | None,
     sampling_override: SamplingConfig | None,
+    guidance_backend: Any | None = None,
+    guidance_generated_prefix: list[int] | None = None,
+    guidance_tokens_consumed: int = 0,
     notice=print,
 ) -> EpisodeEngine:
     episode = store.get_episode(episode_id)
@@ -92,6 +103,9 @@ def _restore_engine(
         initial_token_ids=episode["initial_token_ids"],
         stream_fingerprint=segment["stream_fingerprint"],
         coordinate_offset=segment["coordinate_offset"],
+        guidance_backend=guidance_backend,
+        guidance_generated_prefix=guidance_generated_prefix,
+        guidance_tokens_consumed=guidance_tokens_consumed,
     )
     # These tokens are already known; only the final-position logits are needed.
     # Let the backend batch reconstruction without replaying individual moves.
@@ -177,6 +191,7 @@ def _fork_engine(
     *,
     backend: Any,
     max_tokens: int | None,
+    guidance_backend: Any | None = None,
     notice=print,
 ) -> EpisodeEngine:
     if not 0 <= target <= parent_engine.boundary:
@@ -201,6 +216,9 @@ def _fork_engine(
         stream_fingerprint=segment["stream_fingerprint"],
         coordinate_offset=segment["coordinate_offset"] + target,
         backend_positioned=True,
+        guidance_backend=guidance_backend,
+        guidance_generated_prefix=parent_engine.visible_token_ids[:target],
+        guidance_tokens_consumed=target,
     )
     if max_tokens is None:
         _inherit_budget(store, parent_id, engine, target, rebase=True, notice=notice)
@@ -220,6 +238,7 @@ def _spr_engine_from_source(
     initial_token_ids: list[int] | None = None,
     stream_fingerprint: str | None = None,
     coordinate_offset: int | None = None,
+    guidance_backend: Any | None = None,
 ) -> tuple[EpisodeEngine, ReplayPlan]:
     source = store.get_episode(source_id)
     overrides = dict(sampling_overrides or {})
@@ -257,6 +276,7 @@ def _spr_engine_from_source(
         initial_token_ids=initial_token_ids,
         stream_fingerprint=stream_fingerprint,
         coordinate_offset=coordinate_offset,
+        guidance_backend=guidance_backend,
     )
     final_sampling = (
         replace(store.final_sampling(source_id) if until is None else

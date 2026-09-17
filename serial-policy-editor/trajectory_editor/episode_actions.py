@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+import math
 from typing import Any, TypeAlias
 
 from .domain import EditorError
@@ -51,6 +52,54 @@ class Write:
         return {"kind": self.kind, "text": self.text, "mode": self.mode}
 
 
+PHRASE_DEFAULT_MAX_TOKENS = 16
+PHRASE_DEFAULT_MAX_SHIFT = 6.0
+
+
+@dataclass(frozen=True)
+class Phrase:
+    """A bounded, sequential teacher phrase operation.
+
+    ``force`` selects whether the operation may install an ephemeral
+    next-token bias.  The bias is never part of the durable sampler state.
+    ``mode`` mirrors ``Write`` so the common form can use continuation
+    whitespace while the ``x`` suffix can request exact text.
+    """
+
+    text: str
+    mode: str = "continuation"
+    force: bool = False
+    max_tokens: int = PHRASE_DEFAULT_MAX_TOKENS
+    max_shift: float = PHRASE_DEFAULT_MAX_SHIFT
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.text, str) or not self.text:
+            raise EditorError("phrase text must be nonempty")
+        if self.mode not in {"continuation", "exact"}:
+            raise EditorError("phrase mode must be continuation or exact")
+        if type(self.force) is not bool:
+            raise EditorError("phrase force flag must be boolean")
+        if type(self.max_tokens) is not int or self.max_tokens < 1:
+            raise EditorError("phrase max_tokens must be a positive integer")
+        if type(self.max_shift) not in (int, float) or not math.isfinite(float(self.max_shift)):
+            raise EditorError("phrase max_shift must be a finite number")
+        if self.max_shift < 0.0:
+            raise EditorError("phrase max_shift must be nonnegative")
+
+    @property
+    def kind(self) -> str:
+        return "force-phrase" if self.force else "check-phrase"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "text": self.text,
+            "mode": self.mode,
+            "max_tokens": self.max_tokens,
+            "max_shift": float(self.max_shift),
+        }
+
+
 @dataclass(frozen=True)
 class Hold:
     limit: int
@@ -89,7 +138,7 @@ class EndGeneration:
         return {"kind": self.kind}
 
 
-PolicyAction: TypeAlias = Accept | SelectRawRank | Write | Hold | Finish | EndGeneration
+PolicyAction: TypeAlias = Accept | SelectRawRank | Write | Phrase | Hold | Finish | EndGeneration
 
 
 def action_from_dict(raw: Mapping[str, Any]) -> PolicyAction:
@@ -107,6 +156,20 @@ def action_from_dict(raw: Mapping[str, Any]) -> PolicyAction:
         if not isinstance(text, str) or not isinstance(mode, str):
             raise EditorError("write action is malformed")
         return Write(text, mode)
+    if kind in {"check-phrase", "force-phrase"}:
+        text = raw.get("text", raw.get("supplied_text"))
+        mode = raw.get("mode", "continuation")
+        if not isinstance(text, str) or not isinstance(mode, str):
+            raise EditorError("phrase action is malformed")
+        max_tokens = raw.get("max_tokens", PHRASE_DEFAULT_MAX_TOKENS)
+        max_shift = raw.get("max_shift", PHRASE_DEFAULT_MAX_SHIFT)
+        return Phrase(
+            text,
+            mode,
+            force=kind == "force-phrase",
+            max_tokens=max_tokens,
+            max_shift=max_shift,
+        )
     if kind == "hold":
         limit = raw.get("limit", raw.get("requested_visible_tokens"))
         if type(limit) is not int:

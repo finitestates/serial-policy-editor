@@ -34,6 +34,12 @@ class SamplingConfig:
     top_k: int = 40
     top_p: float = 0.95
     min_p: float = 0.05
+    typical_p: float = 1.0
+    tail_free_z: float = 1.0
+    draw_kernel: str = "categorical"
+    cfg_unconditional_prompt: str | None = None
+    cfg_scale: float = 1.0
+    cfg_prefix_tokens: int = 0
     repeat_penalty: float = 1.0
     repeat_last_n: int = 64
     presence_penalty: float = 0.0
@@ -397,6 +403,31 @@ class SamplingConfig:
             raise EditorError("min_p must be a finite number")
         if not 0.0 <= self.min_p <= 1.0:
             raise EditorError("min_p must be in [0, 1]")
+        for name in ("typical_p", "tail_free_z"):
+            value = getattr(self, name)
+            if type(value) not in {int, float} or not math.isfinite(float(value)):
+                raise EditorError(f"{name} must be a finite number")
+            if not 0.0 < float(value) <= 1.0:
+                raise EditorError(f"{name} must be in (0, 1]")
+        if self.draw_kernel not in {"categorical", "gumbel-max"}:
+            raise EditorError("draw_kernel must be categorical or gumbel-max")
+        if self.cfg_unconditional_prompt is not None and not isinstance(
+            self.cfg_unconditional_prompt, str
+        ):
+            raise EditorError("cfg_unconditional_prompt must be text or null")
+        if (
+            type(self.cfg_scale) not in {int, float}
+            or not math.isfinite(float(self.cfg_scale))
+            or float(self.cfg_scale) < 0.0
+        ):
+            raise EditorError("cfg_scale must be a finite nonnegative number")
+        object.__setattr__(self, "cfg_scale", float(self.cfg_scale))
+        if type(self.cfg_prefix_tokens) is not int or self.cfg_prefix_tokens < 0:
+            raise EditorError("cfg_prefix_tokens must be a nonnegative integer")
+        if self.cfg_unconditional_prompt is not None and self.cfg_prefix_tokens == 0:
+            raise EditorError(
+                "cfg_prefix_tokens must be positive when a CFG unconditional prompt is set"
+            )
         if (
             type(self.repeat_penalty) not in {int, float}
             or not math.isfinite(float(self.repeat_penalty))
@@ -564,6 +595,14 @@ class SamplingConfig:
             top_k=value.get("top_k", defaults.top_k),
             top_p=value.get("top_p", defaults.top_p),
             min_p=value.get("min_p", defaults.min_p),
+            typical_p=value.get("typical_p", defaults.typical_p),
+            tail_free_z=value.get("tail_free_z", defaults.tail_free_z),
+            draw_kernel=value.get("draw_kernel", defaults.draw_kernel),
+            cfg_unconditional_prompt=value.get(
+                "cfg_unconditional_prompt", defaults.cfg_unconditional_prompt
+            ),
+            cfg_scale=value.get("cfg_scale", defaults.cfg_scale),
+            cfg_prefix_tokens=value.get("cfg_prefix_tokens", defaults.cfg_prefix_tokens),
             repeat_penalty=value.get("repeat_penalty", defaults.repeat_penalty),
             repeat_last_n=value.get("repeat_last_n", defaults.repeat_last_n),
             presence_penalty=value.get(
@@ -683,6 +722,12 @@ class SamplingConfig:
         # Scheme fields were introduced after the original v1 records. Missing
         # fields mean the original mathematics, never an implicit upgrade.
         for name, default in (
+            ("typical_p", 1.0),
+            ("tail_free_z", 1.0),
+            ("draw_kernel", "categorical"),
+            ("cfg_unconditional_prompt", None),
+            ("cfg_scale", 1.0),
+            ("cfg_prefix_tokens", 0),
             ("token_preference_feature_scheme", "random-projection-unit-v1"),
             ("token_preference_whitening_ridge", DEFAULT_WHITENING_RIDGE),
             ("token_preference_learning_scheme", "sgd-v1"),
@@ -760,6 +805,12 @@ class SamplingConfig:
             "top_k": self.top_k,
             "top_p": self.top_p,
             "min_p": self.min_p,
+            "typical_p": self.typical_p,
+            "tail_free_z": self.tail_free_z,
+            "draw_kernel": self.draw_kernel,
+            "cfg_unconditional_prompt": self.cfg_unconditional_prompt,
+            "cfg_scale": self.cfg_scale,
+            "cfg_prefix_tokens": self.cfg_prefix_tokens,
             "repeat_penalty": self.repeat_penalty,
             "repeat_last_n": self.repeat_last_n,
             "presence_penalty": self.presence_penalty,
@@ -835,6 +886,25 @@ class Candidate:
     raw_logit: float | None = None
     effective_logit: float | None = None
 
+    @property
+    def model_probability(self) -> float:
+        """Canonical backend/model probability surface.
+
+        ``raw_probability`` remains in the record format for replay and API
+        compatibility; it does not promise that the backend was uninfluenced
+        by model-phase controls such as CFG.
+        """
+        return self.raw_probability
+
+    @property
+    def model_logit(self) -> float | None:
+        return self.raw_logit
+
+    @property
+    def logit_shift(self) -> float | None:
+        """Canonical name for the policy-minus-backend logit difference."""
+        return self.policy_logit_adjustment
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "bias": self.bias,
@@ -842,13 +912,16 @@ class Candidate:
             "token_id": self.token_id,
             "text": self.text,
             "raw_probability": self.raw_probability,
+            "model_probability": self.model_probability,
             "decoder_probability": self.decoder_probability,
             "decoder_supported": self.decoder_probability > 0.0,
             "is_eog": self.is_eog,
             "policy_rank": self.policy_rank,
             "policy_probability": self.policy_probability,
             "policy_logit_adjustment": self.policy_logit_adjustment,
+            "logit_shift": self.logit_shift,
             "raw_logit": self.raw_logit,
+            "model_logit": self.model_logit,
             "effective_logit": self.effective_logit,
         }
 

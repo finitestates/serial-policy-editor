@@ -50,6 +50,18 @@ _SAMPLER_FIELDS = {
     "top_p": float,
     "min-p": float,
     "min_p": float,
+    "typical-p": float,
+    "typical_p": float,
+    "tail-free-z": float,
+    "tail_free_z": float,
+    "draw-kernel": str,
+    "draw_kernel": str,
+    "cfg-unconditional-prompt": str,
+    "cfg_unconditional_prompt": str,
+    "cfg-scale": float,
+    "cfg_scale": float,
+    "cfg-prefix-tokens": int,
+    "cfg_prefix_tokens": int,
     "repeat_penalty": float,
     "repeat-penalty": float,
     "repeat_last_n": int,
@@ -63,6 +75,12 @@ _SAMPLER_ALIASES = {
     "temp": "temperature",
     "top-p": "top_p",
     "min-p": "min_p",
+    "typical-p": "typical_p",
+    "tail-free-z": "tail_free_z",
+    "draw-kernel": "draw_kernel",
+    "cfg-unconditional-prompt": "cfg_unconditional_prompt",
+    "cfg-scale": "cfg_scale",
+    "cfg-prefix-tokens": "cfg_prefix_tokens",
     "repeat-penalty": "repeat_penalty",
     "repeat-last-n": "repeat_last_n",
     "presence-penalty": "presence_penalty",
@@ -104,6 +122,8 @@ _PLAN_FIELDS = (
     "new_prompt", "new_prompt_file", "replay", "resume", "fork_from", "at",
     "workspace", "model", "backend", "max_tokens", "biases", "groups", "reference",
     "activation_vector", "temperature", "top_k", "top_p", "min_p",
+    "typical_p", "tail_free_z", "draw_kernel", "cfg_unconditional_prompt",
+    "cfg_scale", "cfg_prefix_tokens",
     "repeat_penalty", "repeat_last_n", "presence_penalty", "frequency_penalty",
     "seed", "random_seed", *_LEARNING_FIELDS, *_PREFERENCE_FIELDS,
 )
@@ -114,7 +134,9 @@ _PLAN_FIELDS = (
 # accidentally selecting an old replay source when it is loaded later.
 _PROFILE_FIELD_GROUPS = {
     "sampler": (
-        "temperature", "top_k", "top_p", "min_p", "repeat_penalty",
+        "temperature", "top_k", "top_p", "min_p", "typical_p", "tail_free_z",
+        "draw_kernel", "cfg_unconditional_prompt", "cfg_scale", "cfg_prefix_tokens",
+        "repeat_penalty",
         "repeat_last_n", "presence_penalty", "frequency_penalty", "seed",
         "random_seed",
     ),
@@ -140,7 +162,7 @@ _PROFILE_BOOL_FIELDS = frozenset(
 )
 _PROFILE_INT_FIELDS = frozenset(
     {
-        "top_k", "repeat_last_n", "learning_severity_cap", "learning_dead_zone_rank",
+        "top_k", "repeat_last_n", "cfg_prefix_tokens", "learning_severity_cap", "learning_dead_zone_rank",
         "token_preference_dimension", "token_preference_severity_cap",
         "token_preference_dead_zone_rank", "token_preference_fisher_max_support",
         "token_preference_projection_chunk_size", "token_preference_projection_seed",
@@ -148,7 +170,8 @@ _PROFILE_INT_FIELDS = frozenset(
 )
 _PROFILE_FLOAT_FIELDS = frozenset(
     {
-        "temperature", "top_p", "min_p", "repeat_penalty", "presence_penalty",
+        "temperature", "top_p", "min_p", "typical_p", "tail_free_z", "cfg_scale",
+        "repeat_penalty", "presence_penalty",
         "frequency_penalty", "learning_rate", "learning_epsilon", "learning_max_step",
         "learning_min_bias", "learning_max_bias", "learning_rejection_strength",
         "learning_decay", "token_preference_learning_rate", "token_preference_strength",
@@ -193,6 +216,12 @@ class RuntimePlan:
     top_k: int | None = None
     top_p: float | None = None
     min_p: float | None = None
+    typical_p: float | None = None
+    tail_free_z: float | None = None
+    draw_kernel: str | None = None
+    cfg_unconditional_prompt: str | None = None
+    cfg_scale: float | None = None
+    cfg_prefix_tokens: int | None = None
     repeat_penalty: float | None = None
     repeat_last_n: int | None = None
     presence_penalty: float | None = None
@@ -475,13 +504,16 @@ _CONTROL_OPTIONAL_FIELDS = {
 _PROFILE_NULLABLE_FIELDS = frozenset(
     {
         *_PROFILE_PATH_FIELDS,
-        "temperature", "top_k", "top_p", "min_p", "repeat_penalty", "repeat_last_n",
+        "temperature", "top_k", "top_p", "min_p", "typical_p", "tail_free_z",
+        "draw_kernel", "cfg_unconditional_prompt", "cfg_scale", "cfg_prefix_tokens",
+        "repeat_penalty", "repeat_last_n",
         "presence_penalty", "frequency_penalty", "seed", "learnable_groups",
         "token_preference_projection_seed",
         *_CONTROL_OPTIONAL_FIELDS,
     }
 )
 _CONTROL_CHOICES = {
+    "draw_kernel": ("categorical", "gumbel-max"),
     "learning_decay_on": DECAY_ON,
     "learning_write_reduction": WRITE_REDUCTIONS,
     "learning_rejection_target": REJECTION_TARGETS,
@@ -681,6 +713,12 @@ def _validate_profile_values(values: dict[str, Any]) -> None:
             raise EditorError("controller profile top_p must be in (0, 1]")
         if name == "min_p" and value is not None and not 0.0 <= value <= 1.0:
             raise EditorError("controller profile min_p must be in [0, 1]")
+        if name in {"typical_p", "tail_free_z"} and value is not None and not 0.0 < value <= 1.0:
+            raise EditorError(f"controller profile {name} must be in (0, 1]")
+        if name == "cfg_scale" and value is not None and value < 0.0:
+            raise EditorError("controller profile cfg_scale must be nonnegative")
+        if name == "cfg_prefix_tokens" and value is not None and value < 0:
+            raise EditorError("controller profile cfg_prefix_tokens must be nonnegative")
         if name == "temperature" and value is not None and value < 0.0:
             raise EditorError("controller profile temperature cannot be negative")
         if name == "repeat_penalty" and value is not None and value <= 0.0:
@@ -1104,7 +1142,9 @@ def sampler_summary(plan: RuntimePlan) -> str:
     )
     rows = ["SAMPLER SETTINGS", ""]
     for name in (
-        "temperature", "top_k", "top_p", "min_p", "repeat_penalty",
+        "temperature", "top_k", "top_p", "min_p", "typical_p", "tail_free_z",
+        "draw_kernel", "cfg_unconditional_prompt", "cfg_scale", "cfg_prefix_tokens",
+        "repeat_penalty",
         "repeat_last_n", "presence_penalty", "frequency_penalty",
     ):
         selected = getattr(plan, name)
@@ -1150,7 +1190,9 @@ def effective_plan_summary(
         "SAMPLER",
     ]
     for name in (
-        "temperature", "top_k", "top_p", "min_p", "repeat_penalty",
+        "temperature", "top_k", "top_p", "min_p", "typical_p", "tail_free_z",
+        "draw_kernel", "cfg_unconditional_prompt", "cfg_scale", "cfg_prefix_tokens",
+        "repeat_penalty",
         "repeat_last_n", "presence_penalty", "frequency_penalty", "seed",
     ):
         value = getattr(sampling, name)
@@ -1264,12 +1306,19 @@ def _parse_sampler(plan: RuntimePlan, words: list[str]) -> None:
         field = _SAMPLER_ALIASES.get(key, key.replace("-", "_"))
         kind = _SAMPLER_FIELDS.get(key) or _SAMPLER_FIELDS.get(field)
         if kind is None or field not in {
-            "temperature", "top_k", "top_p", "min_p", "repeat_penalty",
+            "temperature", "top_k", "top_p", "min_p", "typical_p", "tail_free_z",
+            "draw_kernel", "cfg_unconditional_prompt", "cfg_scale", "cfg_prefix_tokens",
+            "repeat_penalty",
             "repeat_last_n", "presence_penalty", "frequency_penalty",
         }:
             raise EditorError(f"unknown sampler field {raw_key!r}")
         try:
-            value = kind(raw_value)
+            if field == "draw_kernel":
+                value = raw_value
+                if value not in {"categorical", "gumbel-max"}:
+                    raise ValueError
+            else:
+                value = kind(raw_value)
         except ValueError as exc:
             raise EditorError(f"invalid sampler value for {field}: {raw_value!r}") from exc
         _set(plan, field, value)

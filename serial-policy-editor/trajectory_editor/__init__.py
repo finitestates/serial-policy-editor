@@ -6,6 +6,7 @@ from .episode_actions import (
     EndGeneration,
     Finish,
     Hold,
+    Phrase,
     SelectRawRank,
     Write,
 )
@@ -50,6 +51,7 @@ __all__ = [
     "EpisodeStore",
     "Finish",
     "Hold",
+    "Phrase",
     "Observation",
     "ReplayExpectation",
     "RunResult",

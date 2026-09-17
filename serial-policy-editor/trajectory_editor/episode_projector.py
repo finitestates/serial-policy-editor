@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .domain import EditorError
+from .episode_actions import Accept, EndGeneration, Finish, Hold, Phrase, SelectRawRank, Write
 from .episode_store import EpisodeStore
 
 
@@ -19,7 +20,7 @@ class EpisodeProjection:
     terminal_reason: str | None
 
 
-_TEACHER_ACTION_KINDS = {"accept", "select-raw-rank", "write"}
+_TEACHER_ACTION_KINDS = {"accept", "select-raw-rank", "write", "check-phrase", "force-phrase"}
 
 
 def _probability(value: float) -> str:
@@ -309,7 +310,6 @@ def project_procedure(store: EpisodeStore, episode_id: str) -> str:
     """Render the same surviving procedure used by replay, without a model."""
     from pathlib import PurePosixPath
     from .domain import SamplingConfig
-    from .episode_actions import Accept, EndGeneration, Finish, Hold, SelectRawRank, Write
 
     episode = store.get_episode(episode_id)
     steps = store.replay_procedure(episode_id)
@@ -374,6 +374,18 @@ def project_procedure(store: EpisodeStore, episode_id: str) -> str:
             if any(ord(char) < 32 or ord(char) == 127 for char in action.text):
                 command = ("t " if action.mode == "continuation" else "x ") + _procedure_text(action.text)
                 comment = "display-escaped write; control characters must be pasted literally"
+            else:
+                comment = None
+        elif isinstance(action, Phrase):
+            command = (
+                "force" if action.force else "check"
+            ) + ("x " if action.mode == "exact" else " ") + action.text
+            if any(ord(char) < 32 or ord(char) == 127 for char in action.text):
+                prefix = "forcex " if action.force and action.mode == "exact" else (
+                    "force " if action.force else "checkx " if action.mode == "exact" else "check "
+                )
+                command = prefix + _procedure_text(action.text)
+                comment = "display-escaped phrase; control characters must be pasted literally"
             else:
                 comment = None
         elif isinstance(action, Hold):

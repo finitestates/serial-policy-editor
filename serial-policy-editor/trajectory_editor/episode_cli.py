@@ -68,6 +68,12 @@ SAMPLER_FIELDS = (
     "top_k",
     "top_p",
     "min_p",
+    "typical_p",
+    "tail_free_z",
+    "draw_kernel",
+    "cfg_unconditional_prompt",
+    "cfg_scale",
+    "cfg_prefix_tokens",
     "repeat_penalty",
     "repeat_last_n",
     "presence_penalty",
@@ -146,6 +152,16 @@ def _nonnegative_int(value: str) -> int:
         raise argparse.ArgumentTypeError("must be an integer") from exc
     if parsed < 0:
         raise argparse.ArgumentTypeError("must be a nonnegative integer")
+    return parsed
+
+
+def _nonnegative_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+    if not math.isfinite(parsed) or parsed < 0.0:
+        raise argparse.ArgumentTypeError("must be a finite nonnegative number")
     return parsed
 
 
@@ -240,6 +256,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--table-depth", type=int, default=12)
     parser.add_argument("--search-radius", type=int, default=3)
     parser.add_argument("--hold-default", type=int, default=100)
+    parser.add_argument(
+        "--phrase-max-tokens",
+        type=_positive_int,
+        default=16,
+        help="maximum tokenized length for check/force phrase commands",
+    )
+    parser.add_argument(
+        "--phrase-max-shift",
+        type=_nonnegative_float,
+        default=6.0,
+        help="policy-logit shift bound used by check phrase commands",
+    )
     parser.add_argument("--context-chars", type=int, default=0, help="Context character limit (0 keeps all context)")
     parser.add_argument("--plain-ui", action="store_true")
     parser.add_argument(
@@ -273,7 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
     policy_view = parser.add_mutually_exclusive_group()
     policy_view.add_argument(
         "--policy-view", "--show-policy-rank", dest="show_policy_rank", action="store_true",
-        default=None, help="show policy diagnostics without changing raw-rank ordering (default: automatic)",
+        default=None, help="show policy diagnostics without changing backend-rank ordering (default: automatic)",
     )
     policy_view.add_argument(
         "--no-policy-view", dest="show_policy_rank", action="store_false",
@@ -284,7 +312,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("none", "raw", "effective", "delta", "all"),
         default="none",
         help=(
-            "show raw, effective, or effective-delta logits in episode candidate rows "
+            "show backend, effective, or effective-delta logits in episode candidate rows "
             "(default: none; l cycles the view)"
         ),
     )
@@ -501,12 +529,30 @@ def build_parser() -> argparse.ArgumentParser:
         ("top_k", int),
         ("top_p", float),
         ("min_p", float),
+        ("typical_p", float),
+        ("tail_free_z", float),
         ("repeat_penalty", float),
         ("repeat_last_n", int),
         ("presence_penalty", float),
         ("frequency_penalty", float),
     ):
         sampling.add_argument("--" + name.replace("_", "-"), type=kind)
+    sampling.add_argument(
+        "--draw-kernel", choices=("categorical", "gumbel-max"),
+        help="candidate draw kernel (default: categorical)",
+    )
+    sampling.add_argument(
+        "--cfg-unconditional-prompt", dest="cfg_unconditional_prompt",
+        help="unconditional prompt for prefix classifier-free guidance",
+    )
+    sampling.add_argument(
+        "--cfg-scale", type=float,
+        help="classifier-free guidance scale (requires an unconditional prompt)",
+    )
+    sampling.add_argument(
+        "--cfg-prefix-tokens", type=int,
+        help="number of generated prefix tokens to guide with CFG",
+    )
     sampling.add_argument("--biases", type=Path, help="load a JSON bias preset (replaces the saved bias set)")
     sampling.add_argument(
         "--steering-vector",
@@ -916,7 +962,14 @@ def _sampler_override(current: SamplingConfig, raw: str) -> SamplingConfig:
         if key not in values or key in {"bias_rules", "bias_groups"}:
             raise EditorError(f"unknown sampler field {key!r}")
         try:
-            values[key] = int(value) if key in {"top_k", "repeat_last_n", "seed"} else float(value)
+            if key in {"top_k", "repeat_last_n", "seed", "cfg_prefix_tokens"}:
+                values[key] = int(value)
+            elif key == "draw_kernel":
+                if value not in {"categorical", "gumbel-max"}:
+                    raise ValueError
+                values[key] = value
+            else:
+                values[key] = float(value)
         except ValueError as exc:
             raise EditorError(f"invalid value for {key}: {value!r}") from exc
     return replace(current, **values)
@@ -1039,6 +1092,17 @@ def _load_episode_backend(args, source, io, *, use_saved=False, current_backend=
             selected.model = Path(path).expanduser()
 
 
+def _load_cfg_guidance_backend(args, provenance):
+    """Load a second copy of the active model for CFG's unconditional branch."""
+    selected = copy.copy(args)
+    selected.model = Path(provenance["model_path"])
+    selected.backend = provenance["backend"]
+    for key, value in provenance.get("load_options", {}).items():
+        if hasattr(selected, key):
+            setattr(selected, key, value)
+    return _backend(selected)
+
+
 def _interactive_policy(
     args: argparse.Namespace, store: EpisodeStore, episode_id: str, io: TerminalIO,
     *, catalog=None,
@@ -1055,6 +1119,8 @@ def _interactive_policy(
         menu_size=args.table_depth,
         search_radius=args.search_radius,
         default_hold_tokens=args.hold_default,
+        phrase_max_tokens=getattr(args, "phrase_max_tokens", 16),
+        phrase_max_shift=getattr(args, "phrase_max_shift", 6.0),
         context_characters=args.context_chars,
         manual_acceptance=args.manual_acceptance,
         view_preferences=preferences,
@@ -1070,7 +1136,8 @@ def _interactive_policy(
 def _sampler_summary(config: SamplingConfig) -> str:
     summary = (
         f"temp={config.temperature:g} top_k={config.top_k} top_p={config.top_p:g} "
-        f"min_p={config.min_p:g} rep={config.repeat_penalty:g}/{config.repeat_last_n} "
+        f"min_p={config.min_p:g} typical_p={config.typical_p:g} tfs_z={config.tail_free_z:g} "
+        f"draw={config.draw_kernel} rep={config.repeat_penalty:g}/{config.repeat_last_n} "
         f"presence={config.presence_penalty:g} frequency={config.frequency_penalty:g} "
         f"seed={config.seed}"
     )
@@ -1528,6 +1595,17 @@ def main(argv: list[str] | None = None) -> int:
             source_id = args.resume or args.fork_from or args.replay
             source = store.get_episode(source_id) if source_id else None
             backend, provenance, model_changed = _load_episode_backend(args, source, io)
+            cfg_guidance_backend = None
+
+            def cfg_backend_for(sampling):
+                nonlocal cfg_guidance_backend
+                if sampling.cfg_unconditional_prompt is None:
+                    return None
+                if cfg_guidance_backend is None:
+                    io.write("Loading second model copy for CFG prefix guidance...")
+                    cfg_guidance_backend = _load_cfg_guidance_backend(args, provenance)
+                return cfg_guidance_backend
+
             catalog = None
             if args.bias_catalog is not None:
                 catalog = validate_catalog(
@@ -1612,7 +1690,10 @@ def main(argv: list[str] | None = None) -> int:
                 explicit = sampling != source_sampling
                 io.write("Restoring saved context...")
                 if model_changed:
-                    engine, episode_id = _model_continuation(store, args.resume, backend, provenance)
+                    engine, episode_id = _model_continuation(
+                        store, args.resume, backend, provenance,
+                        guidance_backend=cfg_backend_for(sampling),
+                    )
                     if args.max_tokens is not None:
                         engine.resume(max_tokens=args.max_tokens)
                     if explicit or args.reference_prior is not None or (
@@ -1625,6 +1706,7 @@ def main(argv: list[str] | None = None) -> int:
                     engine = _restore_engine(
                         store, args.resume, backend, max_tokens=args.max_tokens,
                         sampling_override=sampling if explicit else None,
+                        guidance_backend=cfg_backend_for(sampling),
                     )
                     episode_id = args.resume
             elif args.new_prompt is not None or args.new_prompt_file is not None:
@@ -1656,6 +1738,7 @@ def main(argv: list[str] | None = None) -> int:
                     sampling=sampling,
                     max_tokens=args.max_tokens,
                     initial_text=initial_text,
+                    guidance_backend=cfg_backend_for(sampling),
                 )
                 episode_id = _create_episode(
                     store,
@@ -1735,6 +1818,7 @@ def main(argv: list[str] | None = None) -> int:
                     initial_token_ids=replay_prefix,
                     stream_fingerprint=source_segment["stream_fingerprint"] if model_changed else None,
                     coordinate_offset=source_segment["coordinate_offset"] if model_changed else None,
+                    guidance_backend=cfg_backend_for(sampling),
                 )
                 if args.token_preference_projection_seed is not None and pending_tape.follow_source_sampling:
                     states = [step.sampling for step in pending_tape]
@@ -1794,6 +1878,9 @@ def main(argv: list[str] | None = None) -> int:
                     initial_token_ids=prefix,
                     stream_fingerprint=segment["stream_fingerprint"],
                     coordinate_offset=segment["coordinate_offset"] + target,
+                    guidance_backend=cfg_backend_for(sampling),
+                    guidance_generated_prefix=visible[:target],
+                    guidance_tokens_consumed=target,
                 )
                 if args.max_tokens is None:
                     _inherit_budget(store, args.fork_from, engine, target, rebase=True)
@@ -1945,7 +2032,14 @@ def main(argv: list[str] | None = None) -> int:
                         new_backend, new_provenance, changed = _load_episode_backend(args, target_episode, io, use_saved=True,
                             current_backend=backend, current_provenance=provenance)
                         if changed:
-                            new_engine, destination = _model_continuation(store, destination, new_backend, new_provenance)
+                            new_engine, destination = _model_continuation(
+                                store, destination, new_backend, new_provenance,
+                                guidance_backend=cfg_backend_for(
+                                    SamplingConfig.from_record(
+                                        store.sampling_segment(destination, 0)["sampling"]
+                                    )
+                                ),
+                            )
                         elif sealed:
                             visible = _visible_tokens(store, destination)
                             segment = store.sampling_segment(destination, len(visible))
@@ -1954,13 +2048,25 @@ def main(argv: list[str] | None = None) -> int:
                                 sampling=SamplingConfig.from_record(segment["sampling"]),
                                 stream_fingerprint=segment["stream_fingerprint"],
                                 coordinate_offset=segment["coordinate_offset"] + len(visible),
-                                max_tokens=target_episode["max_tokens"])
+                                max_tokens=target_episode["max_tokens"],
+                                guidance_backend=cfg_backend_for(
+                                    SamplingConfig.from_record(segment["sampling"])
+                                ),
+                                guidance_generated_prefix=visible,
+                                guidance_tokens_consumed=len(visible),
+                            )
                             _inherit_budget(store, destination, new_engine, len(visible), rebase=True)
                             destination = _create_episode(store, new_engine, backend_provenance=new_provenance,
                                 parent_episode_id=destination, fork_boundary=len(visible), mode="fork")
                         else:
+                            visible = _visible_tokens(store, destination)
                             new_engine = _restore_engine(store, destination, new_backend,
-                                max_tokens=None, sampling_override=None)
+                                max_tokens=None, sampling_override=None,
+                                guidance_backend=cfg_backend_for(
+                                    SamplingConfig.from_record(
+                                        store.sampling_segment(destination, len(visible))["sampling"]
+                                    )
+                                ))
                     except (EditorError, OSError, RuntimeError) as exc:
                         # A reused backend may already have been repositioned.
                         engine.backend.reset(engine.token_ids)
@@ -2010,6 +2116,7 @@ def main(argv: list[str] | None = None) -> int:
                         target,
                         backend=backend,
                         max_tokens=None,
+                        guidance_backend=cfg_backend_for(parent_engine.sampling),
                     )
                     episode_id = _create_episode(
                         store,

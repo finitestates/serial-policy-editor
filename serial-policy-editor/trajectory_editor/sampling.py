@@ -18,10 +18,121 @@ from .episode_hash import validate_coordinate, validate_fingerprint
 class SparseDistribution:
     ids: np.ndarray
     probabilities: np.ndarray
+    scores: np.ndarray | None = None
 
     def probability(self, token_id: int) -> float:
         matches = np.flatnonzero(self.ids == int(token_id))
         return float(self.probabilities[matches[0]]) if len(matches) else 0.0
+
+
+@dataclass(frozen=True)
+class CandidateFilterResult:
+    """The explicit hand-off between candidate filtering and token drawing."""
+
+    scaled_logits: np.ndarray
+    stages: dict[str, np.ndarray | None]
+    diagnostics: dict[str, object] = field(default_factory=dict)
+
+
+class StandardCandidateFilter:
+    """Deterministic top-k/typical/tail-free/top-p/min-p filtering."""
+
+    name = "standard"
+
+    @staticmethod
+    def _sorted(ids: np.ndarray, scaled: np.ndarray) -> np.ndarray:
+        if len(ids) < 2:
+            return np.asarray(ids, dtype=np.int64)
+        order = np.lexsort((ids, -scaled[ids]))
+        return np.asarray(ids[order], dtype=np.int64)
+
+    @classmethod
+    def _typical(cls, ids: np.ndarray, scaled: np.ndarray, typical_p: float) -> np.ndarray:
+        ids = cls._sorted(ids, scaled)
+        if typical_p >= 1.0 or len(ids) <= 1:
+            return ids
+        probabilities = _softmax(scaled[ids])
+        entropy = float(-np.sum(probabilities * np.log(np.maximum(probabilities, np.finfo(float).tiny))))
+        surprisal = -np.log(np.maximum(probabilities, np.finfo(float).tiny))
+        typicality = np.abs(surprisal - entropy)
+        order = np.lexsort((ids, typicality))
+        ordered_ids = ids[order]
+        ordered_probabilities = probabilities[order]
+        keep_count = int(np.searchsorted(np.cumsum(ordered_probabilities), typical_p, side="left")) + 1
+        return ordered_ids[: max(1, keep_count)]
+
+    @classmethod
+    def _tail_free(cls, ids: np.ndarray, scaled: np.ndarray, tail_free_z: float) -> np.ndarray:
+        ids = cls._sorted(ids, scaled)
+        if tail_free_z >= 1.0 or len(ids) < 3:
+            return ids
+        probabilities = _softmax(scaled[ids])
+        first_derivative = np.abs(np.diff(probabilities))
+        second_derivative = np.abs(np.diff(first_derivative))
+        total = float(np.sum(second_derivative))
+        if total <= 0.0 or not np.isfinite(total):
+            return ids
+        mass = second_derivative / total
+        keep_count = int(np.searchsorted(np.cumsum(mass), tail_free_z, side="left")) + 2
+        return ids[: max(1, min(len(ids), keep_count))]
+
+    def apply(self, adjusted: np.ndarray, config: SamplingConfig) -> CandidateFilterResult:
+        if config.temperature == 0.0:
+            greedy = _top_ids(adjusted, 1)
+            stages = {
+                "after_temperature": greedy,
+                "after_top_k": greedy,
+                "after_typical": greedy,
+                "after_tail_free": greedy,
+                "after_top_p": greedy,
+                "after_min_p": greedy,
+            }
+            return CandidateFilterResult(adjusted, stages, {"filter": self.name, "greedy": True})
+
+        scaled = adjusted / float(config.temperature)
+        if not np.all(np.isfinite(scaled)):
+            raise ValueError("temperature produced non-finite scaled logits")
+        after_top_k = _top_ids(scaled, min(config.top_k, len(scaled)))
+        after_typical = self._typical(after_top_k, scaled, float(config.typical_p))
+        after_tail_free = self._tail_free(after_typical, scaled, float(config.tail_free_z))
+        after_top_p = self._sorted(after_tail_free, scaled)
+        if config.top_p < 1.0:
+            probabilities = _softmax(scaled[after_top_p])
+            keep_count = int(
+                np.searchsorted(np.cumsum(probabilities), config.top_p, side="left")
+            ) + 1
+            after_top_p = after_top_p[: max(1, keep_count)]
+
+        after_min_p = after_top_p
+        if config.min_p > 0.0:
+            probabilities = _softmax(scaled[after_top_p])
+            mask = probabilities >= config.min_p * float(np.max(probabilities))
+            if np.any(mask):
+                after_min_p = after_top_p[mask]
+
+        return CandidateFilterResult(
+            scaled,
+            {
+                "after_temperature": None,
+                "after_top_k": after_top_k,
+                "after_typical": after_typical,
+                "after_tail_free": after_tail_free,
+                "after_top_p": after_top_p,
+                "after_min_p": after_min_p,
+            },
+            {
+                "filter": self.name,
+                "typical_p": float(config.typical_p),
+                "tail_free_z": float(config.tail_free_z),
+            },
+        )
+
+
+def apply_candidate_filter(
+    adjusted: np.ndarray, config: SamplingConfig
+) -> CandidateFilterResult:
+    """Apply the configured candidate filter, before any draw kernel runs."""
+    return StandardCandidateFilter().apply(np.asarray(adjusted, dtype=np.float64), config)
 
 
 @dataclass(frozen=True)
@@ -474,43 +585,8 @@ def _stages_from_adjusted(
     adjusted: np.ndarray, config: SamplingConfig,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray | None]]:
     """Run decoder stages on an already prepared history-policy surface."""
-    if config.temperature == 0.0:
-        greedy = _top_ids(adjusted, 1)
-        return adjusted, adjusted, {
-            "after_temperature": greedy,
-            "after_top_k": greedy,
-            "after_top_p": greedy,
-            "after_min_p": greedy,
-        }
-
-    scaled = adjusted / float(config.temperature)
-    if not np.all(np.isfinite(scaled)):
-        raise ValueError("temperature produced non-finite scaled logits")
-
-    after_top_k = _top_ids(scaled, min(config.top_k, len(scaled)))
-    after_top_p = after_top_k
-    if config.top_p < 1.0:
-        probabilities = _softmax(scaled[after_top_k])
-        keep_count = int(
-            np.searchsorted(np.cumsum(probabilities), config.top_p, side="left")
-        ) + 1
-        after_top_p = after_top_k[: max(1, keep_count)]
-
-    after_min_p = after_top_p
-    if config.min_p > 0.0:
-        probabilities = _softmax(scaled[after_top_p])
-        mask = probabilities >= config.min_p * float(np.max(probabilities))
-        if np.any(mask):
-            after_min_p = after_top_p[mask]
-
-    return adjusted, scaled, {
-        # None means the stage retains the full vocabulary. Avoid allocating a
-        # vocabulary-sized id array when no filtering happens at this stage.
-        "after_temperature": None,
-        "after_top_k": after_top_k,
-        "after_top_p": after_top_p,
-        "after_min_p": after_min_p,
-    }
+    result = apply_candidate_filter(adjusted, config)
+    return adjusted, result.scaled_logits, result.stages
 
 
 def position_uniform(seed: int, stream_fingerprint: str, aligned_step: int) -> float:
@@ -523,13 +599,49 @@ def position_uniform(seed: int, stream_fingerprint: str, aligned_step: int) -> f
     return (value + 0.5) / float(1 << 64)
 
 
+def position_uniform_token(
+    seed: int, stream_fingerprint: str, aligned_step: int, token_id: int
+) -> float:
+    """Return a stable per-token quantile for order-independent draw kernels."""
+    if type(token_id) is not int or token_id < 0:
+        raise EditorError("token id must be a nonnegative integer")
+    if type(seed) is not int or not MIN_SEED <= seed <= MAX_SEED:
+        raise EditorError("seed must be a signed-64-bit integer")
+    validate_fingerprint(stream_fingerprint)
+    validate_coordinate(aligned_step, "sampling position")
+    payload = f"{RNG_SCHEME}:gumbel-max:{seed}:{stream_fingerprint}:{aligned_step}:{token_id}".encode()
+    value = int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big")
+    return (value + 0.5) / float(1 << 64)
+
+
 def draw_token(
     distribution: SparseDistribution,
     *,
     seed: int,
     stream_fingerprint: str,
     aligned_step: int,
+    kernel: str = "categorical",
 ) -> int:
+    if kernel not in {"categorical", "gumbel-max"}:
+        raise EditorError("unsupported draw kernel")
+    if kernel == "gumbel-max":
+        if distribution.scores is None:
+            raise ValueError("gumbel-max requires candidate scores")
+        uniforms = np.asarray(
+            [position_uniform_token(seed, stream_fingerprint, aligned_step, int(token_id))
+             for token_id in distribution.ids],
+            dtype=np.float64,
+        )
+        gumbels = -np.log(-np.log(uniforms))
+        scores = np.asarray(distribution.scores, dtype=np.float64)
+        if scores.shape != distribution.ids.shape:
+            raise ValueError("candidate scores do not match candidate IDs")
+        # IDs are the stable tie-break if an exotic hash collision produces an
+        # equal floating-point score.
+        ranking = scores + gumbels
+        best = np.flatnonzero(ranking == np.max(ranking))
+        index = int(best[np.argmin(distribution.ids[best])])
+        return int(distribution.ids[index])
     draw = position_uniform(seed, stream_fingerprint, aligned_step)
     index = int(
         np.searchsorted(np.cumsum(distribution.probabilities), draw, side="right")
@@ -560,6 +672,8 @@ class ObservationStatistics:
         render_tokens=None,
         token_preference_coordinate_identity=None,
         activation_logit_adjustments=None,
+        model_phase_diagnostics=None,
+        ephemeral_logit_biases=None,
         capture_trace=False,
     ):
         self.logits = _validated_logits(logits).copy()
@@ -586,6 +700,16 @@ class ObservationStatistics:
                 ControllerTraceStage(name, phase, values, delta, details)
             )
 
+        if model_phase_diagnostics:
+            record_stage(
+                str(model_phase_diagnostics.get("name", "model-phase guidance")),
+                "model",
+                self.logits,
+                **{
+                    key: value for key, value in model_phase_diagnostics.items()
+                    if key != "name"
+                },
+            )
         record_stage("backend logits", "policy", self.logits)
         trace_previous = self.logits
         penalties_active = config.history_penalties_active
@@ -822,7 +946,30 @@ class ObservationStatistics:
             controlled_tokens=len(self.group_control_biases),
         )
         trace_previous = self.adjusted
-        penalties_active = config.policy_active
+        self.ephemeral_logit_biases = {
+            int(token): float(amount)
+            for token, amount in (ephemeral_logit_biases or {}).items()
+        }
+        if self.ephemeral_logit_biases:
+            if any(
+                token < 0 or token >= len(self.logits)
+                or not np.isfinite(amount)
+                for token, amount in self.ephemeral_logit_biases.items()
+            ):
+                raise ValueError("ephemeral logit biases are invalid")
+            self.adjusted = self.adjusted.copy()
+            for token, amount in self.ephemeral_logit_biases.items():
+                self.adjusted[token] += amount
+            if not np.all(np.isfinite(self.adjusted)):
+                raise ValueError("ephemeral logit biases produced non-finite policy logits")
+        if self.ephemeral_logit_biases:
+            record_stage(
+                "temporary phrase bias", "policy", self.adjusted, trace_previous,
+                active=True,
+                controlled_tokens=len(self.ephemeral_logit_biases),
+            )
+            trace_previous = self.adjusted
+        penalties_active = config.policy_active or bool(self.ephemeral_logit_biases)
         self.maximum = float(np.max(self.logits))
         exponentials = np.exp(self.logits - self.maximum)
         self.denominator = float(np.sum(exponentials))
@@ -834,11 +981,28 @@ class ObservationStatistics:
         _, scaled, stages = _stages_from_adjusted(self.adjusted, config)
         ids = stages["after_min_p"]
         assert ids is not None
-        self.distribution = SparseDistribution(ids, _softmax(scaled[ids]))
+        self.candidate_filter_diagnostics = {
+            "boundary": "candidate-filter -> draw-kernel",
+            "filter": "standard",
+            "typical_p": float(config.typical_p),
+            "tail_free_z": float(config.tail_free_z),
+            "draw_kernel": config.draw_kernel,
+            "stage_counts": {
+                name: None if value is None else int(len(value))
+                for name, value in stages.items()
+            },
+        }
+        self.distribution = SparseDistribution(
+            ids, _softmax(scaled[ids]), np.asarray(scaled[ids], dtype=np.float64)
+        )
         record_stage(
             "sampler / token draw", "policy", self.adjusted, trace_previous,
             filtered_tokens=len(ids),
             temperature=float(config.temperature),
+            candidate_filter="standard",
+            draw_kernel=config.draw_kernel,
+            typical_p=float(config.typical_p),
+            tail_free_z=float(config.tail_free_z),
         )
         self.controller_trace = (
             ControllerTrace(tuple(trace_stages), tuple(int(value) for value in ids))
@@ -852,6 +1016,8 @@ class ObservationStatistics:
             self.distribution.ids, self.distribution.probabilities,
         ):
             array.setflags(write=False)
+        if self.distribution.scores is not None:
+            self.distribution.scores.setflags(write=False)
         self._raw_ranks: dict[int, int] = {}
         self._policy_ranks: dict[int, int] = (
             {} if penalties_active else self._raw_ranks
@@ -863,6 +1029,28 @@ class ObservationStatistics:
         if self.adjusted is self.logits:
             return self.policy_probabilities[list(token_ids)]
         return np.exp(self.logits[list(token_ids)] - self.maximum) / self.denominator
+
+    # Canonical names for new controller and diagnostic code. The historical
+    # aliases remain because saved evidence and third-party callers use them.
+    @property
+    def backend_logits(self):
+        return self.logits
+
+    @property
+    def policy_logits(self):
+        return self.adjusted
+
+    def model_probabilities(self, token_ids):
+        return self.raw_probabilities(token_ids)
+
+    def model_nll(self, token_id: int) -> float:
+        return self.raw_nll(token_id)
+
+    def model_rank(self, token_id: int) -> int:
+        return self.raw_rank(token_id)
+
+    def top_model_ids(self, count: int) -> list[int]:
+        return self.top_raw_ids(count)
 
     def raw_nll(self, token_id: int) -> float:
         return self.log_z - float(self.logits[token_id])

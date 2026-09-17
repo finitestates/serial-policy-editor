@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .domain import EditorError, SamplingConfig
-from .episode_actions import Write, Hold, Finish, PolicyAction, action_from_dict
+from .episode_actions import Phrase, Write, Hold, Finish, PolicyAction, action_from_dict
 from .episode_engine import ActionOutcome, ReplayExpectation
 from .episode_hash import token_prefix_sha256, validate_coordinate, validate_fingerprint
 
@@ -531,6 +531,8 @@ class EpisodeStore:
         *, replay_origin: Mapping[str, Any] | None = None,
     ) -> None:
         arguments = outcome.action.to_dict()
+        if outcome.diagnostics is not None:
+            arguments["diagnostics"] = dict(outcome.diagnostics)
         if replay_origin is not None:
             arguments["replay_origin"] = dict(replay_origin)
         with self.transaction() as db:
@@ -993,7 +995,7 @@ class EpisodeStore:
             visible = [row for row in step["tokens"] if row["realized_visible"]]
             if len(visible) > count or (len(visible) == count and isinstance(step["action"], (Hold, Finish))):
                 retained = visible[:count]
-                if isinstance(step["action"], Write):
+                if isinstance(step["action"], (Write, Phrase)):
                     step["action"] = Write("".join(row["text"] for row in retained), "exact")
                     reason = "completed"
                 else:

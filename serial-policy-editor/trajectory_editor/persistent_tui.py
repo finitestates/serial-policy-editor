@@ -132,6 +132,10 @@ class PersistentTerminalSession(AbstractContextManager):
         self._prompt_view = None
         self._surface = None
         self._current: _Request | None = None
+        # A request is not allowed to receive input until its first render
+        # cycle has begun. Rendering is synchronous on the UI thread, so this
+        # closes the handoff window without delaying after-render observers.
+        self._view_ready: _Request | None = None
         self._events: Queue = Queue()
         self._ready: Future = Future()
         self._thread: threading.Thread | None = None
@@ -146,7 +150,11 @@ class PersistentTerminalSession(AbstractContextManager):
 
     @property
     def accepting_input(self) -> bool:
-        return self._current is not None and not self._current.response.done()
+        return (
+            self._current is not None
+            and self._view_ready is self._current
+            and not self._current.response.done()
+        )
 
     def __enter__(self):
         if self._thread is not None:
@@ -226,6 +234,7 @@ class PersistentTerminalSession(AbstractContextManager):
             layout=Layout(root), key_bindings=active_keys, style=_live_style(self.theme),
             full_screen=True, erase_when_done=True,
             input=self.input_device, output=self.output_device,
+            before_render=self._before_render,
             after_render=self._rendered,
         )
         await self.application.run_async(set_exception_handler=False, handle_sigint=False)
@@ -235,6 +244,10 @@ class PersistentTerminalSession(AbstractContextManager):
             self._ready.set_result(None)
         if self._closing:
             self._stop()
+
+    def _before_render(self, app):
+        if self._current is not None and not self._current.response.done():
+            self._view_ready = self._current
 
     def _ui_exception(self, loop, context):
         error = context.get("exception") or RuntimeError(context.get("message", "terminal error"))
@@ -315,6 +328,7 @@ class PersistentTerminalSession(AbstractContextManager):
     def _show(self, request):
         if self._closing:
             return
+        self._view_ready = None
         self._current = request
         state = request.state
         if isinstance(state, ChoiceViewState):
