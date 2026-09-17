@@ -67,7 +67,7 @@ class OnlineLearningConfig:
     max_bias: float = 4.0
     learnable_groups: tuple[str, ...] | None = None
     severity_cap: int = 1000
-    dead_zone_rank: int = 1
+    dead_zone_rank: int = 0
     # The normal learner treats every explicit teacher selection as a full
     # teaching event.  ``False`` remains available to callers that need the
     # historical rank/dead-zone behavior.
@@ -96,9 +96,10 @@ class OnlineLearningConfig:
             raise EditorError("epsilon must be positive")
         if min_bias > max_bias:
             raise EditorError("min_bias must not exceed max_bias")
-        for name in ("severity_cap", "dead_zone_rank"):
-            if type(getattr(self, name)) is not int or getattr(self, name) < 1:
-                raise EditorError(f"learning {name} must be a positive integer")
+        if type(self.severity_cap) is not int or self.severity_cap < 1:
+            raise EditorError("learning severity_cap must be a positive integer")
+        if type(self.dead_zone_rank) is not int or self.dead_zone_rank < 0:
+            raise EditorError("learning dead_zone_rank must be a nonnegative integer")
         if type(self.no_severity_attenuation) is not bool:
             raise EditorError("learning no_severity_attenuation must be a boolean")
         _finite_number(self.rejection_strength, "rejection_strength", nonnegative=True)
@@ -146,7 +147,7 @@ class LearningResult:
     update_norm: float
     enabled: bool
     severity_cap: int = 1000
-    dead_zone_rank: int = 1
+    dead_zone_rank: int = 0
     no_severity_attenuation: bool = False
     rejection_strength: float = 0.0
     proposal_token_id: int | None = None

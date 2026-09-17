@@ -139,6 +139,16 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _nonnegative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be a nonnegative integer")
+    return parsed
+
+
 def _read_initial_prompt() -> str:
     return prompt(
         "Write at least one character. Press Escape then Enter to continue.\n\n",
@@ -345,7 +355,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=float, default=4.0,
     )
     learning.add_argument("--learning-severity-cap", type=_positive_int, default=1000)
-    learning.add_argument("--learning-dead-zone-rank", type=_positive_int, default=1)
+    learning.add_argument("--learning-dead-zone-rank", type=_nonnegative_int, default=0)
     learning_severity = learning.add_mutually_exclusive_group()
     learning_severity.add_argument(
         "--learning-no-severity-attenuation",
@@ -434,7 +444,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="restore legacy rank dead-zone and severity attenuation",
     )
     preference.set_defaults(token_preference_no_severity_attenuation=True)
-    preference.add_argument("--token-preference-dead-zone-rank", type=_positive_int, default=1)
+    preference.add_argument("--token-preference-dead-zone-rank", type=_nonnegative_int, default=0)
     preference.add_argument(
         "--token-preference-learning-gate", choices=("rank", "sampler"), default="rank",
         help="sampler replaces rank severity: learn at full severity only from filtered-out tokens; decay is unchanged",

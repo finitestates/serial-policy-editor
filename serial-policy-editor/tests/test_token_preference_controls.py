@@ -126,7 +126,7 @@ def test_disabled_neither_learns_nor_decays_and_fast_off_preserves_saved_fast():
 
 @pytest.mark.parametrize('kwargs', [
     {'decay': -0.01}, {'decay': 1.01}, {'decay': float('nan')},
-    {'severity_cap': 0}, {'severity_cap': 1.5}, {'dead_zone_rank': 0},
+    {'severity_cap': 0}, {'severity_cap': 1.5}, {'dead_zone_rank': -1},
     {'rejection_strength': -1}, {'rejection_strength': float('inf')},
     {'fast_decay': 1.01}, {'fast_learning_rate': -1}, {'fast_max_step': -1},
     {'fast_max_norm': float('nan')}, {'fast_strength': -1},
@@ -135,6 +135,12 @@ def test_disabled_neither_learns_nor_decays_and_fast_off_preserves_saved_fast():
 def test_invalid_learner_controls(kwargs):
     with pytest.raises(EditorError):
         TokenPreferenceConfig(**kwargs)
+
+
+def test_zero_dead_zone_rank_is_valid_for_legacy_attenuation():
+    config = TokenPreferenceConfig(dead_zone_rank=0, no_severity_attenuation=False)
+    assert config.dead_zone_rank == 0
+    assert TokenPreferenceLearner(FEATURES, config=config)._severity(1) > 0.0
 
 
 @pytest.mark.parametrize('kwargs', [

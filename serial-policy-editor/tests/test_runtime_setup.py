@@ -190,6 +190,8 @@ def test_sampler_without_arguments_describes_defaults_and_inheritance():
 def test_learning_and_preference_panels_show_and_update_all_controls():
     plan = _plan()
 
+    assert plan.learning_dead_zone_rank == 0
+    assert plan.token_preference_dead_zone_rank == 0
     assert apply_setup_command("learning", plan) == "show-learning"
     assert apply_setup_command("preference", plan) == "show-preference"
     assert "enabled                 off" in learning_summary(plan)
@@ -199,6 +201,11 @@ def test_learning_and_preference_panels_show_and_update_all_controls():
 
     apply_setup_command("preference from_write=off", plan)
     assert plan.learn_from_write is False
+
+    apply_setup_command("preference dead_zone_rank=0", plan)
+    apply_setup_command("learning dead_zone_rank=0", plan)
+    assert plan.token_preference_dead_zone_rank == 0
+    assert plan.learning_dead_zone_rank == 0
 
     apply_setup_command(
         "group on rate=.2 gate=sampler groups=concrete,abstract from_write=on",

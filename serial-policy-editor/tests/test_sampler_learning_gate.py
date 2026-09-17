@@ -168,8 +168,16 @@ def test_cli_flags_validate_and_reach_both_learners(tmp_path):
     parser = build_parser()
     defaults = parser.parse_args([])
     assert defaults.learning_gate == defaults.token_preference_learning_gate == 'rank'
+    assert defaults.learning_dead_zone_rank == 0
+    assert defaults.token_preference_dead_zone_rank == 0
     args = parser.parse_args(['--learning-gate', 'sampler', '--token-preference-learning-gate', 'sampler'])
     assert _token_preference_config_from_args(args).learning_gate == 'sampler'
+    zero_rank = parser.parse_args([
+        '--learning-dead-zone-rank', '0',
+        '--token-preference-dead-zone-rank', '0',
+    ])
+    assert zero_rank.learning_dead_zone_rank == 0
+    assert zero_rank.token_preference_dead_zone_rank == 0
     for factory in (OnlineLearningConfig, TokenPreferenceConfig):
         with pytest.raises(EditorError, match='gate'):
             factory(learning_gate='unknown')

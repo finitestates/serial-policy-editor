@@ -75,6 +75,20 @@ def test_profile_yaml_round_trip_and_canonical_identity(tmp_path):
     assert controller_profile_json(restored) == controller_profile_json(plan)
 
 
+def test_profile_round_trip_accepts_zero_dead_zone_ranks(tmp_path):
+    plan = RuntimePlan(
+        learning_dead_zone_rank=0,
+        token_preference_dead_zone_rank=0,
+    )
+    path = tmp_path / "zero-dead-zone.yaml"
+    save_controller_profile(plan, path)
+    payload, _ = load_controller_profile(path)
+    restored = RuntimePlan()
+    apply_controller_profile(restored, payload)
+    assert restored.learning_dead_zone_rank == 0
+    assert restored.token_preference_dead_zone_rank == 0
+
+
 def test_profile_commands_print_save_and_load_without_episode_context_mutation(tmp_path):
     source = _profile_plan(tmp_path)
     path = tmp_path / "profile.yaml"

@@ -1047,7 +1047,7 @@ Additional experimental token preference controls are optional:
 | `--token-preference-decay` | `0` | Fraction of old memory forgotten per committed learning intervention, from 0 to 1. |
 | `--token-preference-severity-cap` | `1000` | Positive rank distance above the dead zone where severity reaches 1. |
 | `--token-preference-no-severity-attenuation` | on | Give every selection full severity, including rank-one and sampler-eligible choices. |
-| `--token-preference-dead-zone-rank` | `1` | Legacy attenuation mode's rank threshold; ignored by the normal full-severity mode. |
+| `--token-preference-dead-zone-rank` | `0` | Legacy attenuation mode's rank threshold; zero leaves no rank in the dead zone, and the setting is ignored by the normal full-severity mode. |
 | `--token-preference-rejection-strength` | `0` | Nonnegative rejection pressure when the proposal differs from the chosen token; the negative target defaults to that proposal. |
 | `--token-preference-fast-slow` | off | Also learn an independent fast vector in the same feature space. |
 | `--token-preference-projection-seed` | `9137` for new episodes | Signed 64-bit projection seed; restored episodes keep their saved seed. |

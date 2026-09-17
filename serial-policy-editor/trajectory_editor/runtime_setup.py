@@ -206,7 +206,7 @@ class RuntimePlan:
     learning_min_bias: float = -4.0
     learning_max_bias: float = 4.0
     learning_severity_cap: int = 1000
-    learning_dead_zone_rank: int = 1
+    learning_dead_zone_rank: int = 0
     learning_no_severity_attenuation: bool = True
     learning_rejection_strength: float = 0.0
     learning_decay: float = 0.0
@@ -235,7 +235,7 @@ class RuntimePlan:
     token_preference_rejection_target: str = "proposal"
     token_preference_severity_cap: int = 1000
     token_preference_no_severity_attenuation: bool = True
-    token_preference_dead_zone_rank: int = 1
+    token_preference_dead_zone_rank: int = 0
     token_preference_learning_gate: str = "rank"
     token_preference_rejection_strength: float = 0.0
     token_preference_fast_slow: bool = False
@@ -669,10 +669,12 @@ def _validate_profile_values(values: dict[str, Any]) -> None:
 
     for name, value in values.items():
         if name in {"top_k", "token_preference_dimension", "learning_severity_cap",
-                    "token_preference_severity_cap", "token_preference_projection_chunk_size",
-                    "learning_dead_zone_rank", "token_preference_dead_zone_rank"}:
+                    "token_preference_severity_cap", "token_preference_projection_chunk_size"}:
             if value is not None and value < 1:
                 raise EditorError(f"controller profile {name} must be positive")
+        if name in {"learning_dead_zone_rank", "token_preference_dead_zone_rank"}:
+            if value is not None and value < 0:
+                raise EditorError(f"controller profile {name} must be nonnegative")
         if name == "repeat_last_n" and value is not None and value < -1:
             raise EditorError("controller profile repeat_last_n must be -1 or nonnegative")
         if name == "top_p" and value is not None and not 0.0 < value <= 1.0:
@@ -913,6 +915,10 @@ def _parse_control_value(destination: str, raw_value: str) -> Any:
             value = int(raw_value)
         except ValueError as exc:
             raise EditorError(f"{destination} must be an integer") from exc
+        if destination in {"learning_dead_zone_rank", "token_preference_dead_zone_rank"}:
+            if value < 0:
+                raise EditorError(f"{destination} must be nonnegative")
+            return value
         if value < 1:
             raise EditorError(f"{destination} must be positive")
         return value

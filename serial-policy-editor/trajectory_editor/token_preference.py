@@ -207,7 +207,7 @@ class TokenPreferenceConfig:
     # teaching event.  ``False`` remains available to callers that need the
     # historical rank/dead-zone behavior.
     no_severity_attenuation: bool = True
-    dead_zone_rank: int = 1
+    dead_zone_rank: int = 0
     rejection_strength: float = 0.0
     fast_slow: bool = False
     fast_learning_rate: float | None = None
@@ -258,9 +258,10 @@ class TokenPreferenceConfig:
             raise EditorError("preference no_severity_attenuation must be a boolean")
         if type(self.fast_slow) is not bool:
             raise EditorError("preference fast_slow must be a boolean")
-        for name in ("severity_cap", "dead_zone_rank"):
-            if type(getattr(self, name)) is not int or getattr(self, name) < 1:
-                raise EditorError(f"preference {name} must be a positive integer")
+        if type(self.severity_cap) is not int or self.severity_cap < 1:
+            raise EditorError("preference severity_cap must be a positive integer")
+        if type(self.dead_zone_rank) is not int or self.dead_zone_rank < 0:
+            raise EditorError("preference dead_zone_rank must be a nonnegative integer")
         for name in ("decay", "fast_decay"):
             value = _finite_number(getattr(self, name), f"preference {name}")
             if not 0.0 <= value <= 1.0:
@@ -306,7 +307,7 @@ class TokenPreferenceResult:
     enabled: bool
     severity_cap: int = 1000
     no_severity_attenuation: bool = False
-    dead_zone_rank: int = 1
+    dead_zone_rank: int = 0
     proposal_token_id: int | None = None
     proposal_rejected: bool = False
     rejection_strength: float = 0.0

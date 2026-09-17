@@ -19,7 +19,7 @@ from trajectory_editor.episode_store import EpisodeStore
 from trajectory_editor.episode_ui import InteractivePolicy
 from trajectory_editor.group_control import GroupControl, appearances, control_adjustments
 from trajectory_editor.lexical_reference import compile_reference, load_reference
-from trajectory_editor.online_learning import OnlineLearner
+from trajectory_editor.online_learning import OnlineLearningConfig, OnlineLearner
 from trajectory_editor.sampling import ObservationStatistics
 from trajectory_editor.tui import parse_bias_command
 
@@ -300,6 +300,12 @@ def test_group_feature_gradient_matches_counterfactual_and_controls():
     assert OnlineLearner(
         enabled=True, dead_zone_rank=3, no_severity_attenuation=False
     ).update(o, 3, s).update_norm == 0
+
+
+def test_zero_dead_zone_rank_is_valid_for_learnable_groups():
+    config = OnlineLearningConfig(dead_zone_rank=0, no_severity_attenuation=False)
+    assert config.dead_zone_rank == 0
+    assert OnlineLearner(config=config)._severity(1) > 0.0
 
 
 def test_write_applies_group_updates_sequentially():
