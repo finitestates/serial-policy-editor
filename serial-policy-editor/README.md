@@ -945,6 +945,30 @@ correct. Evaluate derived vectors with `output-head validate`, `explain` (for
 output-head vectors), and the `impact`/`compare` workbench reports before
 using them on new episodes.
 
+Transformers can create hidden-state vectors directly at an arbitrary decoder
+block. The first supported site is the residual stream immediately after the
+selected block; one width-sized direction is stored for every text layer, with
+only the requested range active. Layer numbers are one-based in this command:
+
+```bash
+policy-editor-vector hidden-state create \
+  --model SmolLM-360M-Instruct --backend transformers \
+  --prompt-a "I am calm." \
+  --prompt-b "I am angry." \
+  --layer 12 --output calm-vs-angry.json
+policy-editor-vector hidden-state validate calm-vs-angry.json \
+  --model SmolLM-360M-Instruct --backend transformers
+policy-editor --model SmolLM-360M-Instruct --backend transformers \
+  --new-prompt "How are you?" --steering-vector calm-vs-angry.json
+```
+
+Use `--layer-range START END` to activate several layers. The backend records
+the native module path and per-layer type in its capabilities; this matters for
+hybrid models such as Qwen3.5, where some blocks use linear attention and others
+use full attention. The portable target remains the decoder block-output
+residual stream; lower-level attention or recurrent-state vectors require an
+explicit backend-specific coordinate.
+
 For llama.cpp's native layerwise hidden-state control vectors, import the GGUF
 emitted by `llama-cvector-generator`:
 

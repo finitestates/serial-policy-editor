@@ -1,4 +1,4 @@
-"""Offline workbench for portable token-preference vector artifacts."""
+"""Offline workbench for portable steering and token-preference vectors."""
 
 from __future__ import annotations
 
@@ -85,7 +85,7 @@ def _add_report_args(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="policy-editor-vector",
-        description="Inspect and manage offline token-preference vector artifacts.",
+        description="Inspect and manage offline steering and token-preference vector artifacts.",
     )
     commands = parser.add_subparsers(dest="kind", required=True)
     token_preference = commands.add_parser(
@@ -318,6 +318,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="import and manage layerwise hidden-state control vectors",
     )
     hidden_state_actions = hidden_state.add_subparsers(dest="action", required=True)
+
+    hidden_create = hidden_state_actions.add_parser(
+        "create",
+        help="create a hidden-state vector from two prompts at selected layers",
+    )
+    _add_backend_args(hidden_create, require_model=True)
+    hidden_prompt_a = hidden_create.add_mutually_exclusive_group(required=True)
+    hidden_prompt_a.add_argument("--prompt-a")
+    hidden_prompt_a.add_argument("--prompt-a-file", type=Path)
+    hidden_prompt_b = hidden_create.add_mutually_exclusive_group(required=True)
+    hidden_prompt_b.add_argument("--prompt-b")
+    hidden_prompt_b.add_argument("--prompt-b-file", type=Path)
+    hidden_layers = hidden_create.add_mutually_exclusive_group(required=True)
+    hidden_layers.add_argument("--layer", type=_positive_int)
+    hidden_layers.add_argument("--layer-range", nargs=2, type=_positive_int, metavar=("START", "END"))
+    hidden_create.add_argument(
+        "--capture-position",
+        choices=("first", "last"),
+        default="last",
+        help="token position captured from each prompt",
+    )
+    hidden_create.add_argument("--no-normalize", action="store_true")
+    hidden_create.add_argument("--strength", type=float, default=1.0)
+    hidden_create.add_argument("--output", type=Path)
 
     export_pairs = hidden_state_actions.add_parser(
         "export-pairs",
@@ -996,6 +1020,27 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if args.strength != artifact.strength:
                     artifact = replace(artifact, strength=args.strength)
+                _write_text(artifact.to_json(), args.output)
+                return 0
+            if args.kind == "hidden-state" and args.action == "create":
+                backend = _load_backend(args)
+                if args.layer is not None:
+                    layer_start = layer_end = args.layer
+                else:
+                    layer_start, layer_end = args.layer_range
+                if layer_end < layer_start:
+                    raise EditorError("hidden-state layer range end must be at least its start")
+                artifact = SteeringVectorArtifact.from_hidden_state_prompt_pair(
+                    backend,
+                    backend.provenance(include_model_sha256=False),
+                    _prompt_value(args, "prompt_a", "prompt_a_file", "prompt A"),
+                    _prompt_value(args, "prompt_b", "prompt_b_file", "prompt B"),
+                    layer_start=layer_start,
+                    layer_end=layer_end,
+                    capture_position=args.capture_position,
+                    normalize=not args.no_normalize,
+                    strength=args.strength,
+                )
                 _write_text(artifact.to_json(), args.output)
                 return 0
             if args.kind == "hidden-state" and args.action == "import-cvector":

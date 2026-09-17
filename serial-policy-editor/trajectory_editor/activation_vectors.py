@@ -30,6 +30,8 @@ FORMAT = "spe-steering-vector-v1"
 LEGACY_FORMAT = "spe-activation-vector-v1"
 OUTPUT_HEAD_KIND = "output-head-steering-vector"
 HIDDEN_STATE_KIND = "hidden-state-vector"
+HIDDEN_STATE_SITE = "decoder-block-output-residual"
+HIDDEN_STATE_LAYER_NUMBERING = "one-based"
 OUTPUT_LAYER = "output"
 RUNTIME_POSITION = "current"
 CONTROL_VECTOR_LAYER = "control-vector"
@@ -475,6 +477,18 @@ class SteeringVectorArtifact:
             position = RUNTIME_POSITION
             layer_start = layer_end = None
         else:
+            target = value.get("target")
+            if target is not None:
+                if not isinstance(target, Mapping):
+                    raise EditorError("hidden-state steering target must be an object")
+                if target.get("site") != HIDDEN_STATE_SITE:
+                    raise EditorError(
+                        f"hidden-state steering target site must be {HIDDEN_STATE_SITE!r}"
+                    )
+                if target.get("layer_numbering") != HIDDEN_STATE_LAYER_NUMBERING:
+                    raise EditorError(
+                        "hidden-state steering target must use one-based layer numbering"
+                    )
             layer = CONTROL_VECTOR_LAYER
             position = CONTROL_VECTOR_POSITION
             layer_start = value.get("layer_start")
@@ -678,6 +692,115 @@ class SteeringVectorArtifact:
             source=source_payload,
         )
 
+    @classmethod
+    def from_hidden_state_prompt_pair(
+        cls,
+        backend: Any,
+        provenance: Mapping[str, Any],
+        prompt_a: str,
+        prompt_b: str,
+        *,
+        layer_start: int,
+        layer_end: int,
+        capture_position: str = "last",
+        normalize: bool = True,
+        strength: float = 1.0,
+    ) -> "SteeringVectorArtifact":
+        """Create one residual-stream direction for each selected layer.
+
+        The serialized vector always contains one width-sized slot for every
+        layer in the loaded text decoder.  ``layer_start`` and ``layer_end``
+        select the slots that are active at runtime; inactive slots are zero.
+        This mirrors llama.cpp's layer-range control surface while keeping
+        the coordinate explicit for native Transformers backends.
+        """
+
+        if capture_position not in CAPTURE_POSITIONS:
+            raise EditorError("hidden-state capture position must be first or last")
+        if not isinstance(prompt_a, str) or not prompt_a:
+            raise EditorError("prompt A must be nonempty")
+        if not isinstance(prompt_b, str) or not prompt_b:
+            raise EditorError("prompt B must be nonempty")
+        capture = getattr(backend, "hidden_state_snapshot", None)
+        width_method = getattr(backend, "hidden_state_width", None)
+        layer_count_method = getattr(backend, "hidden_state_layer_count", None)
+        if not callable(capture) or not callable(width_method) or not callable(layer_count_method):
+            raise EditorError(
+                "the loaded backend does not expose arbitrary hidden-state snapshots"
+            )
+        try:
+            width = int(width_method())
+            layer_count = int(layer_count_method())
+        except (RuntimeError, TypeError, ValueError) as exc:
+            raise EditorError(f"could not read hidden-state coordinates: {exc}") from exc
+        if width < 1 or layer_count < 1:
+            raise EditorError("backend reported invalid hidden-state coordinates")
+        if (
+            type(layer_start) is not int
+            or type(layer_end) is not int
+            or layer_start < 1
+            or layer_end < layer_start
+            or layer_end > layer_count
+        ):
+            raise EditorError(
+                f"hidden-state layer range must be between 1 and {layer_count}"
+            )
+
+        directions = np.zeros((layer_count, width), dtype=np.float64)
+        raw_norms: list[float] = []
+        try:
+            for layer in range(layer_start, layer_end + 1):
+                kwargs = {"layer": layer, "position": capture_position}
+                first = np.asarray(
+                    capture(prompt_a, **_supported_kwargs(capture, kwargs)),
+                    dtype=np.float64,
+                )
+                second = np.asarray(
+                    capture(prompt_b, **_supported_kwargs(capture, kwargs)),
+                    dtype=np.float64,
+                )
+                if first.ndim != 1 or second.ndim != 1 or first.shape != second.shape:
+                    raise ValueError(
+                        f"hidden-state layer {layer} snapshots must be equal one-dimensional vectors"
+                    )
+                if first.shape[0] != width:
+                    raise ValueError(
+                        f"hidden-state layer {layer} width {first.shape[0]} does not match backend width {width}"
+                    )
+                if not np.all(np.isfinite(first)) or not np.all(np.isfinite(second)):
+                    raise ValueError("hidden-state snapshots must be finite")
+                delta = first - second
+                raw_norm = float(np.linalg.norm(delta))
+                raw_norms.append(raw_norm)
+                if normalize and raw_norm > 0.0:
+                    delta = delta / raw_norm
+                directions[layer - 1] = delta
+        except (RuntimeError, TypeError, ValueError) as exc:
+            raise EditorError(f"could not capture hidden-state pair: {exc}") from exc
+
+        model = model_identity(provenance, hidden_state_width=width)
+        model.setdefault("hidden_state_layer_count", layer_count)
+        return cls(
+            model=model,
+            vector=tuple(float(value) for value in directions.reshape(-1)),
+            layer=CONTROL_VECTOR_LAYER,
+            position=CONTROL_VECTOR_POSITION,
+            strength=strength,
+            method="hidden-state-prompt-pair-v1",
+            source={
+                "type": "hidden-state-prompt-pair",
+                "prompt_a": prompt_a,
+                "prompt_b": prompt_b,
+                "capture_position": capture_position,
+                "normalized_per_layer": bool(normalize),
+                "layer_start": layer_start,
+                "layer_end": layer_end,
+                "layer_delta_norms": raw_norms,
+            },
+            layer_start=layer_start,
+            layer_end=layer_end,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         result = {
             "format": FORMAT,
@@ -691,6 +814,10 @@ class SteeringVectorArtifact:
         if self.kind == HIDDEN_STATE_KIND:
             result.update(
                 {
+                    "target": {
+                        "site": HIDDEN_STATE_SITE,
+                        "layer_numbering": HIDDEN_STATE_LAYER_NUMBERING,
+                    },
                     "layer_start": self.layer_start,
                     "layer_end": self.layer_end,
                 }

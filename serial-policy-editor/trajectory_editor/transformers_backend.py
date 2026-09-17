@@ -126,6 +126,41 @@ def _infer_context_limit(model_config: Any, tokenizer: Any) -> int | None:
     return None
 
 
+def _text_config(model_config: Any) -> Any:
+    """Return the configuration that describes the text decoder.
+
+    Multimodal Transformers models commonly wrap their language-model
+    configuration in ``text_config``.  Treating that wrapper as the model's
+    decoder config would hide the vocabulary, width, and layer metadata that
+    the episode runtime needs.
+    """
+
+    nested = getattr(model_config, "text_config", None)
+    if nested is not None and any(
+        getattr(nested, name, None) is not None
+        for name in ("vocab_size", "hidden_size", "num_hidden_layers")
+    ):
+        return nested
+    return model_config
+
+
+def _config_value(model_config: Any, name: str, default: Any = None) -> Any:
+    value = getattr(model_config, name, None)
+    if value is not None:
+        return value
+    nested = getattr(model_config, "text_config", None)
+    return getattr(nested, name, default) if nested is not None else default
+
+
+def _is_multimodal_config(model_config: Any) -> bool:
+    """Whether a local checkpoint has a vision/audio wrapper around its LM."""
+
+    return getattr(model_config, "text_config", None) is not None and any(
+        getattr(model_config, name, None) is not None
+        for name in ("vision_config", "audio_config", "video_config")
+    )
+
+
 def _addressable_token_ids(tokenizer: Any) -> tuple[int, ...]:
     ids: set[int] = set()
     get_vocab = getattr(tokenizer, "get_vocab", None)
@@ -227,7 +262,7 @@ class TransformersBackend:
         try:
             import torch
             import transformers
-            from transformers import AutoModelForCausalLM, AutoTokenizer
+            from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
         except ImportError as exc:
             raise RuntimeError(
                 "PyTorch and Transformers are required; install this package with [transformers]"
@@ -252,6 +287,7 @@ class TransformersBackend:
             "local_files_only": True,
             "trust_remote_code": settings.trust_remote_code,
         }
+        model_config = AutoConfig.from_pretrained(str(self.model_path), **common)
         self._tokenizer = AutoTokenizer.from_pretrained(
             str(self.model_path), use_fast=settings.use_fast_tokenizer, **common
         )
@@ -274,9 +310,17 @@ class TransformersBackend:
         quantization_config = self._build_quantization_config()
         if quantization_config is not None:
             model_kwargs["quantization_config"] = quantization_config
-        self._model = AutoModelForCausalLM.from_pretrained(
-            str(self.model_path), **model_kwargs
-        )
+        model_class = AutoModelForCausalLM
+        if _is_multimodal_config(model_config):
+            # A multimodal checkpoint may store its text weights below
+            # model.language_model rather than model.layers. Prefer the
+            # conditional-generation auto class when the installed
+            # Transformers version exposes it, while retaining a causal-LM
+            # fallback for older versions.
+            model_class = getattr(
+                transformers, "AutoModelForImageTextToText", None
+            ) or model_class
+        self._model = model_class.from_pretrained(str(self.model_path), **model_kwargs)
         self._model.eval()
         # Some Transformers model families can apply the output head only to
         # the final position.  Detect the capability once and retain the
@@ -293,8 +337,9 @@ class TransformersBackend:
                 ) from exc
         self._input_device = self._infer_input_device()
 
-        self._context_limit = _infer_context_limit(self._model.config, self._tokenizer)
-        self._model_output_size = int(getattr(self._model.config, "vocab_size", 0))
+        self._text_config = _text_config(self._model.config)
+        self._context_limit = _infer_context_limit(self._text_config, self._tokenizer)
+        self._model_output_size = int(_config_value(self._model.config, "vocab_size", 0))
         if self._model_output_size <= 0:
             raise RuntimeError("Transformers model has no positive config.vocab_size")
         self._addressable_token_ids = _addressable_token_ids(self._tokenizer)
@@ -310,6 +355,8 @@ class TransformersBackend:
         self._token_preference_embedding_fingerprint: str | None = None
         self._token_preference_embedding_width: int | None = None
         self._activation_logit_cache: dict[tuple[str, str, str], np.ndarray] = {}
+        self._hidden_state_control_handles: list[Any] = []
+        self._hidden_state_control_key: tuple[Any, ...] | None = None
 
     def _apply_execution_controls(self) -> None:
         if self.settings.torch_num_threads is not None:
@@ -532,6 +579,285 @@ class TransformersBackend:
         if not np.all(np.isfinite(result)):
             raise RuntimeError("Transformers returned non-finite logits")
         self._last_logits = result
+
+    def _decoder_layer_path(self) -> tuple[str, ...]:
+        """Find the text decoder block list for common HF model layouts."""
+
+        candidates = (
+            ("model", "layers"),
+            ("model", "language_model", "layers"),
+            ("language_model", "layers"),
+            ("transformer", "h"),
+            ("model", "transformer", "h"),
+        )
+        expected = _config_value(self._model.config, "num_hidden_layers")
+        for path in candidates:
+            value: Any = self._model
+            for name in path:
+                value = getattr(value, name, None)
+                if value is None:
+                    break
+            if value is None or not hasattr(value, "__len__"):
+                continue
+            if expected is None or len(value) == int(expected):
+                return path
+        raise RuntimeError(
+            "Transformers model does not expose a recognizable text decoder layer list"
+        )
+
+    def _decoder_layers(self) -> Any:
+        value: Any = self._model
+        for name in self._decoder_layer_path():
+            value = getattr(value, name)
+        return value
+
+    @staticmethod
+    def _hidden_tensor(output: Any) -> Any:
+        """Extract a decoder block's hidden-state tensor from its output."""
+
+        if hasattr(output, "shape") and hasattr(output, "detach"):
+            return output
+        if isinstance(output, (tuple, list)) and output:
+            first = output[0]
+            if hasattr(first, "shape") and hasattr(first, "detach"):
+                return first
+        hidden = getattr(output, "last_hidden_state", None)
+        if hidden is not None and hasattr(hidden, "detach"):
+            return hidden
+        raise RuntimeError("Transformers decoder block returned no hidden-state tensor")
+
+    @staticmethod
+    def _replace_hidden_tensor(output: Any, hidden: Any) -> Any:
+        if hasattr(output, "shape") and hasattr(output, "detach"):
+            return hidden
+        if isinstance(output, tuple):
+            return (hidden, *output[1:])
+        if isinstance(output, list):
+            return [hidden, *output[1:]]
+        if hasattr(output, "last_hidden_state"):
+            try:
+                output.last_hidden_state = hidden
+                return output
+            except (AttributeError, TypeError):
+                pass
+        raise RuntimeError("Transformers decoder block output cannot be updated")
+
+    def hidden_state_width(self) -> int:
+        """Return the width of the decoder residual stream."""
+
+        return self.activation_width()
+
+    def hidden_state_layer_count(self) -> int:
+        """Return the number of addressable text decoder blocks."""
+
+        return int(len(self._decoder_layers()))
+
+    def hidden_state_layer_types(self) -> tuple[str, ...]:
+        """Describe each decoder block without assuming attention is uniform."""
+
+        raw = getattr(self._text_config, "layer_types", None)
+        count = self.hidden_state_layer_count()
+        if isinstance(raw, (list, tuple)) and len(raw) == count:
+            return tuple(str(value) for value in raw)
+        return tuple("decoder" for _ in range(count))
+
+    def hidden_state_capabilities(self) -> dict[str, Any]:
+        """Return the portable residual-stream coordinate contract."""
+
+        count = self.hidden_state_layer_count()
+        path = ".".join(self._decoder_layer_path())
+        return {
+            "site": "decoder-block-output-residual",
+            "layer_numbering": "one-based",
+            "layer_count": count,
+            "width": self.hidden_state_width(),
+            "position_policies": ["first", "last", "current", "all"],
+            "layer_types": list(self.hidden_state_layer_types()),
+            "native_module_path": f"{path}[N-1]",
+            "modality": "text",
+        }
+
+    def _run_hidden_state_capture(
+        self, token_ids: list[int], layer: int
+    ) -> Any:
+        if type(layer) is not int or not 1 <= layer <= self.hidden_state_layer_count():
+            raise RuntimeError(
+                f"hidden-state layer must be between 1 and {self.hidden_state_layer_count()}"
+            )
+        torch = self._torch
+        input_ids = torch.tensor(
+            [token_ids], dtype=torch.long, device=self._input_device
+        )
+        attention_mask = torch.ones_like(input_ids)
+        captured: list[Any] = []
+
+        def capture_hook(_module: Any, _inputs: Any, output: Any) -> Any:
+            hidden = self._hidden_tensor(output)
+            captured.append(hidden.detach().to(dtype=torch.float32, device="cpu"))
+            return output
+
+        handle = self._decoder_layers()[layer - 1].register_forward_hook(capture_hook)
+        try:
+            with torch.inference_mode():
+                self._model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    use_cache=False,
+                    return_dict=True,
+                )
+        finally:
+            handle.remove()
+        if len(captured) != 1:
+            raise RuntimeError("Transformers hidden-state capture did not run exactly once")
+        hidden = captured[0].numpy()
+        if hidden.ndim != 3 or hidden.shape[0] != 1:
+            raise RuntimeError("Transformers hidden-state capture returned an invalid shape")
+        result = np.asarray(hidden[0], dtype=np.float32).copy()
+        if result.shape[1] != self.hidden_state_width():
+            raise RuntimeError("Transformers hidden-state capture has the wrong width")
+        if not np.all(np.isfinite(result)):
+            raise RuntimeError("Transformers hidden-state capture is not finite")
+        return result
+
+    def hidden_state_snapshot(
+        self,
+        text: str,
+        *,
+        layer: int,
+        position: str = "last",
+    ) -> np.ndarray:
+        """Capture a residual-stream state at an arbitrary decoder block."""
+
+        if position not in {"first", "last", "current", "all"}:
+            raise RuntimeError(
+                "hidden-state snapshot position must be first, last, current, or all"
+            )
+        if not isinstance(text, str) or not text:
+            raise RuntimeError("hidden-state snapshot prompt must be nonempty")
+        token_ids = self.tokenize(text, add_bos=True, special=True)
+        if not token_ids:
+            raise RuntimeError("hidden-state snapshot prompt produced no tokens")
+        self._validate_tokens(token_ids)
+        states = self._run_hidden_state_capture(token_ids, layer)
+        if position == "all":
+            return states
+        index = 0 if position == "first" else -1
+        return np.asarray(states[index], dtype=np.float32).copy()
+
+    def _hidden_state_hook(
+        self, vector: np.ndarray, *, layer: int, strength: float
+    ) -> Any:
+        torch = self._torch
+        direction = np.asarray(vector, dtype=np.float32).copy()
+
+        def apply(_module: Any, _inputs: Any, output: Any) -> Any:
+            hidden = self._hidden_tensor(output)
+            if getattr(hidden, "shape", None) is None or int(hidden.shape[-1]) != direction.size:
+                raise RuntimeError(
+                    f"hidden-state layer {layer} returned width {getattr(hidden, 'shape', ())[-1]} "
+                    f"but the vector has width {direction.size}"
+                )
+            delta = torch.as_tensor(
+                direction * float(strength), dtype=hidden.dtype, device=hidden.device
+            )
+            while delta.ndim < hidden.ndim:
+                delta = delta.unsqueeze(0)
+            return self._replace_hidden_tensor(output, hidden + delta)
+
+        return apply
+
+    def set_hidden_state_vector(
+        self,
+        vector,
+        *,
+        layer_start: int,
+        layer_end: int,
+        strength: float,
+    ) -> None:
+        """Install one residual-stream direction for each selected layer."""
+
+        width = self.hidden_state_width()
+        layer_count = self.hidden_state_layer_count()
+        if (
+            type(layer_start) is not int
+            or type(layer_end) is not int
+            or layer_start < 1
+            or layer_end < layer_start
+            or layer_end > layer_count
+        ):
+            raise RuntimeError("hidden-state layer range is outside the loaded model")
+        if type(strength) not in (int, float) or not np.isfinite(float(strength)):
+            raise RuntimeError("hidden-state vector strength must be finite")
+        values = np.asarray(vector, dtype=np.float32)
+        if values.ndim != 1 or values.size != width * layer_count:
+            raise RuntimeError(
+                "hidden-state vector data must contain one direction for every model layer"
+            )
+        if not np.all(np.isfinite(values)):
+            raise RuntimeError("hidden-state vector data is not finite")
+
+        handles: list[Any] = []
+        try:
+            self.clear_hidden_state_vector()
+            layers = self._decoder_layers()
+            for layer in range(layer_start, layer_end + 1):
+                start = (layer - 1) * width
+                handle = layers[layer - 1].register_forward_hook(
+                    self._hidden_state_hook(
+                        values[start : start + width],
+                        layer=layer,
+                        strength=float(strength),
+                    )
+                )
+                handles.append(handle)
+        except (RuntimeError, TypeError, ValueError):
+            for handle in handles:
+                handle.remove()
+            raise
+        self._hidden_state_control_handles = handles
+        self._hidden_state_control_key = (
+            layer_start,
+            layer_end,
+            float(strength),
+            hashlib.sha256(np.ascontiguousarray(values).tobytes()).hexdigest(),
+        )
+
+    def clear_hidden_state_vector(self) -> None:
+        """Remove all residual-stream hooks from the live model."""
+
+        for handle in getattr(self, "_hidden_state_control_handles", []):
+            try:
+                handle.remove()
+            except (AttributeError, RuntimeError):
+                pass
+        self._hidden_state_control_handles = []
+        self._hidden_state_control_key = None
+
+    # Compatibility aliases keep the existing EpisodeEngine lifecycle in one
+    # place while exposing semantic names to future controller code.
+    def activation_control_vector_width(self) -> int:
+        return self.hidden_state_width()
+
+    def activation_control_vector_layer_count(self) -> int:
+        return self.hidden_state_layer_count()
+
+    def set_activation_control_vector(
+        self,
+        vector,
+        *,
+        layer_start: int,
+        layer_end: int,
+        strength: float,
+    ) -> None:
+        self.set_hidden_state_vector(
+            vector,
+            layer_start=layer_start,
+            layer_end=layer_end,
+            strength=strength,
+        )
+
+    def clear_activation_control_vector(self) -> None:
+        self.clear_hidden_state_vector()
 
     def last_logits(self) -> np.ndarray:
         if self._last_logits is None:
@@ -770,11 +1096,12 @@ class TransformersBackend:
 
     def provenance(self, *, include_model_sha256: bool = True) -> dict[str, Any]:
         config = self._model.config
+        text_config = _text_config(config)
         try:
             loaded_dtype = str(next(self._model.parameters()).dtype)
         except (StopIteration, AttributeError):
             loaded_dtype = None
-        return {
+        result = {
             "backend": "transformers",
             "adapter": "huggingface-transformers-causal-lm",
             "model_path": str(self.model_path.resolve()),
@@ -782,7 +1109,11 @@ class TransformersBackend:
             "context_limit": self._context_limit,
             "eog_token_ids": list(self.eog_token_ids()),
             "eog_source": self._eog_source,
-            "model_type": getattr(config, "model_type", None),
+            "model_type": getattr(text_config, "model_type", None),
+            "wrapper_model_type": getattr(config, "model_type", None),
+            "hidden_state_width": self.hidden_state_width(),
+            "hidden_state_layer_count": self.hidden_state_layer_count(),
+            "hidden_state_layer_types": list(self.hidden_state_layer_types()),
             "transformers_version": getattr(self._transformers, "__version__", None),
             "torch_version": getattr(self._torch, "__version__", None),
             "numpy_version": np.__version__,
@@ -794,3 +1125,9 @@ class TransformersBackend:
                 "loaded_dtype": loaded_dtype,
             },
         }
+        if _is_multimodal_config(config):
+            result["modalities"] = ["text", "vision"]
+            result["text_model_type"] = getattr(text_config, "model_type", None)
+        else:
+            result["modalities"] = ["text"]
+        return result
