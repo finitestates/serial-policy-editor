@@ -69,33 +69,6 @@ policy-editor \
   --cache auto
 ```
 
-For an interactive launch, omit the episode source to open the pre-runtime
-setup menu:
-
-```bash
-policy-editor
-```
-
-Choose a prompt or replay source, model/backend, vector or bias artifacts,
-common sampler settings, budget, seed, and learner toggles there. Type `show`
-to review the selection and `go` to start. The same menu can be opened for an
-otherwise flag-configured interactive launch with `--setup-menu`; scripted and
-non-interactive launches continue to use the command-line interface directly.
-The `workspace` command shows or switches the SQLite workspace, `ls` lists its
-episodes, a bare `#N` (or `N`) prints episode information, and `fm [#N]` opens a
-read-only fork map to help construct a later `source fork ... at N` command.
-Typing `sampler` without arguments prints all sampler settings and their
-planned values. The same pattern applies to the option-heavy learners:
-`learning` (or `group`) without arguments prints the manual-group learning
-settings, and `preference` prints the token-preference settings. Their
-`key=value` forms update those controls in the setup plan, for example
-`group on rate=.2 gate=sampler` or `preference on dimension=32 fast_slow=on`.
-The main summary redraws after each change, so the enabled state is visible.
-Use `controllers` (or `stack`) to inspect the ordered influence surfaces:
-model logits, history penalties, layerwise/output activation, biases/groups,
-reference prior, token-preference actuation, and final sampling, followed by
-the feedback learners.
-
 Use `--seed N` for a reproducible sampler seed, or `--random-seed` to choose
 and print a new seed from the supported signed 64-bit range.  The two options
 are mutually exclusive.  The selected value is stored in the episode's
@@ -894,40 +867,6 @@ hidden-state direction is projected through the model output head at each
 decision. The loaded vector, layer, strength, and model identity are persisted
 in sampler segments and included in replay state. `inspect`, `validate`, and
 `blend` are available for activation artifacts as well.
-
-Paired episodes can now seed new vectors. Put desired or teacher-intervened
-episodes on the positive side and baseline or contrasting episodes on the
-negative side; entries are paired by list position. `derive` averages their
-positive-minus-negative output activations, while `export-pairs` writes the
-same episode texts as escaped prompt files for llama.cpp's
-`llama-cvector-generator`:
-
-```bash
-policy-editor-vector activation derive \
-  --workspace episodes.sqlite3 \
-  --positive desired-1 desired-2 \
-  --negative baseline-1 baseline-2 \
-  --model model.gguf --output desired-behavior.json
-
-policy-editor-vector activation export-pairs \
-  --workspace episodes.sqlite3 \
-  --positive desired-1 desired-2 \
-  --negative baseline-1 baseline-2 \
-  --output-dir cvector-input
-llama-cvector-generator -m model.gguf \
-  --positive-file cvector-input/positive.txt \
-  --negative-file cvector-input/negative.txt \
-  --method mean --output control_vector.gguf
-policy-editor-vector activation import-cvector control_vector.gguf \
-  --model model.gguf --output desired-cvector.json
-```
-
-The pair exporter records a manifest with episode IDs, fork ancestry,
-boundaries, text hashes, and token counts. Pairing is analysis-only: it does
-not modify the workspace or infer that a teacher intervention is universally
-correct. Evaluate derived vectors with `activation validate`, `explain` (for
-output-layer vectors), and the `impact`/`compare` workbench reports before
-using them on new episodes.
 
 For llama.cpp's native layerwise control vectors, import the GGUF emitted by
 `llama-cvector-generator`:
