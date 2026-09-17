@@ -34,6 +34,11 @@ def memory_learners(mode, **kwargs):
 
 
 def assert_memory(result, applied):
+    if not hasattr(result, 'new_z') and not result.evidence:
+        # Selection-gated group learning has no event-level decay or movement
+        # when the teacher selected a token outside the group's active routes.
+        assert result.new_group_weights == result.old_group_weights
+        return
     assert result.effective_decay == (.2 if applied else 0)
     if hasattr(result, 'new_z'):
         assert result.effective_fast_decay == (.5 if applied else 0)
@@ -59,7 +64,7 @@ def test_conditional_decay_distinguishes_accept_rejection_and_admitted_evidence(
 
 @pytest.mark.parametrize('mode', ['update', 'rejection', 'evidence'])
 @pytest.mark.parametrize('tokens', [[1, 1], [1, 2], [1, 3], [3, 1]])
-def test_write_decay_triggers_on_any_token_but_only_once(mode, tokens):
+def test_write_decay_is_evaluated_for_each_sequential_token(mode, tokens):
     runtime = memory_engine()
     group, preference = memory_learners(mode)
     acc = _WriteLearningAccumulator(runtime.backend, runtime.sampling, group, preference)
@@ -67,39 +72,47 @@ def test_write_decay_triggers_on_any_token_but_only_once(mode, tokens):
     for token in tokens:
         acc.add(observation, token)
     result = acc.finish(len(tokens))
-    applies = mode == 'update' or 3 in tokens or (mode == 'rejection' and 2 in tokens)
-    for r in (result.group_result, result.token_preference_result):
-        assert_memory(r, applies)
-        assert r.proposal_rejected == any(t != 1 for t in tokens)
+    for r in acc.token_preference_results:
+        applies = (
+            mode == 'update'
+            or (mode == 'rejection' and r.proposal_rejected)
+            or (mode == 'evidence' and r.severity > 0)
+        )
+        assert r.effective_decay == (.2 if applies else 0)
         assert r.to_dict()['decay_on'] == mode
         assert r.to_dict()['effective_decay'] == (.2 if applies else 0)
+    for r in acc.group_results:
+        if r.evidence:
+            applies = (
+                mode == 'update'
+                or (mode == 'rejection' and r.proposal_rejected)
+                or (mode == 'evidence' and r.severity > 0)
+            )
+            assert r.effective_decay == (.2 if applies else 0)
+        else:
+            assert r.new_group_weights == r.old_group_weights
     payload = result.to_dict()
     assert all(t['decay_on'] == mode for t in payload['token_preference_token_observations'])
 
 
 @pytest.mark.parametrize('reduction,factor', [('sum', 2), ('mean', 1), ('sqrt', np.sqrt(2))])
-def test_write_reduction_counts_only_admitted_evidence_and_scales_both_channels(reduction, factor):
+def test_legacy_write_reduction_helpers_scale_admitted_evidence(reduction, factor):
     runtime = memory_engine()
     group, preference = memory_learners('evidence', write_reduction=reduction)
     observation = replace(runtime.observe(), proposal_token_id=1)
-    acc = _WriteLearningAccumulator(runtime.backend, runtime.sampling, group, preference)
-    for token in [3, 1, 3, 2]:
-        acc.add(observation, token)
-    result = acc.finish(4)
-    single_group = group.update(observation, 3, runtime.sampling)
-    single_preference = preference.update(observation, 3, runtime.sampling)
-    assert result.group_result.evidence['target'] == pytest.approx(factor * single_group.evidence['target'])
-    assert result.token_preference_result.learning_evidence == pytest.approx(factor * np.array(single_preference.learning_evidence))
-    assert result.token_preference_result.fast_learning_evidence == pytest.approx(factor * np.array(single_preference.fast_learning_evidence))
-    for r in (result.group_result, result.token_preference_result):
+    group_results = [group.update(observation, token, runtime.sampling) for token in [3, 1, 3, 2]]
+    preference_results = [preference.update(observation, token, runtime.sampling) for token in [3, 1, 3, 2]]
+    group_result = group.aggregate(group_results, runtime.sampling)
+    preference_result = preference.aggregate(preference_results, runtime.sampling)
+    single_group = group_results[0]
+    single_preference = preference_results[0]
+    assert group_result.evidence['target'] == pytest.approx(factor * single_group.evidence['target'])
+    assert preference_result.learning_evidence == pytest.approx(factor * np.array(single_preference.learning_evidence))
+    assert preference_result.fast_learning_evidence == pytest.approx(factor * np.array(single_preference.fast_learning_evidence))
+    for r in (group_result, preference_result):
         assert r.write_evidence_tokens == 2
         assert r.write_evidence_scale == pytest.approx(factor / 2)
         assert_memory(r, True)
-    io = ScriptedIO([])
-    _write_learning_notice(io, result)
-    if reduction != 'sum':
-        show_learning_details(io)
-        assert reduction in io.output[-1] and '2 evidence tokens' in io.output[-1]
 
 
 @pytest.mark.parametrize('reduction', ['mean', 'sqrt'])

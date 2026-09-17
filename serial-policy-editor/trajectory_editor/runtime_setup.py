@@ -207,7 +207,7 @@ class RuntimePlan:
     learning_max_bias: float = 4.0
     learning_severity_cap: int = 1000
     learning_dead_zone_rank: int = 1
-    learning_no_severity_attenuation: bool = False
+    learning_no_severity_attenuation: bool = True
     learning_rejection_strength: float = 0.0
     learning_decay: float = 0.0
     learning_decay_on: str = "update"
@@ -215,7 +215,7 @@ class RuntimePlan:
     learning_rejection_target: str = "proposal"
     learning_gate: str = "rank"
     learnable_groups: list[str] | tuple[str, ...] | None = None
-    learn_from_write: bool = False
+    learn_from_write: bool = True
     token_preference: bool = False
     token_preference_dimension: int = 64
     token_preference_learning_rate: float = 0.05
@@ -234,7 +234,7 @@ class RuntimePlan:
     token_preference_write_reduction: str = "sum"
     token_preference_rejection_target: str = "proposal"
     token_preference_severity_cap: int = 1000
-    token_preference_no_severity_attenuation: bool = False
+    token_preference_no_severity_attenuation: bool = True
     token_preference_dead_zone_rank: int = 1
     token_preference_learning_gate: str = "rank"
     token_preference_rejection_strength: float = 0.0
@@ -389,6 +389,11 @@ _LEARNING_ALIASES = {
 }
 _PREFERENCE_ALIASES = {
     "enabled": "token_preference",
+    # This is a shared event-source switch.  Expose it in the preference
+    # menu as well as the group-learning menu, while both surfaces continue
+    # to update the same RuntimePlan field.
+    "learn_from_write": "learn_from_write",
+    "from_write": "learn_from_write",
     "dimension": "token_preference_dimension",
     "rate": "token_preference_learning_rate",
     "strength": "token_preference_strength",
@@ -1017,9 +1022,11 @@ def preference_summary(plan: RuntimePlan) -> str:
         f"projection_seed          {_setting_value(plan.token_preference_projection_seed)}",
         f"random_projection_seed   {_setting_value(plan.token_preference_random_projection_seed)}",
         f"projection_chunk_size    {_setting_value(plan.token_preference_projection_chunk_size)}",
+        f"learn_from_write        {_setting_value(plan.learn_from_write)}",
         "",
         "Change with: preference key=value [...]",
         "Examples: preference dimension=32 fast_slow=on projection_seed=random",
+        "Shared write control: preference from_write=on|off",
     ]
     return "\n".join(rows)
 

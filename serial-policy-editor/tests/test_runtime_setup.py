@@ -194,6 +194,11 @@ def test_learning_and_preference_panels_show_and_update_all_controls():
     assert apply_setup_command("preference", plan) == "show-preference"
     assert "enabled                 off" in learning_summary(plan)
     assert "enabled                 off" in preference_summary(plan)
+    assert "learn_from_write        on" in learning_summary(plan)
+    assert "learn_from_write        on" in preference_summary(plan)
+
+    apply_setup_command("preference from_write=off", plan)
+    assert plan.learn_from_write is False
 
     apply_setup_command(
         "group on rate=.2 gate=sampler groups=concrete,abstract from_write=on",

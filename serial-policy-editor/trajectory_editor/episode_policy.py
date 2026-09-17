@@ -116,7 +116,13 @@ class WriteTokenLearning:
 
 @dataclass(frozen=True)
 class WriteLearningResult:
-    """One aggregate update produced by a live multi-token ``Write``."""
+    """The per-token learning events produced by a live multi-token ``Write``.
+
+    ``group_result`` and ``token_preference_result`` are the final event for
+    their respective learner.  The complete sequence is in
+    ``*_token_results``; no learning state is computed by reducing those
+    results after the write.
+    """
 
     sampling: SamplingConfig
     boundary_before: int
@@ -140,8 +146,14 @@ class WriteLearningResult:
         }
         if self.group_result is not None:
             payload["group_update"] = self.group_result.to_dict()
+            payload["group_token_updates"] = [
+                result.to_dict() for result in self.group_token_results
+            ]
         if self.token_preference_result is not None:
             payload["token_preference_update"] = self.token_preference_result.to_dict()
+            payload["token_preference_token_updates"] = [
+                result.to_dict() for result in self.token_preference_token_results
+            ]
             payload["token_preference_token_observations"] = [
                 {key: getattr(result, key) for key in (
                     "observation_boundary", "chosen_token_id", "proposal_token_id",
@@ -154,7 +166,12 @@ class WriteLearningResult:
 
 
 class _WriteLearningAccumulator:
-    """Compute conservative per-token updates while a Write remains atomic."""
+    """Apply one independent bounded learning update for each written token.
+
+    The action remains atomic for action recording and divergence handling, but
+    its learner state advances at every committed token boundary.  This lets
+    the next token see the preceding context and the preceding update.
+    """
 
     def __init__(
         self,
@@ -174,39 +191,45 @@ class _WriteLearningAccumulator:
         self.tokens: list[WriteTokenLearning] = []
         self.group_results: list[LearningResult] = []
         self.token_preference_results: list[TokenPreferenceResult] = []
-        self.token_preference_base_probabilities = None
-        self.token_preference_features = None
 
     @property
     def enabled(self) -> bool:
         return self.learner is not None or self.token_preference_learner is not None
 
-    def add(self, observation: Observation, token_id: int) -> None:
-        # Terminal selection is not a preference-bearing token in either v0
-        # learner, matching the SelectRawRank path.
+    def add(self, observation: Observation, token_id: int) -> SamplingConfig | None:
+        # Terminal selection is not a visible teacher choice.  Keep the
+        # existing EOG boundary behavior for writes and ordinary selections.
         if self.backend.is_eog(token_id):
-            return
+            return None
+        old_sampling = self.sampling
         group_result = (
-            self.learner.update(observation, token_id, self.sampling)
+            self.learner.update(observation, token_id, old_sampling)
             if self.learner is not None
             else None
         )
-        if self.token_preference_learner is not None and self.token_preference_base_probabilities is None:
-            base = getattr(observation.statistics, "preference_base_probabilities", None)
-            if base is not None:
-                import numpy as np
-                self.token_preference_base_probabilities = np.asarray(base, dtype=np.float64).copy()
-            features = getattr(observation.statistics, "token_preference_features", None)
-            if features is not None:
-                self.token_preference_features = np.asarray(features, dtype=np.float32)
         token_preference_result = (
-            self.token_preference_learner.update(observation, token_id, self.sampling)
+            self.token_preference_learner.update(observation, token_id, old_sampling)
             if self.token_preference_learner is not None
             else None
         )
         source = group_result or token_preference_result
         if source is None:
-            return
+            return self.sampling
+        updated = old_sampling
+        if group_result is not None:
+            updated = group_result.sampling
+        if token_preference_result is not None:
+            updated = replace(
+                updated,
+                token_preference_vector=token_preference_result.sampling.token_preference_vector,
+                token_preference_strength=token_preference_result.sampling.token_preference_strength,
+                token_preference_fast_vector=token_preference_result.sampling.token_preference_fast_vector,
+                token_preference_fast_strength=token_preference_result.sampling.token_preference_fast_strength,
+                token_preference_projection_seed=token_preference_result.sampling.token_preference_projection_seed,
+                token_preference_learning_scheme=token_preference_result.sampling.token_preference_learning_scheme,
+                token_preference_coordinate_identity=token_preference_result.sampling.token_preference_coordinate_identity,
+            )
+        self.sampling = updated
         self.tokens.append(
             WriteTokenLearning(
                 observation_boundary=observation.boundary,
@@ -223,65 +246,18 @@ class _WriteLearningAccumulator:
             self.group_results.append(group_result)
         if token_preference_result is not None:
             self.token_preference_results.append(token_preference_result)
-
-    @staticmethod
-    def _mean(values: Sequence[float]) -> float:
-        return sum(values) / len(values)
-
-    @staticmethod
-    def _mean_int(values: Sequence[int]) -> int:
-        return max(1, int(round(sum(values) / len(values))))
-
-    def _aggregate_groups(self) -> LearningResult | None:
-        if not self.group_results:
-            return None
-        result = self.learner.aggregate(self.group_results, self.sampling)
-        return replace(result,
-                       old_policy_rank=self._mean_int([r.old_policy_rank for r in self.group_results]),
-                       old_policy_probability=self._mean([r.old_policy_probability for r in self.group_results]),
-                       severity=self._mean([r.severity for r in self.group_results]),
-                       loss=self._mean([r.loss for r in self.group_results]))
-
-    def _aggregate_preference(self) -> TokenPreferenceResult | None:
-        if not self.token_preference_results:
-            return None
-        token_preference_learner = self.token_preference_learner
-        assert token_preference_learner is not None
-        aggregate = token_preference_learner.aggregate(
-            self.token_preference_results,
-            self.sampling,
-            base_probabilities=self.token_preference_base_probabilities,
-            features=self.token_preference_features,
-        )
-        return replace(
-            aggregate,
-            old_policy_rank=self._mean_int([r.old_policy_rank for r in self.token_preference_results]),
-            old_policy_probability=self._mean([r.old_policy_probability for r in self.token_preference_results]),
-            severity=self._mean([r.severity for r in self.token_preference_results]),
-            loss=self._mean([r.loss for r in self.token_preference_results]),
-        )
+        return self.sampling
 
     def finish(self, boundary_after: int) -> WriteLearningResult | None:
         if not self.tokens:
             return None
-        group_result = self._aggregate_groups()
-        token_preference_result = self._aggregate_preference()
-        updated = self.sampling
-        if group_result is not None:
-            updated = group_result.sampling
-        if token_preference_result is not None:
-            updated = replace(
-                updated,
-                token_preference_vector=token_preference_result.sampling.token_preference_vector,
-                token_preference_strength=token_preference_result.sampling.token_preference_strength,
-                token_preference_fast_vector=token_preference_result.sampling.token_preference_fast_vector,
-                token_preference_fast_strength=token_preference_result.sampling.token_preference_fast_strength,
-                token_preference_projection_seed=token_preference_result.sampling.token_preference_projection_seed,
-                token_preference_learning_scheme=token_preference_result.sampling.token_preference_learning_scheme,
-                token_preference_coordinate_identity=token_preference_result.sampling.token_preference_coordinate_identity,
-            )
+        group_result = self.group_results[-1] if self.group_results else None
+        token_preference_result = (
+            self.token_preference_results[-1]
+            if self.token_preference_results else None
+        )
         return WriteLearningResult(
-            sampling=updated,
+            sampling=self.sampling,
             boundary_before=self.tokens[0].observation_boundary,
             boundary_after=boundary_after,
             tokens=tuple(self.tokens),
@@ -306,7 +282,7 @@ class EpisodeRunner:
         on_learning_update: Callable[[LearningResult], None] | None = None,
         token_preference_learner: TokenPreferenceLearner | None = None,
         on_token_preference_learning_update: Callable[[TokenPreferenceResult], None] | None = None,
-        learn_from_write: bool = False,
+        learn_from_write: bool = True,
         on_write_learning_update: Callable[[WriteLearningResult], None] | None = None,
     ) -> None:
         self.engine = engine
@@ -401,10 +377,8 @@ class EpisodeRunner:
         accumulator: _WriteLearningAccumulator,
         outcome: ActionOutcome,
     ) -> WriteLearningResult | None:
-        """Apply one aggregate update after an atomic live Write."""
-        if outcome.status != "completed" or any(
-            evidence.is_eog for evidence in outcome.evidence
-        ):
+        """Record the per-token learning summary for an atomic live Write."""
+        if outcome.status != "completed":
             return None
         result = accumulator.finish(outcome.boundary_after)
         if result is None:
@@ -427,6 +401,26 @@ class EpisodeRunner:
         if self.on_write_learning_update is not None:
             self.on_write_learning_update(result)
         return result
+
+    def _learn_live_write_token(
+        self,
+        accumulator: _WriteLearningAccumulator,
+        observation: Observation,
+        token_id: int,
+    ) -> None:
+        """Advance Write learning immediately after one token is committed."""
+        old_sampling = self.engine.sampling
+        accumulator.add(observation, token_id)
+        if accumulator.sampling == old_sampling:
+            return
+        self.engine.sampling = accumulator.sampling
+        self.store.record_sampling_segment(
+            self.episode_id,
+            start_boundary=self.engine.boundary,
+            sampling=self.engine.sampling,
+            stream_fingerprint=self.engine.stream_fingerprint,
+            coordinate_offset=self.engine.coordinate_offset,
+        )
 
     def run(
         self,
@@ -538,13 +532,17 @@ class EpisodeRunner:
                     if self.learn_from_write and isinstance(action, Write)
                     else None
                 )
+                if write_accumulator is not None and write_accumulator.enabled:
+                    write_token_callback = (
+                        lambda observed, token_id: self._learn_live_write_token(
+                            write_accumulator, observed, token_id
+                        )
+                    )
+                else:
+                    write_token_callback = None
                 outcome = self.engine.apply(
                     action,
-                    on_precommit_observation=(
-                        write_accumulator.add
-                        if write_accumulator is not None and write_accumulator.enabled
-                        else None
-                    ),
+                    on_token_commit=write_token_callback,
                 )
                 live_actions += 1
                 if write_accumulator is not None:

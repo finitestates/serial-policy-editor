@@ -104,6 +104,14 @@ def test_model_mismatch_is_rejected_before_backend_is_repositioned(session):
 
 
 def test_http_journey_and_origin_protection(tmp_path):
+    # Some restricted test runners prohibit loopback sockets entirely.  The
+    # HTTP behavior is covered when the environment permits the prerequisite.
+    try:
+        probe = HTTPServer(('127.0.0.1', 0), object)
+    except PermissionError:
+        pytest.skip('loopback sockets are unavailable in this test environment')
+    else:
+        probe.server_close()
     ready=threading.Event()
     holder=[]
     def run():

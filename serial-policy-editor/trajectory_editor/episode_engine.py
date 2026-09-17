@@ -746,7 +746,8 @@ class EpisodeEngine:
         expectation: ReplayExpectation | None = None,
         divergence_policy: str = "handoff",
         replay: bool = False,
-        on_precommit_observation: Callable[[Observation, int], None] | None = None,
+        on_precommit_observation: Callable[[Observation, int], SamplingConfig | None] | None = None,
+        on_token_commit: Callable[[Observation, int], None] | None = None,
     ) -> ActionOutcome:
         """Resolve and apply one action.
 
@@ -885,8 +886,13 @@ class EpisodeEngine:
                         divergence,
                     )
                 observation = self.observe()
+                deferred_sampling = None
                 if not replay and on_precommit_observation is not None:
-                    on_precommit_observation(observation, token_id)
+                    # A callback may calculate a post-commit sampling state.
+                    # Applying it only after commit keeps this observation
+                    # valid while still allowing the next token in a Write to
+                    # see the update.
+                    deferred_sampling = on_precommit_observation(observation, token_id)
                 item = self._commit_token(observation, token_id)
                 evidence.append(item)
                 resolved.append(token_id)
@@ -895,6 +901,15 @@ class EpisodeEngine:
                 else:
                     self.terminal_reason = "teacher-eog"
                     stop_reason = "eog"
+                if isinstance(deferred_sampling, SamplingConfig):
+                    self.sampling = deferred_sampling
+                if not replay and on_token_commit is not None:
+                    # The observation remains the pre-commit policy snapshot;
+                    # the engine boundary/context now includes this token.
+                    # A live learner can therefore update state here and the
+                    # next token will observe both changes.
+                    on_token_commit(observation, token_id)
+                if not item.realized_visible:
                     break
         else:
             assert isinstance(action, (Hold, Finish))

@@ -223,7 +223,7 @@ def test_exact_learning_kl_bound_corrects_fisher_underestimate(fisher_mode):
     assert alpha < fisher_guess
 
 
-def test_pairwise_rejection_gradient_fades_when_margin_is_correct():
+def test_pairwise_rejection_remains_authoritative_at_full_severity():
     features = np.asarray(
         [[0.0, 0.0], [1.0, 0.0], [-1.0, 0.0], [0.0, 1.0]],
         dtype=np.float32,
@@ -247,10 +247,9 @@ def test_pairwise_rejection_gradient_fades_when_margin_is_correct():
         _token_preference_observation(positive, features, proposal=2), 1, positive
     )
     assert zero_margin.loss > positive_result.loss
+    assert zero_margin.severity == positive_result.severity == 1
     assert np.linalg.norm(zero_margin.learning_evidence) > 0.0
-    assert np.linalg.norm(positive_result.learning_evidence) < np.linalg.norm(
-        zero_margin.learning_evidence
-    )
+    assert np.linalg.norm(positive_result.learning_evidence) > 0.0
 
 
 def test_write_v2_aggregates_raw_evidence_before_one_kl_update():

@@ -101,7 +101,7 @@ def _run_write(
         return runtime, interactions, segment, result
 
 
-def test_write_learning_averages_tokens_and_persists_one_boundary(tmp_path):
+def test_write_learning_processes_each_token_and_persists_every_boundary(tmp_path):
     runtime, interactions, segment, result = _run_write(
         tmp_path,
         learner=OnlineLearner(enabled=True, learning_rate=0.5),
@@ -117,6 +117,7 @@ def test_write_learning_averages_tokens_and_persists_one_boundary(tmp_path):
     payload = interaction["payload"]
     assert payload["token_count"] == 2
     assert [item["chosen_token_id"] for item in payload["tokens"]] == [3, 5]
+    assert len(payload["group_token_updates"]) == 2
     assert [item["observation_boundary"] for item in payload["tokens"]] == [0, 1]
     assert [item["old_policy_rank"] for item in payload["tokens"]] == [3, 2]
     assert all(item["old_policy_probability"] > 0.0 for item in payload["tokens"])
@@ -140,6 +141,8 @@ def test_write_learning_combines_named_and_token_preference_updates(tmp_path):
     payload = interactions[-1]["payload"]
     assert "group_update" in payload
     assert "token_preference_update" in payload
+    assert len(payload["group_token_updates"]) == 2
+    assert len(payload["token_preference_token_updates"]) == 2
 
 
 def test_write_learning_does_not_run_during_replay(tmp_path):
@@ -160,12 +163,13 @@ def test_write_learning_does_not_run_during_replay(tmp_path):
     assert interactions == []
 
 
-def test_write_learning_is_separately_opt_in_at_the_cli(tmp_path):
+def test_write_learning_is_enabled_by_default_and_can_be_disabled_at_the_cli(tmp_path):
     parser = build_parser()
-    assert parser.parse_args([]).learn_from_write is False
+    assert parser.parse_args([]).learn_from_write is True
     args = parser.parse_args(["--online-learning", "--learn-from-write"])
     assert args.online_learning is True
     assert args.learn_from_write is True
+    assert parser.parse_args(["--no-learn-from-write"]).learn_from_write is False
 
 
 def test_existing_learners_ignore_write_without_the_new_opt_in(tmp_path):

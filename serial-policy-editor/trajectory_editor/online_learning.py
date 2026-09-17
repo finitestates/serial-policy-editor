@@ -37,7 +37,10 @@ class OnlineLearningConfig:
     learnable_groups: tuple[str, ...] | None = None
     severity_cap: int = 1000
     dead_zone_rank: int = 1
-    no_severity_attenuation: bool = False
+    # The normal learner treats every explicit teacher selection as a full
+    # teaching event.  ``False`` remains available to callers that need the
+    # historical rank/dead-zone behavior.
+    no_severity_attenuation: bool = True
     rejection_strength: float = 0.0
     decay: float = 0.0
     learning_gate: str = "rank"
@@ -184,10 +187,10 @@ class OnlineLearner:
         return self.config.enabled
 
     def _severity(self, policy_rank: int) -> float:
-        if policy_rank <= self.config.dead_zone_rank:
-            return 0.0
         if self.config.no_severity_attenuation:
             return 1.0
+        if policy_rank <= self.config.dead_zone_rank:
+            return 0.0
         return min(1.0, math.log1p(policy_rank - self.config.dead_zone_rank) / math.log1p(self.config.severity_cap))
 
     @staticmethod
@@ -278,34 +281,27 @@ class OnlineLearner:
                     continue
                 # A group's deduplicated edge scales are sparse fixed features.
                 # Standalone lexical priors do not depend on group magnitude.
-                if not sampling.group_controls and not (sampling.reference_prior_active and sampling.reference_prior_scope == "active"):
-                    scales = BiasMatcher(replace(group, bias=1.).effective_rules()).active_biases(
-                        observation.prefix_token_ids, statistics.boundaries)
-                    mean = sum(float(statistics.policy_probabilities[t]) * v for t, v in scales.items())
-                    gradient = mean - scales.get(chosen_token_id, 0.)
-                    if observation.proposal_token_id != chosen_token_id:
-                        negative = scales.get(observation.proposal_token_id, 0.)
-                        if self.config.rejection_target == "sampler" and self.config.rejection_strength:
-                            negative = sum(float(p) * scales.get(int(t), 0.) for t, p in zip(
-                                statistics.distribution.ids, statistics.distribution.probabilities))
-                        gradient += self.config.rejection_strength * (negative - mean)
-                else:
-                    # Compatibility with nonlinear legacy policies. The normal
-                    # lexical/group-objective workflow never needs this path.
-                    plus = self._counterfactual(observation, self._with_group_bias(sampling, group.name, group.bias + self.config.epsilon))
-                    minus = self._counterfactual(observation, self._with_group_bias(sampling, group.name, group.bias - self.config.epsilon))
-                    gradient = (self._loss(plus, chosen_token_id) - self._loss(minus, chosen_token_id)) / (2 * self.config.epsilon)
-                    if observation.proposal_token_id != chosen_token_id and self.config.rejection_strength:
-                        proposal = observation.proposal_token_id
-                        if self.config.rejection_target == "sampler":
-                            # Freeze the original target distribution across the
-                            # two counterfactual policies, just as for a proposal.
-                            difference = sum(float(p) * (self._loss(plus, int(t)) - self._loss(minus, int(t)))
-                                             for t, p in zip(statistics.distribution.ids,
-                                                             statistics.distribution.probabilities))
-                        else:
-                            difference = self._loss(plus, proposal) - self._loss(minus, proposal)
-                        gradient -= self.config.rejection_strength * difference / (2 * self.config.epsilon)
+                scales = BiasMatcher(replace(group, bias=1.).effective_rules()).active_biases(
+                    observation.prefix_token_ids, statistics.boundaries)
+                chosen_scale = scales.get(chosen_token_id, 0.0)
+                if chosen_scale <= 0.0:
+                    # A teacher selection outside this group's active routes is
+                    # not negative supervision.  In particular, do not apply
+                    # decay or any other movement to an unrelated group.
+                    skipped[group.name] = "chosen token is not an active group member"
+                    continue
+                # Learnable groups use their active route features directly.
+                # Appearance controllers and reference priors may change the
+                # current policy expectation, but they do not change the
+                # meaning of a teacher selecting an active group member.
+                mean = sum(float(statistics.policy_probabilities[t]) * v for t, v in scales.items())
+                gradient = mean - chosen_scale
+                if observation.proposal_token_id != chosen_token_id:
+                    negative = scales.get(observation.proposal_token_id, 0.)
+                    if self.config.rejection_target == "sampler" and self.config.rejection_strength:
+                        negative = sum(float(p) * scales.get(int(t), 0.) for t, p in zip(
+                            statistics.distribution.ids, statistics.distribution.probabilities))
+                    gradient += self.config.rejection_strength * (negative - mean)
                 gradients[group.name] = float(gradient) if math.isfinite(float(gradient)) else 0.
                 evidence[group.name] = -self.config.learning_rate * severity * gradients[group.name]
                 new_weights[group.name] = self._apply_evidence(group.bias, evidence[group.name], effective_decay)

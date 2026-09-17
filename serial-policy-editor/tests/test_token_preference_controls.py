@@ -32,16 +32,16 @@ def learner(**kwargs):
 
 
 def test_default_update_matches_local_main_fixture():
-    # Captured from b1e696f, before the experimental controls were added.
+    # The default is now full-severity teacher supervision.
     sampling = SamplingConfig(token_preference_vector=(0.12, -0.08))
     result = learner().update(_observation(sampling), 3, sampling)
     assert result.old_policy_rank == 4
     assert result.old_policy_probability == pytest.approx(0.025440951760371408)
-    assert result.severity == pytest.approx(0.20065763012322416, abs=1e-15)
-    assert result.new_z == pytest.approx((0.10645405167970969, -0.08012752774251529), abs=1e-15)
+    assert result.severity == 1.0
+    assert result.new_z == pytest.approx((0.05249223410058357, -0.08063554893196424), abs=1e-15)
     assert _observation(result.sampling).statistics.adjusted == pytest.approx([
-        2.0, 1.1064540520310402, 0.5971249714493752, -1.1064540520310402,
-        -2.080127529799938, -2.919872470200062, -3.978709189221263, -5.0,
+        2.0, 1.0524922348558903, 0.5458358451724052, -1.0524922348558903,
+        -2.0806355476379395, -2.9193644523620605, -3.989501552656293, -5.0,
     ], abs=1e-12)
 
 
@@ -62,7 +62,8 @@ def test_decay_and_learning_are_separate(decay):
 def test_shifted_severity_and_dead_zone_gate_rejection(cap):
     sampling = SamplingConfig(token_preference_vector=(0.3, -0.2))
     observation = _observation(sampling, proposal_token_id=5)
-    model = learner(decay=0.25, dead_zone_rank=3, severity_cap=cap, rejection_strength=10)
+    model = learner(decay=0.25, dead_zone_rank=3, severity_cap=cap,
+                    rejection_strength=10, no_severity_attenuation=False)
     inside = model.update(observation, 1, sampling)
     assert inside.severity == 0
     assert inside.learning_step_norm == 0
@@ -97,7 +98,8 @@ def test_fast_slow_independent_dynamics_and_clipping():
     assert result.new_fast_z == pytest.approx(4 * np.asarray(result.new_z))
     assert result.fast_strength == 0.5
     observation = _observation(result.sampling)
-    decayed = learner(fast_slow=True, dead_zone_rank=8, decay=0.1, fast_decay=0.5).update(
+    decayed = learner(fast_slow=True, dead_zone_rank=8, decay=0.1, fast_decay=0.5,
+                      no_severity_attenuation=False).update(
         observation, 3, result.sampling)
     assert decayed.new_z == pytest.approx(0.9 * np.asarray(result.new_z))
     assert decayed.new_fast_z == pytest.approx(0.5 * np.asarray(result.new_fast_z))
@@ -218,35 +220,39 @@ def test_seed_override_clears_both_coordinates_and_replay_rejects_override():
         _apply_token_preference_seed(sampling, 18, io, replay=True)
 
 
-def test_write_sums_evidence_before_clipping_and_decays_once():
+def test_write_applies_sequential_bounded_updates_and_decay():
     sampling = SamplingConfig(token_preference_vector=(0.5, 0.2), token_preference_fast_vector=(0.3, 0.1))
     model = learner(decay=0.2, fast_slow=True, fast_decay=0.5,
                     learning_rate=1, fast_learning_rate=2, max_step=0.03, fast_max_step=0.04)
     observations = [_observation(sampling, proposal_token_id=4), _observation(sampling, proposal_token_id=5)]
-    individual = [model.update(o, token, sampling) for o, token in zip(observations, [3, 1])]
     accumulator = _WriteLearningAccumulator(TokenPreferenceBackend(), sampling, None, model)
+    expected_sampling = sampling
+    expected_results = []
     for o, token in zip(observations, [3, 1]):
+        expected = model.update(o, token, expected_sampling)
+        expected_results.append(expected)
+        expected_sampling = expected.sampling
         accumulator.add(o, token)
     result = accumulator.finish(2).token_preference_result
-    for prefix, decay, bound, old in [('', .2, .03, sampling.token_preference_vector),
-                                      ('fast_', .5, .04, sampling.token_preference_fast_vector)]:
-        evidence = np.sum([getattr(r, prefix + 'learning_evidence') for r in individual], axis=0)
-        step = evidence * min(1, bound / np.linalg.norm(evidence))
-        actual = result.new_z if not prefix else result.new_fast_z
-        assert actual == pytest.approx((1 - decay) * np.array(old) + step)
-        assert getattr(result, prefix + 'learning_step_norm') <= bound + 1e-12
+    assert len(accumulator.token_preference_results) == 2
+    assert result.sampling == expected_sampling
+    assert result.new_z == expected_results[-1].new_z
+    assert result.new_fast_z == expected_results[-1].new_fast_z
+    assert all(r.learning_step_norm <= .03 + 1e-12 for r in accumulator.token_preference_results)
+    assert all(r.fast_learning_step_norm <= .04 + 1e-12 for r in accumulator.token_preference_results)
     assert len(accumulator.finish(2).to_dict()['token_preference_token_observations']) == 2
 
 
-def test_write_dead_zone_only_forgets_once():
+def test_legacy_dead_zone_write_decays_once_per_token():
     sampling = SamplingConfig(token_preference_vector=(0.5, 0.2), token_preference_fast_vector=(0.3, 0.1))
-    model = learner(decay=.2, dead_zone_rank=8, fast_slow=True, fast_decay=.5, rejection_strength=3)
+    model = learner(decay=.2, dead_zone_rank=8, fast_slow=True, fast_decay=.5,
+                    rejection_strength=3, no_severity_attenuation=False)
     accumulator = _WriteLearningAccumulator(TokenPreferenceBackend(), sampling, None, model)
     for token in (1, 3, 5):
         accumulator.add(_observation(sampling), token)
     result = accumulator.finish(3).token_preference_result
-    assert result.new_z == pytest.approx(np.array(sampling.token_preference_vector) * .8)
-    assert result.new_fast_z == pytest.approx(np.array(sampling.token_preference_fast_vector) * .5)
+    assert result.new_z == pytest.approx(np.array(sampling.token_preference_vector) * .8 ** 3)
+    assert result.new_fast_z == pytest.approx(np.array(sampling.token_preference_fast_vector) * .5 ** 3)
 
 
 class SeedBackend(TokenPreferenceBackend):
@@ -397,14 +403,18 @@ def test_live_eog_choice_does_not_learn_or_decay(tmp_path):
         assert not store.interactions(episode)
 
 
-def test_no_severity_attenuation_keeps_dead_zone_and_both_channel_limits():
+def test_no_severity_attenuation_gives_full_severity_and_keeps_channel_limits():
     sampling = SamplingConfig(token_preference_vector=(.2, .1), token_preference_fast_vector=(.1, .2))
     model = learner(no_severity_attenuation=True, dead_zone_rank=2, severity_cap=1000,
                     learning_rate=100, fast_slow=True, fast_learning_rate=200,
                     rejection_strength=3, decay=.2, fast_decay=.5,
                     max_step=.03, max_norm=.1, fast_max_step=.04, fast_max_norm=.08)
     inside = model.update(_observation(sampling), 1, sampling)
-    assert inside.severity == inside.learning_step_norm == inside.fast_learning_step_norm == 0
+    assert inside.severity == 1
+    assert inside.learning_step_norm > 0
+    assert inside.fast_learning_step_norm > 0
+    assert inside.learning_step_norm <= .03 + 1e-12
+    assert inside.fast_learning_step_norm <= .04 + 1e-12
     for chosen in (3, 4, 5):
         result = model.update(_observation(sampling), chosen, sampling)
         assert result.severity == 1
@@ -419,16 +429,17 @@ def test_no_severity_attenuation_keeps_dead_zone_and_both_channel_limits():
         TokenPreferenceConfig(no_severity_attenuation=1)
 
 
-def test_unattenuated_write_accumulates_full_evidence_but_decays_once():
+def test_unattenuated_write_applies_full_severity_per_token():
     sampling = SamplingConfig(token_preference_vector=(.2, .1))
     model = learner(no_severity_attenuation=True, learning_rate=.1, decay=.5)
     accumulator = _WriteLearningAccumulator(TokenPreferenceBackend(), sampling, None, model)
     obs = _observation(sampling)
+    expected_sampling = sampling
     for token in (3, 5):
+        expected_sampling = model.update(obs, token, expected_sampling).sampling
         accumulator.add(obs, token)
     result = accumulator.finish(2).token_preference_result
-    mean = obs.statistics.policy_probabilities @ FEATURES.astype(np.float64)
-    expected_step = .1 * (FEATURES[3] + FEATURES[5] - 2 * mean)
-    expected_step *= min(1, model.config.max_step / np.linalg.norm(expected_step))
     assert result.severity == 1
-    assert result.new_z == pytest.approx(.5 * np.array(sampling.token_preference_vector) + expected_step)
+    assert len(accumulator.token_preference_results) == 2
+    assert result.sampling == expected_sampling
+    assert result.new_z == expected_sampling.token_preference_vector

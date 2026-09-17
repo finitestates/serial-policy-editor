@@ -103,7 +103,7 @@ def test_sampler_gate_leaves_decay_and_fast_slow_limits_independent():
 
 
 @pytest.mark.parametrize('tokens', ([1, 3, 2], [1, 2]))
-def test_write_gates_each_token_and_aggregates_decay_once(tokens):
+def test_write_gates_each_token_and_updates_groups_only_for_positive_members(tokens):
     runtime = engine(top_k=2, token_preference_vector=(.2, .1),
                      token_preference_fast_vector=(.1, .2), token_preference_fast_strength=.5)
     runtime.sampling = replace(runtime.sampling,
@@ -118,18 +118,16 @@ def test_write_gates_each_token_and_aggregates_decay_once(tokens):
     assert [t.sampler_eligible for t in result.tokens] == [t != 3 for t in tokens]
     for r in accumulator.token_preference_results:
         assert r.severity == float(r.chosen_token_id == 3)
-    raw_group = sum(r.evidence['target'] for r in accumulator.group_results)
-    assert result.group_result.new_group_weights['target'] == pytest.approx(.8 * .2 + raw_group)
-    raw_slow = np.sum([r.learning_evidence for r in accumulator.token_preference_results], axis=0)
-    raw_fast = np.sum([r.fast_learning_evidence for r in accumulator.token_preference_results], axis=0)
-    fast_norm = np.linalg.norm(raw_fast)
-    if fast_norm > token_preference_model.config.fast_max_step:
-        raw_fast *= token_preference_model.config.fast_max_step / fast_norm
-    assert result.token_preference_result.new_z == pytest.approx(.8 * np.array((.2, .1)) + raw_slow)
-    assert result.token_preference_result.new_fast_z == pytest.approx(.5 * np.array((.1, .2)) + raw_fast)
+    group_events = accumulator.group_results
+    assert len(group_events) == len(tokens)
+    assert [bool(event.evidence) for event in group_events] == [token == 3 for token in tokens]
+    assert result.group_result.new_group_weights['target'] == accumulator.sampling.bias_groups[0].bias
+    assert len(accumulator.token_preference_results) == len(tokens)
+    assert result.token_preference_result.new_z == accumulator.sampling.token_preference_vector
+    assert result.token_preference_result.new_fast_z == accumulator.sampling.token_preference_fast_vector
     payload = result.to_dict()
-    assert payload['group_update']['sampler_eligible'] is None  # No misleading first-token summary.
-    assert payload['token_preference_update']['sampler_probability'] is None
+    assert len(payload['group_token_updates']) == len(tokens)
+    assert len(payload['token_preference_token_updates']) == len(tokens)
     assert [t['sampler_eligible'] for t in payload['tokens']] == [t != 3 for t in tokens]
     io = ScriptedIO([])
     _write_learning_notice(io, result)

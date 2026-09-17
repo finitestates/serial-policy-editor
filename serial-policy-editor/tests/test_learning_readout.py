@@ -26,16 +26,16 @@ def display(learner, runtime, chosen=1):
     return io.output[0], io.output[-1], result
 
 
-def test_rank_one_skip_explains_unchanged_memory_and_z_bound():
+def test_rank_one_selection_is_full_severity_and_explains_memory_change():
     runtime = engine(token_preference_vector=(.06, .08), token_preference_strength=2.)
     summary, details, _ = display(TokenPreferenceLearner(FEATURES, enabled=True,
         dimension=2, token_preference_strength=2.), runtime)
     assert len(summary.strip()) <= 80
-    assert 'no evidence: rank ≤1' in summary and 'unchanged' in summary
+    assert 'severity 1' in summary and 'learned' in summary
     assert "Chosen: ' A' (id 1)" in details and 'teacher matched proposal' in details
     assert 'policy probability' in details and 'sampler probability' in details
-    assert 'Memory size (z norm): 0.1 → 0.1' in details
-    assert 'Token bias bound: ±0.2 logits' in details
+    assert 'Memory size (z norm): 0.1 → 0.1044' in details
+    assert 'Token bias bound: ±0.2089 logits' in details
     assert 'not confidence' in details
 
 
@@ -113,13 +113,12 @@ def test_write_reports_each_learners_gate_without_using_averaged_ranks():
     result = acc.finish(3)
     io = ScriptedIO([])
     write_notice(io, result, token_text=runtime.backend.token_text)
-    assert 'groups 2/3 evidence' in io.output[-1] and 'preference 1/3 evidence' in io.output[-1]
+    assert 'groups 1/3 evidence' in io.output[-1] and 'preference 1/3 evidence' in io.output[-1]
     show_learning_details(io)
     details = io.output[-1]
-    assert 'Write mean: 1 evidence tokens, scale 1' in details
     assert 'Proposal agreement: 1/3 tokens' in details
     assert "' C' (id 3): rank 3" in details and "' A' (id 1): rank 1" in details
-    assert details.count('decay evaluated once') == 2
+    assert details.count('Each written token received its own bounded update') == 2
 
 
 def test_learning_command_at_choice_and_edge_is_read_only(tmp_path):

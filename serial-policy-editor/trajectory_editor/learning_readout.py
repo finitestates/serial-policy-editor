@@ -153,6 +153,48 @@ def _movement(result, preference):
     return f'net {result.update_norm:.3g}'
 
 
+def _write_movement(tokens, preference):
+    """Summarize the whole sequential write, not only its final token."""
+    if not tokens:
+        return 'unchanged'
+    if preference:
+        learning = any(
+            token.learning_step_norm or token.fast_learning_step_norm
+            for token in tokens
+        )
+        decay = any(
+            token.decay_norm or token.fast_decay_norm
+            for token in tokens
+        )
+        if learning and decay:
+            return 'learned + decayed'
+        if learning:
+            return 'learned'
+        if decay:
+            return 'decayed'
+        return 'unchanged'
+    first = tokens[0].old_group_weights
+    last = tokens[-1].new_group_weights
+    net = math.sqrt(sum(
+        (float(last[name]) - float(old)) ** 2
+        for name, old in first.items()
+    ))
+    return 'unchanged' if net == 0.0 else f'net {net:.3g}'
+
+
+def _write_reason(result, *, preference):
+    if preference or result.evidence:
+        return _reason(result)
+    reasons = set((result.skipped or {}).values())
+    if 'chosen token is not an active group member' in reasons:
+        return 'no active positive group member'
+    if 'controlled by appearance objective' in reasons:
+        return 'appearance objective control'
+    if 'disabled or frozen' in reasons:
+        return 'group disabled or frozen'
+    return _reason(result)
+
+
 def _publish(io, key, title, sections, summary):
     previous = getattr(io, '_learning_readout', None)
     combined = dict(previous[2]) if previous and previous[0] == key else {}
@@ -191,24 +233,30 @@ def write_notice(io, result, *, token_text=None, episode_id=None):
     ):
         if aggregate is None:
             continue
-        count = aggregate.write_evidence_tokens
-        count = sum(t.severity > 0 for t in tokens) if count is None else count
+        if label == 'Groups':
+            # Group severity is only the learner gate.  The positive
+            # selection gate is per group, so an unrelated teacher token can
+            # have full severity while supplying no group evidence at all.
+            count = sum(bool(t.severity > 0 and t.evidence) for t in tokens)
+        else:
+            count = sum(t.severity > 0 for t in tokens)
         lines = [f'Rejection strength {aggregate.rejection_strength:g}; target {aggregate.rejection_target}.',
                  f'{count}/{result.token_count} tokens supplied gate-admitted evidence; '
                  f'{result.token_count-count} gate skips.',
-                 f'Write {aggregate.write_reduction}: {count} evidence tokens, '
-                 f'scale {aggregate.write_evidence_scale:.4g}; decay evaluated once.']
+                 'Each written token received its own bounded update; '
+                 'there was no write-level sum, mean, or square-root reduction.']
         if tokens:
             matches = sum(not t.proposal_rejected for t in tokens)
             lines.append(f'Proposal agreement: {matches}/{len(tokens)} tokens (separate from gate admission).')
             lines.append('Per-token evidence, measured after the preceding written tokens:')
             for t in tokens:
                 lines.append(f'  {_token(t.chosen_token_id, token_text)}: rank {t.old_policy_rank}; '
-                             f'{"different choice" if t.proposal_rejected else "matched proposal"}; {_reason(t)}.')
+                             f'{"different choice" if t.proposal_rejected else "matched proposal"}; '
+                             f'{_write_reason(t, preference=label == "token preference")}.')
         lines.extend(_token_preference_details(aggregate) if label == 'token preference' else _group_details(aggregate))
         sections[label] = lines
         summaries.append(f'{label.lower()} {count}/{result.token_count} evidence, '
-                         f'{_movement(aggregate, label == "token preference")}')
+                         f'{_write_movement(tokens, label == "token preference")}')
     _publish(io, (episode_id, 'write', result.boundary_after),
              f'Teaching Write @ boundaries {result.boundary_before}–{result.boundary_after}',
              sections, 'Write [learning]: ' + ' · '.join(summaries))

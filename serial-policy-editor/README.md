@@ -852,10 +852,10 @@ policy-editor --model /path/to/model.gguf --biases groups.json \
   --token-preference-learning-rate 0.05 --token-preference-max-step 0.25 --token-preference-max-norm 4.0
 ```
 
-It updates only after live numeric `SelectRawRank` choices. The update moves
+It updates after each live teacher-selected token. The update moves
 `z` toward the chosen token's fixed feature and away from the current
-policy-weighted feature mean, using the same bounded rank severity as the
-named-group learner. The vector is stored in sampler segments, included in
+policy-weighted feature mean with full default severity; rank, sampler
+eligibility, and the sampled proposal remain diagnostics. The vector is stored in sampler segments, included in
 full `--biases-only` exports, and consumed during replay without rerunning the
 learner. If the model changes, its token preference state is discarded because the
 fixed feature space is model-specific. `--token-preference-dimension` can reduce the
@@ -993,16 +993,17 @@ The portable envelope is `spe-steering-vector-v1` with an explicit kind of
 `activation` artifacts are rejected with a recreation message rather than
 silently guessing which runtime surface they meant.
 
-Typed answers can optionally provide the same kind of live supervision. Add
-`--learn-from-write` alongside `--online-learning` and/or
-`--token-preference` to let the enabled learners consume a live `Write`
-action. Each typed token is evaluated using the observation immediately before
-it. By default, token preference learning sums the token evidence, then applies step clipping,
-decay, and state norm clipping once for the whole atomic Write. Consistent
-evidence can accumulate; opposing evidence can cancel. This replaces the old
-preference averaging behavior. Manual-group learning also sums its evidence and clips/decays once.
-Neither learner changes the policy midway through the text. Accept, EOG,
-and replay remain non-learning paths.
+Typed answers provide the same kind of live supervision when a learner is
+enabled; learning from writes is enabled by default and `--learn-from-write`
+may be used explicitly. Each typed token is
+evaluated using the observation immediately before it, then receives its own
+bounded update before the next token is observed.
+There is no write-level sum, average, or square-root reduction, and the policy
+can change between written tokens. Learnable groups update only when the
+selected token is an active positive member; unrelated selections leave them
+unchanged. Appearance objectives remain separate. Use `--no-learn-from-write`
+to restore the legacy opt-out. Accept, EOG, and replay remain non-learning
+paths.
 
 Learning notices now summarize the cause of an update or skip. Type **`learning`**
 at a token choice or the live edge for the latest teaching event's token evidence,
@@ -1011,8 +1012,9 @@ opens on demand without generating tokens. See [reading learning feedback](STEER
 
 Three further experiments are available for both learners:
 `--token-preference-decay-on rejection` skips decay on agreement; `evidence` also skips it
-inside the learning dead zone. `--token-preference-write-reduction mean` or `sqrt` tempers
-long typed corrections. `--token-preference-rejection-target sampler` uses the actual sampler's
+inside the learning dead zone. The legacy `--token-preference-write-reduction mean` or `sqrt`
+settings apply only to compatibility aggregate helpers, not normal live writes.
+`--token-preference-rejection-target sampler` uses the actual sampler's
 weighted alternatives as the negative target when rejection strength is nonzero.
 Use `--learning-` in place of `--token-preference-` for manual group fitting. Defaults remain
 `update`, `sum`, and `proposal`. See [semantics](STEERING.md#teacher-learning-experiments)
@@ -1024,8 +1026,8 @@ Additional experimental token preference controls are optional:
 | --- | --- | --- |
 | `--token-preference-decay` | `0` | Fraction of old memory forgotten per committed learning intervention, from 0 to 1. |
 | `--token-preference-severity-cap` | `1000` | Positive rank distance above the dead zone where severity reaches 1. |
-| `--token-preference-no-severity-attenuation` | off | Give every selection outside the dead zone severity 1, bypassing the logarithmic attenuation. |
-| `--token-preference-dead-zone-rank` | `1` | Policy ranks at or better than this rank produce no learning evidence. |
+| `--token-preference-no-severity-attenuation` | on | Give every selection full severity, including rank-one and sampler-eligible choices. |
+| `--token-preference-dead-zone-rank` | `1` | Legacy attenuation mode's rank threshold; ignored by the normal full-severity mode. |
 | `--token-preference-rejection-strength` | `0` | Nonnegative rejection pressure when the proposal differs from the chosen token; the negative target defaults to that proposal. |
 | `--token-preference-fast-slow` | off | Also learn an independent fast vector in the same feature space. |
 | `--token-preference-projection-seed` | `9137` for new episodes | Signed 64-bit projection seed; restored episodes keep their saved seed. |
@@ -1040,14 +1042,14 @@ Additional experimental token preference controls are optional:
 | `--token-preference-influence-mode kl` | manual | Calibrate the combined token preference intervention to `--token-preference-influence-kl`. |
 | `--token-preference-influence-kl` | `0.05` | Nominal total preference deployment KL target in automatic influence mode. |
 
-Severity is `min(1, log1p(max(0, policy_rank - dead_zone_rank)) /
-log1p(severity_cap))`. With the default rejection target, strength 1 gives a chosen-versus-proposal
-pairwise direction; values above 1 add stronger rejection pressure. Selecting
-the sampled proposal retains the expectation-based direction. The dead zone
-gates all learning evidence; by default, enabled learners still decay once per event.
-`--token-preference-no-severity-attenuation` sets severity to 1 outside the dead zone
-and leaves it zero inside. It applies to both token preference channels and typed-write
-evidence; the severity cap is ignored in this mode. It does not remove the
+Normal severity is `1.0` for every explicit teacher selection. With the default
+rejection target, strength 1 gives a chosen-versus-proposal pairwise direction;
+values above 1 add stronger rejection pressure. Selecting the sampled proposal
+retains the expectation-based direction. The legacy severity formula is
+`min(1, log1p(max(0, policy_rank - dead_zone_rank)) /
+log1p(severity_cap))`, and is available with the explicit attenuation setting.
+`--token-preference-no-severity-attenuation` is the normal default; it applies
+to both token preference channels and typed-write evidence. It does not remove the
 step or norm limits, alter decay, or change the named-group learner. Lowering
 the severity cap also strengthens smaller misses; cap 1 already gives full
 severity to every rank outside the dead zone. The explicit flag makes that

@@ -346,7 +346,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     learning.add_argument("--learning-severity-cap", type=_positive_int, default=1000)
     learning.add_argument("--learning-dead-zone-rank", type=_positive_int, default=1)
-    learning.add_argument("--learning-no-severity-attenuation", action="store_true")
+    learning_severity = learning.add_mutually_exclusive_group()
+    learning_severity.add_argument(
+        "--learning-no-severity-attenuation",
+        dest="learning_no_severity_attenuation",
+        action="store_true",
+        help="use full severity for every teacher selection (the default)",
+    )
+    learning_severity.add_argument(
+        "--learning-severity-attenuation",
+        dest="learning_no_severity_attenuation",
+        action="store_false",
+        help="restore legacy rank dead-zone and severity attenuation",
+    )
+    learning.set_defaults(learning_no_severity_attenuation=True)
     learning.add_argument("--learning-rejection-strength", type=float, default=0.)
     learning.add_argument("--learning-decay", type=float, default=0.)
     _add_learning_experiment_flags(learning, "learning")
@@ -360,11 +373,20 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="GROUP",
         help="restrict online learning to these groups; opt them in with b GROUP learn on",
     )
-    learning.add_argument(
+    write_learning = learning.add_mutually_exclusive_group()
+    write_learning.add_argument(
         "--learn-from-write",
+        dest="learn_from_write",
         action="store_true",
-        help="allow enabled learners to learn from live typed writes (off by default)",
+        help="learn from each token in live typed writes (the default)",
     )
+    write_learning.add_argument(
+        "--no-learn-from-write",
+        dest="learn_from_write",
+        action="store_false",
+        help="restore the legacy behavior that does not learn from typed writes",
+    )
+    learning.set_defaults(learn_from_write=True)
     preference = parser.add_argument_group("token preference learning")
     preference.add_argument(
         "--token-preference",
@@ -398,10 +420,20 @@ def build_parser() -> argparse.ArgumentParser:
     preference.add_argument("--token-preference-decay", type=float, default=0.0)
     _add_learning_experiment_flags(preference, "token-preference")
     preference.add_argument("--token-preference-severity-cap", type=_positive_int, default=1000)
-    preference.add_argument(
-        "--token-preference-no-severity-attenuation", action="store_true",
-        help="use severity 1 outside the dead zone; retain learning step and memory norm limits",
+    preference_severity = preference.add_mutually_exclusive_group()
+    preference_severity.add_argument(
+        "--token-preference-no-severity-attenuation",
+        dest="token_preference_no_severity_attenuation",
+        action="store_true",
+        help="use full severity for every teacher selection (the default)",
     )
+    preference_severity.add_argument(
+        "--token-preference-severity-attenuation",
+        dest="token_preference_no_severity_attenuation",
+        action="store_false",
+        help="restore legacy rank dead-zone and severity attenuation",
+    )
+    preference.set_defaults(token_preference_no_severity_attenuation=True)
     preference.add_argument("--token-preference-dead-zone-rank", type=_positive_int, default=1)
     preference.add_argument(
         "--token-preference-learning-gate", choices=("rank", "sampler"), default="rank",

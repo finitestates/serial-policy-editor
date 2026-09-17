@@ -202,7 +202,10 @@ class TokenPreferenceConfig:
     projection_seed: int = DEFAULT_PROJECTION_SEED
     decay: float = 0.0
     severity_cap: int = 1000
-    no_severity_attenuation: bool = False
+    # The normal learner treats every explicit teacher selection as a full
+    # teaching event.  ``False`` remains available to callers that need the
+    # historical rank/dead-zone behavior.
+    no_severity_attenuation: bool = True
     dead_zone_rank: int = 1
     rejection_strength: float = 0.0
     fast_slow: bool = False
@@ -521,10 +524,10 @@ class TokenPreferenceLearner:
         return values
 
     def _severity(self, policy_rank: int) -> float:
-        if policy_rank <= self.config.dead_zone_rank:
-            return 0.0
         if self.config.no_severity_attenuation:
             return 1.0
+        if policy_rank <= self.config.dead_zone_rank:
+            return 0.0
         return min(
             1.0,
             math.log1p(max(0, policy_rank - self.config.dead_zone_rank))
@@ -791,8 +794,8 @@ class TokenPreferenceLearner:
             learning_policy_probability = float(probabilities[chosen_token_id])
             if self.config.learning_gate == "rank":
                 severity = (
-                    0.0 if learning_rank <= self.config.dead_zone_rank
-                    else 1.0 if self.config.no_severity_attenuation
+                    1.0 if self.config.no_severity_attenuation
+                    else 0.0 if learning_rank <= self.config.dead_zone_rank
                     else min(
                         1.0,
                         math.log1p(max(0, learning_rank - self.config.dead_zone_rank))

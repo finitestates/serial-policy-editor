@@ -271,7 +271,7 @@ def test_bias_edit_selection_uses_authoritative_observation(tmp_path):
         results = []
         EpisodeRunner(e, store, eid, learner=OnlineLearner(enabled=True), on_learning_update=results.append).run(
             live_policy=InteractivePolicy(io=ScriptedIO(['b concrete +4', '3'])), max_live_actions=1)
-        assert results[0].old_policy_rank == 1 and results[0].severity == 0
+        assert results[0].old_policy_rank == 1 and results[0].severity == 1
 
 
 def test_outside_bounds_and_excluded_groups_do_not_change():
@@ -297,19 +297,24 @@ def test_group_feature_gradient_matches_counterfactual_and_controls():
     numeric = (learner._loss(plus, 3) - learner._loss(minus, 3)) / (2 * epsilon)
     assert r.gradients["concrete"] == pytest.approx(numeric, abs=1e-8)
     assert r.severity == 1
-    assert OnlineLearner(enabled=True, dead_zone_rank=3).update(o, 3, s).update_norm == 0
+    assert OnlineLearner(
+        enabled=True, dead_zone_rank=3, no_severity_attenuation=False
+    ).update(o, 3, s).update_norm == 0
 
 
-def test_write_evidence_sums_and_decays_once():
+def test_write_applies_group_updates_sequentially():
     s = SamplingConfig(bias_groups=(group(bias=.5),))
     e = EpisodeEngine(ConformingFakeBackend(), initial_token_ids=[7], sampling=s)
     learner = OnlineLearner(enabled=True, decay=.2, no_severity_attenuation=True)
     accumulator = _WriteLearningAccumulator(e.backend, s, learner, None)
-    accumulator.add(e.observe(), 3)
-    accumulator.add(e.observe(), 3)
-    raw = sum(r.evidence["concrete"] for r in accumulator.group_results)
+    expected_sampling = s
+    for _ in range(2):
+        expected_sampling = learner.update(e.observe(), 3, expected_sampling).sampling
+        accumulator.add(e.observe(), 3)
     result = accumulator.finish(2).group_result
-    assert result.new_group_weights["concrete"] == pytest.approx(.8 * .5 + min(.25, raw))
+    assert len(accumulator.group_results) == 2
+    assert result.sampling == accumulator.sampling
+    assert result.sampling == expected_sampling
 
 
 def test_headless_reference_and_group_control_survive_fork_and_reopen(tmp_path):
