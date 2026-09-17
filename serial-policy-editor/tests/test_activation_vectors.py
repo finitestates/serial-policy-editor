@@ -245,12 +245,12 @@ def test_cvector_gguf_import_preserves_layerwise_directions(tmp_path, capsys):
     loaded = SteeringVectorArtifact.from_path(output)
     assert loaded.layer == CONTROL_VECTOR_LAYER
     assert loaded.position == CONTROL_VECTOR_POSITION
-    assert loaded.layer_start == 1
+    assert loaded.layer_start == 2
     assert loaded.layer_end == 2
     assert loaded.vector == pytest.approx((1, 2, 3, 4, 5, 6))
     assert loaded.model["hidden_state_layer_count"] == 2
     assert vector_main(["hidden-state", "inspect", str(source)]) == 0
-    assert "target: hidden-state layers range=1..2" in capsys.readouterr().out
+    assert "target: hidden-state layers range=2..2" in capsys.readouterr().out
 
 
 def test_layerwise_cvector_is_installed_before_runtime_logits():

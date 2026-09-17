@@ -344,6 +344,7 @@ static void write_json(
         << "  \"target\": {\n"
         << "    \"site\": \"decoder-block-output-residual\",\n"
         << "    \"layer_numbering\": \"one-based\",\n"
+        << "    \"coordinate\": \"canonical-decoder-block-output-v1\",\n"
         << "    \"layer_start\": " << args.layer_start << ",\n"
         << "    \"layer_end\": " << args.layer_end << ",\n"
         << "    \"position\": " << json_string(args.position) << "\n"
@@ -418,11 +419,11 @@ int main(int argc, char ** argv) {
             llama_backend_free();
             fail("llama.cpp reported invalid model dimensions");
         }
-        if (args.layer_end > capture_layers) {
+        if (args.layer_start < 2 || args.layer_end > capture_layers) {
             llama_free(ctx);
             llama_model_free(model);
             llama_backend_free();
-            fail("layer range exceeds llama.cpp control-vector layers (1.." +
+            fail("layer range exceeds canonical llama.cpp runtime layers (2.." +
                  std::to_string(capture_layers) + ")");
         }
 

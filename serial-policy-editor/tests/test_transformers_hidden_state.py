@@ -104,6 +104,9 @@ def test_hidden_state_capabilities_describe_the_decoder_boundary():
         "position_policies": ["first", "last", "current", "all"],
         "layer_types": ["decoder", "decoder", "decoder"],
         "native_module_path": "model.layers[N-1]",
+        "capture_coordinate": "canonical block-output N <- module output hook N",
+        "injection_coordinate": "canonical block-output N <- module output hook N",
+        "runtime_layer_range": [1, 3],
         "modality": "text",
     }
 

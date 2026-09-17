@@ -32,6 +32,7 @@ OUTPUT_HEAD_KIND = "output-head-steering-vector"
 HIDDEN_STATE_KIND = "hidden-state-vector"
 HIDDEN_STATE_SITE = "decoder-block-output-residual"
 HIDDEN_STATE_LAYER_NUMBERING = "one-based"
+HIDDEN_STATE_COORDINATE = "canonical-decoder-block-output-v1"
 OUTPUT_LAYER = "output"
 RUNTIME_POSITION = "current"
 CONTROL_VECTOR_LAYER = "control-vector"
@@ -132,6 +133,11 @@ def steering_vector_digest_for(
         "model": dict(model_value),
         "layer": layer,
         "position": position,
+        "coordinate": (
+            HIDDEN_STATE_COORDINATE
+            if layer == CONTROL_VECTOR_LAYER
+            else "output-head-current-v1"
+        ),
         "strength": float(strength),
         "vector": [float(value) for value in vector],
         "layer_start": layer_start,
@@ -489,6 +495,12 @@ class SteeringVectorArtifact:
                     raise EditorError(
                         "hidden-state steering target must use one-based layer numbering"
                     )
+                if target.get("coordinate") != HIDDEN_STATE_COORDINATE:
+                    raise EditorError(
+                        "hidden-state steering target must use the canonical decoder-block output coordinate"
+                    )
+            else:
+                raise EditorError("hidden-state steering artifact requires a target coordinate")
             layer = CONTROL_VECTOR_LAYER
             position = CONTROL_VECTOR_POSITION
             layer_start = value.get("layer_start")
@@ -525,6 +537,10 @@ class SteeringVectorArtifact:
     ) -> "SteeringVectorArtifact":
         model, vector, source = _load_cvector_gguf(path)
         layer_count = int(model["hidden_state_layer_count"])
+        if layer_count < 2:
+            raise EditorError(
+                "cvector GGUF has no canonical decoder-block output layer that llama.cpp can steer"
+            )
         return cls(
             model=model,
             vector=vector,
@@ -533,7 +549,11 @@ class SteeringVectorArtifact:
             strength=strength,
             method="llama-cvector-generator-v1",
             source=source,
-            layer_start=1,
+            # direction.N is the canonical output of block N.  llama.cpp's
+            # native slot N-1 is the corresponding injection point; native
+            # slot zero does not exist, so direction.1 is retained as data
+            # but is intentionally outside the active runtime range.
+            layer_start=2,
             layer_end=layer_count,
         )
 
@@ -709,10 +729,10 @@ class SteeringVectorArtifact:
         """Create one residual-stream direction for each selected layer.
 
         The serialized vector always contains one width-sized slot for every
-        layer in the loaded text decoder.  ``layer_start`` and ``layer_end``
-        select the slots that are active at runtime; inactive slots are zero.
-        This mirrors llama.cpp's layer-range control surface while keeping
-        the coordinate explicit for native Transformers backends.
+        capturable decoder-block output.  ``layer_start`` and ``layer_end``
+        select the canonical one-based outputs that are active at runtime;
+        inactive slots are zero.  Backends may expose a narrower runtime range
+        when their native injection API cannot address every captured site.
         """
 
         if capture_position not in CAPTURE_POSITIONS:
@@ -745,6 +765,17 @@ class SteeringVectorArtifact:
             raise EditorError(
                 f"hidden-state layer range must be between 1 and {layer_count}"
             )
+        capabilities_method = getattr(backend, "hidden_state_capabilities", None)
+        if callable(capabilities_method):
+            capabilities = capabilities_method()
+            runtime_range = capabilities.get("runtime_layer_range")
+            if runtime_range is not None:
+                runtime_start, runtime_end = runtime_range
+                if layer_start < int(runtime_start) or layer_end > int(runtime_end):
+                    raise EditorError(
+                        "hidden-state vector layer range is outside the backend's canonical runtime range "
+                        f"{runtime_start}..{runtime_end}"
+                    )
 
         directions = np.zeros((layer_count, width), dtype=np.float64)
         raw_norms: list[float] = []
@@ -866,6 +897,10 @@ class SteeringVectorArtifact:
             raise EditorError("llama.cpp worker returned an unsupported hidden-state site")
         if target.get("layer_numbering") != HIDDEN_STATE_LAYER_NUMBERING:
             raise EditorError("llama.cpp worker layer numbering must be one-based")
+        if target.get("coordinate") != HIDDEN_STATE_COORDINATE:
+            raise EditorError(
+                "llama.cpp worker target must use the canonical decoder-block output coordinate"
+            )
         if target.get("position") != capture_position:
             raise EditorError("llama.cpp worker position does not match the request")
         if target.get("layer_start") != layer_start or target.get("layer_end") != layer_end:
@@ -886,6 +921,10 @@ class SteeringVectorArtifact:
         )
         if layer_end > layer_count:
             raise EditorError("llama.cpp worker layer range exceeds the model")
+        if layer_start < 2:
+            raise EditorError(
+                "llama.cpp worker vectors require canonical runtime layers 2 or higher"
+            )
         expected_layers = {str(layer) for layer in range(layer_start, layer_end + 1)}
         if set(directions_data) != expected_layers or set(norms_data) != expected_layers:
             raise EditorError("llama.cpp worker returned an incomplete layer range")
@@ -984,6 +1023,7 @@ class SteeringVectorArtifact:
                     "target": {
                         "site": HIDDEN_STATE_SITE,
                         "layer_numbering": HIDDEN_STATE_LAYER_NUMBERING,
+                        "coordinate": HIDDEN_STATE_COORDINATE,
                     },
                     "layer_start": self.layer_start,
                     "layer_end": self.layer_end,
@@ -1027,6 +1067,14 @@ class SteeringVectorArtifact:
                 raise EditorError("hidden-state vector dimension does not match the loaded model layers")
             if self.layer_end > int(control_layers()):
                 raise EditorError("hidden-state vector layer range exceeds the loaded model")
+            runtime_range = getattr(backend, "hidden_state_runtime_layer_range", None)
+            if callable(runtime_range):
+                runtime_start, runtime_end = runtime_range()
+                if self.layer_start < int(runtime_start) or self.layer_end > int(runtime_end):
+                    raise EditorError(
+                        "hidden-state vector layer range is outside the backend's canonical runtime range "
+                        f"{runtime_start}..{runtime_end}"
+                    )
             return np.zeros(int(backend.vocabulary_size()), dtype=np.float64)
         adjustment = getattr(backend, "activation_logit_adjustments", None)
         if not callable(adjustment):

@@ -15,6 +15,7 @@ from trajectory_editor.decoder import LlamaCppDecoder, LlamaCppSettings
 from trajectory_editor.episode_cli import main
 from trajectory_editor.episode_store import EpisodeStore
 from trajectory_editor import episode_engine
+from trajectory_editor import controller_pipeline
 
 pytestmark = pytest.mark.llama_smoke
 INITIAL = SamplingConfig(temperature=.83, top_k=31, top_p=.91, min_p=.07,
@@ -80,7 +81,8 @@ class CheckedIO(ScriptedIO):
             fields = dict(item.split('=') for item in text.split(' · ', 1)[1].split())
             c = self.expected
             expected = dict(temp=f'{c.temperature:g}', top_k=str(c.top_k), top_p=f'{c.top_p:g}',
-                min_p=f'{c.min_p:g}', rep=f'{c.repeat_penalty:g}/{c.repeat_last_n}',
+                min_p=f'{c.min_p:g}', typical_p=f'{c.typical_p:g}', tfs_z=f'{c.tail_free_z:g}',
+                draw=c.draw_kernel, rep=f'{c.repeat_penalty:g}/{c.repeat_last_n}',
                 presence=f'{c.presence_penalty:g}', frequency=f'{c.frequency_penalty:g}', seed=str(c.seed))
             assert fields == expected
             self.headers += 1
@@ -102,10 +104,10 @@ def run(path, model, commands, expected, *flags, first_edge=None):
     calls = []
     pending = {}
 
-    def statistics(logits, config, history, boundaries=None):
+    def statistics(logits, config, history, boundaries=None, **kwargs):
         assert config == io.expected, 'Actual sampler configuration disagrees with scenario/UI'
         assert len(logits) > 10000 and np.isfinite(logits).all()
-        result = original_statistics(logits, config, history, boundaries)
+        result = original_statistics(logits, config, history, boundaries, **kwargs)
         ids, probabilities = reference(logits, io.expected, list(history))
         np.testing.assert_array_equal(result.distribution.ids, ids)
         np.testing.assert_allclose(result.distribution.probabilities, probabilities, rtol=1e-11, atol=1e-14)
@@ -125,7 +127,9 @@ def run(path, model, commands, expected, *flags, first_edge=None):
 
     with patch('trajectory_editor.episode_cli.TerminalIO', return_value=io), patch.object(
         episode_engine, 'ObservationStatistics', statistics
-    ), patch.object(episode_engine, 'draw_token', draw):
+    ), patch.object(controller_pipeline, 'ObservationStatistics', statistics), patch.object(
+        episode_engine, 'draw_token', draw
+    ):
         status = main(['--workspace', str(path), '--model', str(model), '--plain-ui',
             '--n-gpu-layers', '0', '--n-threads', '2', '--n-threads-batch', '2', '--n-ctx', '256',
             '--n-batch', '64', *flags])
@@ -196,24 +200,23 @@ def test_real_llama_hidden_state_capture_and_prompt_pair(model):
         assert capabilities['width'] == backend.activation_width()
 
         rows = backend.hidden_state_snapshots(
-            'A calm lake.', layer_start=1, layer_end=2, position='all'
+            'A calm lake.', layer_start=2, layer_end=2, position='all'
         )
-        assert set(rows) == {1, 2}
-        assert rows[1].ndim == 2 and rows[1].shape[1] == backend.activation_width()
-        assert rows[2].shape == rows[1].shape
-        assert np.isfinite(rows[1]).all() and np.isfinite(rows[2]).all()
+        assert set(rows) == {2}
+        assert rows[2].ndim == 2 and rows[2].shape[1] == backend.activation_width()
+        assert np.isfinite(rows[2]).all()
 
         artifact = SteeringVectorArtifact.from_hidden_state_prompt_pair(
             backend,
             backend.provenance(include_model_sha256=False),
             'A calm lake.',
             'A crowded city.',
-            layer_start=1,
+            layer_start=2,
             layer_end=2,
             capture_position='last',
         )
         assert artifact.layer == 'control-vector'
-        assert artifact.layer_start == 1 and artifact.layer_end == 2
+        assert artifact.layer_start == 2 and artifact.layer_end == 2
         assert len(artifact.vector) == backend.activation_width() * capabilities['layer_count']
         assert artifact.source['layer_delta_norms']
     finally:

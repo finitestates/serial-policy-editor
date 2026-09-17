@@ -1004,9 +1004,9 @@ using them on new episodes.
 
 Both backends can create hidden-state vectors directly at the decoder-block
 residual boundary. The first supported site is the residual stream immediately
-after the selected block; one width-sized direction is stored for every text
-layer, with only the requested range active. Layer numbers are one-based in
-this command:
+after the selected block; one width-sized direction is stored for every
+capturable text layer, with only the requested range active. Layer numbers are
+canonical one-based decoder-block numbers in this command:
 
 ```bash
 policy-editor-vector hidden-state create \
@@ -1042,9 +1042,14 @@ policy-editor-vector hidden-state validate calm-vs-angry.json \
 
 The llama.cpp adapter captures all requested token positions in one evaluation
 per prompt, then the artifact creator selects `first` or `last` for the
-prompt-pair direction. Its native control-vector runtime supports layers
-`1..N-1`, matching llama.cpp's cvector convention; the final output-layer
-representation remains a separate output-head coordinate.
+prompt-pair direction. Its native layer-input tap observes canonical block
+output `N` at tap `N`, while llama.cpp's native cvector slot is offset by one;
+SPE translates canonical output `N` to native slot `N-1`. The currently shared
+capture/runtime range is therefore `2..N-1`: canonical block output 1 has no
+native cvector slot, and the final block output is not available through the
+native layer-input capture tap. Requests outside that range are rejected for
+llama.cpp vector creation rather than silently steering a different block. The
+final normalized representation remains a separate output-head coordinate.
 
 There is also a narrow native worker for installations where the Python
 binding's private capture symbols are not a comfortable compatibility boundary.
@@ -1084,9 +1089,12 @@ policy-editor --model model.gguf --new-prompt "Hello" \
 ```
 
 These artifacts preserve the `direction.1` through `direction.N` hidden-state
-directions and their layer range. The editor installs them through llama.cpp's
-control-vector API and rebuilds the current prefix when that runtime state
-changes. Hidden-state vectors are inspectable and replayable; token-level
+directions and canonicalize them as decoder-block outputs. Because native
+slot zero does not exist, imported cvector direction 1 is retained for
+inspection but is outside the active llama.cpp runtime range; directions 2
+through `N` map to native slots 1 through `N-1`. The editor installs them
+through llama.cpp's control-vector API and rebuilds the current prefix when
+that runtime state changes. Hidden-state vectors are inspectable and replayable; token-level
 `explain` is intentionally available only for output-head steering because a
 hidden-state intervention is not a static output-logit offset.
 

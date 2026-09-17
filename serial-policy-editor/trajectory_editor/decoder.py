@@ -280,11 +280,14 @@ class LlamaCppDecoder:
         raise RuntimeError("installed llama.cpp binding does not expose model layer count")
 
     def _control_vector_layer_count(self) -> int:
-        """Return the residual layers supported by llama.cpp control vectors.
+        """Return the canonical block-output vector width in layer slots.
 
-        llama.cpp reserves layer slot zero for the input embedding and its
-        control-vector adapter stores directions for layers 1 through
-        ``n_layer - 1``. This is also the range emitted by cvector-generator.
+        The native adapter allocates ``n_layer - 1`` direction slots, but
+        those slots are indexed by the zero-based decoder loop.  SPE keeps a
+        canonical one-based block-output coordinate and translates it at the
+        setter boundary.  The final block is not capturable by the native
+        layer-input tap, so the portable artifact currently has ``n_layer - 1``
+        canonical slots as well.
         """
         return max(1, self._model_layer_count() - 1)
 
@@ -293,8 +296,17 @@ class LlamaCppDecoder:
         return self.activation_width()
 
     def hidden_state_layer_count(self) -> int:
-        """Return the one-based residual layers directly capturable and steerable."""
+        """Return the one-based residual layers directly capturable by the tap."""
         return self._control_vector_layer_count()
+
+    def hidden_state_runtime_layer_range(self) -> tuple[int, int]:
+        """Return canonical block-output layers supported by native injection."""
+        layer_count = self.hidden_state_layer_count()
+        if layer_count < 2:
+            raise RuntimeError(
+                "llama.cpp control vectors expose no canonical block-output runtime layer"
+            )
+        return 2, layer_count
 
     def hidden_state_layer_types(self) -> tuple[str, ...]:
         return tuple("decoder" for _ in range(self.hidden_state_layer_count()))
@@ -309,8 +321,11 @@ class LlamaCppDecoder:
             "position_policies": ["first", "last", "current", "all"],
             "layer_types": list(self.hidden_state_layer_types()),
             "native_module_path": "llama.cpp layer input tap N",
+            "capture_coordinate": "canonical block-output N <- native input tap N",
+            "injection_coordinate": "canonical block-output N -> native cvector slot N-1",
+            "runtime_layer_range": list(self.hidden_state_runtime_layer_range()),
             "modality": "text",
-            "final_layer_policy": "excluded-from-control-vector-runtime",
+            "final_layer_policy": "not-capturable-by-native-layer-input-tap",
         }
 
     def _hidden_state_capture_symbols(self):
@@ -494,34 +509,52 @@ class LlamaCppDecoder:
         layer_end: int,
         strength: float,
     ) -> None:
-        """Install a layerwise cvector on the live llama.cpp context."""
+        """Install a canonical block-output vector on the live llama.cpp context.
+
+        llama.cpp applies native slot ``s`` after zero-based decoder block
+        ``s``.  Consequently canonical one-based block output ``N`` maps to
+        native slot ``N - 1``.  The first canonical output has no native slot
+        and is rejected rather than silently steering a different block.
+        """
         setter = getattr(self._llama_cpp, "llama_set_adapter_cvec", None)
         if not callable(setter):
             raise RuntimeError("installed llama.cpp binding does not expose control vectors")
         width = self.activation_control_vector_width()
         layer_count = self.activation_control_vector_layer_count()
+        runtime_start, runtime_end = self.hidden_state_runtime_layer_range()
         if (
             type(layer_start) is not int
             or type(layer_end) is not int
-            or layer_start < 1
+            or layer_start < runtime_start
             or layer_end < layer_start
-            or layer_end > layer_count
+            or layer_end > runtime_end
         ):
-            raise RuntimeError("control-vector layer range is outside the loaded model")
+            raise RuntimeError(
+                "control-vector canonical layer range is outside the loaded model "
+                f"runtime range {runtime_start}..{runtime_end}"
+            )
         values = np.asarray(vector, dtype=np.float32)
         if values.ndim != 1 or values.size != width * layer_count:
             raise RuntimeError("control-vector data does not match the loaded model")
         if not np.all(np.isfinite(values)):
             raise RuntimeError("control-vector data is not finite")
-        scaled = np.ascontiguousarray(values * float(strength), dtype=np.float32)
+        # The canonical vector reserves one chunk per capturable block output.
+        # Native cvector data reserves one chunk per native slot.  Shift the
+        # canonical chunks left so native slot 1 receives canonical layer 2;
+        # the final native slot is intentionally zero because canonical layer
+        # ``n_layer`` is not part of the current capture contract.
+        native_values = np.zeros_like(values)
+        if layer_count > 1:
+            native_values[: width * (layer_count - 1)] = values[width:]
+        scaled = np.ascontiguousarray(native_values * float(strength), dtype=np.float32)
         context = self._model._ctx.ctx if hasattr(self._model, "_ctx") else self._model.ctx
         result = setter(
             context,
             scaled.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             int(scaled.size),
             width,
-            layer_start,
-            layer_end,
+            layer_start - 1,
+            layer_end - 1,
         )
         if int(result) != 0:
             raise RuntimeError(f"llama.cpp rejected the control vector (error {result})")

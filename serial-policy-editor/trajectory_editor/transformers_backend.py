@@ -652,6 +652,11 @@ class TransformersBackend:
 
         return int(len(self._decoder_layers()))
 
+    def hidden_state_runtime_layer_range(self) -> tuple[int, int]:
+        """Return canonical block-output layers supported by HF hooks."""
+
+        return 1, self.hidden_state_layer_count()
+
     def hidden_state_layer_types(self) -> tuple[str, ...]:
         """Describe each decoder block without assuming attention is uniform."""
 
@@ -674,6 +679,9 @@ class TransformersBackend:
             "position_policies": ["first", "last", "current", "all"],
             "layer_types": list(self.hidden_state_layer_types()),
             "native_module_path": f"{path}[N-1]",
+            "capture_coordinate": "canonical block-output N <- module output hook N",
+            "injection_coordinate": "canonical block-output N <- module output hook N",
+            "runtime_layer_range": list(self.hidden_state_runtime_layer_range()),
             "modality": "text",
         }
 

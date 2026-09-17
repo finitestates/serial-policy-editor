@@ -32,6 +32,7 @@ def worker_response(filename: str = "model.gguf") -> dict:
         "target": {
             "site": "decoder-block-output-residual",
             "layer_numbering": "one-based",
+            "coordinate": "canonical-decoder-block-output-v1",
             "layer_start": 2,
             "layer_end": 3,
             "position": "last",

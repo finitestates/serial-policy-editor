@@ -143,4 +143,54 @@ def test_llama_hidden_state_coordinate_excludes_unsteerable_final_layer():
     assert capabilities["site"] == "decoder-block-output-residual"
     assert capabilities["layer_numbering"] == "one-based"
     assert capabilities["layer_count"] == 3
-    assert capabilities["final_layer_policy"] == "excluded-from-control-vector-runtime"
+    assert capabilities["capture_coordinate"] == "canonical block-output N <- native input tap N"
+    assert capabilities["injection_coordinate"] == "canonical block-output N -> native cvector slot N-1"
+    assert capabilities["runtime_layer_range"] == [2, 3]
+    assert capabilities["final_layer_policy"] == "not-capturable-by-native-layer-input-tap"
+
+
+def test_llama_control_vector_maps_canonical_layers_to_native_slots():
+    decoder, model, _ = _decoder_with_capture_buffers({})
+    calls = []
+
+    class Binding:
+        def llama_set_adapter_cvec(self, context, pointer, size, width, start, end):
+            values = np.ctypeslib.as_array(pointer, shape=(int(size),)).copy()
+            calls.append((context, values, int(width), int(start), int(end)))
+            return 0
+
+    decoder._model = model
+    decoder._llama_cpp = Binding()
+
+    decoder.set_activation_control_vector(
+        np.asarray([1, 2, 3, 4, 5, 6], dtype=np.float32),
+        layer_start=2,
+        layer_end=3,
+        strength=0.5,
+    )
+
+    assert len(calls) == 1
+    context, values, width, native_start, native_end = calls[0]
+    assert context is model._ctx.ctx
+    assert width == 2
+    assert native_start == 1
+    assert native_end == 2
+    np.testing.assert_allclose(values, [1.5, 2.0, 2.5, 3.0, 0.0, 0.0])
+
+
+def test_llama_control_vector_rejects_unaddressable_first_block_output():
+    decoder, _, _ = _decoder_with_capture_buffers({})
+    decoder._model = _FakeEmbeddingModel()
+
+    class Binding:
+        def llama_set_adapter_cvec(self, *args):
+            raise AssertionError("setter must not be called")
+
+    decoder._llama_cpp = Binding()
+    with pytest.raises(RuntimeError, match="canonical layer range"):
+        decoder.set_activation_control_vector(
+            np.zeros(6, dtype=np.float32),
+            layer_start=1,
+            layer_end=2,
+            strength=1.0,
+        )
