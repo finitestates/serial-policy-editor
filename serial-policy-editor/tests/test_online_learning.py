@@ -4,7 +4,7 @@ import numpy as np
 from tests.fakes import ConformingFakeBackend
 from trajectory_editor.bias_rules import BiasGroup, BiasRule
 from trajectory_editor.domain import EditorError, SamplingConfig
-from trajectory_editor.episode_actions import SelectRawRank
+from trajectory_editor.episode_actions import Accept, SelectRawRank
 from trajectory_editor.episode_engine import EpisodeEngine, ReplayExpectation
 from trajectory_editor.episode_policy import EpisodeRunner, TapeStep
 from trajectory_editor.episode_store import EpisodeStore
@@ -187,6 +187,37 @@ def test_runner_learns_only_after_live_select_raw_rank_and_persists_boundary(tmp
         assert interaction["payload"]["observation_boundary"] == 0
         assert interaction["payload"]["chosen_token_id"] == 3
         assert interaction["payload"]["new_group_weights"]["concrete"] > 0.0
+
+
+def test_runner_learns_after_live_accept_as_an_explicit_teacher_selection(tmp_path):
+    sampling = _sampling(_group("concrete", (3,)))
+    runtime = _engine(sampling)
+    with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
+        episode_id = store.create_episode(
+            episode_id="live-accept-learning",
+            initial_text=runtime.text,
+            initial_token_ids=list(runtime.initial_token_ids),
+            sampling=sampling,
+            stream_fingerprint=runtime.stream_fingerprint,
+            coordinate_offset=0,
+            max_tokens=None,
+            backend={},
+        )
+        result = EpisodeRunner(
+            runtime,
+            store,
+            episode_id,
+            learner=OnlineLearner(enabled=True, learning_rate=0.5),
+        ).run(
+            live_policy=type("Once", (), {"choose": lambda self, _e, _o: Accept()})(),
+            max_live_actions=1,
+        )
+
+        assert result.outcomes[0].evidence[0].token_id == 3
+        assert runtime.sampling.bias_groups[0].bias > 0.0
+        interaction = store.interactions(episode_id)[-1]
+        assert interaction["kind"] == "online-learning-update"
+        assert interaction["payload"]["chosen_token_id"] == 3
 
 
 def test_runner_does_not_learn_during_replay(tmp_path):

@@ -16,6 +16,7 @@ from .token_preference_features import (
     coordinate_identity,
 )
 from .learning_controls import decay_applies, validate_controls, write_scale
+from .learning_observation import CompiledLearningObservation
 
 
 _MIN_PROBABILITY = float.fromhex("0x1.0p-1022")
@@ -670,19 +671,22 @@ class TokenPreferenceLearner:
         observation,
         chosen_token_id: int,
         sampling: SamplingConfig,
+        *,
+        compiled: CompiledLearningObservation | None = None,
     ) -> TokenPreferenceResult:
         if type(chosen_token_id) is not int or not 0 <= chosen_token_id < len(
             observation.logits
         ):
             raise EditorError("chosen token is outside the observation vocabulary")
 
-        statistics = observation.statistics
+        if compiled is not None and compiled.observation is not observation:
+            raise EditorError("compiled learning observation does not match observation")
+        prepared = compiled or CompiledLearningObservation.from_observation(observation)
+        statistics = prepared.statistics
         old_policy_rank = statistics.policy_rank(chosen_token_id)
-        old_policy_probability = float(
-            statistics.policy_probabilities[chosen_token_id]
-        )
-        sampler_eligible = bool(chosen_token_id in statistics.distribution.ids)
-        sampler_probability = statistics.distribution.probability(chosen_token_id)
+        old_policy_probability = float(prepared.policy_probabilities[chosen_token_id])
+        sampler_eligible = prepared.sampler_eligible(chosen_token_id)
+        sampler_probability = prepared.sampler_probability(chosen_token_id)
         severity = (float(not sampler_eligible) if self.config.learning_gate == "sampler"
                     else self._severity(old_policy_rank))
         loss = self._loss(old_policy_probability)
@@ -693,9 +697,10 @@ class TokenPreferenceLearner:
         if old_z.size == 0:
             old_z = np.zeros(dimension, dtype=np.float64)
 
-        features = getattr(statistics, "token_preference_features", None)
+        features = prepared.token_preference_features
         if features is None:
             features = self._features(len(observation.logits), sampling, dimension)
+            prepared.token_preference_features = features
         else:
             features = np.asarray(features, dtype=np.float32)
             expected = (len(observation.logits), dimension)
@@ -824,7 +829,7 @@ class TokenPreferenceLearner:
                 self.config.rejection_strength * pair_loss
             )
         else:
-            probabilities = np.asarray(statistics.policy_probabilities, dtype=np.float64)
+            probabilities = np.asarray(prepared.policy_probabilities, dtype=np.float64)
             weighted_mean = np.empty(dimension, dtype=np.float64)
             # Accumulate in float64 without first materializing a float64 copy
             # of the full float32 feature matrix. Keep this v1 reduction

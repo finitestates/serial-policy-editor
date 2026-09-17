@@ -8,11 +8,12 @@ import math
 from typing import Protocol
 
 from .domain import SamplingConfig
-from .episode_actions import PolicyAction, SelectRawRank, Write
+from .episode_actions import Accept, PolicyAction, SelectRawRank, Write
 from .episode_engine import ActionOutcome, EpisodeEngine, Observation, ReplayExpectation, InstructionRejected
 from .episode_store import EpisodeStore
 from .token_preference import TokenPreferenceLearner, TokenPreferenceResult
 from .online_learning import LearningResult, OnlineLearner
+from .learning_observation import CompiledLearningObservation
 
 
 class EdgeRequested(Exception):
@@ -202,13 +203,16 @@ class _WriteLearningAccumulator:
         if self.backend.is_eog(token_id):
             return None
         old_sampling = self.sampling
+        compiled = CompiledLearningObservation.from_observation(observation)
         group_result = (
-            self.learner.update(observation, token_id, old_sampling)
+            self.learner.update(observation, token_id, old_sampling, compiled=compiled)
             if self.learner is not None
             else None
         )
         token_preference_result = (
-            self.token_preference_learner.update(observation, token_id, old_sampling)
+            self.token_preference_learner.update(
+                observation, token_id, old_sampling, compiled=compiled
+            )
             if self.token_preference_learner is not None
             else None
         )
@@ -302,9 +306,16 @@ class EpisodeRunner:
         action: PolicyAction,
         outcome: ActionOutcome,
     ) -> LearningResult | TokenPreferenceResult | None:
-        """Learn after a committed live raw-rank selection only."""
+        """Learn after a committed live explicit token selection.
+
+        The interactive UI currently translates ``Accept`` to a raw-rank
+        selection, but headless and programmatic policies may submit
+        ``Accept`` directly.  Both forms are authoritative teacher choices;
+        the resolved token, rather than the proposal's provenance, is the
+        learner input.
+        """
         if (
-            not isinstance(action, SelectRawRank)
+            not isinstance(action, (Accept, SelectRawRank))
             or outcome.status != "completed"
             or len(outcome.evidence) != 1
             or outcome.evidence[0].is_eog
@@ -312,15 +323,16 @@ class EpisodeRunner:
             return None
         evidence = outcome.evidence[0]
         old_sampling = self.engine.sampling
+        compiled = CompiledLearningObservation.from_observation(observation)
         group_result = None
         if self.learner is not None and self.learner.enabled:
             group_result = self.learner.update(
-                observation, evidence.token_id, old_sampling
+                observation, evidence.token_id, old_sampling, compiled=compiled
             )
         token_preference_result = None
         if self.token_preference_learner is not None and self.token_preference_learner.enabled:
             token_preference_result = self.token_preference_learner.update(
-                observation, evidence.token_id, old_sampling
+                observation, evidence.token_id, old_sampling, compiled=compiled
             )
 
         updated_sampling = old_sampling

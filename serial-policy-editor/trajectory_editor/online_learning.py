@@ -13,6 +13,37 @@ from typing import Any
 from .domain import EditorError, SamplingConfig
 from .sampling import ObservationStatistics
 from .learning_controls import decay_applies, validate_controls, write_scale
+from .learning_observation import CompiledLearningObservation
+
+
+class _GroupFeatureCompiler:
+    """Cache normalized group matchers; active routes remain observation-local."""
+
+    def __init__(self) -> None:
+        self._matchers: dict[tuple[Any, ...], Any] = {}
+
+    def _matcher(self, group):
+        from .bias_rules import BiasMatcher
+
+        key = (group.name, group.rules)
+        matcher = self._matchers.get(key)
+        if matcher is None:
+            matcher = BiasMatcher(replace(group, bias=1.0).effective_rules())
+            self._matchers[key] = matcher
+        return matcher
+
+    def active_scales(
+        self,
+        group,
+        prepared: CompiledLearningObservation,
+    ) -> dict[int, float]:
+        key = (group.name, group.rules)
+        if key not in prepared.group_scales:
+            prepared.group_scales[key] = self._matcher(group).active_biases(
+                prepared.observation.prefix_token_ids,
+                prepared.statistics.boundaries,
+            )
+        return prepared.group_scales[key]
 
 
 def _finite_number(value: Any, name: str, *, nonnegative: bool = False) -> float:
@@ -181,6 +212,7 @@ class OnlineLearner:
         if config is not None and settings:
             raise TypeError("pass either config or online-learning settings")
         self.config = config or OnlineLearningConfig(**settings)
+        self._group_features = _GroupFeatureCompiler()
 
     @property
     def enabled(self) -> bool:
@@ -229,6 +261,8 @@ class OnlineLearner:
         observation,
         chosen_token_id: int,
         sampling: SamplingConfig,
+        *,
+        compiled: CompiledLearningObservation | None = None,
     ) -> LearningResult:
         """Apply one bounded correction using the pre-action observation."""
         if type(chosen_token_id) is not int or not 0 <= chosen_token_id < len(
@@ -236,13 +270,16 @@ class OnlineLearner:
         ):
             raise EditorError("chosen token is outside the observation vocabulary")
 
-        statistics = observation.statistics
+        if compiled is not None and compiled.observation is not observation:
+            raise EditorError("compiled learning observation does not match observation")
+        prepared = compiled or CompiledLearningObservation.from_observation(observation)
+        statistics = prepared.statistics
         old_policy_rank = statistics.policy_rank(chosen_token_id)
-        old_policy_probability = float(statistics.policy_probabilities[chosen_token_id])
+        old_policy_probability = float(prepared.policy_probabilities[chosen_token_id])
         # Membership, rather than probability > 0, also handles numerical
         # underflow for a token that survived the actual decoder filters.
-        sampler_eligible = bool(chosen_token_id in statistics.distribution.ids)
-        sampler_probability = statistics.distribution.probability(chosen_token_id)
+        sampler_eligible = prepared.sampler_eligible(chosen_token_id)
+        sampler_probability = prepared.sampler_probability(chosen_token_id)
         severity = (float(not sampler_eligible) if self.config.learning_gate == "sampler"
                     else self._severity(old_policy_rank))
         loss = self._loss(statistics, chosen_token_id)
@@ -268,7 +305,6 @@ class OnlineLearner:
         evidence = {}
         skipped = {}
         if self.enabled:
-            from .bias_rules import BiasMatcher
             for group in groups:
                 if group.name not in selected_names or not group.enabled or not group.learnable:
                     skipped[group.name] = "disabled or frozen"
@@ -281,8 +317,7 @@ class OnlineLearner:
                     continue
                 # A group's deduplicated edge scales are sparse fixed features.
                 # Standalone lexical priors do not depend on group magnitude.
-                scales = BiasMatcher(replace(group, bias=1.).effective_rules()).active_biases(
-                    observation.prefix_token_ids, statistics.boundaries)
+                scales = self._group_features.active_scales(group, prepared)
                 chosen_scale = scales.get(chosen_token_id, 0.0)
                 if chosen_scale <= 0.0:
                     # A teacher selection outside this group's active routes is
@@ -294,7 +329,7 @@ class OnlineLearner:
                 # Appearance controllers and reference priors may change the
                 # current policy expectation, but they do not change the
                 # meaning of a teacher selecting an active group member.
-                mean = sum(float(statistics.policy_probabilities[t]) * v for t, v in scales.items())
+                mean = sum(float(prepared.policy_probabilities[t]) * v for t, v in scales.items())
                 gradient = mean - chosen_scale
                 if observation.proposal_token_id != chosen_token_id:
                     negative = scales.get(observation.proposal_token_id, 0.)
