@@ -28,7 +28,7 @@ from .token_preference import (
 )
 from .token_preference_features import TokenPreferenceCoordinateIdentity
 from .vector_artifacts import TokenPreferenceVectorArtifact
-from .activation_vectors import ActivationVectorArtifact
+from .steering_vectors import SteeringVectorArtifact
 from .controller_pipeline import ControllerPipeline
 from .sampling import ControllerTrace, ControllerTraceStage
 from .trajectory_compare import compare_episodes, render_compare_report
@@ -60,7 +60,7 @@ __all__ = [
     "TokenPreferenceResult",
     "TokenPreferenceCoordinateIdentity",
     "TokenPreferenceVectorArtifact",
-    "ActivationVectorArtifact",
+    "SteeringVectorArtifact",
     "ControllerPipeline",
     "ControllerTrace",
     "ControllerTraceStage",

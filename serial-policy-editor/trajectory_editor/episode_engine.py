@@ -397,9 +397,9 @@ class EpisodeEngine:
             and sampling.activation_vector_strength != 0.0
         ):
             return ("plain",)
-        from .activation_vectors import activation_vector_digest_for
+        from .activation_vectors import steering_vector_digest_for
 
-        content_digest = activation_vector_digest_for(
+        content_digest = steering_vector_digest_for(
             sampling.activation_vector,
             model=sampling.activation_vector_model,
             layer=sampling.activation_vector_layer,
@@ -433,7 +433,7 @@ class EpisodeEngine:
                     # already present in a reused KV cache.
                     self.backend.reset(self.token_ids)
                 except (RuntimeError, TypeError, ValueError) as exc:
-                    raise EditorError(f"could not clear activation control vector: {exc}") from exc
+                    raise EditorError(f"could not clear hidden-state control vector: {exc}") from exc
         if is_control:
             setter = getattr(self.backend, "set_activation_control_vector", None)
             if not callable(setter):
@@ -457,13 +457,13 @@ class EpisodeEngine:
                     width_method = getattr(self.backend, "activation_width", None)
                     if not callable(width_method):
                         raise EditorError(
-                            "the loaded backend does not expose activation width metadata"
+                            "the loaded backend does not expose hidden-state width metadata"
                         )
                     assert_model_compatible(
                         expected_model,
                         model_identity(
                             self.backend.provenance(include_model_sha256=False),
-                            activation_width=int(width_method()),
+                            hidden_state_width=int(width_method()),
                         ),
                         label="loaded model",
                     )
@@ -520,7 +520,7 @@ class EpisodeEngine:
             provider = getattr(self.backend, "activation_logit_adjustments", None)
             if not callable(provider):
                 raise EditorError(
-                    "the loaded backend does not expose output activation runtime support"
+                    "the loaded backend does not expose output-head steering runtime support"
                 )
             validation_key = (
                 self.sampling.activation_vector_digest,
@@ -539,13 +539,13 @@ class EpisodeEngine:
                     width_method = getattr(self.backend, "activation_width", None)
                     if not callable(width_method):
                         raise EditorError(
-                            "the loaded backend does not expose activation width metadata"
+                            "the loaded backend does not expose hidden-state width metadata"
                         )
                     assert_model_compatible(
                         expected_model,
                         model_identity(
                             self.backend.provenance(include_model_sha256=False),
-                            activation_width=int(width_method()),
+                            hidden_state_width=int(width_method()),
                         ),
                         label="loaded model",
                     )
@@ -557,16 +557,16 @@ class EpisodeEngine:
                     position=self.sampling.activation_vector_position,
                 )
             except (RuntimeError, TypeError, ValueError) as exc:
-                raise EditorError(f"could not apply activation vector: {exc}") from exc
+                raise EditorError(f"could not apply output-head steering vector: {exc}") from exc
             activation_logit_adjustments = np.asarray(
                 activation_logit_adjustments, dtype=np.float64
             )
             if activation_logit_adjustments.shape != logits.shape:
                 raise RuntimeError(
-                    "activation logit adjustments do not match the backend vocabulary"
+                    "output-head steering adjustments do not match the backend vocabulary"
                 )
             if not np.all(np.isfinite(activation_logit_adjustments)):
-                raise RuntimeError("activation logit adjustments are not finite")
+                raise RuntimeError("output-head steering adjustments are not finite")
         statistics = self.controller_pipeline.build_statistics(
             logits,
             self.sampling,

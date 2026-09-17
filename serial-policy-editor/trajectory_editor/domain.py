@@ -189,24 +189,24 @@ class SamplingConfig:
         object.__setattr__(self, "activation_vector", activation)
         if self.activation_vector_layer == "output":
             if self.activation_vector_position != "current":
-                raise EditorError("output activation position must be current")
+                raise EditorError("output-head steering position must be current")
             if (
                 self.activation_vector_layer_start is not None
                 or self.activation_vector_layer_end is not None
             ):
-                raise EditorError("output activation vectors cannot specify a layer range")
+                raise EditorError("output-head steering vectors cannot specify a layer range")
         elif self.activation_vector_layer == "control-vector":
             if self.activation_vector_position != "layers":
-                raise EditorError("control-vector activation position must be layers")
+                raise EditorError("hidden-state vector position must be layers")
             if (
                 type(self.activation_vector_layer_start) is not int
                 or self.activation_vector_layer_start < 1
                 or type(self.activation_vector_layer_end) is not int
                 or self.activation_vector_layer_end < self.activation_vector_layer_start
             ):
-                raise EditorError("activation vector layer range must be a positive interval")
+                raise EditorError("hidden-state vector layer range must be a positive interval")
         else:
-            raise EditorError("activation_vector_layer must be output or control-vector")
+            raise EditorError("steering vector target must be output or control-vector")
         value = self.activation_vector_strength
         if (
             type(value) not in (int, float)
@@ -249,13 +249,14 @@ class SamplingConfig:
                 "active control-vector activation requires a verified digest"
             )
         if activation and model:
-            width = json.loads(model).get("activation_width")
+            model_metadata = json.loads(model)
+            width = model_metadata.get("hidden_state_width", model_metadata.get("activation_width"))
             if (
                 width is not None
                 and self.activation_vector_layer == "output"
                 and width != len(activation)
             ):
-                raise EditorError("activation vector dimension does not match model width")
+                raise EditorError("steering vector dimension does not match model width")
             if (
                 width is not None
                 and self.activation_vector_layer == "control-vector"
@@ -267,7 +268,9 @@ class SamplingConfig:
                 and width is None
             ):
                 raise EditorError("control-vector activation requires model width")
-            layer_count = json.loads(model).get("activation_layer_count")
+            layer_count = model_metadata.get(
+                "hidden_state_layer_count", model_metadata.get("activation_layer_count")
+            )
             if (
                 layer_count is not None
                 and self.activation_vector_layer == "control-vector"
@@ -530,6 +533,32 @@ class SamplingConfig:
                     if float(legacy_exit) > 0.0
                     else "contrastive"
                 )
+        steering_vector = value.get(
+            "steering_vector", value.get("activation_vector", defaults.activation_vector)
+        )
+        steering_strength = value.get(
+            "steering_strength",
+            value.get("activation_vector_strength", defaults.activation_vector_strength),
+        )
+        steering_layer = value.get(
+            "activation_vector_layer", defaults.activation_vector_layer
+        )
+        steering_kind = value.get("steering_kind")
+        if steering_kind is not None:
+            if steering_kind == "output-head-steering-vector":
+                steering_layer = "output"
+            elif steering_kind == "hidden-state-vector":
+                steering_layer = "control-vector"
+            else:
+                raise EditorError(
+                    "steering_kind must identify an output-head or hidden-state vector"
+                )
+        steering_position = value.get(
+            "steering_position",
+            value.get("activation_vector_position", defaults.activation_vector_position),
+        )
+        if steering_kind == "hidden-state-vector" and "steering_position" not in value:
+            steering_position = "layers"
         return cls(
             temperature=value.get("temperature", defaults.temperature),
             top_k=value.get("top_k", defaults.top_k),
@@ -574,27 +603,25 @@ class SamplingConfig:
             token_preference_coordinate_identity=value.get(
                 "token_preference_coordinate_identity", defaults.token_preference_coordinate_identity
             ),
-            activation_vector=value.get("activation_vector", defaults.activation_vector),
-            activation_vector_strength=value.get(
-                "activation_vector_strength", defaults.activation_vector_strength
-            ),
-            activation_vector_layer=value.get(
-                "activation_vector_layer", defaults.activation_vector_layer
-            ),
-            activation_vector_position=value.get(
-                "activation_vector_position", defaults.activation_vector_position
-            ),
+            activation_vector=steering_vector,
+            activation_vector_strength=steering_strength,
+            activation_vector_layer=steering_layer,
+            activation_vector_position=steering_position,
             activation_vector_layer_start=value.get(
-                "activation_vector_layer_start", defaults.activation_vector_layer_start
+                "steering_layer_start",
+                value.get("activation_vector_layer_start", defaults.activation_vector_layer_start),
             ),
             activation_vector_layer_end=value.get(
-                "activation_vector_layer_end", defaults.activation_vector_layer_end
+                "steering_layer_end",
+                value.get("activation_vector_layer_end", defaults.activation_vector_layer_end),
             ),
             activation_vector_model=value.get(
-                "activation_vector_model", defaults.activation_vector_model
+                "steering_model",
+                value.get("activation_vector_model", defaults.activation_vector_model),
             ),
             activation_vector_digest=value.get(
-                "activation_vector_digest", defaults.activation_vector_digest
+                "steering_digest",
+                value.get("activation_vector_digest", defaults.activation_vector_digest),
             ),
             group_control_scheme=value.get(
                 "group_control_scheme", defaults.group_control_scheme
@@ -626,6 +653,33 @@ class SamplingConfig:
         if not isinstance(value, Mapping):
             raise EditorError("saved sampler settings must be an object")
         value = dict(value)
+        legacy_layer = value.get("activation_vector_layer", "output")
+        legacy_position = value.get("activation_vector_position", "current")
+        for old_name, new_name in (
+            ("activation_vector", "steering_vector"),
+            ("activation_vector_strength", "steering_strength"),
+            ("activation_vector_position", "steering_position"),
+            ("activation_vector_layer_start", "steering_layer_start"),
+            ("activation_vector_layer_end", "steering_layer_end"),
+            ("activation_vector_model", "steering_model"),
+            ("activation_vector_digest", "steering_digest"),
+        ):
+            if old_name in value:
+                if new_name in value:
+                    raise EditorError(
+                        f"saved sampler settings contain both {old_name} and {new_name}"
+                    )
+                value[new_name] = value.pop(old_name)
+        if "steering_kind" not in value:
+            value["steering_kind"] = (
+                "hidden-state-vector"
+                if legacy_layer == "control-vector"
+                else "output-head-steering-vector"
+            )
+        value.setdefault(
+            "steering_position",
+            "layers" if legacy_layer == "control-vector" else legacy_position,
+        )
         # Scheme fields were introduced after the original v1 records. Missing
         # fields mean the original mathematics, never an implicit upgrade.
         for name, default in (
@@ -638,14 +692,14 @@ class SamplingConfig:
             ("token_preference_max_gain", 8.0),
             ("token_preference_coordinate_identity", None),
             ("group_control_scheme", "appearance-feedback-v1"),
-            ("activation_vector", ()),
-            ("activation_vector_strength", 0.0),
-            ("activation_vector_layer", "output"),
-            ("activation_vector_position", "current"),
-            ("activation_vector_layer_start", None),
-            ("activation_vector_layer_end", None),
-            ("activation_vector_model", ""),
-            ("activation_vector_digest", ""),
+            ("steering_vector", ()),
+            ("steering_strength", 0.0),
+            ("steering_kind", "output-head-steering-vector"),
+            ("steering_position", "current"),
+            ("steering_layer_start", None),
+            ("steering_layer_end", None),
+            ("steering_model", ""),
+            ("steering_digest", ""),
         ):
             value.setdefault(name, default)
         if "reference_prior_mode" not in value:
@@ -727,17 +781,21 @@ class SamplingConfig:
             ),
             **(
                 {
-                    "activation_vector": list(self.activation_vector),
-                    "activation_vector_strength": self.activation_vector_strength,
-                    "activation_vector_layer": self.activation_vector_layer,
-                    "activation_vector_position": self.activation_vector_position,
-                    "activation_vector_layer_start": self.activation_vector_layer_start,
-                    "activation_vector_layer_end": self.activation_vector_layer_end,
-                    "activation_vector_model": (
+                    "steering_vector": list(self.activation_vector),
+                    "steering_strength": self.activation_vector_strength,
+                    "steering_kind": (
+                        "hidden-state-vector"
+                        if self.activation_vector_layer == "control-vector"
+                        else "output-head-steering-vector"
+                    ),
+                    "steering_position": self.activation_vector_position,
+                    "steering_layer_start": self.activation_vector_layer_start,
+                    "steering_layer_end": self.activation_vector_layer_end,
+                    "steering_model": (
                         json.loads(self.activation_vector_model)
                         if self.activation_vector_model else {}
                     ),
-                    "activation_vector_digest": self.activation_vector_digest,
+                    "steering_digest": self.activation_vector_digest,
                 }
                 if (
                     self.activation_vector

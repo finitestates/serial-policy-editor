@@ -609,9 +609,9 @@ class TransformersBackend:
             raise RuntimeError("Transformers activation runtime position must be current")
         values = np.asarray(vector, dtype=np.float32)
         if values.ndim != 1 or values.shape[0] != self.activation_width():
-            raise RuntimeError("activation vector does not match the output-head width")
+            raise RuntimeError("output-head steering vector does not match the output-head width")
         if not np.all(np.isfinite(values)):
-            raise RuntimeError("activation vector is not finite")
+            raise RuntimeError("output-head steering vector is not finite")
         digest = hashlib.sha256(np.ascontiguousarray(values).tobytes()).hexdigest()
         key = (layer, position, digest)
         cached = self._activation_logit_cache.get(key)

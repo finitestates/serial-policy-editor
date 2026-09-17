@@ -40,8 +40,7 @@ _PATH_FIELDS = {
     "biases": "biases",
     "groups": "groups",
     "reference": "reference",
-    "activation": "activation_vector",
-    "vector": "activation_vector",
+    "steering": "activation_vector",
 }
 _SAMPLER_FIELDS = {
     "temperature": float,
@@ -129,6 +128,8 @@ _PROFILE_FIELDS = frozenset(
     for field_name in field_names
 )
 _PROFILE_PATH_FIELDS = frozenset({"biases", "groups", "reference", "activation_vector"})
+_PROFILE_PUBLIC_NAMES = {"activation_vector": "vector"}
+_PROFILE_INTERNAL_NAMES = {value: key for key, value in _PROFILE_PUBLIC_NAMES.items()}
 _PROFILE_BOOL_FIELDS = frozenset(
     {
         "random_seed", "online_learning", "learning_no_severity_attenuation",
@@ -527,7 +528,7 @@ def _controller_profile_payload(plan: RuntimePlan) -> dict[str, Any]:
         "format": CONTROLLER_PROFILE_FORMAT,
         "controllers": {
             group: {
-                name: intent[name]
+                _PROFILE_PUBLIC_NAMES.get(name, name): intent[name]
                 for name in fields
                 if name in intent
             }
@@ -723,23 +724,27 @@ def _parse_controller_profile(document: Any, path: Path) -> tuple[dict[str, Any]
     values: dict[str, Any] = {}
     for group, raw_values in raw_controllers.items():
         raw_values = _profile_mapping(raw_values, label=f"controllers.{group}")
-        allowed_fields = set(_PROFILE_FIELD_GROUPS[group])
+        allowed_fields = {
+            _PROFILE_PUBLIC_NAMES.get(name, name)
+            for name in _PROFILE_FIELD_GROUPS[group]
+        }
         unknown_fields = set(raw_values) - allowed_fields
         if unknown_fields:
             raise EditorError(
                 f"controller profile {group} has unknown fields: "
                 + ", ".join(sorted(unknown_fields))
             )
-        for field_name, raw_value in raw_values.items():
+        for public_name, raw_value in raw_values.items():
+            field_name = _PROFILE_INTERNAL_NAMES.get(public_name, public_name)
             values[field_name] = _profile_value(
-                field_name, raw_value, label=f"controllers.{group}.{field_name}"
+                field_name, raw_value, label=f"controllers.{group}.{public_name}"
             )
     _validate_profile_values(values)
     payload = {
         "format": CONTROLLER_PROFILE_FORMAT,
         "controllers": {
             group: {
-                name: values[name]
+                _PROFILE_PUBLIC_NAMES.get(name, name): values[name]
                 for name in fields
                 if name in values
             }
@@ -787,7 +792,13 @@ def apply_controller_profile(plan: RuntimePlan, payload: dict[str, Any]) -> str:
 
     values = {}
     for group, fields in _PROFILE_FIELD_GROUPS.items():
-        values.update(payload["controllers"].get(group, {}))
+        for public_name, value in payload["controllers"].get(group, {}).items():
+            field_name = _PROFILE_INTERNAL_NAMES.get(public_name, public_name)
+            if field_name not in fields:
+                raise EditorError(
+                    f"controller profile {group} has unknown field {public_name!r}"
+                )
+            values[field_name] = value
 
     candidate = replace(plan, explicit_options=set(plan.explicit_options))
     baseline = type(plan)()
@@ -1035,7 +1046,7 @@ def setup_summary(plan: RuntimePlan) -> str:
             f"  biases     {_display_path(getattr(plan, 'biases', None))}",
             f"  groups     {_display_path(getattr(plan, 'groups', None))}",
             f"  reference  {_display_path(getattr(plan, 'reference', None))}",
-            f"  activation {_display_path(getattr(plan, 'activation_vector', None))}",
+            f"  steering   {_display_path(getattr(plan, 'activation_vector', None))}",
             "",
             f"Sampler      {sampler}",
             f"Seed         {getattr(plan, 'seed', None) if getattr(plan, 'seed', None) is not None else 'default'}",
@@ -1052,7 +1063,7 @@ def setup_summary(plan: RuntimePlan) -> str:
             "  source replay|resume|fork ID [at N]",
             "  model PATH                  choose a model",
             "  backend llama.cpp|transformers",
-            "  biases|groups|reference|activation PATH",
+            "  biases|groups|reference|steering PATH",
             "  sampler key=value [...]     change sampler settings",
             "  budget N|off                set visible-token allowance",
             "  seed N|random|default",
@@ -1141,11 +1152,12 @@ def effective_plan_summary(
     if sampling.activation_vector_digest:
         layer = sampling.activation_vector_layer
         rows.append(
-            f"  activation       {sampling.activation_vector_digest[:12]} "
-            f"layer={layer} strength={sampling.activation_vector_strength:g}"
+            f"  steering        {sampling.activation_vector_digest[:12]} "
+            f"target={('output-head' if layer == 'output' else 'hidden-state')} "
+            f"strength={sampling.activation_vector_strength:g}"
         )
     else:
-        rows.append("  activation       none")
+        rows.append("  steering         none")
     if sampling.bias_rules or sampling.bias_groups:
         rows.append(
             f"  biases           {len(sampling.bias_rules)} rules, "

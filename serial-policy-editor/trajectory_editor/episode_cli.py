@@ -20,7 +20,7 @@ from typing import Any
 from prompt_toolkit import prompt
 from prompt_toolkit.validation import Validator
 
-from .activation_vectors import ActivationVectorArtifact
+from .activation_vectors import SteeringVectorArtifact
 from .bias_presets import load_bias_preset, project_biases
 from .bias_catalog import load_catalog, validate_catalog, compile_catalog, load_yaml_source, BiasCatalog
 from .lexical_reference import load_reference
@@ -467,14 +467,18 @@ def build_parser() -> argparse.ArgumentParser:
         sampling.add_argument("--" + name.replace("_", "-"), type=kind)
     sampling.add_argument("--biases", type=Path, help="load a JSON bias preset (replaces the saved bias set)")
     sampling.add_argument(
-        "--activation-vector",
+        "--steering-vector",
+        dest="activation_vector",
         type=Path,
-        help="load a model-matched activation artifact or llama.cpp cvector GGUF",
+        metavar="PATH",
+        help="load an output-head steering or hidden-state vector artifact",
     )
     sampling.add_argument(
-        "--activation-strength",
+        "--steering-strength",
+        dest="activation_strength",
         type=float,
-        help="override the activation vector artifact strength",
+        metavar="VALUE",
+        help="override the steering vector artifact strength",
     )
     sampling.add_argument("--bias-step", type=float, help="default positive bias adjustment (default: 0.5)")
     parser.set_defaults(bias_rules=None, bias_groups=None)
@@ -693,7 +697,7 @@ def _apply_token_preference_preset(
 
 def _apply_activation_artifact(
     sampling: SamplingConfig,
-    artifact: ActivationVectorArtifact | None,
+    artifact: SteeringVectorArtifact | None,
     args: argparse.Namespace,
 ) -> SamplingConfig:
     if artifact is None:
@@ -1042,9 +1046,9 @@ def _sampler_summary(config: SamplingConfig) -> str:
     if config.activation_vector or config.activation_vector_digest:
         norm = sum(value * value for value in config.activation_vector) ** 0.5
         summary += (
-            f" activation_vector_norm={norm:g}"
-            f" activation_vector_strength={config.activation_vector_strength:g}"
-            f" activation_vector_digest={config.activation_vector_digest[:12]}"
+            f" steering_vector_norm={norm:g}"
+            f" steering_strength={config.activation_vector_strength:g}"
+            f" steering_digest={config.activation_vector_digest[:12]}"
         )
     return summary
 
@@ -1057,7 +1061,7 @@ def _confirm_runtime_plan(
     sampling: SamplingConfig,
     *,
     source_sampling: SamplingConfig | None = None,
-    activation_artifact: ActivationVectorArtifact | None = None,
+    activation_artifact: SteeringVectorArtifact | None = None,
     catalog: Any | None = None,
 ) -> bool:
     """Show the resolved plan and require an explicit final go in setup mode."""
@@ -1065,7 +1069,7 @@ def _confirm_runtime_plan(
         return True
     validated: list[str] = []
     if activation_artifact is not None:
-        validated.append("activation vector: model and width matched")
+        validated.append("steering vector: model and width matched")
     if args.biases is not None:
         validated.append("bias preset: loaded and model-matched")
     if catalog is not None:
@@ -1508,9 +1512,9 @@ def main(argv: list[str] | None = None) -> int:
                 args._bias_preset = preset
             activation_artifact = None
             if args.activation_strength is not None and args.activation_vector is None:
-                raise EditorError("--activation-strength requires --activation-vector")
+                raise EditorError("--steering-strength requires --steering-vector")
             if args.activation_vector is not None:
-                activation_artifact = ActivationVectorArtifact.from_path(
+                activation_artifact = SteeringVectorArtifact.from_path(
                     args.activation_vector
                 )
                 activation_artifact.validate_against_backend(backend, provenance)

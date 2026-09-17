@@ -1,11 +1,11 @@
-# Serial Policy Editor 0.4.3
+# Serial Policy Editor 0.4.4
 
 Serial Policy Editor (SPE) is a terminal editor for steering a local language
 model one token, text insertion, or delegated span at a time. Save your choices,
 rewind or fork a continuation, and replay the recorded editing procedure in a
 new context.
 
-**0.4.3 consolidates the first executable controller-stack seam and activation-runtime safety fixes.**
+**0.4.4 separates hidden-state control from output-head steering throughout the public vector tooling.**
 Load relative term weights with `--reference`, define groups with YAML or
 commands, and activate promote, suppress, or maintain objectives with bare
 `b target +`, `-`, or `=`. Numeric amounts remain manual; `off` clears an
@@ -92,7 +92,7 @@ settings, and `preference` prints the token-preference settings. Their
 `group on rate=.2 gate=sampler` or `preference on dimension=32 fast_slow=on`.
 The main summary redraws after each change, so the enabled state is visible.
 Use `controllers` (or `stack`) to inspect the ordered influence surfaces:
-model logits, history penalties, layerwise/output activation, biases/groups,
+model logits, history penalties, hidden-state control, output-head steering, biases/groups,
 reference prior, token-preference actuation, and final sampling, followed by
 the feedback learners.
 
@@ -791,7 +791,7 @@ at the teacher prompt with `b atmosphere -> {shadow, silhouette}`.
 b atmosphere +       promote appearances adaptively
 b atmosphere -       suppress appearances adaptively
 b atmosphere =       maintain approximately the present rate
-b atmosphere off     disable that activation
+b atmosphere off     disable that group objective
 b atmosphere +0.5    explicit manual logit bias
 b                    inspect groups and controller diagnostics
 ```
@@ -867,7 +867,7 @@ cost of slower initialization) or raise it when startup speed matters more
 than peak memory. The setting does not change the learned feature space and is
 not persisted in presets.
 
-### Offline token-preference vector workbench
+### Offline vector workbench
 
 `policy-editor-vector` manages standalone, model-matched token preference
 artifacts. Extract a vector from an episode or a v4 preset, inspect its
@@ -888,44 +888,44 @@ seed, feature scheme, coordinate identity, slow/fast vectors, strengths, and
 source metadata. The workbench refuses to combine vectors from incompatible
 models or feature bases.
 
-The same workbench can create a first-generation output activation vector from
-two prompts. It computes Prompt A minus Prompt B at the final hidden/output
-layer; the default artifact is unit-normalized and can be loaded directly by
-the editor:
+The workbench also creates output-head steering vectors from two prompts. It
+computes Prompt A minus Prompt B at the final hidden state, then the runtime
+projects that direction through the model output head into vocabulary logits.
+The default artifact is unit-normalized and can be loaded directly by the
+editor:
 
 ```bash
-policy-editor-vector activation create \
+policy-editor-vector output-head create \
   --model model.gguf --backend llama.cpp \
   --prompt-a "Answer warmly and briefly." \
   --prompt-b "Answer coldly and at length." \
   --output style.json
-policy-editor-vector activation explain style.json \
+policy-editor-vector output-head explain style.json \
   --model model.gguf --top 50
 policy-editor --model model.gguf --new-prompt "Hello" \
-  --activation-vector style.json
+  --steering-vector style.json
 ```
 
-This initial activation contract operates at the output layer: the captured
-hidden-state direction is projected through the model output head at each
-decision. The loaded vector, layer, strength, and model identity are persisted
-in sampler segments and included in replay state. `inspect`, `validate`, and
-`blend` are available for activation artifacts as well.
+The artifact is explicitly typed as `output-head-steering-vector`; it is not a
+vocabulary-sized logit vector. The selected vector, target, strength, and model
+identity are persisted in sampler segments and included in replay state.
+`inspect`, `validate`, and `blend` are available under `output-head` as well.
 
 Paired episodes can now seed new vectors. Put desired or teacher-intervened
 episodes on the positive side and baseline or contrasting episodes on the
 negative side; entries are paired by list position. `derive` averages their
-positive-minus-negative output activations, while `export-pairs` writes the
-same episode texts as escaped prompt files for llama.cpp's
+positive-minus-negative final hidden states for output-head steering, while
+`export-pairs` writes the same episode texts as escaped prompt files for llama.cpp's
 `llama-cvector-generator`:
 
 ```bash
-policy-editor-vector activation derive \
+policy-editor-vector output-head derive \
   --workspace episodes.sqlite3 \
   --positive desired-1 desired-2 \
   --negative baseline-1 baseline-2 \
   --model model.gguf --output desired-behavior.json
 
-policy-editor-vector activation export-pairs \
+policy-editor-vector hidden-state export-pairs \
   --workspace episodes.sqlite3 \
   --positive desired-1 desired-2 \
   --negative baseline-1 baseline-2 \
@@ -934,35 +934,40 @@ llama-cvector-generator -m model.gguf \
   --positive-file cvector-input/positive.txt \
   --negative-file cvector-input/negative.txt \
   --method mean --output control_vector.gguf
-policy-editor-vector activation import-cvector control_vector.gguf \
+policy-editor-vector hidden-state import-cvector control_vector.gguf \
   --model model.gguf --output desired-cvector.json
 ```
 
 The pair exporter records a manifest with episode IDs, fork ancestry,
 boundaries, text hashes, and token counts. Pairing is analysis-only: it does
 not modify the workspace or infer that a teacher intervention is universally
-correct. Evaluate derived vectors with `activation validate`, `explain` (for
-output-layer vectors), and the `impact`/`compare` workbench reports before
+correct. Evaluate derived vectors with `output-head validate`, `explain` (for
+output-head vectors), and the `impact`/`compare` workbench reports before
 using them on new episodes.
 
-For llama.cpp's native layerwise control vectors, import the GGUF emitted by
-`llama-cvector-generator`:
+For llama.cpp's native layerwise hidden-state control vectors, import the GGUF
+emitted by `llama-cvector-generator`:
 
 ```bash
-policy-editor-vector activation import-cvector control_vector.gguf \
+policy-editor-vector hidden-state import-cvector control_vector.gguf \
   --model model.gguf --backend llama.cpp --output mood-cvector.json
-policy-editor-vector activation validate mood-cvector.json \
+policy-editor-vector hidden-state validate mood-cvector.json \
   --model model.gguf --backend llama.cpp
 policy-editor --model model.gguf --new-prompt "Hello" \
-  --activation-vector mood-cvector.json
+  --steering-vector mood-cvector.json
 ```
 
 These artifacts preserve the `direction.1` through `direction.N` hidden-state
 directions and their layer range. The editor installs them through llama.cpp's
 control-vector API and rebuilds the current prefix when that runtime state
-changes. Layerwise cvectors are inspectable and replayable; token-level
-`explain` is intentionally limited to output-layer artifacts because a
-layerwise intervention is not a static output-logit offset.
+changes. Hidden-state vectors are inspectable and replayable; token-level
+`explain` is intentionally available only for output-head steering because a
+hidden-state intervention is not a static output-logit offset.
+
+The portable envelope is `spe-steering-vector-v1` with an explicit kind of
+`output-head-steering-vector` or `hidden-state-vector`. Older ambiguous
+`activation` artifacts are rejected with a recreation message rather than
+silently guessing which runtime surface they meant.
 
 Typed answers can optionally provide the same kind of live supervision. Add
 `--learn-from-write` alongside `--online-learning` and/or

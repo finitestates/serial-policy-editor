@@ -228,7 +228,7 @@ def test_controller_pipeline_emits_named_trace_without_changing_statistics():
     assert [stage.name for stage in trace.stages] == [
         "backend logits",
         "history penalties",
-        "output activation",
+        "output-head steering",
         "manual/reference",
         "token preference",
         "group control",
@@ -238,7 +238,7 @@ def test_controller_pipeline_emits_named_trace_without_changing_statistics():
         trace.stage("token preference").surface,
         stats.adjusted,
     )
-    assert trace.stage("output activation").diagnostics["affected_tokens"] > 0
+    assert trace.stage("output-head steering").diagnostics["affected_tokens"] > 0
     assert trace.filtered_token_ids == tuple(stats.distribution.ids.tolist())
     assert trace.to_dict()["stages"][0]["shape"] == [8]
 
@@ -253,14 +253,14 @@ def test_controller_display_contract_exposes_missing_model_and_group_stages():
     assert policy_names == [
         "base model",
         "history penalties",
-        "output activation",
+        "output-head steering",
         "manual biases/groups",
         "reference prior",
         "token preference actuator",
         "group control",
         "sampler / token draw",
     ]
-    assert next(entry for entry in stack.entries if entry.name == "layerwise activation").phase == "model"
+    assert next(entry for entry in stack.entries if entry.name == "layerwise hidden-state control").phase == "model"
 
 
 def test_raw_rank_and_policy_rank_actions_remain_distinct():

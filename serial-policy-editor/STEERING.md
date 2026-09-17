@@ -119,6 +119,16 @@ The model's probabilities, decoder filtering, and shared fragments can prevent
 an objective from reaching its target. Inspect observed rates rather than
 assuming that a requested target is guaranteed.
 
+A group is not a blanket bias over every token belonging to every member. A
+manual group amount is one shared scalar applied only to the group's currently
+matching entry and continuation routes at the decision boundary. The route
+matcher, tokenization, competing groups, and decoder filters determine which
+tokens receive an adjustment. An appearance objective is a separate adaptive
+controller: it tries to increase, decrease, or maintain the observed rate of
+group-member surfaces by adjusting those available routes. It is therefore
+more accurate to describe groups as appearance-rate controls than as uniform
+member-token biases.
+
 ### Scopes
 
 ```text

@@ -607,24 +607,24 @@ class ObservationStatistics:
         ):
             if activation_logit_adjustments is None:
                 raise ValueError(
-                    "activation logit adjustments are required when activation state is active"
+                    "output-head steering adjustments are required when steering state is active"
                 )
             raw_activation = np.asarray(activation_logit_adjustments, dtype=np.float64)
             if raw_activation.shape != self.logits.shape:
                 raise ValueError(
-                    "activation logit adjustments do not match the policy vocabulary"
+                    "output-head steering adjustments do not match the policy vocabulary"
                 )
             if not np.all(np.isfinite(raw_activation)):
-                raise ValueError("activation logit adjustments must be finite")
+                raise ValueError("output-head steering adjustments must be finite")
             self.activation_logit_adjustments = (
                 float(config.activation_vector_strength) * raw_activation
             )
             if not np.all(np.isfinite(self.activation_logit_adjustments)):
-                raise ValueError("activation vector produced non-finite policy logits")
+                raise ValueError("output-head steering produced non-finite policy logits")
             self.adjusted = self.adjusted.copy()
             self.adjusted += self.activation_logit_adjustments
         record_stage(
-            "output activation", "policy", self.adjusted, trace_previous,
+            "output-head steering", "policy", self.adjusted, trace_previous,
             active=bool(
                 config.activation_vector_layer == "output"
                 and config.activation_vector

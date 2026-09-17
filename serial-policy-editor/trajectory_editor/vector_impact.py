@@ -19,8 +19,8 @@ from typing import Any
 import numpy as np
 
 from .activation_vectors import (
-    FORMAT as ACTIVATION_FORMAT,
-    ActivationVectorArtifact,
+    FORMAT as STEERING_FORMAT,
+    SteeringVectorArtifact,
     model_identity_json,
 )
 from .domain import EditorError, SamplingConfig
@@ -37,26 +37,26 @@ from .vector_artifacts import (
 FORMAT = "spe-vector-impact-v1"
 DEFAULT_IMPACT_STRENGTHS = (-1.0, -0.5, 0.0, 0.5, 1.0)
 
-VectorArtifact = ActivationVectorArtifact | TokenPreferenceVectorArtifact
+VectorArtifact = SteeringVectorArtifact | TokenPreferenceVectorArtifact
 
 
 def load_vector_artifact(path: Path) -> VectorArtifact:
     """Load either supported portable vector artifact kind."""
     if path.suffix.lower() == ".gguf":
-        return ActivationVectorArtifact.from_path(path)
+        return SteeringVectorArtifact.from_path(path)
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise EditorError(f"could not read vector artifact: {exc}") from exc
     if not isinstance(value, Mapping):
         raise EditorError("vector artifact must contain a JSON object")
-    if value.get("format") == ACTIVATION_FORMAT:
-        return ActivationVectorArtifact.from_mapping(value)
+    if value.get("format") == STEERING_FORMAT:
+        return SteeringVectorArtifact.from_mapping(value)
     if value.get("format") == TOKEN_PREFERENCE_FORMAT:
         return TokenPreferenceVectorArtifact.from_mapping(value)
     raise EditorError(
         "vector artifact must use "
-        f"{ACTIVATION_FORMAT} or {TOKEN_PREFERENCE_FORMAT}"
+        f"{STEERING_FORMAT} or {TOKEN_PREFERENCE_FORMAT}"
     )
 
 
@@ -72,10 +72,10 @@ def _softmax(values: np.ndarray) -> np.ndarray:
 
 
 def _artifact_descriptor(artifact: VectorArtifact) -> dict[str, Any]:
-    if isinstance(artifact, ActivationVectorArtifact):
+    if isinstance(artifact, SteeringVectorArtifact):
         return {
-            "format": ACTIVATION_FORMAT,
-            "kind": "activation",
+            "format": STEERING_FORMAT,
+            "kind": artifact.kind,
             "model": dict(artifact.model),
             "dimension": artifact.dimension,
             "norm": artifact.norm,
@@ -118,7 +118,7 @@ def _artifact_descriptor(artifact: VectorArtifact) -> dict[str, Any]:
 
 
 def _clear_target(sampling: SamplingConfig, kind: str) -> SamplingConfig:
-    if kind == "activation":
+    if kind == "steering":
         return replace(
             sampling,
             activation_vector=(),
@@ -144,11 +144,11 @@ def _apply_target(
     artifact: VectorArtifact,
     multiplier: float,
 ) -> SamplingConfig:
-    base = _clear_target(sampling, "activation" if isinstance(artifact, ActivationVectorArtifact) else "token-preference")
+    base = _clear_target(sampling, "steering" if isinstance(artifact, SteeringVectorArtifact) else "token-preference")
     multiplier = float(multiplier)
     sign = -1.0 if multiplier < 0.0 else 1.0
     magnitude = abs(multiplier)
-    if isinstance(artifact, ActivationVectorArtifact):
+    if isinstance(artifact, SteeringVectorArtifact):
         return replace(
             base,
             activation_vector=tuple(sign * value for value in artifact.vector),
@@ -563,9 +563,9 @@ def impact_vector(
         raise EditorError("impact strengths must not contain duplicates")
 
     provenance = backend.provenance(include_model_sha256=False)
-    if isinstance(artifact, ActivationVectorArtifact):
+    if isinstance(artifact, SteeringVectorArtifact):
         artifact.validate_against_backend(backend, provenance)
-        kind = "activation"
+        kind = "steering"
     else:
         artifact.validate_against_backend(
             backend,
@@ -630,7 +630,7 @@ def impact_vector(
                 "multiplier": multiplier,
                 "effective_multiplier": (
                     multiplier * float(artifact.strength)
-                    if isinstance(artifact, ActivationVectorArtifact)
+                    if isinstance(artifact, SteeringVectorArtifact)
                     else multiplier * float(artifact.token_preference_strength)
                 ),
                 "metrics": _metrics(

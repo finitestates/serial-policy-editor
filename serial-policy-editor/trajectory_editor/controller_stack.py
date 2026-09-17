@@ -110,7 +110,7 @@ def build_controller_stack(
             and bool(sampling.activation_vector)
             and sampling.activation_vector_strength != 0.0
         )
-        activation_configured = bool(sampling.activation_vector)
+        steering_configured = bool(sampling.activation_vector)
         manual_active = bool(sampling.bias_rules or sampling.bias_groups)
         group_active = bool(sampling.group_controls)
         reference_active = sampling.reference_prior_active
@@ -118,9 +118,10 @@ def build_controller_stack(
         preference_active = bool(
             sampling.token_preference_vector or sampling.token_preference_fast_vector
         )
-        activation_detail = (
-            f"{sampling.activation_vector_layer}, strength={sampling.activation_vector_strength:g}"
-            if activation_configured else "no vector"
+        steering_detail = (
+            f"{('output-head' if sampling.activation_vector_layer == 'output' else 'hidden-state')}, "
+            f"strength={sampling.activation_vector_strength:g}"
+            if steering_configured else "no vector"
         )
         manual_detail = (
             f"{len(sampling.bias_rules)} rules, {len(sampling.bias_groups)} groups"
@@ -144,7 +145,7 @@ def build_controller_stack(
             getattr(plan, name, None) not in (None, 0, 1.0)
             for name in ("repeat_penalty", "presence_penalty", "frequency_penalty")
         )
-        activation_configured = getattr(plan, "activation_vector", None) is not None
+        steering_configured = getattr(plan, "activation_vector", None) is not None
         control_active = False
         output_active = False
         manual_active = False
@@ -152,7 +153,7 @@ def build_controller_stack(
         reference_active = False
         reference_configured = getattr(plan, "reference", None) is not None
         preference_active = False
-        activation_detail = _path_detail(plan, "activation_vector") or "no vector selected"
+        steering_detail = _path_detail(plan, "activation_vector") or "no vector selected"
         manual_detail = _path_detail(plan, "biases", "groups") or "no bias artifact selected"
         group_detail = _path_detail(plan, "groups") or "no group controls selected"
         reference_detail = _path_detail(plan, "reference") or "no reference selected"
@@ -161,13 +162,13 @@ def build_controller_stack(
     control_unavailable = control_active and backend_name not in (None, "llama.cpp")
     entries = (
         ControllerEntry(
-            "model", 1, "layerwise activation", _state(
+            "model", 1, "layerwise hidden-state control", _state(
                 control_active,
-                configured=activation_configured and not output_active,
+                configured=steering_configured and not output_active,
                 unavailable=control_unavailable,
             ),
-            activation_detail + ("; llama.cpp required" if control_unavailable else ""),
-            "activation",
+            steering_detail + ("; llama.cpp required" if control_unavailable else ""),
+            "steering",
         ),
         ControllerEntry(
             "policy", 1, "base model", "on",
@@ -178,12 +179,12 @@ def build_controller_stack(
             "repeat/presence/frequency", "sampler",
         ),
         ControllerEntry(
-            "policy", 3, "output activation", _state(
+            "policy", 3, "output-head steering", _state(
                 output_active,
-                configured=activation_configured and not control_active,
+                configured=steering_configured and not control_active,
             ),
-            activation_detail if activation_configured else "no vector",
-            "activation",
+            steering_detail if steering_configured else "no vector",
+            "steering",
         ),
         ControllerEntry(
             "policy", 4, "manual biases/groups", _state(

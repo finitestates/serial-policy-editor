@@ -13,7 +13,7 @@ from trajectory_editor.activation_vectors import (
     CONTROL_VECTOR_LAYER,
     CONTROL_VECTOR_POSITION,
     FORMAT,
-    ActivationVectorArtifact,
+    SteeringVectorArtifact,
     blend_artifacts,
 )
 
@@ -109,9 +109,9 @@ class ControlBackend(ActivationBackend):
         self.clear_calls += 1
 
 
-def artifact(backend=None) -> ActivationVectorArtifact:
+def artifact(backend=None) -> SteeringVectorArtifact:
     backend = backend or ActivationBackend()
-    return ActivationVectorArtifact.from_prompt_pair(
+    return SteeringVectorArtifact.from_prompt_pair(
         backend,
         backend.provenance(),
         "A",
@@ -122,29 +122,40 @@ def artifact(backend=None) -> ActivationVectorArtifact:
 def test_prompt_pair_artifact_is_normalized_and_round_trips():
     value = artifact()
 
-    assert value.model["activation_width"] == 3
+    assert value.model["hidden_state_width"] == 3
     assert value.vector == pytest.approx((1 / np.sqrt(5), 0.0, 2 / np.sqrt(5)))
     assert value.norm == pytest.approx(1.0)
     assert value.source["capture_position"] == "last"
     assert value.digest == value.to_dict()["digest"]
-    assert ActivationVectorArtifact.from_mapping(json.loads(value.to_json())) == value
+    assert SteeringVectorArtifact.from_mapping(json.loads(value.to_json())) == value
+    document = value.to_dict()
+    assert document["kind"] == "output-head-steering-vector"
+    assert "layer" not in document
+
+
+def test_ambiguous_legacy_artifacts_are_rejected_without_guessing():
+    with pytest.raises(EditorError, match="ambiguous activation-vector artifact"):
+        SteeringVectorArtifact.from_mapping({
+            "format": "spe-activation-vector-v1",
+            "kind": "activation",
+        })
 
 
 def test_activation_cli_create_inspect_and_validate(tmp_path, capsys):
     output = tmp_path / "activation.json"
     with patch("trajectory_editor.vector_cli.create_backend", return_value=ActivationBackend()):
         assert vector_main([
-            "activation", "create", "--model", "fake",
+            "output-head", "create", "--model", "fake",
             "--backend", "llama.cpp", "--prompt-a", "A", "--prompt-b", "B",
             "--output", str(output),
         ]) == 0
-        assert vector_main(["activation", "inspect", str(output)]) == 0
+        assert vector_main(["output-head", "inspect", str(output)]) == 0
         assert vector_main([
-            "activation", "validate", str(output), "--model", "fake",
+            "output-head", "validate", str(output), "--model", "fake",
         ]) == 0
     captured = capsys.readouterr().out
-    assert "spe-activation-vector-v1" in captured
-    assert "activation_width=3" in captured
+    assert "spe-steering-vector-v1" in captured
+    assert "hidden_state_width=3" in captured
 
 
 def test_activation_blend_requires_matching_coordinates():
@@ -229,22 +240,22 @@ def test_cvector_gguf_import_preserves_layerwise_directions(tmp_path, capsys):
     _write_cvector(source)
 
     assert vector_main([
-        "activation", "import-cvector", str(source), "--output", str(output)
+        "hidden-state", "import-cvector", str(source), "--output", str(output)
     ]) == 0
-    loaded = ActivationVectorArtifact.from_path(output)
+    loaded = SteeringVectorArtifact.from_path(output)
     assert loaded.layer == CONTROL_VECTOR_LAYER
     assert loaded.position == CONTROL_VECTOR_POSITION
     assert loaded.layer_start == 1
     assert loaded.layer_end == 2
     assert loaded.vector == pytest.approx((1, 2, 3, 4, 5, 6))
-    assert loaded.model["activation_layer_count"] == 2
-    assert vector_main(["activation", "inspect", str(source)]) == 0
-    assert "layer: control-vector position=layers" in capsys.readouterr().out
+    assert loaded.model["hidden_state_layer_count"] == 2
+    assert vector_main(["hidden-state", "inspect", str(source)]) == 0
+    assert "target: hidden-state layers range=1..2" in capsys.readouterr().out
 
 
 def test_layerwise_cvector_is_installed_before_runtime_logits():
     backend = ControlBackend()
-    cvector = ActivationVectorArtifact(
+    cvector = SteeringVectorArtifact(
         model={"backend": "fake", "activation_width": 3, "activation_layer_count": 2},
         vector=(1, 2, 3, 4, 5, 6),
         layer=CONTROL_VECTOR_LAYER,

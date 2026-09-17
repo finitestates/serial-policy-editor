@@ -1,10 +1,13 @@
-"""Portable activation-vector artifacts.
+"""Portable steering-vector artifacts.
 
-The first activation interface intentionally operates at the model's final
-hidden/output-head boundary.  It is a real hidden-state difference, while its
-runtime application is the equivalent linear output-head logit adjustment.
-The same artifact envelope can also carry the layerwise F32 directions emitted
-by llama.cpp's cvector-generator.
+This module contains two deliberately distinct artifact families: output-head
+steering vectors, which are final hidden-state directions projected into
+vocabulary logits, and hidden-state vectors, which are layerwise directions
+installed inside a compatible model runtime.
+
+The implementation file retains its historical name for now so the runtime
+refactor can proceed independently of the public terminology. The artifact
+format and command surface do not retain that ambiguity.
 """
 
 from __future__ import annotations
@@ -23,8 +26,10 @@ import numpy as np
 from .domain import EditorError, SamplingConfig
 
 
-FORMAT = "spe-activation-vector-v1"
-KIND = "activation"
+FORMAT = "spe-steering-vector-v1"
+LEGACY_FORMAT = "spe-activation-vector-v1"
+OUTPUT_HEAD_KIND = "output-head-steering-vector"
+HIDDEN_STATE_KIND = "hidden-state-vector"
 OUTPUT_LAYER = "output"
 RUNTIME_POSITION = "current"
 CONTROL_VECTOR_LAYER = "control-vector"
@@ -38,12 +43,12 @@ MODEL_IDENTITY_FIELDS = (
     "vocabulary_size",
     "tokenizer_fingerprint",
     "model_type",
-    "activation_width",
-    "activation_layer_count",
+    "hidden_state_width",
+    "hidden_state_layer_count",
 )
 
 
-def _vector(value: Any, name: str = "activation_vector") -> tuple[float, ...]:
+def _vector(value: Any, name: str = "steering_vector") -> tuple[float, ...]:
     if not isinstance(value, (list, tuple)):
         raise EditorError(f"{name} must be an array")
     try:
@@ -58,20 +63,24 @@ def _vector(value: Any, name: str = "activation_vector") -> tuple[float, ...]:
 
 
 def model_identity(
-    provenance: Mapping[str, Any], *, activation_width: int | None = None
+    provenance: Mapping[str, Any], *, hidden_state_width: int | None = None
 ) -> dict[str, Any]:
-    """Keep stable model facts needed to interpret an activation vector."""
+    """Keep stable model facts needed to interpret a steering vector."""
     result = {
         name: provenance[name]
         for name in MODEL_IDENTITY_FIELDS
-        if name != "activation_width"
+        if name not in {"hidden_state_width", "hidden_state_layer_count"}
         and name in provenance
         and provenance[name] is not None
     }
-    if activation_width is None:
-        activation_width = provenance.get("activation_width")
-    if activation_width is not None:
-        result["activation_width"] = int(activation_width)
+    if hidden_state_width is None:
+        hidden_state_width = provenance.get(
+            "hidden_state_width", provenance.get("activation_width")
+        )
+    if hidden_state_width is not None:
+        result["hidden_state_width"] = int(hidden_state_width)
+    if "hidden_state_layer_count" not in result and "activation_layer_count" in provenance:
+        result["hidden_state_layer_count"] = int(provenance["activation_layer_count"])
     return result
 
 
@@ -87,13 +96,13 @@ def model_identity_from_json(value: str) -> dict[str, Any]:
     try:
         parsed = json.loads(value)
     except (TypeError, ValueError) as exc:
-        raise EditorError("activation vector model identity is malformed") from exc
+        raise EditorError("steering vector model identity is malformed") from exc
     if not isinstance(parsed, dict):
-        raise EditorError("activation vector model identity must be an object")
+        raise EditorError("steering vector model identity must be an object")
     return parsed
 
 
-def activation_vector_digest_for(
+def steering_vector_digest_for(
     vector: Sequence[float],
     *,
     model: Mapping[str, Any] | str | None = None,
@@ -103,7 +112,7 @@ def activation_vector_digest_for(
     layer_start: int | None = None,
     layer_end: int | None = None,
 ) -> str:
-    """Return the canonical content digest used by activation artifacts.
+    """Return the canonical content digest used by steering artifacts.
 
     Runtime state must not rely on a caller-provided label alone.  Keeping the
     digest construction here also makes artifact and live sampler identities
@@ -116,7 +125,7 @@ def activation_vector_digest_for(
     elif isinstance(model, Mapping):
         model_value = model
     else:
-        raise EditorError("activation vector model identity must be an object")
+        raise EditorError("steering vector model identity must be an object")
     payload = {
         "model": dict(model_value),
         "layer": layer,
@@ -300,8 +309,8 @@ def _load_cvector_gguf(path: Path) -> tuple[dict[str, Any], tuple[float, ...], d
     model = {
         "backend": "llama.cpp",
         "model_type": model_hint if isinstance(model_hint, str) else None,
-        "activation_width": width,
-        "activation_layer_count": layer_count,
+        "hidden_state_width": width,
+        "hidden_state_layer_count": layer_count,
     }
     model = {key: value for key, value in model.items() if value is not None}
     vector = tuple(value for layer in expected_layers for value in directions[layer])
@@ -318,8 +327,8 @@ def _load_cvector_gguf(path: Path) -> tuple[dict[str, Any], tuple[float, ...], d
 
 
 @dataclass(frozen=True)
-class ActivationVectorArtifact:
-    """A model-matched output direction or llama.cpp layerwise cvector."""
+class SteeringVectorArtifact:
+    """A model-matched output-head or hidden-state steering vector."""
 
     model: Mapping[str, Any]
     vector: tuple[float, ...]
@@ -333,19 +342,31 @@ class ActivationVectorArtifact:
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, Mapping):
-            raise EditorError("activation artifact model must be an object")
-        object.__setattr__(self, "model", dict(self.model))
+            raise EditorError("steering vector artifact model must be an object")
+        model = dict(self.model)
+        # Backend provenance still exposes a few historical field names.  The
+        # portable artifact normalizes them before serialization so they never
+        # leak into the user-facing contract.
+        if "hidden_state_width" not in model and "activation_width" in model:
+            model["hidden_state_width"] = model.pop("activation_width")
+        if "hidden_state_layer_count" not in model and "activation_layer_count" in model:
+            model["hidden_state_layer_count"] = model.pop("activation_layer_count")
+        object.__setattr__(self, "model", model)
         vector = _vector(self.vector)
         object.__setattr__(self, "vector", vector)
         if self.layer == OUTPUT_LAYER:
             if self.position != RUNTIME_POSITION:
-                raise EditorError(f"activation position must be {RUNTIME_POSITION!r}")
+                raise EditorError(
+                    f"output-head steering position must be {RUNTIME_POSITION!r}"
+                )
             if self.layer_start is not None or self.layer_end is not None:
-                raise EditorError("output activation vectors cannot specify a layer range")
+                raise EditorError(
+                    "output-head steering vectors cannot specify a layer range"
+                )
         elif self.layer == CONTROL_VECTOR_LAYER:
             if self.position != CONTROL_VECTOR_POSITION:
                 raise EditorError(
-                    f"control-vector activation position must be {CONTROL_VECTOR_POSITION!r}"
+                    f"hidden-state vector position must be {CONTROL_VECTOR_POSITION!r}"
                 )
             if (
                 type(self.layer_start) is not int
@@ -353,45 +374,45 @@ class ActivationVectorArtifact:
                 or type(self.layer_end) is not int
                 or self.layer_end < self.layer_start
             ):
-                raise EditorError("control-vector activation layer range is invalid")
+                raise EditorError("hidden-state vector layer range is invalid")
         else:
             raise EditorError(
-                f"activation layer must be {OUTPUT_LAYER!r} or {CONTROL_VECTOR_LAYER!r}"
+                f"steering vector target must be {OUTPUT_LAYER!r} or {CONTROL_VECTOR_LAYER!r}"
             )
         if not isinstance(self.method, str) or not self.method:
-            raise EditorError("activation artifact method must be nonempty")
+            raise EditorError("steering vector artifact method must be nonempty")
         if (
             type(self.strength) not in (int, float)
             or not math.isfinite(float(self.strength))
             or float(self.strength) < 0.0
         ):
-            raise EditorError("activation strength must be finite and nonnegative")
+            raise EditorError("steering vector strength must be finite and nonnegative")
         object.__setattr__(self, "strength", float(self.strength))
         if self.source is not None:
             if not isinstance(self.source, Mapping):
-                raise EditorError("activation artifact source must be an object")
+                raise EditorError("steering vector artifact source must be an object")
             object.__setattr__(self, "source", dict(self.source))
 
-        width = self.model.get("activation_width")
+        width = self.model.get("hidden_state_width")
         if width is not None:
             if type(width) is not int or width < 1:
-                raise EditorError("activation model width must be a positive integer")
+                raise EditorError("hidden-state model width must be a positive integer")
             if self.layer == OUTPUT_LAYER and width != len(vector):
-                raise EditorError("activation vector dimension does not match model width")
+                raise EditorError("steering vector dimension does not match model width")
             if self.layer == CONTROL_VECTOR_LAYER and len(vector) % width:
-                raise EditorError("control-vector activation dimension is not layer-aligned")
-        layer_count = self.model.get("activation_layer_count")
+                raise EditorError("hidden-state vector dimension is not layer-aligned")
+        layer_count = self.model.get("hidden_state_layer_count")
         if layer_count is not None and (
             type(layer_count) is not int or layer_count < 1
         ):
-            raise EditorError("activation model layer count must be a positive integer")
+            raise EditorError("hidden-state model layer count must be a positive integer")
         if self.layer == CONTROL_VECTOR_LAYER:
             if width is None:
-                raise EditorError("control-vector activation requires model width")
+                raise EditorError("hidden-state vector requires model width")
             if layer_count is not None and len(vector) // int(width) != layer_count:
-                raise EditorError("control-vector activation layer count does not match model")
+                raise EditorError("hidden-state vector layer count does not match model")
             if layer_count is not None and self.layer_end > layer_count:
-                raise EditorError("control-vector activation layer range exceeds model layers")
+                raise EditorError("hidden-state vector layer range exceeds model layers")
 
     @property
     def dimension(self) -> int:
@@ -403,7 +424,7 @@ class ActivationVectorArtifact:
 
     @property
     def digest(self) -> str:
-        return activation_vector_digest_for(
+        return steering_vector_digest_for(
             self.vector,
             model=self.model,
             layer=self.layer,
@@ -413,49 +434,83 @@ class ActivationVectorArtifact:
             layer_end=self.layer_end,
         )
 
-    @classmethod
-    def from_mapping(cls, value: Mapping[str, Any]) -> "ActivationVectorArtifact":
-        if not isinstance(value, Mapping):
-            raise EditorError("activation artifact must be an object")
-        if value.get("format") != FORMAT:
-            raise EditorError(f"activation artifact must use format {FORMAT}")
-        if value.get("kind") != KIND:
-            raise EditorError(f"activation artifact kind must be {KIND!r}")
-        model = value.get("model")
-        if not isinstance(model, Mapping):
-            raise EditorError("activation artifact requires model metadata")
-        return cls(
-            model=model,
-            vector=value.get("vector"),
-            layer=value.get("layer", OUTPUT_LAYER),
-            position=value.get("position", RUNTIME_POSITION),
-            strength=value.get("strength", 1.0),
-            method=value.get("method", "prompt-difference-v1"),
-            source=value.get("source"),
-            layer_start=value.get("layer_start"),
-            layer_end=value.get("layer_end"),
+    @property
+    def kind(self) -> str:
+        return (
+            OUTPUT_HEAD_KIND
+            if self.layer == OUTPUT_LAYER
+            else HIDDEN_STATE_KIND
+        )
+
+    @property
+    def target_description(self) -> str:
+        return (
+            "output head"
+            if self.kind == OUTPUT_HEAD_KIND
+            else "hidden-state layers"
         )
 
     @classmethod
-    def from_path(cls, path: Path) -> "ActivationVectorArtifact":
+    def from_mapping(cls, value: Mapping[str, Any]) -> "SteeringVectorArtifact":
+        if not isinstance(value, Mapping):
+            raise EditorError("steering vector artifact must be an object")
+        if value.get("format") == LEGACY_FORMAT or value.get("kind") == "activation":
+            raise EditorError(
+                "ambiguous activation-vector artifact is not accepted; recreate it "
+                "as an output-head-steering-vector or hidden-state-vector artifact"
+            )
+        if value.get("format") != FORMAT:
+            raise EditorError(f"steering vector artifact must use format {FORMAT}")
+        kind = value.get("kind")
+        if kind not in {OUTPUT_HEAD_KIND, HIDDEN_STATE_KIND}:
+            raise EditorError(
+                "steering vector artifact kind must be "
+                f"{OUTPUT_HEAD_KIND!r} or {HIDDEN_STATE_KIND!r}"
+            )
+        model = value.get("model")
+        if not isinstance(model, Mapping):
+            raise EditorError("steering vector artifact requires model metadata")
+        if kind == OUTPUT_HEAD_KIND:
+            layer = OUTPUT_LAYER
+            position = RUNTIME_POSITION
+            layer_start = layer_end = None
+        else:
+            layer = CONTROL_VECTOR_LAYER
+            position = CONTROL_VECTOR_POSITION
+            layer_start = value.get("layer_start")
+            layer_end = value.get("layer_end")
+        return cls(
+            model=model,
+            vector=value.get("vector"),
+            layer=layer,
+            position=position,
+            strength=value.get("strength", 1.0),
+            method=value.get("method", "prompt-difference-v1"),
+            source=value.get("source"),
+            layer_start=layer_start,
+            layer_end=layer_end,
+        )
+
+    @classmethod
+    def from_path(cls, path: Path) -> "SteeringVectorArtifact":
         if path.suffix.lower() == ".gguf":
             return cls.from_cvector_path(path)
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
-            raise EditorError(f"could not read activation artifact: {exc}") from exc
+            raise EditorError(f"could not read steering vector artifact: {exc}") from exc
         artifact = cls.from_mapping(value)
         declared_digest = value.get("digest")
         if declared_digest is not None and declared_digest != artifact.digest:
-            raise EditorError("activation artifact digest does not match its contents")
+            raise EditorError("steering vector artifact digest does not match its contents")
         return artifact
 
     @classmethod
     def from_cvector_path(
         cls, path: Path, *, strength: float = 1.0
-    ) -> "ActivationVectorArtifact":
+    ) -> "SteeringVectorArtifact":
         model, vector, source = _load_cvector_gguf(path)
-        layer_count = int(model["activation_layer_count"])
+        layer_count = int(model["hidden_state_layer_count"])
         return cls(
             model=model,
             vector=vector,
@@ -478,10 +533,10 @@ class ActivationVectorArtifact:
         *,
         capture_position: str = "last",
         normalize: bool = True,
-    ) -> "ActivationVectorArtifact":
+    ) -> "SteeringVectorArtifact":
         if capture_position not in CAPTURE_POSITIONS:
             raise EditorError(
-                "activation capture position must be first or last"
+                "output-head capture position must be first or last"
             )
         if not isinstance(prompt_a, str) or not prompt_a:
             raise EditorError("prompt A must be nonempty")
@@ -491,7 +546,7 @@ class ActivationVectorArtifact:
         width_method = getattr(backend, "activation_width", None)
         if not callable(capture) or not callable(width_method):
             raise EditorError(
-                "the loaded backend does not expose output activation snapshots"
+                "the loaded backend does not expose final hidden-state snapshots"
             )
         try:
             kwargs = {"layer": OUTPUT_LAYER, "position": capture_position}
@@ -507,19 +562,21 @@ class ActivationVectorArtifact:
         except (RuntimeError, TypeError, ValueError) as exc:
             raise EditorError(f"could not capture activation pair: {exc}") from exc
         if first.ndim != 1 or second.ndim != 1 or first.shape != second.shape:
-            raise EditorError("activation snapshots must be equal one-dimensional vectors")
+            raise EditorError(
+                "final hidden-state snapshots must be equal one-dimensional vectors"
+            )
         if first.shape[0] != width:
             raise EditorError(
-                f"activation snapshot width {first.shape[0]} does not match backend width {width}"
+                f"final hidden-state width {first.shape[0]} does not match backend width {width}"
             )
         if not np.all(np.isfinite(first)) or not np.all(np.isfinite(second)):
-            raise EditorError("activation snapshots must be finite")
+            raise EditorError("final hidden-state snapshots must be finite")
         delta = first - second
         raw_norm = float(np.linalg.norm(delta))
         if normalize and raw_norm > 0.0:
             delta = delta / raw_norm
         return cls(
-            model=model_identity(provenance, activation_width=width),
+            model=model_identity(provenance, hidden_state_width=width),
             vector=tuple(float(value) for value in delta),
             source={
                 "type": "prompt-pair",
@@ -542,7 +599,7 @@ class ActivationVectorArtifact:
         normalize: bool = True,
         strength: float = 1.0,
         source: Mapping[str, Any] | None = None,
-    ) -> "ActivationVectorArtifact":
+    ) -> "SteeringVectorArtifact":
         """Average positive-minus-negative activation differences.
 
         Each pair is captured independently, then the raw differences are
@@ -552,14 +609,14 @@ class ActivationVectorArtifact:
         first.
         """
         if not pairs:
-            raise EditorError("at least one activation prompt pair is required")
+            raise EditorError("at least one output-head prompt pair is required")
         if capture_position not in CAPTURE_POSITIONS:
-            raise EditorError("activation capture position must be first or last")
+            raise EditorError("output-head capture position must be first or last")
         capture = getattr(backend, "activation_snapshot", None)
         width_method = getattr(backend, "activation_width", None)
         if not callable(capture) or not callable(width_method):
             raise EditorError(
-                "the loaded backend does not expose output activation snapshots"
+                "the loaded backend does not expose final hidden-state snapshots"
             )
 
         deltas: list[np.ndarray] = []
@@ -567,7 +624,7 @@ class ActivationVectorArtifact:
         try:
             width = int(width_method())
             if width < 1:
-                raise ValueError("activation width must be positive")
+                raise ValueError("final hidden-state width must be positive")
             kwargs = {"layer": OUTPUT_LAYER, "position": capture_position}
             for positive_prompt, negative_prompt in pairs:
                 if not isinstance(positive_prompt, str) or not positive_prompt:
@@ -584,14 +641,14 @@ class ActivationVectorArtifact:
                 )
                 if positive.ndim != 1 or negative.ndim != 1 or positive.shape != negative.shape:
                     raise ValueError(
-                        "activation snapshots must be equal one-dimensional vectors"
+                        "final hidden-state snapshots must be equal one-dimensional vectors"
                     )
                 if positive.shape[0] != width:
                     raise ValueError(
-                        f"activation snapshot width {positive.shape[0]} does not match backend width {width}"
+                        f"final hidden-state width {positive.shape[0]} does not match backend width {width}"
                     )
                 if not np.all(np.isfinite(positive)) or not np.all(np.isfinite(negative)):
-                    raise ValueError("activation snapshots must be finite")
+                    raise ValueError("final hidden-state snapshots must be finite")
                 delta = positive - negative
                 deltas.append(delta)
                 pair_norms.append(float(np.linalg.norm(delta)))
@@ -614,7 +671,7 @@ class ActivationVectorArtifact:
             }
         )
         return cls(
-            model=model_identity(provenance, activation_width=width),
+            model=model_identity(provenance, hidden_state_width=width),
             vector=tuple(float(value) for value in aggregate),
             strength=strength,
             method="prompt-pairs-mean-v1",
@@ -622,20 +679,25 @@ class ActivationVectorArtifact:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "format": FORMAT,
-            "kind": KIND,
+            "kind": self.kind,
             "model": dict(self.model),
-            "layer": self.layer,
-            "position": self.position,
-            "layer_start": self.layer_start,
-            "layer_end": self.layer_end,
             "strength": self.strength,
             "method": self.method,
             "vector": list(self.vector),
             "digest": self.digest,
-            **({"source": dict(self.source)} if self.source is not None else {}),
         }
+        if self.kind == HIDDEN_STATE_KIND:
+            result.update(
+                {
+                    "layer_start": self.layer_start,
+                    "layer_end": self.layer_end,
+                }
+            )
+        if self.source is not None:
+            result["source"] = dict(self.source)
+        return result
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=2, allow_nan=False)
@@ -644,15 +706,19 @@ class ActivationVectorArtifact:
         try:
             path.write_text(self.to_json() + "\n", encoding="utf-8")
         except OSError as exc:
-            raise EditorError(f"could not write activation artifact: {exc}") from exc
+            raise EditorError(f"could not write steering vector artifact: {exc}") from exc
 
     def validate_against_backend(
         self, backend: Any, provenance: Mapping[str, Any]
     ) -> np.ndarray:
         width_method = getattr(backend, "activation_width", None)
         if not callable(width_method):
-            raise EditorError("the loaded backend does not expose activation width metadata")
-        loaded_model = model_identity(provenance, activation_width=int(width_method()))
+            raise EditorError(
+                "the loaded backend does not expose hidden-state width metadata"
+            )
+        loaded_model = model_identity(
+            provenance, hidden_state_width=int(width_method())
+        )
         assert_model_compatible(self.model, loaded_model, label="loaded model")
         if self.layer == CONTROL_VECTOR_LAYER:
             control_width = getattr(backend, "activation_control_vector_width", None)
@@ -661,19 +727,21 @@ class ActivationVectorArtifact:
                 raise EditorError(
                     "the loaded backend does not expose llama.cpp control-vector runtime support"
                 )
-            if int(control_width()) != int(self.model.get("activation_width", -1)):
-                raise EditorError("control-vector width does not match the loaded model")
+            if int(control_width()) != int(self.model.get("hidden_state_width", -1)):
+                raise EditorError("hidden-state vector width does not match the loaded model")
             if int(control_width()) * int(control_layers()) != self.dimension:
-                raise EditorError("control-vector dimension does not match the loaded model layers")
+                raise EditorError("hidden-state vector dimension does not match the loaded model layers")
             if self.layer_end > int(control_layers()):
-                raise EditorError("control-vector layer range exceeds the loaded model")
+                raise EditorError("hidden-state vector layer range exceeds the loaded model")
             return np.zeros(int(backend.vocabulary_size()), dtype=np.float64)
         adjustment = getattr(backend, "activation_logit_adjustments", None)
         if not callable(adjustment):
-            raise EditorError("the loaded backend does not expose output activation runtime support")
+            raise EditorError(
+                "the loaded backend does not expose output-head steering runtime support"
+            )
         if int(width_method()) != self.dimension:
             raise EditorError(
-                f"activation vector dimension {self.dimension} does not match loaded model width {width_method()}"
+                f"output-head steering vector dimension {self.dimension} does not match loaded model width {width_method()}"
             )
         try:
             values = adjustment(
@@ -684,18 +752,18 @@ class ActivationVectorArtifact:
                 ),
             )
         except (RuntimeError, TypeError, ValueError) as exc:
-            raise EditorError(f"could not validate activation vector: {exc}") from exc
+            raise EditorError(f"could not validate output-head steering vector: {exc}") from exc
         values = np.asarray(values, dtype=np.float64)
         if values.ndim != 1 or values.shape[0] != int(backend.vocabulary_size()):
-            raise EditorError("activation logit adjustment does not match vocabulary")
+            raise EditorError("output-head steering adjustment does not match vocabulary")
         if not np.all(np.isfinite(values)):
-            raise EditorError("activation logit adjustment is not finite")
+            raise EditorError("output-head steering adjustment is not finite")
         return values
 
     def apply_to_sampling(
         self, sampling: SamplingConfig, *, strength: float | None = None
     ) -> SamplingConfig:
-        return replace_activation_sampling(
+        return replace_steering_sampling(
             sampling,
             vector=self.vector,
             strength=self.strength if strength is None else strength,
@@ -708,7 +776,7 @@ class ActivationVectorArtifact:
         )
 
 
-def replace_activation_sampling(
+def replace_steering_sampling(
     sampling: SamplingConfig,
     *,
     vector: tuple[float, ...] | list[float],
@@ -720,7 +788,7 @@ def replace_activation_sampling(
     layer_start: int | None = None,
     layer_end: int | None = None,
 ) -> SamplingConfig:
-    """Attach an activation artifact's effective state to a sampler config."""
+    """Attach a steering artifact's effective state to a sampler config."""
     from dataclasses import replace
 
     return replace(
@@ -737,25 +805,25 @@ def replace_activation_sampling(
 
 
 def assert_compatible(
-    left: ActivationVectorArtifact, right: ActivationVectorArtifact
+    left: SteeringVectorArtifact, right: SteeringVectorArtifact
 ) -> None:
     _check_model_compatibility(left.model, right.model, label="artifacts")
     if left.layer != right.layer:
-        raise EditorError("incompatible activation layers")
+        raise EditorError("incompatible steering vector targets")
     if left.position != right.position:
-        raise EditorError("incompatible activation positions")
+        raise EditorError("incompatible steering vector positions")
     if (left.layer_start, left.layer_end) != (right.layer_start, right.layer_end):
-        raise EditorError("incompatible activation layer ranges")
+        raise EditorError("incompatible hidden-state layer ranges")
 
 
 def blend_artifacts(
-    artifacts: list[ActivationVectorArtifact],
+    artifacts: list[SteeringVectorArtifact],
     weights: list[float],
     *,
     source: Mapping[str, Any] | None = None,
-) -> ActivationVectorArtifact:
+) -> SteeringVectorArtifact:
     if not artifacts:
-        raise EditorError("blend requires at least one activation artifact")
+        raise EditorError("blend requires at least one steering vector artifact")
     if len(weights) != len(artifacts):
         raise EditorError("blend weights must match the number of artifacts")
     if any(not math.isfinite(float(weight)) for weight in weights):
@@ -768,7 +836,7 @@ def blend_artifacts(
         vector += float(weight) * artifact.strength * np.asarray(
             artifact.vector, dtype=np.float64
         )
-    return ActivationVectorArtifact(
+    return SteeringVectorArtifact(
         model=first.model,
         vector=tuple(float(value) for value in vector),
         layer=first.layer,

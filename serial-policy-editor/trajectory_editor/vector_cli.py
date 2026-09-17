@@ -15,10 +15,12 @@ import numpy as np
 from .backend_factory import BACKEND_NAMES, create_backend
 from .bias_presets import FORMAT as BIAS_FORMAT
 from .activation_vectors import (
-    FORMAT as ACTIVATION_FORMAT,
-    ActivationVectorArtifact,
-    assert_compatible as assert_activation_compatible,
-    blend_artifacts as blend_activation_artifacts,
+    FORMAT as STEERING_FORMAT,
+    HIDDEN_STATE_KIND,
+    OUTPUT_HEAD_KIND,
+    SteeringVectorArtifact,
+    assert_compatible as assert_steering_compatible,
+    blend_artifacts as blend_steering_artifacts,
     model_identity,
 )
 from .decoder import LlamaCppSettings
@@ -146,9 +148,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="compute mean fixed token-feature contrasts (requires --model)",
     )
     compare.add_argument(
-        "--activation",
+        "--hidden-state",
+        dest="hidden_state",
         action="store_true",
-        help="compute hidden-state activation contrasts (requires --model)",
+        help="compute final hidden-state contrasts (requires --model)",
     )
     compare.add_argument(
         "--feature-dimension",
@@ -160,20 +163,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--capture-position",
         choices=("first", "last"),
         default="last",
-        help="activation position used for model-backed contrasts",
+        help="hidden-state position used for model-backed contrasts",
     )
     compare.add_argument(
-        "--no-normalize-activation",
+        "--no-normalize-hidden-state",
+        dest="no_normalize_hidden_state",
         action="store_true",
-        help="retain the raw activation delta instead of unit-normalizing it",
+        help="retain the raw hidden-state delta instead of unit-normalizing it",
     )
     compare.add_argument(
-        "--activation-strengths",
+        "--hidden-state-strengths",
+        dest="hidden_state_strengths",
         type=float,
         nargs="+",
         default=list(DEFAULT_ACTIVATION_STRENGTHS),
         metavar="MULTIPLIER",
-        help="signed activation multipliers to report in the strength sweep",
+        help="signed hidden-state multipliers to report in the strength sweep",
     )
     compare.add_argument(
         "--include-vectors",
@@ -191,7 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--vector",
         type=Path,
         required=True,
-        help="activation or token-preference vector artifact",
+        help="steering or token-preference vector artifact",
     )
     impact.add_argument(
         "--workspace",
@@ -248,14 +253,14 @@ def build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--biases", type=Path, required=True)
     apply.add_argument("--output", type=Path, required=True)
 
-    activation = commands.add_parser(
-        "activation",
-        help="create and manage output-layer vectors and llama.cpp cvectors",
+    output_head = commands.add_parser(
+        "output-head",
+        help="create and manage vectors projected through the model output head",
     )
-    activation_actions = activation.add_subparsers(dest="action", required=True)
+    output_head_actions = output_head.add_subparsers(dest="action", required=True)
 
-    create = activation_actions.add_parser(
-        "create", help="create a vector from two prompts"
+    create = output_head_actions.add_parser(
+        "create", help="create an output-head steering vector from two prompts"
     )
     _add_backend_args(create, require_model=True)
     prompt_a = create.add_mutually_exclusive_group(required=True)
@@ -269,9 +274,9 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--strength", type=float, default=1.0)
     create.add_argument("--output", type=Path)
 
-    derive = activation_actions.add_parser(
+    derive = output_head_actions.add_parser(
         "derive",
-        help="derive an output-layer vector from paired positive and negative episodes",
+        help="derive an output-head steering vector from paired episodes",
     )
     derive.add_argument(
         "--workspace",
@@ -298,17 +303,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--capture-position",
         choices=("first", "last"),
         default="last",
-        help="activation position captured from each episode text",
+        help="final hidden-state position captured from each episode text",
     )
     derive.add_argument(
         "--no-normalize",
         action="store_true",
-        help="retain the mean activation difference magnitude",
+        help="retain the mean hidden-state difference magnitude",
     )
     derive.add_argument("--strength", type=float, default=1.0)
     derive.add_argument("--output", type=Path)
 
-    export_pairs = activation_actions.add_parser(
+    hidden_state = commands.add_parser(
+        "hidden-state",
+        help="import and manage layerwise hidden-state control vectors",
+    )
+    hidden_state_actions = hidden_state.add_subparsers(dest="action", required=True)
+
+    export_pairs = hidden_state_actions.add_parser(
         "export-pairs",
         help="export paired episodes as cvector-generator prompt files",
     )
@@ -339,7 +350,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="directory for positive.txt, negative.txt, and manifest.json",
     )
 
-    import_cvector = activation_actions.add_parser(
+    import_cvector = hidden_state_actions.add_parser(
         "import-cvector",
         help="import a llama.cpp cvector-generator GGUF as a portable artifact",
     )
@@ -348,34 +359,38 @@ def build_parser() -> argparse.ArgumentParser:
     import_cvector.add_argument("--output", type=Path)
     _add_backend_args(import_cvector)
 
-    activation_inspect = activation_actions.add_parser(
-        "inspect", help="show activation artifact metadata and norm"
-    )
-    activation_inspect.add_argument("artifact", type=Path)
-    _add_report_args(activation_inspect)
+    def add_vector_management(parent, label: str):
+        inspect = parent.add_parser(
+            "inspect", help=f"show {label} metadata and norm"
+        )
+        inspect.add_argument("artifact", type=Path)
+        _add_report_args(inspect)
 
-    activation_validate = activation_actions.add_parser(
-        "validate", help="validate an activation artifact, optionally against a model"
-    )
-    activation_validate.add_argument("artifact", type=Path)
-    _add_backend_args(activation_validate)
-    _add_report_args(activation_validate)
+        validate = parent.add_parser(
+            "validate", help=f"validate a {label}, optionally against a model"
+        )
+        validate.add_argument("artifact", type=Path)
+        _add_backend_args(validate)
+        _add_report_args(validate)
 
-    activation_explain = activation_actions.add_parser(
-        "explain", help="rank vocabulary tokens by activation-induced logit adjustment"
-    )
-    activation_explain.add_argument("artifact", type=Path)
-    _add_backend_args(activation_explain, require_model=True)
-    activation_explain.add_argument("--top", type=_positive_int, default=20)
-    activation_explain.add_argument("--include-eog", action="store_true")
-    _add_report_args(activation_explain)
+        blend = parent.add_parser(
+            "blend", help=f"combine compatible {label}s by effective actuation"
+        )
+        blend.add_argument("artifacts", type=Path, nargs="+")
+        blend.add_argument("--weights", type=float, nargs="+")
+        blend.add_argument("--output", type=Path)
 
-    activation_blend = activation_actions.add_parser(
-        "blend", help="combine compatible activation artifacts by effective actuation"
+    add_vector_management(output_head_actions, "output-head steering vector")
+    add_vector_management(hidden_state_actions, "hidden-state vector")
+
+    output_head_explain = output_head_actions.add_parser(
+        "explain", help="rank vocabulary tokens by output-head steering effect"
     )
-    activation_blend.add_argument("artifacts", type=Path, nargs="+")
-    activation_blend.add_argument("--weights", type=float, nargs="+")
-    activation_blend.add_argument("--output", type=Path)
+    output_head_explain.add_argument("artifact", type=Path)
+    _add_backend_args(output_head_explain, require_model=True)
+    output_head_explain.add_argument("--top", type=_positive_int, default=20)
+    output_head_explain.add_argument("--include-eog", action="store_true")
+    _add_report_args(output_head_explain)
     return parser
 
 
@@ -651,15 +666,14 @@ def _text_inspect(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _activation_inspect_report(artifact: ActivationVectorArtifact) -> dict[str, Any]:
+def _steering_inspect_report(artifact: SteeringVectorArtifact) -> dict[str, Any]:
     return {
-        "format": ACTIVATION_FORMAT,
-        "kind": "activation",
+        "format": STEERING_FORMAT,
+        "kind": artifact.kind,
         "model": dict(artifact.model),
         "dimension": artifact.dimension,
         "norm": artifact.norm,
-        "layer": artifact.layer,
-        "position": artifact.position,
+        "target": artifact.target_description,
         "layer_start": artifact.layer_start,
         "layer_end": artifact.layer_end,
         "strength": artifact.strength,
@@ -669,14 +683,14 @@ def _activation_inspect_report(artifact: ActivationVectorArtifact) -> dict[str, 
     }
 
 
-def _text_activation_inspect(report: dict[str, Any]) -> str:
+def _text_steering_inspect(report: dict[str, Any]) -> str:
     lines = [
         f"valid: {report['valid']}" if "valid" in report else None,
         f"format: {report['format']}",
         f"kind: {report['kind']}",
         f"dimension: {report['dimension']}",
         f"norm: {report['norm']:.6g} strength={report['strength']:.6g}",
-        f"layer: {report['layer']} position={report['position']}"
+        f"target: {report['target']}"
         + (
             f" range={report['layer_start']}..{report['layer_end']}"
             if report["layer_start"] is not None
@@ -789,8 +803,8 @@ def _text_explain(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _activation_explain_report(
-    artifact: ActivationVectorArtifact,
+def _output_head_explain_report(
+    artifact: SteeringVectorArtifact,
     backend: Any,
     provenance: dict[str, Any],
     *,
@@ -799,8 +813,8 @@ def _activation_explain_report(
 ) -> dict[str, Any]:
     if artifact.layer == "control-vector":
         raise EditorError(
-            "layerwise cvector artifacts do not have a static token-logit explanation; "
-            "use activation validate and inspect them with the llama.cpp runtime"
+            "hidden-state vectors do not have a static token-logit explanation; "
+            "use hidden-state validate and inspect them with the model runtime"
         )
     adjustments = artifact.validate_against_backend(backend, provenance)
     adjustments = float(artifact.strength) * np.asarray(adjustments, dtype=np.float64)
@@ -829,7 +843,7 @@ def _activation_explain_report(
         return result
 
     return {
-        **_activation_inspect_report(artifact),
+        **_steering_inspect_report(artifact),
         "eligible_token_count": len(token_ids),
         "logit_rms": float(np.sqrt(np.mean(adjustments[token_ids] ** 2))) if token_ids else 0.0,
         "top_positive": rows(descending, positive=True),
@@ -837,10 +851,10 @@ def _activation_explain_report(
     }
 
 
-def _text_activation_explain(report: dict[str, Any]) -> str:
+def _text_output_head_explain(report: dict[str, Any]) -> str:
     lines = [
-        f"activation explanation: dimension={report['dimension']} eligible_tokens={report['eligible_token_count']}",
-        f"logit_rms={report['logit_rms']:.6g} layer={report['layer']} strength={report['strength']:.6g}",
+        f"output-head steering explanation: dimension={report['dimension']} eligible_tokens={report['eligible_token_count']}",
+        f"logit_rms={report['logit_rms']:.6g} strength={report['strength']:.6g}",
     ]
     for title, key in (("top positive", "top_positive"), ("top negative", "top_negative")):
         lines.append(f"{title}:")
@@ -911,13 +925,13 @@ def main(argv: list[str] | None = None) -> int:
                 _write_text(render_impact_report(report), args.output)
             return 0
         if args.kind == "compare":
-            if (args.content or args.activation) and args.model is None:
+            if (args.content or args.hidden_state) and args.model is None:
                 raise EditorError(
-                    "--model is required when --content or --activation is requested"
+                    "--model is required when --content or --hidden-state is requested"
                 )
-            if args.model is not None and not (args.content or args.activation):
+            if args.model is not None and not (args.content or args.hidden_state):
                 raise EditorError(
-                    "--model is only used with --content or --activation"
+                    "--model is only used with --content or --hidden-state"
                 )
             if args.model is not None:
                 backend = _load_backend(args)
@@ -927,12 +941,12 @@ def main(argv: list[str] | None = None) -> int:
                     args.episodes,
                     backend=backend,
                     include_content=args.content,
-                    include_activation=args.activation,
+                    include_hidden_state=args.hidden_state,
                     feature_dimension=args.feature_dimension,
                     projection_chunk_size=args.projection_chunk_size,
                     capture_position=args.capture_position,
-                    normalize_activation=not args.no_normalize_activation,
-                    activation_strengths=args.activation_strengths,
+                    normalize_activation=not args.no_normalize_hidden_state,
+                    activation_strengths=args.hidden_state_strengths,
                     include_vectors=args.include_vectors,
                 )
             # Keep the format identifier visible to programmatic consumers even
@@ -942,8 +956,8 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 _write_text(render_compare_report(report), args.output)
             return 0
-        if args.kind == "activation":
-            if args.action == "export-pairs":
+        if args.kind in {"output-head", "hidden-state"}:
+            if args.kind == "hidden-state" and args.action == "export-pairs":
                 with EpisodeStore(args.workspace) as store:
                     positive, negative = _activation_episode_pairs(
                         store, args.positive, args.negative
@@ -953,13 +967,13 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 _write_text(json.dumps(manifest, ensure_ascii=False, indent=2), None)
                 return 0
-            if args.action == "derive":
+            if args.kind == "output-head" and args.action == "derive":
                 with EpisodeStore(args.workspace) as store:
                     positive, negative = _activation_episode_pairs(
                         store, args.positive, args.negative
                     )
                 backend = _load_backend(args)
-                artifact = ActivationVectorArtifact.from_prompt_pairs(
+                artifact = SteeringVectorArtifact.from_prompt_pairs(
                     backend,
                     backend.provenance(include_model_sha256=False),
                     [(left["text"], right["text"]) for left, right in zip(positive, negative)],
@@ -970,9 +984,9 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 _write_text(artifact.to_json(), args.output)
                 return 0
-            if args.action == "create":
+            if args.kind == "output-head" and args.action == "create":
                 backend = _load_backend(args)
-                artifact = ActivationVectorArtifact.from_prompt_pair(
+                artifact = SteeringVectorArtifact.from_prompt_pair(
                     backend,
                     backend.provenance(include_model_sha256=False),
                     _prompt_value(args, "prompt_a", "prompt_a_file", "prompt A"),
@@ -984,8 +998,8 @@ def main(argv: list[str] | None = None) -> int:
                     artifact = replace(artifact, strength=args.strength)
                 _write_text(artifact.to_json(), args.output)
                 return 0
-            if args.action == "import-cvector":
-                artifact = ActivationVectorArtifact.from_cvector_path(
+            if args.kind == "hidden-state" and args.action == "import-cvector":
+                artifact = SteeringVectorArtifact.from_cvector_path(
                     args.cvector, strength=args.strength
                 )
                 if args.model is not None:
@@ -997,47 +1011,68 @@ def main(argv: list[str] | None = None) -> int:
                         artifact,
                         model=model_identity(
                             backend.provenance(include_model_sha256=False),
-                            activation_width=backend.activation_width(),
+                            hidden_state_width=backend.activation_width(),
                         ),
                     )
                 _write_text(artifact.to_json(), args.output)
                 return 0
             if args.action == "inspect":
-                artifact = ActivationVectorArtifact.from_path(args.artifact)
-                report = _activation_inspect_report(artifact)
-                _render(report, args.output, args.format, _text_activation_inspect)
+                artifact = SteeringVectorArtifact.from_path(args.artifact)
+                expected_kind = (
+                    OUTPUT_HEAD_KIND if args.kind == "output-head" else HIDDEN_STATE_KIND
+                )
+                if artifact.kind != expected_kind:
+                    raise EditorError(
+                        f"{args.kind} command cannot inspect {artifact.kind}"
+                    )
+                report = _steering_inspect_report(artifact)
+                _render(report, args.output, args.format, _text_steering_inspect)
                 return 0
             if args.action == "validate":
-                artifact = ActivationVectorArtifact.from_path(args.artifact)
+                artifact = SteeringVectorArtifact.from_path(args.artifact)
+                expected_kind = (
+                    OUTPUT_HEAD_KIND if args.kind == "output-head" else HIDDEN_STATE_KIND
+                )
+                if artifact.kind != expected_kind:
+                    raise EditorError(
+                        f"{args.kind} command cannot validate {artifact.kind}"
+                    )
                 if args.model is not None:
                     backend = _load_backend(args)
                     artifact.validate_against_backend(
                         backend, backend.provenance(include_model_sha256=False)
                     )
-                report = _activation_inspect_report(artifact)
+                report = _steering_inspect_report(artifact)
                 report["valid"] = True
                 report["validated_against_model"] = args.model is not None
-                _render(report, args.output, args.format, _text_activation_inspect)
+                _render(report, args.output, args.format, _text_steering_inspect)
                 return 0
-            if args.action == "explain":
-                artifact = ActivationVectorArtifact.from_path(args.artifact)
+            if args.kind == "output-head" and args.action == "explain":
+                artifact = SteeringVectorArtifact.from_path(args.artifact)
                 backend = _load_backend(args)
-                report = _activation_explain_report(
+                report = _output_head_explain_report(
                     artifact,
                     backend,
                     backend.provenance(include_model_sha256=False),
                     top=args.top,
                     include_eog=args.include_eog,
                 )
-                _render(report, args.output, args.format, _text_activation_explain)
+                _render(report, args.output, args.format, _text_output_head_explain)
                 return 0
             if args.action == "blend":
                 weights = args.weights or [1.0] * len(args.artifacts)
                 artifacts = [
-                    ActivationVectorArtifact.from_path(path)
+                    SteeringVectorArtifact.from_path(path)
                     for path in args.artifacts
                 ]
-                result = blend_activation_artifacts(
+                expected_kind = (
+                    OUTPUT_HEAD_KIND if args.kind == "output-head" else HIDDEN_STATE_KIND
+                )
+                if any(artifact.kind != expected_kind for artifact in artifacts):
+                    raise EditorError(
+                        f"{args.kind} blend requires {expected_kind} artifacts"
+                    )
+                result = blend_steering_artifacts(
                     artifacts,
                     weights,
                     source={
@@ -1048,7 +1083,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 _write_text(result.to_json(), args.output)
                 return 0
-            raise EditorError(f"unsupported activation action {args.action!r}")
+            raise EditorError(f"unsupported {args.kind} action {args.action!r}")
 
         if args.kind != "token-preference":
             raise EditorError("unsupported vector kind")

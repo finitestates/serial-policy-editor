@@ -175,7 +175,7 @@ def test_compare_reports_learner_deltas_and_aggregates(tmp_path):
     assert np.allclose(aggregate["mean_delta_vector"], [0.05, -0.45])
 
 
-def test_compare_can_compute_content_and_activation_contrasts(tmp_path):
+def test_compare_can_compute_content_and_hidden_state_contrasts(tmp_path):
     content_sampling = SamplingConfig(token_preference_projection_seed=7)
     with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
         reference = _create(store, "reference", sampling=content_sampling)
@@ -188,7 +188,7 @@ def test_compare_can_compute_content_and_activation_contrasts(tmp_path):
             ["reference", "candidate"],
             backend=CompareFeatureBackend(),
             include_content=True,
-            include_activation=True,
+            include_hidden_state=True,
             feature_dimension=2,
             activation_strengths=(0.25, 1.0, -1.0),
             include_vectors=True,
@@ -196,11 +196,11 @@ def test_compare_can_compute_content_and_activation_contrasts(tmp_path):
 
     comparison = report["comparisons"][0]
     assert comparison["content_feature_vector"]["delta_vector"] == [-1.0, 1.0]
-    activation = comparison["activation_vector"]
-    assert activation["available"] is True
-    assert activation["vector"]
-    assert [row["multiplier"] for row in activation["strength_sweep"]] == [0.25, 1.0, -1.0]
-    assert activation["strength_sweep"][-1]["orientation"] == "opposite"
+    hidden_state = comparison["hidden_state_vector"]
+    assert hidden_state["available"] is True
+    assert hidden_state["vector"]
+    assert [row["multiplier"] for row in hidden_state["strength_sweep"]] == [0.25, 1.0, -1.0]
+    assert hidden_state["strength_sweep"][-1]["orientation"] == "opposite"
 
 
 def test_vector_cli_compare_emits_json(tmp_path, capsys):

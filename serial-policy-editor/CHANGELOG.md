@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.4 — 2026-09-16
+
+- Replace the ambiguous public `activation` vector surface with explicit
+  `output-head` and `hidden-state` workbench commands.
+- Type portable steering artifacts as `output-head-steering-vector` or
+  `hidden-state-vector` under `spe-steering-vector-v1`; ambiguous legacy
+  activation-vector artifacts are rejected instead of being guessed.
+- Rename launcher and setup-menu controls to `--steering-vector`,
+  `--steering-strength`, and `steering PATH`, and expose `vector` as the
+  reusable profile field.
+- Clarify controller-stack and trace labels so output-head logit steering is
+  not presented as an internal hidden-state intervention.
+
 ## 0.4.3 — 2026-09-16
 
 - Add episode-pair activation tooling: derive portable output-layer vectors

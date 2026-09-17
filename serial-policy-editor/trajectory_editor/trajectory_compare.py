@@ -14,7 +14,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from .activation_vectors import ActivationVectorArtifact
+from .activation_vectors import SteeringVectorArtifact
 from .domain import EditorError, SamplingConfig
 from .episode_store import EpisodeStore
 from .token_preference_features import (
@@ -114,10 +114,14 @@ def _sampling_summary(sampling: SamplingConfig) -> dict[str, Any]:
             "projection_seed": int(sampling.token_preference_projection_seed),
             "feature_scheme": str(sampling.token_preference_feature_scheme),
         },
-        "activation": {
+        "steering": {
             "dimension": len(sampling.activation_vector),
             "strength": float(sampling.activation_vector_strength),
-            "layer": str(sampling.activation_vector_layer),
+            "kind": (
+                "hidden-state-vector"
+                if sampling.activation_vector_layer == "control-vector"
+                else "output-head-steering-vector"
+            ),
             "position": str(sampling.activation_vector_position),
             "digest": str(sampling.activation_vector_digest),
         },
@@ -479,7 +483,7 @@ def _activation_contrast(
     include_vectors: bool,
 ) -> dict[str, Any]:
     provenance = backend.provenance(include_model_sha256=False)
-    artifact = ActivationVectorArtifact.from_prompt_pair(
+    artifact = SteeringVectorArtifact.from_prompt_pair(
         backend,
         provenance,
         candidate["text"],
@@ -492,8 +496,7 @@ def _activation_contrast(
         "direction": "candidate minus reference",
         "dimension": artifact.dimension,
         "norm": artifact.norm,
-        "layer": artifact.layer,
-        "position": artifact.position,
+        "target": artifact.target_description,
         "method": artifact.method,
         "digest": artifact.digest,
         "model": dict(artifact.model),
@@ -553,7 +556,7 @@ def compare_episodes(
     *,
     backend: Any | None = None,
     include_content: bool = False,
-    include_activation: bool = False,
+    include_hidden_state: bool = False,
     feature_dimension: int = 64,
     projection_chunk_size: int = DEFAULT_PROJECTION_CHUNK_SIZE,
     capture_position: str = "last",
@@ -567,12 +570,12 @@ def compare_episodes(
     if type(feature_dimension) is not int or feature_dimension < 1:
         raise EditorError("feature dimension must be a positive integer")
     if capture_position not in {"first", "last"}:
-        raise EditorError("activation capture position must be first or last")
+        raise EditorError("hidden-state capture position must be first or last")
     if any(not math.isfinite(float(value)) for value in activation_strengths):
-        raise EditorError("activation strengths must be finite numbers")
-    if (include_content or include_activation) and backend is None:
+        raise EditorError("hidden-state strengths must be finite numbers")
+    if (include_content or include_hidden_state) and backend is None:
         raise EditorError(
-            "--model is required when content or activation vectors are requested"
+            "--model is required when content or hidden-state vectors are requested"
         )
 
     resolved_ids: list[str] = []
@@ -636,9 +639,9 @@ def compare_episodes(
                         )
                     )
                 )
-        if include_activation:
+        if include_hidden_state:
             try:
-                comparison["activation_vector"] = _activation_contrast(
+                comparison["hidden_state_vector"] = _activation_contrast(
                     reference,
                     candidate,
                     backend,
@@ -649,7 +652,7 @@ def compare_episodes(
                 )
             except (RuntimeError, TypeError, ValueError) as exc:
                 raise EditorError(
-                    "could not compute activation contrast for "
+                    "could not compute hidden-state contrast for "
                     f"{candidate['episode_id']!r}: {exc}"
                 ) from exc
         comparisons.append(comparison)
@@ -753,15 +756,15 @@ def render_compare_report(report: dict[str, Any]) -> str:
                 )
             else:
                 lines.append("  content features: unavailable")
-        activation = comparison.get("activation_vector")
-        if activation is not None:
-            if activation.get("available"):
+        hidden_state = comparison.get("hidden_state_vector")
+        if hidden_state is not None:
+            if hidden_state.get("available"):
                 lines.append(
-                    f"  activation: dimension={activation['dimension']} "
-                    f"norm={activation['norm']:.6g} digest={activation['digest'][:12]}"
+                    f"  hidden state: dimension={hidden_state['dimension']} "
+                    f"norm={hidden_state['norm']:.6g} digest={hidden_state['digest'][:12]}"
                 )
             else:
-                lines.append("  activation: unavailable")
+                lines.append("  hidden state: unavailable")
     if report["aggregate"]:
         lines.extend(["", "aggregate candidate-minus-reference directions:"])
         for name, value in sorted(report["aggregate"].items()):

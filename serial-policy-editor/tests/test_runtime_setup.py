@@ -82,7 +82,7 @@ def test_setup_commands_build_a_new_runtime_selection(tmp_path):
     assert apply_setup_command('prompt "A careful beginning"', plan) == "continue"
     assert apply_setup_command(f"model {tmp_path / 'model.gguf'}", plan) == "continue"
     assert apply_setup_command("backend llama.cpp", plan) == "continue"
-    assert apply_setup_command(f"activation {tmp_path / 'calm.json'}", plan) == "continue"
+    assert apply_setup_command(f"steering {tmp_path / 'calm.json'}", plan) == "continue"
     assert apply_setup_command("sampler temp=.8 top_k=24", plan) == "continue"
     assert apply_setup_command("budget 32", plan) == "continue"
     assert apply_setup_command("seed 91", plan) == "continue"
@@ -146,7 +146,7 @@ def test_setup_menu_can_be_cancelled():
 def test_setup_summary_shows_effective_selections(tmp_path):
     plan = _plan()
     apply_setup_command('prompt "Prompt"', plan)
-    apply_setup_command(f"activation {tmp_path / 'vector.json'}", plan)
+    apply_setup_command(f"steering {tmp_path / 'vector.json'}", plan)
     apply_setup_command("sampler temperature=.7", plan)
 
     rendered = setup_summary(plan)
@@ -251,10 +251,10 @@ def test_controller_stack_is_ordered_and_discoverable():
     assert apply_setup_command("controllers", plan) == "show-controllers"
     stack = build_controller_stack(plan=plan)
     model = [entry.name for entry in stack.entries if entry.phase == "model"]
-    assert model == ["layerwise activation"]
+    assert model == ["layerwise hidden-state control"]
     names = [entry.name for entry in stack.entries if entry.phase == "policy"]
     assert names == [
-        "base model", "history penalties", "output activation",
+        "base model", "history penalties", "output-head steering",
         "manual biases/groups", "reference prior", "token preference actuator",
         "group control", "sampler / token draw",
     ]
@@ -326,13 +326,13 @@ def test_effective_plan_summary_marks_inheritance_and_validation(tmp_path):
         sampling,
         source_sampling=source,
         provenance={"backend": "llama.cpp", "model_path": str(tmp_path / "model.gguf")},
-        validated_artifacts=("activation vector: model and width matched",),
+        validated_artifacts=("steering vector: model and width matched",),
     )
     assert "RUNTIME PREFLIGHT" in rendered
     assert "temperature      0.8  [override]" in rendered
     assert "top_k            40  [inherited]" in rendered
     assert "aaaaaaaaaaaa" in rendered
-    assert "activation vector: model and width matched" in rendered
+    assert "steering vector: model and width matched" in rendered
 
 
 def test_preflight_requires_final_go_before_runtime_creation():

@@ -52,7 +52,7 @@ def test_profile_yaml_round_trip_and_canonical_identity(tmp_path):
 
     assert document["format"] == "spe-controller-profile-v1"
     assert document["controllers"]["sampler"]["temperature"] == 0.72
-    assert document["controllers"]["steering"]["activation_vector"] == str(
+    assert document["controllers"]["steering"]["vector"] == str(
         tmp_path / "style.json"
     )
     assert "replay" not in rendered
@@ -196,7 +196,7 @@ def test_profile_path_and_replay_safety_are_explicit(tmp_path):
         "  sampler:\n"
         "    temperature: 0.9\n"
         "  steering:\n"
-        f"    activation_vector: {str(tmp_path / 'vector.json')!r}\n",
+            f"    vector: {str(tmp_path / 'vector.json')!r}\n",
         encoding="utf-8",
     )
 

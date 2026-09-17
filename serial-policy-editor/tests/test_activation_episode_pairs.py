@@ -5,7 +5,7 @@ import json
 import numpy as np
 
 from tests.fakes import ConformingFakeBackend
-from trajectory_editor.activation_vectors import ActivationVectorArtifact
+from trajectory_editor.activation_vectors import SteeringVectorArtifact
 from trajectory_editor.domain import SamplingConfig
 from trajectory_editor.episode_store import EpisodeStore
 from trajectory_editor.vector_cli import main
@@ -53,7 +53,7 @@ def _episode(store: EpisodeStore, episode_id: str, text: str) -> None:
 
 def test_prompt_pairs_average_raw_differences_before_normalizing():
     backend = EpisodeActivationBackend()
-    artifact = ActivationVectorArtifact.from_prompt_pairs(
+    artifact = SteeringVectorArtifact.from_prompt_pairs(
         backend,
         backend.provenance(),
         [("POS-1", "NEG-1"), ("POS-2", "NEG-2")],
@@ -79,7 +79,7 @@ def test_activation_derive_uses_episode_provenance(tmp_path, monkeypatch):
         lambda *args, **kwargs: EpisodeActivationBackend(),
     )
     assert main([
-        "activation", "derive",
+        "output-head", "derive",
         "--workspace", str(workspace),
         "--positive", "positive-1", "positive-2",
         "--negative", "negative-1", "negative-2",
@@ -87,7 +87,7 @@ def test_activation_derive_uses_episode_provenance(tmp_path, monkeypatch):
         "--output", str(output),
     ]) == 0
 
-    artifact = ActivationVectorArtifact.from_path(output)
+    artifact = SteeringVectorArtifact.from_path(output)
     assert artifact.vector == (1.0, 0.0, 0.0)
     assert artifact.source["positive"][0]["episode_id"] == "positive-1"
     assert artifact.source["negative"][1]["episode_id"] == "negative-2"
@@ -102,7 +102,7 @@ def test_activation_export_pairs_escapes_cvector_prompt_lines(tmp_path, capsys):
 
     output_dir = tmp_path / "cvector-input"
     assert main([
-        "activation", "export-pairs",
+        "hidden-state", "export-pairs",
         "--workspace", str(workspace),
         "--positive", "positive",
         "--negative", "negative",
@@ -125,7 +125,7 @@ def test_activation_pair_lists_must_be_paired(tmp_path, capsys):
         _episode(store, "negative", "NEG-1")
 
     assert main([
-        "activation", "export-pairs",
+        "hidden-state", "export-pairs",
         "--workspace", str(workspace),
         "--positive", "positive", "positive",
         "--negative", "negative",
