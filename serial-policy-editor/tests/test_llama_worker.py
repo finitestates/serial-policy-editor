@@ -15,12 +15,12 @@ from trajectory_editor.llama_worker import capture_hidden_state_pair
 
 def worker_response(filename: str = "model.gguf") -> dict:
     return {
-        "protocol": "spe-llama-worker-v1",
+        "protocol": "spe-llama-worker-v2",
         "operation": "hidden-state-pair",
         "backend": {
             "name": "llama.cpp",
             "version": "0.3.0-dev",
-            "capture_api": "layer-input-native-worker",
+            "capture_api": "layer-input-c-api-plus-graph-output",
         },
         "model": {
             "filename": filename,
@@ -104,6 +104,26 @@ def test_worker_response_validation_rejects_mismatches(tmp_path, change, message
             prompt_a="a",
             prompt_b="b",
             layer_start=2,
+            layer_end=3,
+        )
+
+
+def test_worker_layer_one_capture_cannot_become_a_loadable_cvector(tmp_path):
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"model")
+    response = worker_response()
+    response["target"]["layer_start"] = 1
+    response["directions"]["1"] = [0.0, 0.0, 0.0]
+    response["raw_delta_norms"]["1"] = 0.0
+
+    with pytest.raises(EditorError, match="layer 1 is capture-only"):
+        SteeringVectorArtifact.from_llama_worker_response(
+            response,
+            model_path=model,
+            worker_path=tmp_path / "worker",
+            prompt_a="a",
+            prompt_b="b",
+            layer_start=1,
             layer_end=3,
         )
 

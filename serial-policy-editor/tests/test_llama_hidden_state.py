@@ -142,11 +142,12 @@ def test_llama_hidden_state_coordinate_excludes_unsteerable_final_layer():
 
     assert capabilities["site"] == "decoder-block-output-residual"
     assert capabilities["layer_numbering"] == "one-based"
-    assert capabilities["layer_count"] == 3
+    assert capabilities["layer_count"] == 4
     assert capabilities["capture_coordinate"] == "canonical block-output N <- native input tap N"
     assert capabilities["injection_coordinate"] == "canonical block-output N -> native cvector slot N-1"
-    assert capabilities["runtime_layer_range"] == [2, 3]
-    assert capabilities["final_layer_policy"] == "not-capturable-by-native-layer-input-tap"
+    assert capabilities["capture_layer_range"] == [1, 3]
+    assert capabilities["runtime_layer_range"] == [2, 4]
+    assert capabilities["final_layer_policy"] == "worker-graph-output-callback"
 
 
 def test_llama_control_vector_maps_canonical_layers_to_native_slots():
@@ -163,7 +164,7 @@ def test_llama_control_vector_maps_canonical_layers_to_native_slots():
     decoder._llama_cpp = Binding()
 
     decoder.set_activation_control_vector(
-        np.asarray([1, 2, 3, 4, 5, 6], dtype=np.float32),
+        np.asarray([1, 2, 3, 4, 5, 6, 7, 8], dtype=np.float32),
         layer_start=2,
         layer_end=3,
         strength=0.5,
@@ -175,7 +176,7 @@ def test_llama_control_vector_maps_canonical_layers_to_native_slots():
     assert width == 2
     assert native_start == 1
     assert native_end == 2
-    np.testing.assert_allclose(values, [1.5, 2.0, 2.5, 3.0, 0.0, 0.0])
+    np.testing.assert_allclose(values, [1.5, 2.0, 2.5, 3.0, 3.5, 4.0])
 
 
 def test_llama_control_vector_rejects_unaddressable_first_block_output():
@@ -189,7 +190,7 @@ def test_llama_control_vector_rejects_unaddressable_first_block_output():
     decoder._llama_cpp = Binding()
     with pytest.raises(RuntimeError, match="canonical layer range"):
         decoder.set_activation_control_vector(
-            np.zeros(6, dtype=np.float32),
+            np.zeros(8, dtype=np.float32),
             layer_start=1,
             layer_end=2,
             strength=1.0,

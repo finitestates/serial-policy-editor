@@ -125,6 +125,22 @@ def test_hidden_state_snapshot_captures_arbitrary_layer_and_positions():
         value.hidden_state_snapshot("abc", layer=0)
 
 
+def test_output_snapshot_captures_the_output_head_input():
+    value = backend()
+
+    token_ids = value.tokenize("abc", add_bos=True, special=True)
+    expected = value._model.model.embed_tokens(
+        torch.tensor([token_ids], dtype=torch.long)
+    )
+    for layer in value._model.model.layers:
+        expected = layer(expected)
+
+    np.testing.assert_allclose(
+        value.activation_snapshot("abc", position="last"),
+        expected[0, -1].detach().numpy(),
+    )
+
+
 def test_hidden_state_vector_hooks_only_selected_layers_and_can_be_cleared():
     value = backend()
     baseline = value.hidden_state_snapshot("abc", layer=2, position="last")

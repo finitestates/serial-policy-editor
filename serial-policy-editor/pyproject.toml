@@ -9,12 +9,22 @@ description = "A small terminal editor for human-steered model continuations and
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24", "prompt-toolkit>=3.0,<4", "PyYAML>=6"]
+dependencies = [
+    "numpy>=1.24",
+    "prompt-toolkit>=3.0,<4",
+    "PyYAML>=6",
+    "accelerate>=0.26",
+]
 
 [project.optional-dependencies]
 test = ["pytest>=9,<10"]
 llama = ["llama-cpp-python>=0.3"]
 transformers = ["torch>=2.1", "transformers>=4.45,<6"]
+transformers-gguf = [
+    "torch>=2.1",
+    "transformers>=4.45,<6",
+    "gguf>=0.10",
+]
 transformers-bnb = ["torch>=2.1", "transformers>=4.45,<6", "bitsandbytes>=0.43"]
 
 [project.scripts]
@@ -32,6 +42,7 @@ pythonpath = ["."]
 markers = [
     "llama_smoke: opt-in integration tests using a real local GGUF model",
     "transformers_smoke: opt-in integration tests using a real local Hugging Face model",
+    "transformers_gguf_smoke: opt-in cross-backend GGUF conformance tests",
      ]
 
 [tool.setuptools.package-data]

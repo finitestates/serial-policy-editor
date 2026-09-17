@@ -1,9 +1,9 @@
 """Portable steering-vector artifacts.
 
 This module contains two deliberately distinct artifact families: output-head
-steering vectors, which are final hidden-state directions projected into
-vocabulary logits, and hidden-state vectors, which are layerwise directions
-installed inside a compatible model runtime.
+steering vectors, which are post-normalization output-head-input directions
+projected into vocabulary logits, and hidden-state vectors, which are layerwise
+directions installed inside a compatible model runtime.
 
 The implementation file retains its historical name for now so the runtime
 refactor can proceed independently of the public terminology. The artifact
@@ -310,9 +310,17 @@ def _load_cvector_gguf(path: Path) -> tuple[dict[str, Any], tuple[float, ...], d
     expected_layers = list(range(1, max(directions) + 1))
     if sorted(directions) != expected_layers:
         raise EditorError("cvector direction layers must be contiguous from layer 1")
-    layer_count = int(metadata.get("controlvector.layer_count", len(directions)))
-    if layer_count != len(directions):
+    native_layer_count = int(metadata.get("controlvector.layer_count", len(directions)))
+    if native_layer_count != len(directions):
         raise EditorError("cvector layer count metadata does not match direction tensors")
+    # llama.cpp's native cvector buffer starts at native slot 1.  Native slot
+    # 1 is applied after canonical decoder block 2, while native slot N-1 is
+    # applied after canonical decoder block N.  Make that translation explicit
+    # instead of presenting native slot numbers as human-facing layer numbers.
+    layer_count = native_layer_count + 1
+    canonical_vector = (0.0,) * width + tuple(
+        value for layer in expected_layers for value in directions[layer]
+    )
     model_hint = metadata.get("controlvector.model_hint")
     model = {
         "backend": "llama.cpp",
@@ -321,17 +329,18 @@ def _load_cvector_gguf(path: Path) -> tuple[dict[str, Any], tuple[float, ...], d
         "hidden_state_layer_count": layer_count,
     }
     model = {key: value for key, value in model.items() if value is not None}
-    vector = tuple(value for layer in expected_layers for value in directions[layer])
     source = {
         "type": "llama-cvector-gguf",
         "adapter": "llama-cvector",
         "path": str(path),
         "gguf_version": version,
         "model_hint": model_hint,
-        "layer_count": layer_count,
+        "native_layer_count": native_layer_count,
+        "canonical_layer_count": layer_count,
         "direction_layers": expected_layers,
+        "canonical_layer_range": [2, layer_count],
     }
-    return model, vector, source
+    return model, canonical_vector, source
 
 
 @dataclass(frozen=True)
@@ -549,10 +558,9 @@ class SteeringVectorArtifact:
             strength=strength,
             method="llama-cvector-generator-v1",
             source=source,
-            # direction.N is the canonical output of block N.  llama.cpp's
-            # native slot N-1 is the corresponding injection point; native
-            # slot zero does not exist, so direction.1 is retained as data
-            # but is intentionally outside the active runtime range.
+            # Native direction.N is the native slot N, which is the output of
+            # canonical block N+1.  The importer has already padded and
+            # translated those chunks into the canonical layer layout.
             layer_start=2,
             layer_end=layer_count,
         )
@@ -580,7 +588,7 @@ class SteeringVectorArtifact:
         width_method = getattr(backend, "activation_width", None)
         if not callable(capture) or not callable(width_method):
             raise EditorError(
-                "the loaded backend does not expose final hidden-state snapshots"
+                "the loaded backend does not expose post-normalization output-head snapshots"
             )
         try:
             kwargs = {"layer": OUTPUT_LAYER, "position": capture_position}
@@ -597,14 +605,14 @@ class SteeringVectorArtifact:
             raise EditorError(f"could not capture activation pair: {exc}") from exc
         if first.ndim != 1 or second.ndim != 1 or first.shape != second.shape:
             raise EditorError(
-                "final hidden-state snapshots must be equal one-dimensional vectors"
+                "output-head snapshots must be equal one-dimensional vectors"
             )
         if first.shape[0] != width:
             raise EditorError(
-                f"final hidden-state width {first.shape[0]} does not match backend width {width}"
+                f"output-head snapshot width {first.shape[0]} does not match backend width {width}"
             )
         if not np.all(np.isfinite(first)) or not np.all(np.isfinite(second)):
-            raise EditorError("final hidden-state snapshots must be finite")
+            raise EditorError("output-head snapshots must be finite")
         delta = first - second
         raw_norm = float(np.linalg.norm(delta))
         if normalize and raw_norm > 0.0:
@@ -650,7 +658,7 @@ class SteeringVectorArtifact:
         width_method = getattr(backend, "activation_width", None)
         if not callable(capture) or not callable(width_method):
             raise EditorError(
-                "the loaded backend does not expose final hidden-state snapshots"
+                "the loaded backend does not expose post-normalization output-head snapshots"
             )
 
         deltas: list[np.ndarray] = []
@@ -675,14 +683,14 @@ class SteeringVectorArtifact:
                 )
                 if positive.ndim != 1 or negative.ndim != 1 or positive.shape != negative.shape:
                     raise ValueError(
-                        "final hidden-state snapshots must be equal one-dimensional vectors"
+                        "output-head snapshots must be equal one-dimensional vectors"
                     )
                 if positive.shape[0] != width:
                     raise ValueError(
-                        f"final hidden-state width {positive.shape[0]} does not match backend width {width}"
+                        f"output-head snapshot width {positive.shape[0]} does not match backend width {width}"
                     )
                 if not np.all(np.isfinite(positive)) or not np.all(np.isfinite(negative)):
-                    raise ValueError("final hidden-state snapshots must be finite")
+                    raise ValueError("output-head snapshots must be finite")
                 delta = positive - negative
                 deltas.append(delta)
                 pair_norms.append(float(np.linalg.norm(delta)))
@@ -878,7 +886,7 @@ class SteeringVectorArtifact:
 
         if not isinstance(response, Mapping):
             raise EditorError("llama.cpp worker response must be an object")
-        if response.get("protocol") != "spe-llama-worker-v1":
+        if response.get("protocol") != "spe-llama-worker-v2":
             raise EditorError("llama.cpp worker returned an unsupported protocol")
         if response.get("operation") != "hidden-state-pair":
             raise EditorError("llama.cpp worker returned an unsupported operation")
@@ -901,6 +909,11 @@ class SteeringVectorArtifact:
             raise EditorError(
                 "llama.cpp worker target must use the canonical decoder-block output coordinate"
             )
+        if layer_start < 2:
+            raise EditorError(
+                "llama.cpp hidden-state artifacts require canonical runtime layers 2 or higher; "
+                "layer 1 is capture-only with the upstream cvector adapter"
+            )
         if target.get("position") != capture_position:
             raise EditorError("llama.cpp worker position does not match the request")
         if target.get("layer_start") != layer_start or target.get("layer_end") != layer_end:
@@ -921,10 +934,6 @@ class SteeringVectorArtifact:
         )
         if layer_end > layer_count:
             raise EditorError("llama.cpp worker layer range exceeds the model")
-        if layer_start < 2:
-            raise EditorError(
-                "llama.cpp worker vectors require canonical runtime layers 2 or higher"
-            )
         expected_layers = {str(layer) for layer in range(layer_start, layer_end + 1)}
         if set(directions_data) != expected_layers or set(norms_data) != expected_layers:
             raise EditorError("llama.cpp worker returned an incomplete layer range")

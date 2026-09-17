@@ -5,7 +5,7 @@
 // directly, and emits a JSON response that the Python vector workbench can
 // turn into a portable SPE artifact.
 
-#include "llama.h"
+#include "llama-ext.h"
 
 #include <algorithm>
 #include <cmath>
@@ -21,17 +21,17 @@
 #include <string>
 #include <vector>
 
-// These hooks are implemented by SPE's pinned llama.cpp checkout.  They are
-// currently C++-linkage functions because the checkout has not promoted them
-// into the public C ABI.  Calling them here is deliberate: the compatibility
-// boundary is now this worker's build, rather than Python resolving compiler-
-// generated symbols from an arbitrary shared library at runtime.
-void llama_set_embeddings_layer_inp(
-    llama_context * ctx, uint32_t layer, bool enabled);
-float * llama_get_embeddings_layer_inp(
-    llama_context * ctx, uint32_t layer);
-
 namespace {
+
+constexpr const char * WORKER_PROTOCOL = "spe-llama-worker-v2";
+constexpr const char * BLOCK_OUTPUT_SITE = "decoder-block-output-residual";
+constexpr const char * BLOCK_OUTPUT_COORDINATE = "canonical-decoder-block-output-v1";
+constexpr const char * EMBEDDING_OUTPUT_SITE = "embedding-output";
+constexpr const char * EMBEDDING_OUTPUT_COORDINATE = "canonical-embedding-output-v1";
+constexpr const char * PRE_NORM_SITE = "pre-output-normalization-residual";
+constexpr const char * PRE_NORM_COORDINATE = "canonical-pre-output-normalization-residual-v1";
+constexpr const char * POST_NORM_SITE = "post-normalization-output-head-input";
+constexpr const char * POST_NORM_COORDINATE = "canonical-post-normalization-output-head-input-v1";
 
 struct Arguments {
     std::string model;
@@ -53,6 +53,21 @@ struct Arguments {
 struct Capture {
     int token_count = 0;
     std::vector<float> values;
+};
+
+struct PromptRepresentations {
+    int token_count = 0;
+    Capture embedding_output;
+    std::vector<Capture> block_outputs;
+    Capture post_normalization;
+};
+
+struct EvalCapture {
+    int model_layers = 0;
+    int width = 0;
+    PromptRepresentations * current = nullptr;
+    bool saw_final_block = false;
+    std::string error;
 };
 
 static void fail(const std::string & message) {
@@ -125,7 +140,7 @@ static void print_help(const char * program) {
         << " (--layer N | --layer-range START END)"
         << " [options]\n\n"
         << "Capture llama.cpp residual states for a prompt pair and emit JSON.\n"
-        << "Prompt A minus Prompt B is returned for each selected layer.\n\n"
+        << "The response includes the selected block range plus endpoint site directions.\n\n"
         << "options:\n"
         << "  --model PATH\n"
         << "  --prompt-a TEXT | --prompt-a-file PATH\n"
@@ -138,6 +153,64 @@ static void print_help(const char * program) {
         << "  --n-threads N               (default: llama.cpp default)\n"
         << "  --n-gpu-layers N            (default: 0)\n"
         << "  --output PATH               (default: stdout)\n";
+}
+
+static int block_output_index(const ggml_tensor * tensor) {
+    const char * name = ggml_get_name(tensor);
+    if (name == nullptr) {
+        return -1;
+    }
+    const std::string prefix = "l_out-";
+    const std::string value(name);
+    if (value.rfind(prefix, 0) != 0) {
+        return -1;
+    }
+    const std::string suffix = value.substr(prefix.size());
+    size_t consumed = 0;
+    int layer = 0;
+    try {
+        layer = std::stoi(suffix, &consumed);
+    } catch (const std::exception &) {
+        return -1;
+    }
+    return consumed == suffix.size() ? layer : -1;
+}
+
+static bool capture_block_outputs(
+    ggml_tensor * tensor, bool ask, void * user_data) {
+    auto * state = static_cast<EvalCapture *>(user_data);
+    if (state == nullptr || state->current == nullptr) {
+        return ask ? false : true;
+    }
+    const int layer = block_output_index(tensor);
+    if (layer < 0 || layer >= state->model_layers) {
+        return ask ? false : true;
+    }
+    if (ask) {
+        return true;
+    }
+    if (tensor->type != GGML_TYPE_F32 || tensor->ne[0] != state->width) {
+        state->error = "llama.cpp decoder-block output has an unexpected tensor shape";
+        return true;
+    }
+    const size_t rows = static_cast<size_t>(tensor->ne[1]);
+    if (rows != static_cast<size_t>(state->current->token_count)) {
+        state->error = "llama.cpp decoder-block output did not contain every token row";
+        return true;
+    }
+    Capture & capture = state->current->block_outputs[static_cast<size_t>(layer)];
+    capture.token_count = static_cast<int>(rows);
+    capture.values.resize(
+        rows * static_cast<size_t>(state->width));
+    ggml_backend_tensor_get(
+        tensor,
+        capture.values.data(),
+        0,
+        capture.values.size() * sizeof(float));
+    if (layer == state->model_layers - 1) {
+        state->saw_final_block = true;
+    }
+    return true;
 }
 
 static Arguments parse_arguments(int argc, char ** argv) {
@@ -221,30 +294,30 @@ static Arguments parse_arguments(int argc, char ** argv) {
 static std::vector<llama_token> tokenize(
     const llama_vocab * vocab, const std::string & text) {
     const int32_t required = llama_tokenize(
-        vocab, text.data(), static_cast<int32_t>(text.size()), nullptr, 0, true, true);
+        vocab, text.data(), static_cast<int32_t>(text.size()), nullptr, 0, true, false);
     if (required == std::numeric_limits<int32_t>::min() || required >= 0) {
         fail("llama.cpp returned an invalid tokenization size");
     }
     std::vector<llama_token> tokens(static_cast<size_t>(-required));
     const int32_t actual = llama_tokenize(
         vocab, text.data(), static_cast<int32_t>(text.size()), tokens.data(),
-        static_cast<int32_t>(tokens.size()), true, true);
+        static_cast<int32_t>(tokens.size()), true, false);
     if (actual < 0 || actual != static_cast<int32_t>(tokens.size())) {
         fail("llama.cpp failed to tokenize prompt");
     }
     return tokens;
 }
 
-static std::vector<Capture> capture_prompt(
+static PromptRepresentations capture_prompt(
     llama_context * ctx,
     const llama_vocab * vocab,
     const std::string & prompt,
-    int layer_start,
-    int layer_end,
+    int model_layers,
     const std::string & position,
     int width,
     uint32_t n_ctx,
-    uint32_t n_batch) {
+    uint32_t n_batch,
+    EvalCapture & eval_capture) {
     if (prompt.empty()) {
         fail("prompts must be nonempty");
     }
@@ -259,14 +332,29 @@ static std::vector<Capture> capture_prompt(
     llama_memory_clear(llama_get_memory(ctx), true);
     const llama_batch batch = llama_batch_get_one(
         const_cast<llama_token *>(tokens.data()), static_cast<int32_t>(tokens.size()));
+    PromptRepresentations representations;
+    representations.token_count = static_cast<int>(tokens.size());
+    representations.embedding_output.token_count = representations.token_count;
+    representations.block_outputs.assign(
+        static_cast<size_t>(model_layers), Capture{});
+    eval_capture.current = &representations;
+    eval_capture.saw_final_block = false;
+    eval_capture.error.clear();
     const int result = llama_decode(ctx, batch);
+    llama_synchronize(ctx);
+    eval_capture.current = nullptr;
     if (result != 0) {
         fail("llama.cpp failed to evaluate prompt (error " + std::to_string(result) + ")");
     }
+    if (!eval_capture.error.empty()) {
+        fail(eval_capture.error);
+    }
 
     const size_t row = position == "first" ? 0 : tokens.size() - 1;
-    std::vector<Capture> captures;
-    for (int layer = layer_start; layer <= layer_end; ++layer) {
+    // The layer-input C API supplies the embedding output at tap 0. Decoder
+    // block outputs are captured by the graph callback, including the final
+    // block, which has no subsequent layer-input tap in this graph.
+    for (int layer = 0; layer < 1; ++layer) {
         float * pointer = llama_get_embeddings_layer_inp(
             ctx, static_cast<uint32_t>(layer));
         if (pointer == nullptr) {
@@ -274,16 +362,51 @@ static std::vector<Capture> capture_prompt(
                  std::to_string(layer));
         }
         Capture capture;
-        capture.token_count = static_cast<int>(tokens.size());
+        capture.token_count = representations.token_count;
         capture.values.assign(pointer + row * static_cast<size_t>(width),
                               pointer + (row + 1) * static_cast<size_t>(width));
         if (std::any_of(capture.values.begin(), capture.values.end(),
                         [](float value) { return !std::isfinite(value); })) {
             fail("llama.cpp returned non-finite hidden-state values");
         }
-        captures.push_back(std::move(capture));
+        if (layer == 0) {
+            representations.embedding_output = std::move(capture);
+        }
     }
-    return captures;
+    if (!eval_capture.saw_final_block) {
+        fail("llama.cpp did not expose the final decoder-block output");
+    }
+    for (int layer = 0; layer < model_layers; ++layer) {
+        Capture & captured = representations.block_outputs[static_cast<size_t>(layer)];
+        if (captured.values.size() != tokens.size() * static_cast<size_t>(width)) {
+            fail("llama.cpp decoder-block output has an invalid row count");
+        }
+        Capture selected;
+        selected.token_count = representations.token_count;
+        selected.values.assign(
+            captured.values.data() + row * static_cast<size_t>(width),
+            captured.values.data() + (row + 1) * static_cast<size_t>(width));
+        if (std::any_of(selected.values.begin(), selected.values.end(),
+                        [](float value) { return !std::isfinite(value); })) {
+            fail("llama.cpp returned non-finite decoder-block values");
+        }
+        captured = std::move(selected);
+    }
+
+    float * post_norm = llama_get_embeddings_ith(
+        ctx, position == "first" ? 0 : -1);
+    if (post_norm == nullptr) {
+        fail("llama.cpp returned no post-normalization output-head input");
+    }
+    representations.post_normalization.token_count = representations.token_count;
+    representations.post_normalization.values.assign(
+        post_norm, post_norm + static_cast<size_t>(width));
+    if (std::any_of(representations.post_normalization.values.begin(),
+                    representations.post_normalization.values.end(),
+                    [](float value) { return !std::isfinite(value); })) {
+        fail("llama.cpp returned non-finite post-normalization values");
+    }
+    return representations;
 }
 
 static double norm(const std::vector<float> & values) {
@@ -314,23 +437,68 @@ static void write_vector(std::ostream & out, const std::vector<float> & values) 
     out << ']';
 }
 
+static double norm(const std::vector<float> & values);
+
+static std::vector<float> difference(
+    const std::vector<float> & positive,
+    const std::vector<float> & negative,
+    bool normalize,
+    double & raw_norm) {
+    if (positive.size() != negative.size() || positive.empty()) {
+        fail("llama.cpp returned mismatched representation widths");
+    }
+    std::vector<float> result(positive.size());
+    for (size_t i = 0; i < result.size(); ++i) {
+        result[i] = positive[i] - negative[i];
+    }
+    raw_norm = norm(result);
+    if (normalize && raw_norm > 0.0) {
+        for (float & value : result) {
+            value = static_cast<float>(value / raw_norm);
+        }
+    }
+    return result;
+}
+
+static void write_site_direction(
+    std::ostream & out,
+    const char * site,
+    const char * coordinate,
+    const std::vector<float> & direction,
+    double raw_norm) {
+    out << "    " << json_string(site) << ": {\n"
+        << "      \"site\": " << json_string(site) << ",\n"
+        << "      \"coordinate\": " << json_string(coordinate) << ",\n"
+        << "      \"direction\": ";
+    write_vector(out, direction);
+    out << ",\n      \"raw_delta_norm\": " << std::setprecision(17)
+        << raw_norm << "\n"
+        << "    }";
+}
+
 static void write_json(
     std::ostream & out,
     const Arguments & args,
     const llama_model * model,
     int width,
     int layer_count,
-    const std::vector<Capture> & captures_a,
-    const std::vector<Capture> & captures_b,
+    const PromptRepresentations & representations_a,
+    const PromptRepresentations & representations_b,
     const std::vector<std::vector<float>> & directions,
-    const std::vector<double> & raw_norms) {
+    const std::vector<double> & raw_norms,
+    const std::vector<float> & embedding_direction,
+    double embedding_norm,
+    const std::vector<float> & pre_norm_direction,
+    double pre_norm_norm,
+    const std::vector<float> & post_norm_direction,
+    double post_norm_norm) {
     out << "{\n"
-        << "  \"protocol\": \"spe-llama-worker-v1\",\n"
+        << "  \"protocol\": " << json_string(WORKER_PROTOCOL) << ",\n"
         << "  \"operation\": \"hidden-state-pair\",\n"
         << "  \"backend\": {\n"
         << "    \"name\": \"llama.cpp\",\n"
         << "    \"version\": " << json_string(llama_version()) << ",\n"
-        << "    \"capture_api\": \"layer-input-native-worker\"\n"
+        << "    \"capture_api\": \"layer-input-c-api-plus-graph-output\"\n"
         << "  },\n"
         << "  \"model\": {\n"
         << "    \"filename\": "
@@ -339,19 +507,20 @@ static void write_json(
         << "    \"vocabulary_size\": "
         << llama_vocab_n_tokens(llama_model_get_vocab(model)) << ",\n"
         << "    \"hidden_state_width\": " << width << ",\n"
-        << "    \"hidden_state_layer_count\": " << layer_count << "\n"
+        << "    \"hidden_state_layer_count\": " << layer_count << ",\n"
+        << "    \"decoder_block_count\": " << layer_count << "\n"
         << "  },\n"
         << "  \"target\": {\n"
-        << "    \"site\": \"decoder-block-output-residual\",\n"
+        << "    \"site\": " << json_string(BLOCK_OUTPUT_SITE) << ",\n"
         << "    \"layer_numbering\": \"one-based\",\n"
-        << "    \"coordinate\": \"canonical-decoder-block-output-v1\",\n"
+        << "    \"coordinate\": " << json_string(BLOCK_OUTPUT_COORDINATE) << ",\n"
         << "    \"layer_start\": " << args.layer_start << ",\n"
         << "    \"layer_end\": " << args.layer_end << ",\n"
         << "    \"position\": " << json_string(args.position) << "\n"
         << "  },\n"
         << "  \"prompts\": {\n"
-        << "    \"a_token_count\": " << captures_a.front().token_count << ",\n"
-        << "    \"b_token_count\": " << captures_b.front().token_count << "\n"
+        << "    \"a_token_count\": " << representations_a.token_count << ",\n"
+        << "    \"b_token_count\": " << representations_b.token_count << "\n"
         << "  },\n"
         << "  \"normalized\": " << (args.normalize ? "true" : "false") << ",\n"
         << "  \"directions\": {\n";
@@ -372,6 +541,18 @@ static void write_json(
         out << "    " << json_string(std::to_string(layer)) << ": "
             << std::setprecision(17) << raw_norms[index];
     }
+    out << "\n  },\n  \"site_directions\": {\n";
+    write_site_direction(
+        out, EMBEDDING_OUTPUT_SITE, EMBEDDING_OUTPUT_COORDINATE,
+        embedding_direction, embedding_norm);
+    out << ",\n";
+    write_site_direction(
+        out, PRE_NORM_SITE, PRE_NORM_COORDINATE,
+        pre_norm_direction, pre_norm_norm);
+    out << ",\n";
+    write_site_direction(
+        out, POST_NORM_SITE, POST_NORM_COORDINATE,
+        post_norm_direction, post_norm_norm);
     out << "\n  }\n}\n";
 }
 
@@ -399,6 +580,9 @@ int main(int argc, char ** argv) {
         context_params.n_batch = args.n_batch;
         context_params.n_ubatch = std::min(context_params.n_ubatch, args.n_batch);
         context_params.embeddings = true;
+        EvalCapture eval_capture;
+        context_params.cb_eval = capture_block_outputs;
+        context_params.cb_eval_user_data = &eval_capture;
         if (args.n_threads > 0) {
             context_params.n_threads = args.n_threads;
             context_params.n_threads_batch = args.n_threads;
@@ -412,49 +596,62 @@ int main(int argc, char ** argv) {
 
         const int width = llama_model_n_embd(model);
         const int model_layers = llama_model_n_layer(model);
-        const int capture_layers = std::max(1, model_layers - 1);
+        eval_capture.model_layers = model_layers;
+        eval_capture.width = width;
         if (width < 1 || model_layers < 1) {
             llama_free(ctx);
             llama_model_free(model);
             llama_backend_free();
             fail("llama.cpp reported invalid model dimensions");
         }
-        if (args.layer_start < 2 || args.layer_end > capture_layers) {
+        if (args.layer_start < 1 || args.layer_end > model_layers) {
             llama_free(ctx);
             llama_model_free(model);
             llama_backend_free();
-            fail("layer range exceeds canonical llama.cpp runtime layers (2.." +
-                 std::to_string(capture_layers) + ")");
+            fail("layer range exceeds canonical decoder-block layers (1.." +
+                 std::to_string(model_layers) + ")");
         }
 
-        for (int layer = args.layer_start; layer <= args.layer_end; ++layer) {
-            llama_set_embeddings_layer_inp(ctx, static_cast<uint32_t>(layer), true);
-        }
+        llama_set_embeddings_layer_inp(ctx, 0, true);
         const llama_vocab * vocab = llama_model_get_vocab(model);
-        std::vector<Capture> captures_a;
-        std::vector<Capture> captures_b;
+        PromptRepresentations representations_a;
+        PromptRepresentations representations_b;
         std::vector<std::vector<float>> directions;
         std::vector<double> raw_norms;
-        captures_a = capture_prompt(
-            ctx, vocab, prompt_a, args.layer_start, args.layer_end,
-            args.position, width, args.n_ctx, args.n_batch);
-        captures_b = capture_prompt(
-            ctx, vocab, prompt_b, args.layer_start, args.layer_end,
-            args.position, width, args.n_ctx, args.n_batch);
-        for (size_t index = 0; index < captures_a.size(); ++index) {
-            std::vector<float> direction(width);
-            for (int i = 0; i < width; ++i) {
-                direction[i] = captures_a[index].values[i] - captures_b[index].values[i];
-            }
-            const double raw_norm = norm(direction);
-            if (args.normalize && raw_norm > 0.0) {
-                for (float & value : direction) {
-                    value = static_cast<float>(value / raw_norm);
-                }
-            }
-            directions.push_back(std::move(direction));
+        representations_a = capture_prompt(
+            ctx, vocab, prompt_a, model_layers, args.position, width,
+            args.n_ctx, args.n_batch, eval_capture);
+        representations_b = capture_prompt(
+            ctx, vocab, prompt_b, model_layers, args.position, width,
+            args.n_ctx, args.n_batch, eval_capture);
+        for (int layer = args.layer_start; layer <= args.layer_end; ++layer) {
+            double raw_norm = 0.0;
+            directions.push_back(difference(
+                representations_a.block_outputs[static_cast<size_t>(layer - 1)].values,
+                representations_b.block_outputs[static_cast<size_t>(layer - 1)].values,
+                args.normalize,
+                raw_norm));
             raw_norms.push_back(raw_norm);
         }
+
+        double embedding_norm = 0.0;
+        const std::vector<float> embedding_direction = difference(
+            representations_a.embedding_output.values,
+            representations_b.embedding_output.values,
+            args.normalize,
+            embedding_norm);
+        double pre_norm_norm = 0.0;
+        const std::vector<float> pre_norm_direction = difference(
+            representations_a.block_outputs.back().values,
+            representations_b.block_outputs.back().values,
+            args.normalize,
+            pre_norm_norm);
+        double post_norm_norm = 0.0;
+        const std::vector<float> post_norm_direction = difference(
+            representations_a.post_normalization.values,
+            representations_b.post_normalization.values,
+            args.normalize,
+            post_norm_norm);
 
         std::ofstream file;
         std::ostream * output = &std::cout;
@@ -468,8 +665,12 @@ int main(int argc, char ** argv) {
             }
             output = &file;
         }
-        write_json(*output, args, model, width, capture_layers,
-                   captures_a, captures_b, directions, raw_norms);
+        write_json(
+            *output, args, model, width, model_layers,
+            representations_a, representations_b, directions, raw_norms,
+            embedding_direction, embedding_norm,
+            pre_norm_direction, pre_norm_norm,
+            post_norm_direction, post_norm_norm);
 
         llama_free(ctx);
         llama_model_free(model);

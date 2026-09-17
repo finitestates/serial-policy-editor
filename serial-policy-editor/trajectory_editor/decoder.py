@@ -280,24 +280,20 @@ class LlamaCppDecoder:
         raise RuntimeError("installed llama.cpp binding does not expose model layer count")
 
     def _control_vector_layer_count(self) -> int:
-        """Return the canonical block-output vector width in layer slots.
-
-        The native adapter allocates ``n_layer - 1`` direction slots, but
-        those slots are indexed by the zero-based decoder loop.  SPE keeps a
-        canonical one-based block-output coordinate and translates it at the
-        setter boundary.  The final block is not capturable by the native
-        layer-input tap, so the portable artifact currently has ``n_layer - 1``
-        canonical slots as well.
-        """
-        return max(1, self._model_layer_count() - 1)
+        """Return the number of canonical one-based decoder block outputs."""
+        return self._model_layer_count()
 
     def hidden_state_width(self) -> int:
         """Return the residual-stream width used by native control vectors."""
         return self.activation_width()
 
     def hidden_state_layer_count(self) -> int:
-        """Return the one-based residual layers directly capturable by the tap."""
+        """Return the number of canonical decoder block-output coordinates."""
         return self._control_vector_layer_count()
+
+    def hidden_state_capture_layer_range(self) -> tuple[int, int]:
+        """Return the block outputs exposed by llama.cpp's layer taps."""
+        return 1, max(1, self._model_layer_count() - 1)
 
     def hidden_state_runtime_layer_range(self) -> tuple[int, int]:
         """Return canonical block-output layers supported by native injection."""
@@ -323,9 +319,10 @@ class LlamaCppDecoder:
             "native_module_path": "llama.cpp layer input tap N",
             "capture_coordinate": "canonical block-output N <- native input tap N",
             "injection_coordinate": "canonical block-output N -> native cvector slot N-1",
+            "capture_layer_range": list(self.hidden_state_capture_layer_range()),
             "runtime_layer_range": list(self.hidden_state_runtime_layer_range()),
             "modality": "text",
-            "final_layer_policy": "not-capturable-by-native-layer-input-tap",
+            "final_layer_policy": "worker-graph-output-callback",
         }
 
     def _hidden_state_capture_symbols(self):
@@ -378,13 +375,13 @@ class LlamaCppDecoder:
         """Capture all token rows for selected residual layers in an isolated context."""
         if not layers:
             raise RuntimeError("at least one hidden-state layer must be selected")
-        layer_count = self.hidden_state_layer_count()
+        capture_start, capture_end = self.hidden_state_capture_layer_range()
         if any(
-            type(layer) is not int or layer < 1 or layer > layer_count
+            type(layer) is not int or layer < capture_start or layer > capture_end
             for layer in layers
         ):
             raise RuntimeError(
-                f"hidden-state layer must be between 1 and {layer_count}"
+                f"hidden-state layer must be between {capture_start} and {capture_end}"
             )
         if not isinstance(text, str) or not text:
             raise RuntimeError("hidden-state snapshot prompt must be nonempty")
@@ -479,16 +476,16 @@ class LlamaCppDecoder:
             raise RuntimeError(
                 "hidden-state snapshot position must be first, last, current, or all"
             )
-        layer_count = self.hidden_state_layer_count()
+        capture_start, capture_end = self.hidden_state_capture_layer_range()
         if (
             type(layer_start) is not int
             or type(layer_end) is not int
-            or layer_start < 1
+            or layer_start < capture_start
             or layer_end < layer_start
-            or layer_end > layer_count
+            or layer_end > capture_end
         ):
             raise RuntimeError(
-                f"hidden-state layer range must be between 1 and {layer_count}"
+                f"hidden-state layer range must be between {capture_start} and {capture_end}"
             )
         rows = self._capture_hidden_state_rows(
             text, tuple(range(layer_start, layer_end + 1))
@@ -513,8 +510,9 @@ class LlamaCppDecoder:
 
         llama.cpp applies native slot ``s`` after zero-based decoder block
         ``s``.  Consequently canonical one-based block output ``N`` maps to
-        native slot ``N - 1``.  The first canonical output has no native slot
-        and is rejected rather than silently steering a different block.
+        native slot ``N - 1``.  Canonical layer 1 remains capture-only because
+        the upstream native adapter reserves no slot 0; canonical layer N is
+        fully steerable before final output normalization.
         """
         setter = getattr(self._llama_cpp, "llama_set_adapter_cvec", None)
         if not callable(setter):
@@ -538,14 +536,12 @@ class LlamaCppDecoder:
             raise RuntimeError("control-vector data does not match the loaded model")
         if not np.all(np.isfinite(values)):
             raise RuntimeError("control-vector data is not finite")
-        # The canonical vector reserves one chunk per capturable block output.
-        # Native cvector data reserves one chunk per native slot.  Shift the
-        # canonical chunks left so native slot 1 receives canonical layer 2;
-        # the final native slot is intentionally zero because canonical layer
-        # ``n_layer`` is not part of the current capture contract.
-        native_values = np.zeros_like(values)
-        if layer_count > 1:
-            native_values[: width * (layer_count - 1)] = values[width:]
+        # The canonical vector has one chunk for every decoder block output.
+        # Native llama.cpp cvector data begins at slot 1, so discard the
+        # capture-only canonical layer 1 chunk and pass canonical layers 2..N
+        # directly to native slots 1..N-1.  This preserves the final block's
+        # pre-normalization injection point.
+        native_values = np.ascontiguousarray(values[width:], dtype=np.float32)
         scaled = np.ascontiguousarray(native_values * float(strength), dtype=np.float32)
         context = self._model._ctx.ctx if hasattr(self._model, "_ctx") else self._model.ctx
         result = setter(
@@ -567,7 +563,7 @@ class LlamaCppDecoder:
         width = self.activation_control_vector_width()
         layer_count = self.activation_control_vector_layer_count()
         context = self._model._ctx.ctx if hasattr(self._model, "_ctx") else self._model.ctx
-        result = setter(context, None, 0, width, 1, layer_count)
+        result = setter(context, None, 0, width, 1, max(1, layer_count - 1))
         if int(result) != 0:
             raise RuntimeError(f"llama.cpp rejected clearing the control vector (error {result})")
 

@@ -1,4 +1,4 @@
-# Serial Policy Editor 0.4.4
+# Serial Policy Editor 0.4.6
 
 Steer a local language model in your terminal: choose individual tokens, insert
 text, delegate a span, and rewind or fork the result. Serial Policy Replay (SPR)

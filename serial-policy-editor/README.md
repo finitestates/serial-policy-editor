@@ -762,6 +762,24 @@ SPE_TRANSFORMERS_SMOKE_MODEL=/path/to/model-directory \
   python -m pytest -m transformers_smoke -v
 ```
 
+### Cross-backend hidden-state conformance
+
+The optional `transformers_gguf_smoke` check loads the same local GGUF through
+Transformers and the SPE llama.cpp worker. It verifies tokenizer identity and
+compares the worker's pairwise directions against explicit Transformers hooks
+for every one-based decoder-block output, the embedding output, the final
+pre-normalization residual, and the post-normalization output-head input. This
+is deliberately a slow sanity check for worker coordinates and prompt-pair
+arithmetic, not part of normal vector creation or runtime generation. Use an
+F16 GGUF for the clearest reference before repeating the check with a quantized
+file:
+
+```bash
+SPE_TRANSFORMERS_GGUF_MODEL=/path/to/model-f16.gguf \
+SPE_LLAMA_WORKER=/path/to/spe-llama-worker \
+  python -m pytest -m transformers_gguf_smoke -v
+```
+
 A passing matrix is evidence that SPE agrees with real inference engines on the
 paths exercised by these tests. It is not a bit-for-bit reproducibility claim:
 different hardware, kernels, dtypes, quantization, and near-tied logits can
@@ -916,9 +934,9 @@ presented as generic “activation vectors”:
 | Vector kind | Coordinate space | Runtime effect |
 | --- | --- | --- |
 | `hidden-state-vector` | Decoder-block output residual at selected layers | Changes the model’s internal residual stream before later layers run. |
-| `output-head-steering-vector` | Final hidden representation | Projects through the output head into a vocabulary-wide logit adjustment. |
+| `output-head-steering-vector` | Post-normalization output-head input | Projects through the output head into a vocabulary-wide logit adjustment. |
 | Token-preference vector | SPE’s deterministic projected token-feature coordinates | Adjusts token logits directly through the preference learner surface. |
-| Native cvector GGUF | llama.cpp’s layerwise control-vector format | Imports native hidden-state directions, preserving `direction.N` layer slots. |
+| Native cvector GGUF | llama.cpp’s native layerwise direction format | Imports native hidden-state directions and translates their slots into canonical block coordinates. |
 
 The first two are model-state controls; only the output-head kind has a
 static vocabulary-logit explanation. Token-preference vectors and learner
@@ -946,7 +964,8 @@ source metadata. The workbench refuses to combine vectors from incompatible
 models or feature bases.
 
 The workbench also creates output-head steering vectors from two prompts. It
-computes Prompt A minus Prompt B at the final hidden state, then the runtime
+computes Prompt A minus Prompt B at the post-normalization output-head input,
+then the runtime
 projects that direction through the model output head into vocabulary logits.
 The default artifact is unit-normalized and can be loaded directly by the
 editor:
@@ -1003,10 +1022,14 @@ output-head vectors), and the `impact`/`compare` workbench reports before
 using them on new episodes.
 
 Both backends can create hidden-state vectors directly at the decoder-block
-residual boundary. The first supported site is the residual stream immediately
-after the selected block; one width-sized direction is stored for every
-capturable text layer, with only the requested range active. Layer numbers are
-canonical one-based decoder-block numbers in this command:
+residual boundary. The portable coordinate is the residual stream immediately
+after a canonical one-based decoder block; one width-sized direction is stored
+for every model block, with only the requested range active. The native worker
+also reports three explicitly separate endpoint sites: embedding output, the
+final pre-output-normalization residual, and the post-normalization
+output-head input. They are not interchangeable hidden-state coordinates.
+
+Layer numbers are canonical one-based decoder-block numbers in this command:
 
 ```bash
 policy-editor-vector hidden-state create \
@@ -1027,8 +1050,8 @@ use full attention. The portable target remains the decoder block-output
 residual stream; lower-level attention or recurrent-state vectors require an
 explicit backend-specific coordinate.
 
-For llama.cpp, `hidden-state create` captures the selected per-token residual
-states directly through llama.cpp's native layer-input extraction API:
+For llama.cpp, the normal Python adapter captures the selected per-token
+residual states directly through llama.cpp's native layer-input extraction API:
 
 ```bash
 policy-editor-vector hidden-state create \
@@ -1042,14 +1065,14 @@ policy-editor-vector hidden-state validate calm-vs-angry.json \
 
 The llama.cpp adapter captures all requested token positions in one evaluation
 per prompt, then the artifact creator selects `first` or `last` for the
-prompt-pair direction. Its native layer-input tap observes canonical block
-output `N` at tap `N`, while llama.cpp's native cvector slot is offset by one;
-SPE translates canonical output `N` to native slot `N-1`. The currently shared
-capture/runtime range is therefore `2..N-1`: canonical block output 1 has no
-native cvector slot, and the final block output is not available through the
-native layer-input capture tap. Requests outside that range are rejected for
-llama.cpp vector creation rather than silently steering a different block. The
-final normalized representation remains a separate output-head coordinate.
+prompt-pair direction. Its layer-input tap captures canonical block outputs
+`1..N-1`. The native cvector slot is offset by one: canonical block output `N`
+maps to native slot `N-1`, so the final block is runtime-steerable even though
+it is not available through that capture tap. Canonical block output 1 remains
+capture-only with the upstream cvector adapter because it has no slot 0.
+Requests outside the adapter's capture range are rejected rather than silently
+steering a different block. The final pre-normalization residual and the
+post-normalization output-head input are separate sites.
 
 There is also a narrow native worker for installations where the Python
 binding's private capture symbols are not a comfortable compatibility boundary.
@@ -1068,13 +1091,19 @@ policy-editor-vector hidden-state create \
 
 The worker is a one-shot native compatibility process, not an inference
 server. It links directly to the selected llama.cpp build, captures the
-requested residual layers, and writes a small versioned JSON response. The
-workbench validates that response and converts it into the same portable
+requested canonical block range plus the embedding, final pre-normalization,
+and post-normalization endpoint sites, and writes a small versioned JSON
+response. The final block is captured from llama.cpp's evaluated graph output,
+not guessed from a neighboring layer-input tap. The workbench validates the
+selected range and converts it into the same portable
 `spe-steering-vector-v1` artifact used by the normal backend. If llama.cpp's
 internal capture interface changes, rebuilding the worker fails at its build
 boundary instead of leaving a runtime symbol lookup silently pointed at the
-wrong ABI. Set `SPE_LLAMA_CPP_ROOT` or `SPE_LLAMA_CPP_BUILD` when the checkout
-or build is not adjacent to the SPE repository.
+wrong ABI. A worker JSON request may include canonical layer 1 for inspection,
+but a loadable llama.cpp hidden-state artifact must target layers `2..N`,
+because upstream cvector has no slot 0. Set `SPE_LLAMA_CPP_ROOT` or
+`SPE_LLAMA_CPP_BUILD` when the checkout or build is not adjacent to the SPE
+repository.
 
 `export-pairs` plus `llama-cvector-generator` remains available when you want
 llama.cpp's PCA/mean training workflow or a native GGUF cvector:
@@ -1088,13 +1117,12 @@ policy-editor --model model.gguf --new-prompt "Hello" \
   --steering-vector mood-cvector.json
 ```
 
-These artifacts preserve the `direction.1` through `direction.N` hidden-state
-directions and canonicalize them as decoder-block outputs. Because native
-slot zero does not exist, imported cvector direction 1 is retained for
-inspection but is outside the active llama.cpp runtime range; directions 2
-through `N` map to native slots 1 through `N-1`. The editor installs them
-through llama.cpp's control-vector API and rebuilds the current prefix when
-that runtime state changes. Hidden-state vectors are inspectable and replayable; token-level
+These artifacts translate native cvector directions into the canonical layout.
+Native `direction.1` maps to canonical block output 2, and native
+`direction.N-1` maps to canonical block output `N`; a leading zero chunk records
+the capture-only canonical layer 1. The editor installs them through llama.cpp's
+control-vector API and rebuilds the current prefix when that runtime state
+changes. Hidden-state vectors are inspectable and replayable; token-level
 `explain` is intentionally available only for output-head steering because a
 hidden-state intervention is not a static output-logit offset.
 

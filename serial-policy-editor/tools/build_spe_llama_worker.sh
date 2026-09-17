@@ -19,6 +19,7 @@ mkdir -p "$(dirname "${output}")"
 
 c++ -std=c++17 -O2 \
     -I"${llama_root}/include" \
+    -I"${llama_root}/src" \
     -I"${llama_root}/ggml/include" \
     "${repo_root}/tools/spe_llama_worker.cpp" \
     -L"${llama_build}/bin" \

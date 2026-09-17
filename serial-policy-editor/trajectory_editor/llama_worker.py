@@ -10,7 +10,7 @@ from typing import Any, Mapping
 from .domain import EditorError
 
 
-PROTOCOL = "spe-llama-worker-v1"
+PROTOCOL = "spe-llama-worker-v2"
 
 
 def capture_hidden_state_pair(

@@ -887,11 +887,14 @@ class TransformersBackend:
         layer: str = "output",
         position: str = "last",
     ) -> np.ndarray:
-        """Capture one final hidden-state position for a prompt.
+        """Capture one post-normalization output-head input for a prompt.
 
         ``layer=output`` names the representation immediately before the
-        language-model output head.  This is the first portable activation
-        coordinate shared with the llama.cpp adapter.
+        language-model output head.  Capturing the output-head input directly
+        avoids relying on the version-dependent meaning of
+        ``outputs.hidden_states[-1]``: some Transformers releases expose the
+        pre-normalization final residual there, while others replace it with
+        the normalized output-head input.
         """
         if layer != "output":
             raise RuntimeError("Transformers activation snapshots currently support layer=output only")
@@ -908,20 +911,34 @@ class TransformersBackend:
             [token_ids], dtype=torch.long, device=self._input_device
         )
         attention_mask = torch.ones_like(input_ids)
-        with torch.inference_mode():
-            outputs = self._model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                use_cache=False,
-                return_dict=True,
-                output_hidden_states=True,
-            )
-        hidden_states = getattr(outputs, "hidden_states", None)
-        if not hidden_states:
-            raise RuntimeError("Transformers model returned no hidden states")
-        hidden = hidden_states[-1]
+        output_embeddings = self._model.get_output_embeddings()
+        if output_embeddings is None or not callable(getattr(output_embeddings, "register_forward_pre_hook", None)):
+            raise RuntimeError("Transformers model output head cannot expose its input")
+        captured: list[Any] = []
+
+        def capture_head_input(_module: Any, inputs: tuple[Any, ...]) -> None:
+            if not inputs:
+                raise RuntimeError("Transformers output head received no hidden-state input")
+            captured.append(inputs[0].detach().to(dtype=torch.float32, device="cpu"))
+
+        handle = output_embeddings.register_forward_pre_hook(capture_head_input)
+        try:
+            with torch.inference_mode():
+                self._model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    use_cache=False,
+                    return_dict=True,
+                )
+        finally:
+            handle.remove()
+        if len(captured) != 1:
+            raise RuntimeError("Transformers output-head capture did not run exactly once")
+        hidden = captured[0]
+        if hidden.ndim != 3 or hidden.shape[0] != 1:
+            raise RuntimeError("Transformers output-head input has an invalid shape")
         index = 0 if position == "first" else -1
-        row = hidden[0, index].detach().to(dtype=torch.float32, device="cpu").numpy()
+        row = hidden[0, index].numpy()
         result = np.asarray(row, dtype=np.float32).copy()
         if result.ndim != 1 or result.shape[0] != self.activation_width():
             raise RuntimeError("Transformers activation snapshot has the wrong width")
