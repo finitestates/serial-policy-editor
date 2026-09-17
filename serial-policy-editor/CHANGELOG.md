@@ -28,6 +28,11 @@
 - Add the first executable `ControllerPipeline` seam with opt-in immutable
   intermediate-surface traces; existing observation arithmetic remains the
   replay authority.
+- Add strict reusable controller profiles in user-facing YAML. Setup now
+  supports `profile print`, `profile save PATH`, and transactional
+  `profile load PATH`; profiles use canonical JSON for SHA-256 identity and
+  exclude episode/workspace/model launch context so replay selection remains
+  untouched.
 
 ## 0.4.2 — 2026-09-16
 

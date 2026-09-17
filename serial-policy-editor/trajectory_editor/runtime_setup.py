@@ -8,10 +8,15 @@ end that produces the same inputs.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
+import os
 import re
 import shlex
+import tempfile
 from argparse import Namespace
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +31,7 @@ from .token_preference_features import (
 
 
 RUNTIME_PLAN_FORMAT = "spe-runtime-plan-v1"
+CONTROLLER_PROFILE_FORMAT = "spe-controller-profile-v1"
 
 
 _SOURCE_FIELDS = ("new_prompt", "new_prompt_file", "replay", "resume", "fork_from")
@@ -102,6 +108,60 @@ _PLAN_FIELDS = (
     "repeat_penalty", "repeat_last_n", "presence_penalty", "frequency_penalty",
     "seed", "random_seed", *_LEARNING_FIELDS, *_PREFERENCE_FIELDS,
 )
+
+# A profile is deliberately narrower than RuntimePlan.  Episode/workspace
+# selection and model loading are launch context, not reusable controller
+# intent.  Keeping the boundary explicit also prevents a saved profile from
+# accidentally selecting an old replay source when it is loaded later.
+_PROFILE_FIELD_GROUPS = {
+    "sampler": (
+        "temperature", "top_k", "top_p", "min_p", "repeat_penalty",
+        "repeat_last_n", "presence_penalty", "frequency_penalty", "seed",
+        "random_seed",
+    ),
+    "steering": ("biases", "groups", "reference", "activation_vector"),
+    "learning": _LEARNING_FIELDS,
+    "preference": _PREFERENCE_FIELDS,
+}
+_PROFILE_FIELDS = frozenset(
+    field_name
+    for field_names in _PROFILE_FIELD_GROUPS.values()
+    for field_name in field_names
+)
+_PROFILE_PATH_FIELDS = frozenset({"biases", "groups", "reference", "activation_vector"})
+_PROFILE_BOOL_FIELDS = frozenset(
+    {
+        "random_seed", "online_learning", "learning_no_severity_attenuation",
+        "learn_from_write", "token_preference", "token_preference_fast_slow",
+        "token_preference_no_severity_attenuation",
+        "token_preference_random_projection_seed",
+    }
+)
+_PROFILE_INT_FIELDS = frozenset(
+    {
+        "top_k", "repeat_last_n", "learning_severity_cap", "learning_dead_zone_rank",
+        "token_preference_dimension", "token_preference_severity_cap",
+        "token_preference_dead_zone_rank", "token_preference_fisher_max_support",
+        "token_preference_projection_chunk_size", "token_preference_projection_seed",
+    }
+)
+_PROFILE_FLOAT_FIELDS = frozenset(
+    {
+        "temperature", "top_p", "min_p", "repeat_penalty", "presence_penalty",
+        "frequency_penalty", "learning_rate", "learning_epsilon", "learning_max_step",
+        "learning_min_bias", "learning_max_bias", "learning_rejection_strength",
+        "learning_decay", "token_preference_learning_rate", "token_preference_strength",
+        "token_preference_whitening_ridge", "token_preference_influence_kl",
+        "token_preference_min_gain", "token_preference_max_gain",
+        "token_preference_max_step", "token_preference_max_norm", "token_preference_decay",
+        "token_preference_rejection_strength", "token_preference_fast_learning_rate",
+        "token_preference_fast_decay", "token_preference_fast_strength",
+        "token_preference_fast_max_step", "token_preference_fast_max_norm",
+        "token_preference_learning_kl", "token_preference_fast_learning_kl",
+        "token_preference_fisher_ridge", "token_preference_fisher_mass",
+    }
+)
+_PROFILE_LIST_FIELDS = frozenset({"learnable_groups"})
 
 
 @dataclass
@@ -405,6 +465,16 @@ _CONTROL_OPTIONAL_FIELDS = {
     "token_preference_fisher_ridge", "token_preference_fisher_mode",
     "token_preference_fisher_mass", "token_preference_fisher_max_support",
 }
+
+_PROFILE_NULLABLE_FIELDS = frozenset(
+    {
+        *_PROFILE_PATH_FIELDS,
+        "temperature", "top_k", "top_p", "min_p", "repeat_penalty", "repeat_last_n",
+        "presence_penalty", "frequency_penalty", "seed", "learnable_groups",
+        "token_preference_projection_seed",
+        *_CONTROL_OPTIONAL_FIELDS,
+    }
+)
 _CONTROL_CHOICES = {
     "learning_decay_on": DECAY_ON,
     "learning_write_reduction": WRITE_REDUCTIONS,
@@ -420,6 +490,354 @@ _CONTROL_CHOICES = {
     "token_preference_learning_metric": ("euclidean", "fisher"),
     "token_preference_fisher_mode": ("diagonal", "full"),
 }
+
+
+def _profile_json_value(value: Any) -> Any:
+    """Convert a plan value to JSON/YAML-safe canonical data."""
+
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (tuple, list)):
+        return [_profile_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _profile_json_value(item)
+            for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+        }
+    return value
+
+
+def _profile_intent_fields(plan: RuntimePlan) -> dict[str, Any]:
+    baseline = type(plan)()
+    explicit = set(plan.explicit_options)
+    return {
+        name: (
+            float(getattr(plan, name))
+            if name in _PROFILE_FLOAT_FIELDS and getattr(plan, name) is not None
+            else _profile_json_value(getattr(plan, name))
+        )
+        for name in _PROFILE_FIELDS
+        if name in explicit or getattr(plan, name) != getattr(baseline, name)
+    }
+
+
+def _controller_profile_payload(plan: RuntimePlan) -> dict[str, Any]:
+    intent = _profile_intent_fields(plan)
+    return {
+        "format": CONTROLLER_PROFILE_FORMAT,
+        "controllers": {
+            group: {
+                name: intent[name]
+                for name in fields
+                if name in intent
+            }
+            for group, fields in _PROFILE_FIELD_GROUPS.items()
+        },
+    }
+
+
+def controller_profile_json(plan: RuntimePlan) -> str:
+    """Return the canonical JSON payload used for profile identity."""
+
+    return json.dumps(
+        _controller_profile_payload(plan),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def controller_profile_fingerprint(plan: RuntimePlan) -> str:
+    """Return the SHA-256 identity of reusable controller intent."""
+
+    return hashlib.sha256(controller_profile_json(plan).encode("utf-8")).hexdigest()
+
+
+def _profile_yaml_dump(document: dict[str, Any]) -> str:
+    try:
+        import yaml
+    except ImportError as exc:  # pragma: no cover - package dependency
+        raise EditorError("PyYAML is required for controller profiles") from exc
+    return yaml.safe_dump(
+        document,
+        allow_unicode=True,
+        default_flow_style=False,
+        sort_keys=False,
+    )
+
+
+def controller_profile_yaml(plan: RuntimePlan) -> str:
+    """Render the reusable controller intent as user-facing YAML."""
+
+    payload = _controller_profile_payload(plan)
+    document = dict(payload)
+    document["fingerprint"] = controller_profile_fingerprint(plan)
+    return _profile_yaml_dump(document)
+
+
+def _strict_profile_yaml(text: str, path: Path) -> Any:
+    try:
+        import yaml
+    except ImportError as exc:  # pragma: no cover - package dependency
+        raise EditorError("PyYAML is required for controller profiles") from exc
+
+    class StrictProfileLoader(yaml.SafeLoader):
+        pass
+
+    def construct_mapping(loader, node, deep=False):
+        mapping = {}
+        for key_node, value_node in node.value:
+            key = loader.construct_object(key_node, deep=deep)
+            if type(key) is not str:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping", node.start_mark,
+                    "controller profile keys must be strings", key_node.start_mark,
+                )
+            if key in mapping:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping", node.start_mark,
+                    f"found duplicate key {key!r}", key_node.start_mark,
+                )
+            mapping[key] = loader.construct_object(value_node, deep=deep)
+        return mapping
+
+    StrictProfileLoader.add_constructor(
+        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+        construct_mapping,
+    )
+    try:
+        return yaml.load(text, Loader=StrictProfileLoader)
+    except yaml.YAMLError as exc:
+        raise EditorError(f"invalid controller profile {path}: {exc}") from exc
+
+
+def _profile_mapping(value: Any, *, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise EditorError(f"controller profile {label} must be a mapping")
+    if any(type(key) is not str for key in value):
+        raise EditorError(f"controller profile {label} keys must be strings")
+    return value
+
+
+def _profile_value(field_name: str, value: Any, *, label: str) -> Any:
+    if value is None:
+        if field_name not in _PROFILE_NULLABLE_FIELDS:
+            raise EditorError(f"controller profile {label} cannot be null")
+        return None
+    if field_name in _PROFILE_PATH_FIELDS:
+        if type(value) is not str or not value.strip():
+            raise EditorError(f"controller profile {label} must be a non-empty path string")
+        return value
+    if field_name in _PROFILE_BOOL_FIELDS:
+        if type(value) is not bool:
+            raise EditorError(f"controller profile {label} must be a boolean")
+        return value
+    if field_name in _PROFILE_INT_FIELDS or field_name == "seed":
+        if type(value) is not int:
+            raise EditorError(f"controller profile {label} must be an integer")
+        if field_name in {"seed", "token_preference_projection_seed"} and not -(1 << 63) <= value <= (1 << 63) - 1:
+            raise EditorError(f"controller profile {label} is outside the signed 64-bit range")
+        return value
+    if field_name in _PROFILE_FLOAT_FIELDS:
+        if type(value) not in (int, float) or not math.isfinite(float(value)):
+            raise EditorError(f"controller profile {label} must be a finite number")
+        return float(value)
+    if field_name in _PROFILE_LIST_FIELDS:
+        if type(value) is not list or any(type(item) is not str or not item for item in value):
+            raise EditorError(f"controller profile {label} must be a list of non-empty strings")
+        return list(value)
+    if type(value) is not str:
+        raise EditorError(f"controller profile {label} must be a string")
+    choices = _CONTROL_CHOICES.get(field_name)
+    if choices is not None and value not in choices:
+        raise EditorError(
+            f"controller profile {label} must be one of: {', '.join(choices)}"
+        )
+    return value
+
+
+def _validate_profile_values(values: dict[str, Any]) -> None:
+    def present(name: str) -> Any:
+        return values.get(name)
+
+    for name, value in values.items():
+        if name in {"top_k", "token_preference_dimension", "learning_severity_cap",
+                    "token_preference_severity_cap", "token_preference_projection_chunk_size",
+                    "learning_dead_zone_rank", "token_preference_dead_zone_rank"}:
+            if value is not None and value < 1:
+                raise EditorError(f"controller profile {name} must be positive")
+        if name == "repeat_last_n" and value is not None and value < -1:
+            raise EditorError("controller profile repeat_last_n must be -1 or nonnegative")
+        if name == "top_p" and value is not None and not 0.0 < value <= 1.0:
+            raise EditorError("controller profile top_p must be in (0, 1]")
+        if name == "min_p" and value is not None and not 0.0 <= value <= 1.0:
+            raise EditorError("controller profile min_p must be in [0, 1]")
+        if name == "temperature" and value is not None and value < 0.0:
+            raise EditorError("controller profile temperature cannot be negative")
+        if name == "repeat_penalty" and value is not None and value <= 0.0:
+            raise EditorError("controller profile repeat_penalty must be greater than 0")
+        if name in {
+            "learning_rate", "learning_epsilon", "learning_max_step",
+            "learning_rejection_strength", "learning_decay",
+            "token_preference_learning_rate", "token_preference_strength",
+            "token_preference_whitening_ridge", "token_preference_influence_kl",
+            "token_preference_min_gain", "token_preference_max_gain",
+            "token_preference_max_step", "token_preference_max_norm",
+            "token_preference_decay", "token_preference_rejection_strength",
+            "token_preference_fast_learning_rate", "token_preference_fast_decay",
+            "token_preference_fast_strength", "token_preference_fast_max_step",
+            "token_preference_fast_max_norm", "token_preference_learning_kl",
+            "token_preference_fast_learning_kl", "token_preference_fisher_ridge",
+            "token_preference_fisher_mass",
+        } and value is not None and value < 0.0:
+            raise EditorError(f"controller profile {name} must be nonnegative")
+    minimum = present("token_preference_min_gain")
+    maximum = present("token_preference_max_gain")
+    if minimum is not None and maximum is not None and maximum < minimum:
+        raise EditorError(
+            "controller profile token_preference_max_gain must be at least min_gain"
+        )
+
+
+def _parse_controller_profile(document: Any, path: Path) -> tuple[dict[str, Any], str]:
+    document = _profile_mapping(document, label="document")
+    allowed_top = {"format", "controllers", "fingerprint"}
+    unknown = set(document) - allowed_top
+    if unknown:
+        raise EditorError(
+            "controller profile has unknown top-level keys: " + ", ".join(sorted(unknown))
+        )
+    if document.get("format") != CONTROLLER_PROFILE_FORMAT:
+        raise EditorError(
+            f"unsupported controller profile format {document.get('format')!r}; "
+            f"expected {CONTROLLER_PROFILE_FORMAT}"
+        )
+    raw_controllers = _profile_mapping(document.get("controllers"), label="controllers")
+    unknown_groups = set(raw_controllers) - set(_PROFILE_FIELD_GROUPS)
+    if unknown_groups:
+        raise EditorError(
+            "controller profile has unknown controller sections: "
+            + ", ".join(sorted(unknown_groups))
+        )
+    values: dict[str, Any] = {}
+    for group, raw_values in raw_controllers.items():
+        raw_values = _profile_mapping(raw_values, label=f"controllers.{group}")
+        allowed_fields = set(_PROFILE_FIELD_GROUPS[group])
+        unknown_fields = set(raw_values) - allowed_fields
+        if unknown_fields:
+            raise EditorError(
+                f"controller profile {group} has unknown fields: "
+                + ", ".join(sorted(unknown_fields))
+            )
+        for field_name, raw_value in raw_values.items():
+            values[field_name] = _profile_value(
+                field_name, raw_value, label=f"controllers.{group}.{field_name}"
+            )
+    _validate_profile_values(values)
+    payload = {
+        "format": CONTROLLER_PROFILE_FORMAT,
+        "controllers": {
+            group: {
+                name: values[name]
+                for name in fields
+                if name in values
+            }
+            for group, fields in _PROFILE_FIELD_GROUPS.items()
+        },
+    }
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+    fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    declared = document.get("fingerprint")
+    if declared is not None:
+        if type(declared) is not str or len(declared) != 64 or any(
+            char not in "0123456789abcdef" for char in declared
+        ):
+            raise EditorError("controller profile fingerprint must be a lowercase SHA-256 digest")
+        if declared != fingerprint:
+            raise EditorError(
+                f"controller profile fingerprint mismatch: declared {declared}, calculated {fingerprint}"
+            )
+    return payload, fingerprint
+
+
+def load_controller_profile(path: Path | str) -> tuple[dict[str, Any], str]:
+    """Read and fully validate a profile before returning any plan changes."""
+
+    selected = Path(path).expanduser()
+    try:
+        text = selected.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise EditorError(f"cannot read controller profile {selected}: {exc}") from exc
+    return _parse_controller_profile(_strict_profile_yaml(text, selected), selected)
+
+
+def _profile_runtime_value(field_name: str, value: Any) -> Any:
+    if field_name in _PROFILE_PATH_FIELDS and value is not None:
+        return Path(value).expanduser()
+    if field_name == "learnable_groups" and value is not None:
+        return tuple(value)
+    return value
+
+
+def apply_controller_profile(plan: RuntimePlan, payload: dict[str, Any]) -> str:
+    """Replace controller intent while preserving launch and episode context."""
+
+    values = {}
+    for group, fields in _PROFILE_FIELD_GROUPS.items():
+        values.update(payload["controllers"].get(group, {}))
+
+    candidate = replace(plan, explicit_options=set(plan.explicit_options))
+    baseline = type(plan)()
+    for field_name in _PROFILE_FIELDS:
+        setattr(candidate, field_name, getattr(baseline, field_name))
+        candidate.explicit_options.discard(field_name)
+    for field_name, value in values.items():
+        setattr(candidate, field_name, _profile_runtime_value(field_name, value))
+        candidate.explicit_options.add(field_name)
+
+    # Commit only after the complete candidate has been assembled.  Source,
+    # workspace, model, backend, and budget never participate in this update.
+    for field_name in _PROFILE_FIELDS:
+        setattr(plan, field_name, getattr(candidate, field_name))
+    plan.explicit_options = set(candidate.explicit_options)
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    ).hexdigest()
+
+
+def save_controller_profile(plan: RuntimePlan, path: Path | str) -> str:
+    """Atomically write a user-facing YAML profile and return its fingerprint."""
+
+    selected = Path(path).expanduser()
+    if selected.exists() and selected.is_dir():
+        raise EditorError(f"controller profile path is a directory: {selected}")
+    try:
+        selected.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise EditorError(f"cannot create controller profile directory {selected.parent}: {exc}") from exc
+    text = controller_profile_yaml(plan)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=selected.parent,
+            prefix=f".{selected.name}.", suffix=".tmp", delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, selected)
+    except OSError as exc:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+        raise EditorError(f"cannot save controller profile {selected}: {exc}") from exc
+    return controller_profile_fingerprint(plan)
 
 
 def _control_destination(raw_key: str, *, preference: bool) -> str:
@@ -624,6 +1042,7 @@ def setup_summary(plan: RuntimePlan) -> str:
             f"Group learn  {_setting_value(plan.online_learning)}",
             f"Preference   {_setting_value(plan.token_preference)}",
             f"Controllers  {build_controller_stack(plan=plan).compact()}",
+            f"Profile      {controller_profile_fingerprint(plan)[:12]}",
             "",
             "Commands",
             "  workspace [PATH]            show or switch episode workspace",
@@ -640,6 +1059,9 @@ def setup_summary(plan: RuntimePlan) -> str:
             "  learning|group [key=value]  show/configure group learning",
             "  preference [key=value]      show/configure token preference",
             "  controllers|stack           show ordered control surfaces",
+            "  profile print               print reusable controller YAML",
+            "  profile save PATH           save reusable controller YAML",
+            "  profile load PATH           replace controller intent from YAML",
             "  #N or N                     inspect an episode",
             "  fm [#N]                     show its fork map",
             "  show                        redraw this summary",
@@ -894,6 +1316,18 @@ def apply_setup_command(
         if len(words) != 1:
             raise EditorError(f"{command} does not take arguments")
         return "show-controllers"
+    if command == "profile":
+        if len(words) == 1 or (len(words) == 2 and words[1].lower() == "print"):
+            return "show-profile"
+        if len(words) != 3 or words[1].lower() not in {"save", "load"}:
+            raise EditorError("use profile print, profile save PATH, or profile load PATH")
+        selected = _path(words[2], label="profile")
+        if words[1].lower() == "save":
+            save_controller_profile(plan, selected)
+            return "profile-saved"
+        payload, _ = load_controller_profile(selected)
+        apply_controller_profile(plan, payload)
+        return "profile-loaded"
     if command in {"ls", "episodes"}:
         return "list"
     if command == "workspace":
@@ -1057,6 +1491,16 @@ def run_runtime_setup_menu(io: Any, args: Namespace, *, store: Any | None = None
             continue
         if result == "show-controllers":
             io.page(build_controller_stack(plan=plan).render())
+            continue
+        if result == "show-profile":
+            io.page(controller_profile_yaml(plan))
+            continue
+        if result == "profile-saved":
+            io.write("Controller profile saved.")
+            continue
+        if result == "profile-loaded":
+            io.write("Controller profile loaded; episode and workspace selection were preserved.")
+            io.write(setup_summary(plan))
             continue
         if result == "list":
             if store is None:

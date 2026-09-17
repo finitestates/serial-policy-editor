@@ -96,6 +96,22 @@ model logits, history penalties, layerwise/output activation, biases/groups,
 reference prior, token-preference actuation, and final sampling, followed by
 the feedback learners.
 
+Reusable controller intent can be printed or saved as strict YAML from the
+same menu:
+
+```text
+profile print
+profile save profiles/calm.yaml
+profile load profiles/calm.yaml
+```
+
+Profiles contain sampler, steering-artifact, group-learning, and token-
+preference settings. They intentionally do not contain an episode source,
+workspace, model/backend choice, or token budget, so loading one cannot move a
+replay to another episode or workspace. The YAML document includes a
+fingerprint derived from canonical, sorted JSON; hand-edited profiles may omit
+that fingerprint, while a present fingerprint must match exactly.
+
 Use `--seed N` for a reproducible sampler seed, or `--random-seed` to choose
 and print a new seed from the supported signed 64-bit range.  The two options
 are mutually exclusive.  The selected value is stored in the episode's
