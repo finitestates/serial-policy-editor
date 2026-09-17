@@ -93,6 +93,45 @@ def model_identity_from_json(value: str) -> dict[str, Any]:
     return parsed
 
 
+def activation_vector_digest_for(
+    vector: Sequence[float],
+    *,
+    model: Mapping[str, Any] | str | None = None,
+    layer: str = OUTPUT_LAYER,
+    position: str = RUNTIME_POSITION,
+    strength: float = 1.0,
+    layer_start: int | None = None,
+    layer_end: int | None = None,
+) -> str:
+    """Return the canonical content digest used by activation artifacts.
+
+    Runtime state must not rely on a caller-provided label alone.  Keeping the
+    digest construction here also makes artifact and live sampler identities
+    agree without making the domain module import the artifact type.
+    """
+    if model is None:
+        model_value: Mapping[str, Any] = {}
+    elif isinstance(model, str):
+        model_value = model_identity_from_json(model)
+    elif isinstance(model, Mapping):
+        model_value = model
+    else:
+        raise EditorError("activation vector model identity must be an object")
+    payload = {
+        "model": dict(model_value),
+        "layer": layer,
+        "position": position,
+        "strength": float(strength),
+        "vector": [float(value) for value in vector],
+        "layer_start": layer_start,
+        "layer_end": layer_end,
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _check_model_compatibility(
     left: Mapping[str, Any], right: Mapping[str, Any], *, label: str
 ) -> None:
@@ -364,19 +403,15 @@ class ActivationVectorArtifact:
 
     @property
     def digest(self) -> str:
-        payload = {
-            "model": dict(self.model),
-            "layer": self.layer,
-            "position": self.position,
-            "strength": self.strength,
-            "vector": list(self.vector),
-            "layer_start": self.layer_start,
-            "layer_end": self.layer_end,
-        }
-        encoded = json.dumps(
-            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-        return hashlib.sha256(encoded).hexdigest()
+        return activation_vector_digest_for(
+            self.vector,
+            model=self.model,
+            layer=self.layer,
+            position=self.position,
+            strength=self.strength,
+            layer_start=self.layer_start,
+            layer_end=self.layer_end,
+        )
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ActivationVectorArtifact":

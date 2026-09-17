@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 
 import numpy as np
@@ -22,6 +22,65 @@ class SparseDistribution:
     def probability(self, token_id: int) -> float:
         matches = np.flatnonzero(self.ids == int(token_id))
         return float(self.probabilities[matches[0]]) if len(matches) else 0.0
+
+
+@dataclass(frozen=True)
+class ControllerTraceStage:
+    """One immutable intermediate logit surface from a policy decision."""
+
+    name: str
+    phase: str
+    surface: np.ndarray = field(repr=False, compare=False)
+    delta: np.ndarray = field(repr=False, compare=False)
+    diagnostics: dict[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        surface = np.asarray(self.surface, dtype=np.float64).copy()
+        delta = np.asarray(self.delta, dtype=np.float64).copy()
+        if surface.ndim != 1 or delta.shape != surface.shape:
+            raise ValueError("controller trace surfaces must be equal one-dimensional arrays")
+        if not np.all(np.isfinite(surface)) or not np.all(np.isfinite(delta)):
+            raise ValueError("controller trace surfaces must be finite")
+        surface.setflags(write=False)
+        delta.setflags(write=False)
+        object.__setattr__(self, "surface", surface)
+        object.__setattr__(self, "delta", delta)
+        object.__setattr__(self, "diagnostics", dict(self.diagnostics))
+
+    def to_dict(self, *, include_surface: bool = False) -> dict[str, object]:
+        result: dict[str, object] = {
+            "name": self.name,
+            "phase": self.phase,
+            "shape": list(self.surface.shape),
+            "diagnostics": dict(self.diagnostics),
+        }
+        if include_surface:
+            result["surface"] = self.surface.tolist()
+            result["delta"] = self.delta.tolist()
+        return result
+
+
+@dataclass(frozen=True)
+class ControllerTrace:
+    """Captured policy surfaces; never persisted as episode state."""
+
+    stages: tuple[ControllerTraceStage, ...]
+    filtered_token_ids: tuple[int, ...] = ()
+
+    def stage(self, name: str) -> ControllerTraceStage:
+        for stage in self.stages:
+            if stage.name == name:
+                return stage
+        raise KeyError(name)
+
+    def to_dict(self, *, include_surfaces: bool = False) -> dict[str, object]:
+        return {
+            "stages": [
+                stage.to_dict(include_surface=include_surfaces)
+                for stage in self.stages
+            ],
+            "filtered_token_ids": list(self.filtered_token_ids),
+        }
 
 
 def _softmax(values: np.ndarray) -> np.ndarray:
@@ -501,12 +560,34 @@ class ObservationStatistics:
         render_tokens=None,
         token_preference_coordinate_identity=None,
         activation_logit_adjustments=None,
+        capture_trace=False,
     ):
         self.logits = _validated_logits(logits).copy()
         self.boundaries = boundaries
         self.token_preference_features = token_preference_features
         self.token_preference_coordinate_identity = token_preference_coordinate_identity
         self.render_tokens = render_tokens
+        trace_stages: list[ControllerTraceStage] = []
+
+        def record_stage(name: str, phase: str, surface, previous=None, **details) -> None:
+            if not capture_trace:
+                return
+            values = np.asarray(surface, dtype=np.float64)
+            prior = np.zeros_like(values) if previous is None else np.asarray(previous, dtype=np.float64)
+            delta = values - prior
+            details = {
+                "delta_rms": float(np.sqrt(np.mean(delta ** 2))),
+                "delta_min": float(np.min(delta)),
+                "delta_max": float(np.max(delta)),
+                "affected_tokens": int(np.count_nonzero(delta)),
+                **details,
+            }
+            trace_stages.append(
+                ControllerTraceStage(name, phase, values, delta, details)
+            )
+
+        record_stage("backend logits", "policy", self.logits)
+        trace_previous = self.logits
         penalties_active = config.history_penalties_active
         if penalties_active:
             self.adjusted, _, _ = _history_penalty_surface(
@@ -516,6 +597,8 @@ class ObservationStatistics:
             if history_token_ids is not None:
                 _validated_history(history_token_ids, len(self.logits))
             self.adjusted = self.logits
+        record_stage("history penalties", "policy", self.adjusted, trace_previous)
+        trace_previous = self.adjusted
         self.activation_logit_adjustments = np.zeros_like(self.logits)
         if (
             config.activation_vector_layer == "output"
@@ -540,6 +623,15 @@ class ObservationStatistics:
                 raise ValueError("activation vector produced non-finite policy logits")
             self.adjusted = self.adjusted.copy()
             self.adjusted += self.activation_logit_adjustments
+        record_stage(
+            "output activation", "policy", self.adjusted, trace_previous,
+            active=bool(
+                config.activation_vector_layer == "output"
+                and config.activation_vector
+                and config.activation_vector_strength != 0.0
+            ),
+        )
+        trace_previous = self.adjusted
         self.activation_diagnostics = {
             "vector_norm": float(
                 np.linalg.norm(np.asarray(config.activation_vector, dtype=np.float64))
@@ -569,6 +661,12 @@ class ObservationStatistics:
                 self.adjusted[token] += bias
             if not np.all(np.isfinite(self.adjusted)):
                 raise ValueError("biases produced non-finite policy logits")
+        record_stage(
+            "manual/reference", "policy", self.adjusted, trace_previous,
+            manual_tokens=len(self.active_biases),
+            reference_tokens=len(self.reference_prior_biases),
+        )
+        trace_previous = self.adjusted
         # This is the canonical surface immediately before preference actuation.
         # Keep it separate from both the deployed policy and the raw model.
         self.preference_base_logits = np.asarray(self.adjusted, dtype=np.float64).copy()
@@ -696,6 +794,11 @@ class ObservationStatistics:
             self.adjusted += token_preference_adjustments
         else:
             self.token_preference_logit_adjustments = np.zeros_like(self.adjusted)
+        record_stage(
+            "token preference", "policy", self.adjusted, trace_previous,
+            active=bool(token_preference_vector or fast_vector),
+        )
+        trace_previous = self.adjusted
         self.baseline_probabilities = _softmax(self.adjusted)
         if token_preference_vector or fast_vector:
             self.token_preference_diagnostics["pre_post_token_preference_kl"] = policy_kl(
@@ -713,6 +816,12 @@ class ObservationStatistics:
             self.adjusted = self.adjusted.copy()
             for token, amount in self.group_control_biases.items():
                 self.adjusted[token] += amount
+        record_stage(
+            "group control", "policy", self.adjusted, trace_previous,
+            active=bool(config.group_controls),
+            controlled_tokens=len(self.group_control_biases),
+        )
+        trace_previous = self.adjusted
         penalties_active = config.policy_active
         self.maximum = float(np.max(self.logits))
         exponentials = np.exp(self.logits - self.maximum)
@@ -726,6 +835,15 @@ class ObservationStatistics:
         ids = stages["after_min_p"]
         assert ids is not None
         self.distribution = SparseDistribution(ids, _softmax(scaled[ids]))
+        record_stage(
+            "sampler / token draw", "policy", self.adjusted, trace_previous,
+            filtered_tokens=len(ids),
+            temperature=float(config.temperature),
+        )
+        self.controller_trace = (
+            ControllerTrace(tuple(trace_stages), tuple(int(value) for value in ids))
+            if capture_trace else None
+        )
         for array in (
             self.logits, self.adjusted, self.policy_probabilities, self.baseline_probabilities,
             self.preference_base_logits, self.preference_base_probabilities,

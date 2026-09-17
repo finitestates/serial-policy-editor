@@ -239,6 +239,15 @@ class SamplingConfig:
         ):
             raise EditorError("activation_vector_digest must be a lowercase SHA-256 digest")
         object.__setattr__(self, "activation_vector_digest", digest)
+        if (
+            self.activation_vector_layer == "control-vector"
+            and self.activation_vector
+            and self.activation_vector_strength != 0.0
+            and not digest
+        ):
+            raise EditorError(
+                "active control-vector activation requires a verified digest"
+            )
         if activation and model:
             width = json.loads(model).get("activation_width")
             if (

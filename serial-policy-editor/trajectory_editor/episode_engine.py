@@ -24,6 +24,7 @@ from .episode_backend import EpisodeBackend, require_episode_backend
 from .episode_hash import token_prefix_sha256, validate_fingerprint
 from .token_preference_features import coordinate_identity_matches
 from .vector_artifacts import _supported_kwargs
+from .controller_pipeline import ControllerPipeline
 from .sampling import (
     SparseDistribution,
     ObservationStatistics,
@@ -173,6 +174,7 @@ class EpisodeEngine:
         stream_fingerprint: str | None = None,
         coordinate_offset: int = 0,
         backend_positioned: bool = False,
+        controller_pipeline: ControllerPipeline | None = None,
     ) -> None:
         if max_tokens is not None and (type(max_tokens) is not int or max_tokens < 1):
             raise EditorError("max_tokens must be a positive integer")
@@ -217,6 +219,7 @@ class EpisodeEngine:
         self._observation_key: tuple | None = None
         self._activation_validation_key: tuple | None = None
         self._activation_runtime_key: tuple | None = None
+        self.controller_pipeline = controller_pipeline or ControllerPipeline()
         # This engine owns one backend/tokenizer. Sampler changes and rewinds
         # do not change token spellings, so their classifications remain valid.
         self._token_boundaries: dict[int, frozenset[str]] = {}
@@ -266,6 +269,11 @@ class EpisodeEngine:
 
     @sampling.setter
     def sampling(self, value: SamplingConfig) -> None:
+        previous = getattr(self, "_sampling", None)
+        previous_activation_key = (
+            self._activation_backend_key_for(previous)
+            if previous is not None else None
+        )
         if hasattr(self, "initial_token_ids") and any(c.history_start is None for c in value.group_controls):
             value = replace(value, group_controls=tuple(
                 replace(c, history_start=len(self.initial_token_ids)) if c.history_start is None else c
@@ -288,6 +296,10 @@ class EpisodeEngine:
         if not (value.token_preference_vector or value.token_preference_fast_vector):
             self._token_preference_coordinate_identity = None
         self._activation_validation_key = None
+        if hasattr(self, "_activation_runtime_key") and (
+            previous_activation_key != self._activation_backend_key_for(value)
+        ):
+            self._activation_runtime_key = None
         self._invalidate_observation()
 
     @property
@@ -376,29 +388,50 @@ class EpisodeEngine:
         self._observation = None
         self._observation_key = None
 
-    def _prepare_activation_runtime(self) -> None:
-        """Install a layerwise llama.cpp cvector before reading logits."""
-        is_control = (
-            self.sampling.activation_vector_layer == "control-vector"
-            and bool(self.sampling.activation_vector)
-            and self.sampling.activation_vector_strength != 0.0
+    @staticmethod
+    def _activation_backend_key_for(sampling: SamplingConfig | None) -> tuple:
+        """Return the backend-state identity, including vector contents."""
+        if sampling is None or not (
+            sampling.activation_vector_layer == "control-vector"
+            and sampling.activation_vector
+            and sampling.activation_vector_strength != 0.0
+        ):
+            return ("plain",)
+        from .activation_vectors import activation_vector_digest_for
+
+        content_digest = activation_vector_digest_for(
+            sampling.activation_vector,
+            model=sampling.activation_vector_model,
+            layer=sampling.activation_vector_layer,
+            position=sampling.activation_vector_position,
+            strength=sampling.activation_vector_strength,
+            layer_start=sampling.activation_vector_layer_start,
+            layer_end=sampling.activation_vector_layer_end,
         )
-        current_key = (
+        return (
             "control-vector",
-            self.sampling.activation_vector_digest,
-            self.sampling.activation_vector_model,
-            self.sampling.activation_vector_layer_start,
-            self.sampling.activation_vector_layer_end,
-            self.sampling.activation_vector_strength,
-        ) if is_control else ("output",)
+            content_digest,
+            sampling.activation_vector_digest,
+            sampling.activation_vector_model,
+            sampling.activation_vector_layer_start,
+            sampling.activation_vector_layer_end,
+            sampling.activation_vector_strength,
+        )
+
+    def _prepare_activation_runtime(self) -> None:
+        """Reconcile backend model-state controls before reading logits."""
+        current_key = self._activation_backend_key_for(self.sampling)
         if current_key == self._activation_runtime_key:
             return
-        previous = self._activation_runtime_key
-        if previous is not None and previous[0] == "control-vector" and not is_control:
+        is_control = current_key[0] == "control-vector"
+        if not is_control:
             clear = getattr(self.backend, "clear_activation_control_vector", None)
             if callable(clear):
                 try:
                     clear()
+                    # Clearing an adapter does not retroactively change logits
+                    # already present in a reused KV cache.
+                    self.backend.reset(self.token_ids)
                 except (RuntimeError, TypeError, ValueError) as exc:
                     raise EditorError(f"could not clear activation control vector: {exc}") from exc
         if is_control:
@@ -408,7 +441,7 @@ class EpisodeEngine:
                     "the loaded backend does not expose llama.cpp control-vector runtime support"
                 )
             validation_key = (
-                self.sampling.activation_vector_digest,
+                current_key[1],
                 self.sampling.activation_vector_model,
             )
             if validation_key != self._activation_validation_key:
@@ -534,7 +567,7 @@ class EpisodeEngine:
                 )
             if not np.all(np.isfinite(activation_logit_adjustments)):
                 raise RuntimeError("activation logit adjustments are not finite")
-        statistics = ObservationStatistics(
+        statistics = self.controller_pipeline.build_statistics(
             logits,
             self.sampling,
             key[0],

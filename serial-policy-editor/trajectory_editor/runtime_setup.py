@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .backend_factory import BACKEND_NAMES
+from .controller_stack import build_controller_stack
 from .domain import EditorError, SamplingConfig
 from .learning_controls import DECAY_ON, REJECTION_TARGETS, WRITE_REDUCTIONS
 from .token_preference_features import (
@@ -622,6 +623,7 @@ def setup_summary(plan: RuntimePlan) -> str:
             f"Seed         {getattr(plan, 'seed', None) if getattr(plan, 'seed', None) is not None else 'default'}",
             f"Group learn  {_setting_value(plan.online_learning)}",
             f"Preference   {_setting_value(plan.token_preference)}",
+            f"Controllers  {build_controller_stack(plan=plan).compact()}",
             "",
             "Commands",
             "  workspace [PATH]            show or switch episode workspace",
@@ -637,6 +639,7 @@ def setup_summary(plan: RuntimePlan) -> str:
             "  seed N|random|default",
             "  learning|group [key=value]  show/configure group learning",
             "  preference [key=value]      show/configure token preference",
+            "  controllers|stack           show ordered control surfaces",
             "  #N or N                     inspect an episode",
             "  fm [#N]                     show its fork map",
             "  show                        redraw this summary",
@@ -746,6 +749,16 @@ def effective_plan_summary(
             f"strength={plan.token_preference_strength:g} "
             f"scheme={plan.token_preference_learning_scheme or 'sgd-v1'}",
             "  Details: learning|group and preference",
+            "",
+        )
+    )
+    rows.extend(build_controller_stack(
+        plan=plan,
+        sampling=sampling,
+        provenance=provenance,
+    ).render().splitlines())
+    rows.extend(
+        (
             "",
             "VALIDATION",
             "  backend and sampler: ready",
@@ -877,6 +890,10 @@ def apply_setup_command(
         return "quit"
     if command in {"show", "status", "help", "?"}:
         return "show"
+    if command in {"controllers", "controller", "stack"}:
+        if len(words) != 1:
+            raise EditorError(f"{command} does not take arguments")
+        return "show-controllers"
     if command in {"ls", "episodes"}:
         return "list"
     if command == "workspace":
@@ -1037,6 +1054,9 @@ def run_runtime_setup_menu(io: Any, args: Namespace, *, store: Any | None = None
             continue
         if result == "show-preference":
             io.page(preference_summary(plan))
+            continue
+        if result == "show-controllers":
+            io.page(build_controller_stack(plan=plan).render())
             continue
         if result == "list":
             if store is None:

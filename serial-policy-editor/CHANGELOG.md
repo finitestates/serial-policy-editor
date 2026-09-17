@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.3 — 2026-09-16
 
 - Add episode-pair activation tooling: derive portable output-layer vectors
   from positive/negative replay or fork episodes, or export escaped paired
@@ -19,6 +19,15 @@
   setup: bare commands show every associated control, `key=value` edits are
   accepted, and the main plan redraws after each change so enabled states are
   visible.
+- Add the first descriptive controller stack: `controllers`/`stack` shows the
+  ordered policy surfaces and feedback learners in setup and final preflight,
+  without changing their established intervention mathematics.
+- Correct the controller-stack order to distinguish backend model preparation
+  from logit-space control, expose group control after token preference, and
+  reconcile reused backend control-vector state before every new model surface.
+- Add the first executable `ControllerPipeline` seam with opt-in immutable
+  intermediate-surface traces; existing observation arithmetic remains the
+  replay authority.
 
 ## 0.4.2 — 2026-09-16
 

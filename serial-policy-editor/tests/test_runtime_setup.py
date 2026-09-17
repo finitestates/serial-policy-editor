@@ -5,6 +5,7 @@ from trajectory_editor.episode_cli import _confirm_runtime_plan, build_parser
 from trajectory_editor.runtime_setup import (
     RuntimePlan,
     apply_setup_command,
+    build_controller_stack,
     effective_plan_summary,
     learning_summary,
     preference_summary,
@@ -236,6 +237,34 @@ def test_setup_menu_redraws_after_learning_and_preference_changes():
     rendered = "\n".join(text for text in io.writes if isinstance(text, str))
     assert "Group learn  on" in rendered
     assert "Preference   on" in rendered
+
+
+def test_controller_stack_is_ordered_and_discoverable():
+    plan = RuntimePlan(
+        biases=Path("biases.json"),
+        reference=Path("reference.yaml"),
+        activation_vector=Path("style.json"),
+        online_learning=True,
+        token_preference=True,
+    )
+
+    assert apply_setup_command("controllers", plan) == "show-controllers"
+    stack = build_controller_stack(plan=plan)
+    model = [entry.name for entry in stack.entries if entry.phase == "model"]
+    assert model == ["layerwise activation"]
+    names = [entry.name for entry in stack.entries if entry.phase == "policy"]
+    assert names == [
+        "base model", "history penalties", "output activation",
+        "manual biases/groups", "reference prior", "token preference actuator",
+        "group control", "sampler / token draw",
+    ]
+    feedback = [entry for entry in stack.entries if entry.phase == "feedback"]
+    assert [entry.state for entry in feedback] == ["on", "on"]
+    rendered = stack.render()
+    assert "CONTROLLER STACK" in rendered
+    assert "MODEL PREPARATION" in rendered
+    assert "manual biases/groups" in rendered
+    assert "token-preference learner" in rendered
 
 
 def test_bare_episode_number_inspects_and_fork_map_is_read_only(monkeypatch):
