@@ -10,8 +10,24 @@ if [[ ! -f "${llama_root}/include/llama.h" ]]; then
     echo "llama.cpp headers not found under ${llama_root}" >&2
     exit 2
 fi
-if [[ ! -f "${llama_build}/bin/libllama.so" && ! -f "${llama_build}/bin/libllama.so.0.3.0" ]]; then
-    echo "llama.cpp build library not found under ${llama_build}/bin" >&2
+if [[ ! -f "${llama_root}/src/llama-ext.h" ]]; then
+    echo "the SPE worker requires the llama.cpp staging header ${llama_root}/src/llama-ext.h" >&2
+    exit 2
+fi
+if ! command -v c++ >/dev/null 2>&1; then
+    echo "a C++17 compiler named c++ is required to build the SPE worker" >&2
+    exit 2
+fi
+
+for library in llama llama-common ggml-cpu ggml-base ggml; do
+    if [[ ! -e "${llama_build}/bin/lib${library}.so" && ! -e "${llama_build}/bin/lib${library}.so.0" ]]; then
+        echo "llama.cpp library lib${library} not found under ${llama_build}/bin" >&2
+        exit 2
+    fi
+done
+
+if [[ ! -f "${repo_root}/tools/spe_llama_worker.cpp" ]]; then
+    echo "SPE worker source is missing: ${repo_root}/tools/spe_llama_worker.cpp" >&2
     exit 2
 fi
 
@@ -27,4 +43,5 @@ c++ -std=c++17 -O2 \
     -lllama -lllama-common -lggml-cpu -lggml-base -lggml \
     -o "${output}"
 
-echo "built ${output}" >&2
+llama_revision="$(git -C "${llama_root}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+echo "built ${output} against llama.cpp revision ${llama_revision}" >&2

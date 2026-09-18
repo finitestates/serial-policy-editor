@@ -1,7 +1,33 @@
 # Changelog
 
+## 0.5.0 — 2026-09-18
+
+- Establish `core/` as the standalone runtime package with replayable actions,
+  results, `SamplerConfig`, persistence, menus, and backend contracts.
+- Move research learners, instrumentation, compatibility surfaces, and retired
+  integrations under `archive/` so core does not import research modules.
+- Make `vector/` an optional singular `policy-editor-vector` distribution for
+  conventional hidden-state steering vectors and cvector import/production.
+- Keep arbitrary external vector loading in core without requiring vector
+  production or analysis dependencies.
+- Reduce the active suite to contract-focused core and optional-vector tests,
+  while retaining historical research and integration tests in the archive.
+
 ## 0.4.6 — 2026-09-17
 
+- Establish a repository-root pytest entry point restricted to the package test
+  tree, and make the Transformers smoke harness patch the executable
+  `ControllerPipeline` statistics seam shared by both backends.
+- Persist cached SHA-256 model identity for new steering artifacts and runtime
+  provenance. Version the artifact schema's compatibility declaration while
+  continuing to read legacy metadata-only artifacts with an explicit weak
+  compatibility policy and useful mismatch diagnostics.
+- Harden the optional native worker boundary with timeout, output and prompt
+  limits, response metadata validation, distinct startup/model/protocol errors,
+  and build-time checks for its llama.cpp staging-header and library contract.
+- Add bounded real llama.cpp release smoke coverage for CFG, hidden-state
+  control, phrase recovery, cache navigation, and advanced sampling kernels;
+  optional suites remain local-model-only and skip cleanly when unavailable.
 - Add direct llama.cpp residual-stream capture for selected layers and token
   positions, including efficient range capture and prompt-pair hidden-state
   vector creation. The existing `cvector-generator` export/import workflow
@@ -142,7 +168,8 @@
   preserving other source transitions. Clear token-based steering on model change.
 - Support references/presets and shared steering commands in the HTTP adapter.
 
-See [Steering](STEERING.md) for interfaces, limitations, and migration details.
+See the archived [Steering guide](archive/research/docs/STEERING.md) for
+historical interfaces, limitations, and migration details.
 
 ## 0.3.8 — 2026-09-14
 

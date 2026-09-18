@@ -29,7 +29,8 @@ supports:
 
 The compiler's YAML input, its generated JSON catalog, the optional reference
 YAML, and the editor's runtime JSON preset are different formats. The complete
-schema and examples are in [BIAS_CATALOG_YAML.md](BIAS_CATALOG_YAML.md).
+schema and examples are in the archived
+[BIAS_CATALOG_YAML.md](archive/research/docs/BIAS_CATALOG_YAML.md).
 
 ### Runtime rules and groups
 

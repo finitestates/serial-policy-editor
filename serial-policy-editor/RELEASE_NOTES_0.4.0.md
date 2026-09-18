@@ -64,7 +64,8 @@ routes. Ordinary compilation avoids exploratory vocabulary enumeration.
 Command and YAML group construction share the same semantic model.
 
 Recompile older catalogs to obtain the new runtime/exploration separation.
-See [the YAML reference](BIAS_CATALOG_YAML.md) for current options.
+See the archived [YAML reference](archive/research/docs/BIAS_CATALOG_YAML.md)
+for the historical options.
 
 ## Preference learning and diagnostics
 
@@ -109,7 +110,8 @@ steering tied to the former tokenizer.
 
 The local HTTP server accepts reference/group YAML and presets at launch and
 shares terminal steering commands through `POST /api/session/steering`.
-Observation responses expose group-control diagnostics. See [the HTTP guide](HEADLESS.md).
+Observation responses exposed group-control diagnostics in the archived HTTP
+preview; see [the archived guide](archive/research/docs/archive/HEADLESS.md).
 
 ## Validation and documentation
 
@@ -120,6 +122,8 @@ Observation responses expose group-control diagnostics. See [the HTTP guide](HEA
 - The implementation was also tested successfully by the user. Controlled
   real-model quality and latency benchmarks have not been run for this redesign.
 
-See [Steering](STEERING.md) for the complete command and preset guide,
+See the archived [Steering guide](archive/research/docs/STEERING.md) for the
+historical command and preset guide,
 [the user guide](README.md) for learner flags and editor workflows, and
-[the implementation review](GROUP_CONTROL_REVIEW.md) for design and test details.
+[the implementation review](archive/research/docs/GROUP_CONTROL_REVIEW.md) for
+historical design and test details.
