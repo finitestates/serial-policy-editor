@@ -1,154 +1,208 @@
-# Serial Policy Editor 0.4.6
+# Serial Policy Editor
 
-Steer a local language model in your terminal: choose individual tokens, insert
-text, delegate a span, and rewind or fork the result. Serial Policy Replay (SPR)
-lets you apply the recorded editing procedure again and inspect where its
-outcome changes.
+Serial Policy Editor is a terminal editor for steering a local language model
+one token, text insertion, or delegated span at a time. Episodes can be
+replayed, rewound, forked, searched, and exported through the projector.
 
-SPE supports **llama.cpp (GGUF)** and **Hugging Face Transformers (local model
-directories)**. A SQLite workspace keeps episodes, editing actions, and token
-evidence for resumption, replay, and text or evidence projection.
+The active project is intentionally small:
 
-## Getting started
+- `core/` — the standalone runtime and `policy-editor` command;
+- `vector/` — optional conventional activation/steering-vector production;
+- `archive/` — historical material, optional experiments, and retired tests.
 
-The installable Python project is in [`serial-policy-editor/`](serial-policy-editor/).
-You need Python 3.10 or newer and your own local model files.
+The archive is not an install root and is not part of the normal test suite.
+
+## Get only the files you need
+
+These commands use Git sparse checkout. They leave the repository metadata and
+top-level documentation available, but omit unrelated package trees and their
+files from the working tree.
+
+### Core only
 
 ```bash
-cd serial-policy-editor
+git clone --depth 1 --filter=blob:none --sparse \
+  https://github.com/finitestates/serial-policy-editor.git serial-policy-editor-core
+cd serial-policy-editor-core
+git sparse-checkout set core
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[llama]'
-```
-For Transformers, use:
-```bash
-python -m pip install -e '.[transformers]'
+python -m pip install ./core
 ```
 
-Once installed, you can run the program a few different ways, but the most straightforward method is to use the interactive menu:
-```bash
-policy-editor
-```
-
-For more info about the program, just enter:
-```bash
-policy-editor --help
-```
-Or
-```bash
-policy-editor -h
-```
-To see a full list of command line flags (these options are also accessible via the interactive menu).
-
-The following is some basic information about using the program. For more detailed notes, there is a [more technical README](serial-policy-editor/README.md):
-
-## Basic command usage
-Once an episode is live, nearly everything uses the **Enter** key before it does anything with a few notable exceptions: 
-- **Tab** and **Shift-Tab** cycle through token-selection options or search options
-- `[` and `]` move backwards and forwards through tokens you have already selected
-- **CTRL-G** executes a search based on token rank number
-
-To keep things simple, assume that any command described below is followed by hitting **Enter**.
-
-Some of the commands follow a pattern of `letter [operator] number` (e.g. `m 10` or `h . 5`). While these are presented with whitespace for readability purposes, in the program itself, whitespace is not necessary (e.g. `m 10` and `m10` parse the same; this is also true for things like `h . 5` and `h.5`).
-
-Other commands (e.g. `t` and `x` especially) require whitespace after the initial letter in order to do anything (`t TEXT` enters `TEXT`; `tTEXT` will just throw an error).
-
-`/` is whitespace sensitive since tokens themselves can include or not include whitespace. So, `/TERM` and `/ TERM` are different searches.
-
-### Core syntax
-The default interaction pattern is fairly simple:
-- From a new token position (such as the first token that could appear after the prompt you entered when you started the program), pressing **Enter** without doing anything will select the sampler's proposed token
-- If you want to select a different token, type the number on the left-hand column (the raw rank number)
-- You can also use **Tab** or **Shift-Tab** to cycle through the token-selection menu
-- `t TEXT` or `x TEXT` allow you to enter any text you want, including multiple tokens at once (the only difference is that `t` automatically inserts whitespace and `x` will not); if the last token is `an`, `t avocado` will form `an avocado`, whereas `x other` will form `another`
-- `m N` temporarily expands the token-selection menu by N rows (e.g. `m 10` expands it by 10 rows); this resets on the next token, so feel free to expand the available menu as much as you want at a given token position
-- `h N` delegates the next `N` decisions to the model & sampler (e.g. `h 5` lets the model & sampler automatically pick the next 5 tokens):
-    - `h . N` will delegate `N` decisions to the model & sampler up to a sentence boundary (e.g. `.`, `!`, `?`) or `N`, whichever comes first.
-    - `h | N` will do the same but up to a newline (e.g. `\n`).
-    - When using `h . N` or `h | N`, tokens that contain either a sentence boundary or a newline plus some other text, will not be split-up (e.g. `h . N` will include the full token for things like `."` or `.\n\n`).
-- `?` brings up a list of commands with short descriptions of what they do.
-
-After you select a token or enter text, you will automatically be taken to the next position.
-
-### Search the vocabulary
-`/TERM` lets you search the model's full vocabulary for `TERM` (this is whitespace sensitive, so `/by` and `/ by` search for different tokens -- much of the time you are searching for the next word so you will want to search for a `TERM` with a space between `/` and `TERM`):
-- Once you have searched for something, it will bring up a smaller menu, which contains `TERM` and its nearest neighbors based on raw rank
-- To return to the main token-selection menu from the search menu, use `m`
-- If you have already searched for something and are on the token-selection menu, `ms` returns you to search menu
-- You can expand the search menu by `N` rows up or down using `ms + N` or `ms - N`  (e.g. `ms + 10` adds 10 additional rows below the end of the current search menu).
-- If `TERM` is a multi-token expression (sometimes different model tokenizers will break words into several different tokens), you will get a search suggestion instead of being taken to the search menu
-- To automatically enter a search suggestion into the action field, immediately after your search, just hit Tab and it should auto-populate the action field with the first search suggestion
-
-_For example: you search for the word "elephantine" using `/ elephantine` but get told that this particular tokenizer has tokens for `elephant` and `ine`; from there, hit Tab, and the action field should show `/ elephant`; then, enter to search for "elephant"._
-
-If you type in any number, it will preview the token at that position even if you haven't searched for it and even if it is not currently on the token-selection menu. 
-
-_For example: you can just type in `205` to see what token raw-rank 205 is. If you want to perform a search for that token, just hit **CTRL-G** and it will automatically take you to a search menu for that token._
-
-### Access the EDGE menu
-`q` accesses the EDGE menu; from here you can:
-- quit an episode (you can always resume it later)
-- end an episode (this seals it, but that doesn't prevent you from forking it, replaying it, or doing other things with it)
-- change your sampler settings
-- list the episodes that are in your workspace
-- fork from a particular point in this episode (`fm` lets you see a map of available points; I highly recommend using it)
-- resume the current episode
-
-### Rewinding
-`[` and `]` let you navigate forwards and backwards to different token positions in a live episode.
-
-Using `[` and `]` for navigation is handy for backtracking especially if you have decided that you want to undo some recent actions: all you have to do is hit `[` as many times as necessary and then hit Enter. However, it's important to note that this type of undo action is irreversible. It is roughly equivalent to using the Backspace key. If you are not sure whether or not you want to permanently delete something, it is better to create a fork instead (input `f` at the point you have navigated to, or use the forking option from the EDGE menu).
-
-## Replay
-
-You may notice that there is both `--resume` and `--replay`. They sound like they might be doing the same thing, so why have both? Resume continues an existing unfinished episode; replay creates a new episode by executing its recorded editing actions. Replay is like a swiss-army-knife command that can function as a quick way to clone an existing episode, as a stress test for your system, as a counterfactual generator, or--when used within an episode--as a splicing tool. Replay executes each command that generated an episode sequentially using a "tape" of the other episode's actions.
-
-So: let's say you started an episode by selecting token `7`, which corresponded to `night`. If you replay that episode, the program will (by default) import the same settings of the original episode, fire the model up, and select `7` again. Often, this corresponds to the same token, but it may not.
-
-Replay will continue acting based on the available tape. But it can be initiated with two different stopping conditions:
-- Handoff (default): if an action is about to select a different token than the one from the source episode at the same position, replay will end and the EDGE menu will open. From there, action proceeds like any other live episode.
-- Ballistic: replay just continues until the tape is exhausted even if different tokens are selected. The only thing that can stop ballistic mode from exhausting the full tape is a rather narrow range of conditions. This can generate episodes that are markedly different than the original especially if you start the replay with a different PRNG seed (`policy-editor --replay '#1' --random-seed` or `policy-editor --replay '#1' --seed 77`) or alter the sampler settings (not every setting will cause a divergence; some are more prone to that than others).
-
-For example, to replay episode `#1` in ballistic mode:
+### Core plus vectors
 
 ```bash
-policy-editor --replay '#1' --divergence-policy ballistic
+git clone --depth 1 --filter=blob:none --sparse \
+  https://github.com/finitestates/serial-policy-editor.git serial-policy-editor-vector
+cd serial-policy-editor-vector
+git sparse-checkout set core vector
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install ./core ./vector
 ```
 
-Replace `#1` with an episode number from your workspace, and keep the quotes in shell commands so `#` is not treated as a comment. The examples assume you are using the same workspace; add `--workspace /path/to/episodes.sqlite3` if needed.
+If the repository has already been cloned, the essential commands are simply:
 
-The crucial thing about replay is that it always terminates at the EDGE menu, regardless of if you use handoff or ballistic. It is using another episode as a source in order to create a new live episode. It's one of the things that makes the program special in my opinion: episodes you create do not simply generate archival transcripts (although they do that also), but can be used to create new live episodes with very little effort.
+```bash
+git sparse-checkout init --cone
+git sparse-checkout set core                 # core only
+# or: git sparse-checkout set core vector     # core plus vector tools
+```
 
-Another way to use replay is within an episode itself. To do this you enter `spr #1` from the EDGE menu, replacing `#1` with the source episode's number. The prompt of that other episode will be entered as raw text as if using the `x` command, followed by its recorded actions. This appends to the current episode and keeps the destination's model, sampler settings, and random stream; source sampler settings are not imported. Replay when used this way can function as a powerful splicing tool, allowing you to compose episodes out of other episodes.
+## Backend installation
 
-There are some finer points to all this, which are covered elsewhere, but it is worth drawing attention to this function.
+All commands below are run from the repository root with the virtual
+environment active. The base core install is model-free; choose the backend
+extra that matches the model you intend to run.
 
-**One final note about replay:** People often over-index how likely a replayed episode is to diverge from the source episode. In my experience, using the same model and comparable runtime settings, replay usually reproduces the source unless I deliberately change something to encourage divergence. Since token selection happens via raw rank or directly tokenized text, those tend to be pretty stable, unless you change one of a handful of things about the source sampler config or if your episode contains raw rank selection from deep within the probability distribution. `policy-editor --replay '#1'` without anything else more often than not produces an episode that looks the same as the source. The underlying math may have shifted slightly, but not enough to matter. Further, whether or not divergence is even undesirable depends on what you are trying to accomplish via replay.
+```bash
+# llama.cpp / GGUF
+python -m pip install './core[llama]'
 
-## Why "teacher"?
+# Basic Transformers inference, CPU or GPU
+python -m pip install './core[transformers]'
 
-The user in this program is referred to as "Teacher" as a reference to Teacher-forced answers in machine learning. That being said, this program is not a model-training tool. Anything you can do here, you can probably accomplish more directly and efficiently via other means. In fact, some of the most fun things to do involve taking the less direct path than you could (e.g. searching for a token and entering it from the search menu as opposed to just entering it directly via `t TEXT`). The purpose of this program is educational, exploratory, and creative--it provides you with a very granular view into how the next token arrives and gives you as much or as little control as you want over that process.
+# Transformers plus Accelerate
+python -m pip install './core[transformers-accelerate]'
+```
 
+The ordinary `transformers` extra does not install Accelerate. For the
+explicit GGUF cross-backend conformance path, use:
 
-## Documentation
+```bash
+python -m pip install './core[transformers-gguf]'
+```
 
-- [Replay semantics](serial-policy-editor/README.md#serial-policy-replay)
-- [Troubleshooting and backing up work](serial-policy-editor/README.md#troubleshooting)
-- [Changelog](serial-policy-editor/CHANGELOG.md)
-- [Lexical references, group objectives, and learner weights](serial-policy-editor/STEERING.md)
-- [Group/catalog YAML reference](serial-policy-editor/BIAS_CATALOG_YAML.md)
-- [Browser editor and HTTP API](serial-policy-editor/HEADLESS.md)
-- [0.4.0 release notes](serial-policy-editor/RELEASE_NOTES_0.4.0.md)
-- [0.3.8 release notes](serial-policy-editor/RELEASE_NOTES_0.3.8.md)
-- [0.3.6 release notes](serial-policy-editor/RELEASE_NOTES_0.3.6.md)
+That path includes the GGUF reader and Accelerate. The optional bitsandbytes
+path is available as `./core[transformers-bnb]`.
 
-The repository contains source and tests. Model weights, local workspaces,
-virtual environments, and historical local archives are not release inputs.
+For the vector package, install core first with the backend it needs, then
+install `vector`:
 
-## License
+```bash
+python -m pip install './core[llama]' ./vector
+```
 
-Copyright (c) 2026 Graham Christopher Andrews.
+`policy-editor-vector` does not add Transformers, Torch, Accelerate, or
+CUDA-related dependencies by default.
 
-Serial Policy Editor is released under the [MIT License](LICENSE).
-Third-party dependencies and model weights remain subject to their own licenses.
+## Start the editor
+
+With llama.cpp:
+
+```bash
+policy-editor \
+  --backend llama.cpp \
+  --model /path/to/model.gguf \
+  --new-prompt 'Once upon a time' \
+  --max-tokens 100
+```
+
+With a local Hugging Face model directory:
+
+```bash
+policy-editor \
+  --backend transformers \
+  --model /path/to/model-directory \
+  --new-prompt 'Once upon a time'
+```
+
+Running `policy-editor` without an episode source opens the pre-runtime setup
+menu. The editor supports sequential token selection, full-vocabulary search,
+check/force actions, conditional and naive bias rules, CFG and Gumbel draws,
+raw/model/gap logit views, replay, rewind, fork, and live-edge continuation.
+
+## Vectors
+
+Install the optional vector package when you want to create or inspect
+conventional hidden-state steering vectors:
+
+```bash
+python -m pip install './core[llama]' ./vector
+policy-editor-vector create \
+  --model /path/to/model.gguf \
+  --backend llama.cpp \
+  --prompt-a 'I am calm.' \
+  --prompt-b 'I am angry.' \
+  --layer-start 2 \
+  --layer-end 2 \
+  --output calm-vs-angry.json
+policy-editor-vector inspect calm-vs-angry.json
+```
+
+The core editor can load a compatible externally produced vector without the
+vector package:
+
+```bash
+policy-editor \
+  --backend llama.cpp \
+  --model /path/to/model.gguf \
+  --steering-vector calm-vs-angry.json \
+  --new-prompt 'Hello'
+```
+
+The vector package also imports llama.cpp cvector GGUF files:
+
+```bash
+policy-editor-vector import-cvector control_vector.gguf \
+  --output imported-cvector.json
+```
+
+Core preserves available artifact metadata but does not require producer
+provenance or attempt to prove layer alignment from metadata alone. The
+backend remains responsible for whether a vector can be applied.
+
+## Replay and persistence
+
+Episodes are stored in an SQLite workspace. The replay tape is deliberately
+small: a step number, teacher action, and an optional result used to detect
+handoff divergence. Forks, rewinds, searches, and menus are editorial moves;
+they are not replay tape entries. Handoff stops at the first divergence, while
+ballistic replay continues with teacher actions and yields at the live edge
+when the tape is exhausted.
+
+The `projector` command and the live edge expose plain-text, procedure, fork
+map, and episode metadata views without making cache state part of the replay
+contract.
+
+## Active tests
+
+The active suite is divided by package boundary:
+
+```bash
+python -m pytest -q tests/core
+python -m pytest -q tests/vectors
+```
+
+Core tests cover the 55 contract slots for sampling, actions, replay,
+lifecycle, menus, vector loading, persistence, and generated cases. Vector
+tests cover artifact interpretation, hidden-state capture, worker protocol,
+and optional production behavior. Real-model backend checks are opt-in and
+skip when their local model or worker is absent. The heavyweight cross-backend
+worker check is documented separately under [optional cross-backend vector
+conformance](#optional-cross-backend-vector-conformance).
+
+### Optional cross-backend vector conformance
+
+`tests/vectors/test_transformers_worker_interop.py` is intentionally not part
+of the ordinary Transformers install or the default test run. It is an opt-in
+check for people who want to compare a Transformers worker with a llama.cpp
+GGUF worker. It requires a local model and worker command, plus the heavier
+`./core[transformers-gguf]` extra, which includes GGUF support and Accelerate.
+The normal `./core[transformers]` path does not install Accelerate and does not
+need this test.
+
+Historical tests and experimental material are retained under `archive/` and
+are not collected by these commands.
+
+## Project documents
+
+- [Core scope](CORE_SCOPE.md) — what belongs in the main runtime;
+- [Cut notes](CUT_NOTES.md) — architectural decisions and migration notes;
+- [Core package](core/README.md) — standalone core installation;
+- [Vector package](vector/README.md) — optional steering-vector tooling;
+- [Core contract matrix](tests/CORE_CONTRACTS.md) — the reduced test budget;
+- [Test inventory](tests/TEST_INVENTORY.md) — active and archived test buckets.
+
+The version currently represented by the active package manifests is `0.5.0`.
