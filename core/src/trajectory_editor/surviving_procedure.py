@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from .core.actions import Hold, PolicyAction, Write
+from .core.actions import Hold, Phrase, PolicyAction, Write
 from .core.results import ActionOutcome, ReplayExpectation
 from .core.sampler_config import SamplerConfig
 from .episode_runner import TapeStep
@@ -139,6 +139,18 @@ def _partial_step(record: ProcedureRecord) -> TapeStep:
     )
 
 
+def _surviving_action(action: PolicyAction) -> PolicyAction:
+    """Remove implementation-only force steering from surviving history."""
+
+    if isinstance(action, Phrase) and action.force:
+        # ``force`` and ``forcex`` use the same text resolution as Write; the
+        # only extra behavior is temporary per-token policy steering. Preserve
+        # the original mode so force remains continuation and forcex remains
+        # exact.
+        return Write(action.text, mode=action.mode)
+    return action
+
+
 def project_surviving_procedure(
     records: Iterable[ProcedureRecord],
 ) -> SurvivingProcedure:
@@ -149,7 +161,9 @@ def project_surviving_procedure(
     were realized, those tokens become a finite action.  All other statuses
     are retained as executable steps; in particular, a successful source
     check remains a check whose expectation can cause a future replay to
-    hand off again if the target diverges.
+    hand off again if the target diverges.  Successful forced phrases are
+    normalized to ordinary writes while retaining their continuation/exact
+    mode.
     """
 
     steps: list[ProcedureStep] = []
@@ -176,7 +190,9 @@ def project_surviving_procedure(
 
         steps.append(
             ProcedureStep(
-                tape_step=TapeStep(record.action, record.expectation),
+                tape_step=TapeStep(
+                    _surviving_action(record.action), record.expectation
+                ),
                 boundary=record.boundary_before,
                 source_index=source_index,
                 sampling=record.sampling,
