@@ -28,6 +28,7 @@ from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import Layout
 from prompt_toolkit.layout.containers import HSplit, Window, DynamicContainer, ConditionalContainer
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.widgets import TextArea
 
 from .edge_tui import EdgeViewState, LiveEdgeView
@@ -41,6 +42,7 @@ class PromptState:
     body: str = ""
     single_key: bool = False
     page: bool = False
+    multiline: bool = False
 
 
 @dataclass(eq=False)
@@ -65,7 +67,7 @@ class _PromptView:
     def __init__(self, submit, enabled):
         self.state = PromptState("")
         self.submit = submit
-        self.command_buffer = Buffer(read_only=Condition(lambda: not enabled()))
+        self.command_buffer = Buffer(multiline=True, read_only=Condition(lambda: not enabled()))
         self.body = TextArea(read_only=True, scrollbar=True, wrap_lines=True)
         self.input_control = BufferControl(buffer=self.command_buffer)
         self.layout = Layout(HSplit([
@@ -73,21 +75,39 @@ class _PromptView:
             ConditionalContainer(Window(FormattedTextControl(lambda: self.state.prompt),
                                         dont_extend_height=True),
                                  Condition(lambda: not self.state.page)),
-            ConditionalContainer(Window(self.input_control, height=1, style="class:input"),
+            ConditionalContainer(Window(
+                self.input_control,
+                height=lambda: (
+                    Dimension.exact(1)
+                    if not self.state.multiline
+                    else Dimension(min=3, preferred=8)
+                ),
+                style="class:input",
+                wrap_lines=True,
+            ),
                                  Condition(lambda: not self.state.page)),
             Window(FormattedTextControl(lambda: (
                 "↑/↓ · PgUp/PgDn scroll · Enter/Esc returns" if self.state.page else
-                "Press a key" if self.state.single_key else "Enter submits · Ctrl-D cancels"
+                "Press a key" if self.state.single_key else
+                "Escape then Enter submits · Ctrl-D cancels" if self.state.multiline else
+                "Enter submits · Ctrl-D cancels"
             )), height=1, style="class:hint"),
         ]))
         self.bindings = KeyBindings()
 
-        @self.bindings.add("enter")
+        @self.bindings.add("enter", filter=Condition(lambda: not self.state.multiline))
         def enter(event):
             self.submit(result="" if self.state.page else "\n" if self.state.single_key
                         else self.command_buffer.text)
 
-        @self.bindings.add("escape", eager=True)
+        @self.bindings.add(
+            "escape", "enter", eager=True,
+            filter=Condition(lambda: self.state.multiline),
+        )
+        def submit_multiline(event):
+            self.submit(result=self.command_buffer.text)
+
+        @self.bindings.add("escape", eager=True, filter=Condition(lambda: not self.state.multiline))
         def escape(event):
             self.submit(result="\x1b" if self.state.single_key else "" if self.state.page else None)
 
@@ -311,6 +331,12 @@ class PersistentTerminalSession(AbstractContextManager):
 
     def read(self, prompt: str, *, single_key=False):
         return self._read(PromptState(prompt, single_key=single_key))
+
+    def read_multiline_prompt(
+        self,
+        prompt: str = "Write at least one character. Press Escape then Enter to continue.\n\n",
+    ):
+        return self._read(PromptState(prompt, multiline=True))
 
     def page(self, text: str):
         return self._read(PromptState("", body=text, page=True))

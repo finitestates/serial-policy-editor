@@ -61,11 +61,14 @@ def _edge_header(
     ]
     if mode == "session":
         fragments.extend(_command_row("branches", "show retained live branches\n"))
-        fragments.extend(_command_row("switch N / ID", "reactivate one live branch\n"))
+        fragments.extend(_command_row("#N", "switch to any retained root or branch\n"))
+        fragments.extend(_command_row("switch N", "compatible branch-switch alias\n"))
+        fragments.extend(_command_row("new TEXT", "start an unrelated prompt root\n"))
         fragments.extend(_command_row("rewind N", "trim this branch back to token N\n"))
     else:
         fragments.extend(_command_row("ls / ls all", "list open / all episodes\n"))
         fragments.extend(_command_row("#N", "switch episode\n"))
+        fragments.extend(_command_row("new TEXT", "start an unrelated episode\n"))
         fragments.extend(_command_row("name TITLE", "rename this episode\n"))
         fragments.extend(_command_row("rewind N", "delete continuation from token N\n"))
     fragments.extend(_command_row("c / continue", "resume the current tranche\n"))

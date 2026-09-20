@@ -20,6 +20,7 @@ from .core.results import ActionOutcome, ReplayExpectation
 from .core.sampler_config import SamplerConfig
 from .episode_engine import EpisodeEngine
 from .episode_runner import TapeStep
+from .fresh_episode import fresh_root_from
 from .fork_materializer import trim_live_prefix
 
 
@@ -302,6 +303,7 @@ class LiveSession:
         self._tree = BranchTree(BranchNode(identity))
         self._active_id = identity.branch_id
         self._active_identity = identity
+        self._detached = False
         self._rewinds: dict[str, RewindState | None] = {identity.branch_id: None}
         self._forks: dict[str, ForkState | None] = {identity.branch_id: None}
         self._discarded = False
@@ -369,6 +371,8 @@ class LiveSession:
     def _capture_active(self, *, capture_cache: bool = False) -> BranchState:
         """Freeze the active engine's complete semantic state into its record."""
         self._require_session()
+        if self._detached:
+            raise EditorError("the live session is detached from its shared backend")
         state = self._branches[self._active_id]
         # Callers invoke this only between complete action applications.  It
         # deliberately detects direct sampler/budget edits, too.
@@ -387,6 +391,9 @@ class LiveSession:
             terminal_token_id=self._engine.terminal_token_id,
             terminal_reason=self._engine.terminal_reason,
             status=status,
+            guidance_initial_token_ids=tuple(self._engine.guidance_initial_token_ids),
+            guidance_generated_prefix=tuple(self._engine.guidance_generated_prefix),
+            guidance_tokens_consumed=self._engine.guidance_tokens_consumed,
             backend_cache_snapshot=snapshot,
         )
         self._branches[self._active_id] = captured
@@ -409,9 +416,10 @@ class LiveSession:
 
     def _activate(self, branch_id: str) -> EpisodeEngine:
         self._require_session()
-        if branch_id == self._active_id:
+        if branch_id == self._active_id and not self._detached:
             return self._engine
-        self._capture_active(capture_cache=True)
+        if not self._detached:
+            self._capture_active(capture_cache=True)
         state = self._state(branch_id)
         prefix = state.prefix_token_ids
         if not self._restore_cache(state.backend_cache_snapshot, prefix):
@@ -442,9 +450,16 @@ class LiveSession:
         engine.terminal_token_id = state.terminal_token_id
         engine.terminal_reason = state.terminal_reason
         engine.trajectory.set_budget(point.max_tokens, point.checkpoint_boundary)
+        if self._guidance_backend is not None and engine.sampling.cfg_unconditional_prompt is not None:
+            self._guidance_backend.reset([
+                *engine.guidance_initial_token_ids,
+                *state.guidance_generated_prefix,
+                *state.visible_token_ids,
+            ])
         self._engine = engine
         self._active_id = branch_id
         self._active_identity = state.identity
+        self._detached = False
         self._emit("branch-activated", state.identity, state.boundary, {})
         return engine
 
@@ -456,13 +471,13 @@ class LiveSession:
 
     def branch_state(self, branch_id: str | None = None) -> BranchState:
         identifier = self._active_id if branch_id is None else branch_id
-        if not self._discarded and identifier == self._active_id:
+        if not self._discarded and not self._detached and identifier == self._active_id:
             self._capture_active()
         return self._state(identifier)
 
     @property
     def branch_states(self) -> Mapping[str, BranchState]:
-        if not self._discarded:
+        if not self._discarded and not self._detached:
             self._capture_active()
         return MappingProxyType(dict(self._branches))
 
@@ -472,7 +487,26 @@ class LiveSession:
     @property
     def engine(self) -> EpisodeEngine:
         self._require_session()
+        if self._detached:
+            raise EditorError("the live session is detached; activate it before using its engine")
         return self._engine
+
+    @property
+    def is_detached(self) -> bool:
+        return self._detached
+
+    def suspend(self) -> BranchState:
+        """Capture this root before its shared backends are reused elsewhere."""
+
+        self._require_session()
+        if not self._detached:
+            state = self._capture_active(capture_cache=True)
+            self._detached = True
+        else:
+            state = self._branches[self._active_id]
+        return state
+
+    detach = suspend
 
     @property
     def branch(self) -> BranchIdentity:
@@ -987,6 +1021,125 @@ class LiveBranch:
         return self._session.export(target, _branch_id=self._identity.branch_id, _view=self)
 
 
+@dataclass(frozen=True)
+class LiveRosterEntry:
+    """One stable global address in a persistence-free live roster."""
+
+    number: int
+    session: LiveSession
+    branch_id: str
+
+    @property
+    def identity(self) -> BranchIdentity:
+        return self.session.branch_state(self.branch_id).identity
+
+    @property
+    def state(self) -> BranchState:
+        return self.session.branch_state(self.branch_id)
+
+
+class LiveSessionRoster:
+    """Keep unrelated live roots and their local branch trees together."""
+
+    def __init__(self, root: LiveSession) -> None:
+        if not isinstance(root, LiveSession):
+            raise TypeError("root must be a LiveSession")
+        self._sessions: dict[str, LiveSession] = {root.session_id: root}
+        self._addresses: dict[int, tuple[str, str]] = {}
+        self._numbers: dict[tuple[str, str], int] = {}
+        self._next_number = 1
+        self._active_session_id = root.session_id
+        self._register(root, root.branch.branch_id)
+
+    @property
+    def active_session(self) -> LiveSession:
+        try:
+            return self._sessions[self._active_session_id]
+        except KeyError as exc:  # pragma: no cover - only possible after misuse
+            raise EditorError("the live roster has no active session") from exc
+
+    @property
+    def active_branch(self) -> LiveBranch:
+        session = self.active_session
+        return session.branch_handle(session.branch.branch_id)
+
+    def _register(self, session: LiveSession, branch_id: str) -> int:
+        key = (session.session_id, branch_id)
+        existing = self._numbers.get(key)
+        if existing is not None:
+            return existing
+        number = self._next_number
+        self._next_number += 1
+        self._numbers[key] = number
+        self._addresses[number] = key
+        return number
+
+    def register_branch(self, branch: LiveBranch) -> int:
+        return self._register(branch.session, branch.branch.branch_id)
+
+    def number_for(self, session: LiveSession, branch_id: str) -> int:
+        return self._register(session, branch_id)
+
+    def entries(self) -> tuple[LiveRosterEntry, ...]:
+        return tuple(
+            LiveRosterEntry(number, self._sessions[session_id], branch_id)
+            for number, (session_id, branch_id) in sorted(self._addresses.items())
+        )
+
+    def resolve(self, reference: str | int) -> LiveRosterEntry:
+        cleaned = str(reference).strip()
+        if cleaned.startswith("#"):
+            cleaned = cleaned[1:]
+        if cleaned.isdigit() and int(cleaned) in self._addresses:
+            number = int(cleaned)
+            session_id, branch_id = self._addresses[number]
+            return LiveRosterEntry(number, self._sessions[session_id], branch_id)
+        for entry in self.entries():
+            if entry.branch_id == cleaned:
+                return entry
+        raise EditorError(f"unknown live branch {reference!r}")
+
+    def switch(self, reference: str | int) -> LiveSession:
+        entry = self.resolve(reference)
+        current = self.active_session
+        if current is not entry.session:
+            current.suspend()
+        entry.session.activate(entry.branch_id)
+        self._active_session_id = entry.session.session_id
+        return entry.session
+
+    def fork(self, boundary: int | None = None) -> LiveBranch:
+        branch = self.active_session.fork(boundary=boundary)
+        self.register_branch(branch)
+        return branch
+
+    def new_root(self, prompt: str) -> LiveSession:
+        source = self.active_session
+        source_engine = source.engine
+        environment = dict(source.environment_stamp)
+        source.suspend()
+        try:
+            engine = fresh_root_from(source_engine, prompt)
+            if "sampler" in environment:
+                environment["sampler"] = engine.sampling.to_dict()
+            root = LiveSession(
+                engine,
+                prompt=prompt,
+                environment_stamp=environment,
+            )
+        except Exception:
+            source.activate(source.branch.branch_id)
+            raise
+        self._sessions[root.session_id] = root
+        self._register(root, root.branch.branch_id)
+        self._active_session_id = root.session_id
+        return root
+
+    def discard(self) -> None:
+        for session in tuple(self._sessions.values()):
+            session.discard()
+
+
 class LiveEpisode(LiveBranch):
     """Compatibility branch facade rooted in a new :class:`LiveSession`."""
 
@@ -1009,7 +1162,9 @@ __all__ = [
     "ForkState",
     "LiveBranch",
     "LiveEpisode",
+    "LiveRosterEntry",
     "LiveSession",
+    "LiveSessionRoster",
     "RewindState",
     "Session",
     "SessionEvent",

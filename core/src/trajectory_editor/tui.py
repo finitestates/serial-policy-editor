@@ -214,6 +214,14 @@ class TerminalIO:
         except EOFError:
             return None
 
+    def read_multiline_prompt(self) -> str | None:
+        """Read a new root with the same composer used for initial prompts."""
+        if self._live_session is not None:
+            return self._live_session.read_multiline_prompt()
+        from .episode_cli import _read_initial_prompt
+
+        return _read_initial_prompt()
+
     def read_key(self, prompt: str) -> str | None:
         """Read one unbuffered key without echoing it on an interactive TTY."""
         if self._live_session is not None:
