@@ -117,9 +117,126 @@ def test_l04_fork_preserves_exactly_the_requested_visible_prefix(tmp_path):
             store, identifier, episode, 1, backend=NoEogBackend(), max_tokens=None
         )
 
-    assert child.visible_token_ids == []
-    assert child.initial_token_ids == (7, 1)
+    assert child.visible_token_ids == [1]
+    assert child.initial_token_ids == (7,)
     assert child.text == "P A"
+
+
+def test_l04a_persisted_fork_keeps_root_relative_history_and_can_rewind_to_zero(tmp_path):
+    with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
+        parent = runtime()
+        parent_id = create(store, "parent", parent)
+        outcome = parent.apply(Hold(2))
+        store.record_action(parent_id, 0, outcome)
+        store.update_episode(
+            parent_id,
+            visible_text=parent.backend.render(parent.visible_token_ids),
+            max_tokens=None,
+        )
+
+        child_engine = _fork_engine(
+            store, parent_id, parent, 1, backend=NoEogBackend(), max_tokens=None
+        )
+        child_id = _create_episode(
+            store,
+            child_engine,
+            backend_provenance={},
+            parent_episode_id=parent_id,
+            fork_boundary=1,
+            mode="fork",
+        )
+        store.copy_prefix(
+            parent_id,
+            child_id,
+            1,
+            visible_text=child_engine.backend.render(child_engine.visible_token_ids),
+            max_tokens=child_engine.max_tokens,
+        )
+
+        child = _restore_engine(
+            store, child_id, NoEogBackend(), max_tokens=None, sampling_override=None
+        )
+        assert store.get_episode(child_id)["initial_text"] == "P"
+        assert store.get_episode(child_id)["initial_token_ids"] == [7]
+        assert child.visible_token_ids == [1]
+        assert project_fork_map(store, child_id) == "P|0| A|1|"
+
+        _rewind_episode(store, child_id, child, 0)
+        assert child.visible_token_ids == []
+        assert store.actions(child_id) == []
+        assert store.tokens(child_id) == []
+        assert project_fork_map(store, child_id) == "P|0|"
+
+
+def test_l04b_nested_persisted_forks_keep_the_same_root_coordinates(tmp_path):
+    with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
+        parent = runtime()
+        parent_id = create(store, "parent", parent)
+        outcome = parent.apply(Hold(2))
+        store.record_action(parent_id, 0, outcome)
+        store.update_episode(
+            parent_id,
+            visible_text=parent.backend.render(parent.visible_token_ids),
+            max_tokens=None,
+        )
+
+        child_engine = _fork_engine(
+            store, parent_id, parent, 1, backend=NoEogBackend(), max_tokens=None
+        )
+        child_id = _create_episode(
+            store,
+            child_engine,
+            backend_provenance={},
+            parent_episode_id=parent_id,
+            fork_boundary=1,
+            mode="fork",
+        )
+        store.copy_prefix(
+            parent_id,
+            child_id,
+            1,
+            visible_text=child_engine.backend.render(child_engine.visible_token_ids),
+            max_tokens=child_engine.max_tokens,
+        )
+
+        grandchild_engine = _fork_engine(
+            store,
+            child_id,
+            child_engine,
+            1,
+            backend=NoEogBackend(),
+            max_tokens=None,
+        )
+        grandchild_id = _create_episode(
+            store,
+            grandchild_engine,
+            backend_provenance={},
+            parent_episode_id=child_id,
+            fork_boundary=1,
+            mode="fork",
+        )
+        store.copy_prefix(
+            child_id,
+            grandchild_id,
+            1,
+            visible_text=grandchild_engine.backend.render(
+                grandchild_engine.visible_token_ids
+            ),
+            max_tokens=grandchild_engine.max_tokens,
+        )
+
+        restored = _restore_engine(
+            store,
+            grandchild_id,
+            NoEogBackend(),
+            max_tokens=None,
+            sampling_override=None,
+        )
+
+        assert store.get_episode(grandchild_id)["initial_text"] == "P"
+        assert restored.initial_token_ids == (7,)
+        assert restored.visible_token_ids == [1]
+        assert project_fork_map(store, grandchild_id) == "P|0| A|1|"
 
 
 def test_l05_fork_lineage_and_fork_map_keep_editorial_boundaries(tmp_path):
@@ -194,6 +311,8 @@ def test_l08_model_continuation_preserves_visible_text_and_sampler_state(tmp_pat
     class NewTokenizer(NoEogBackend):
         def tokenize(self, text, **kwargs):
             self.received_text = text
+            if kwargs.get("add_bos"):
+                return [7]
             return [7, 4]
 
     with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
@@ -205,8 +324,14 @@ def test_l08_model_continuation_preserves_visible_text_and_sampler_state(tmp_pat
 
         backend = NewTokenizer()
         continued, child_id = _model_continuation(store, identifier, backend, {})
+        child = store.get_episode(child_id)
+        assert child["initial_text"] == "P"
+        assert child["initial_token_ids"] == [7]
+        assert len(store.actions(child_id)) == 1
 
-    assert backend.received_text == "P A"
-    assert continued.initial_token_ids == (7, 4)
+    assert backend.received_text == " A"
+    assert continued.initial_text == "P"
+    assert continued.initial_token_ids == (7,)
+    assert continued.visible_token_ids == [7, 4]
     assert continued.sampling == source.sampling
     assert child_id != identifier

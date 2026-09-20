@@ -61,7 +61,7 @@ def _edge_header(
     ]
     if mode == "session":
         fragments.extend(_command_row("branches", "show retained live branches\n"))
-        fragments.extend(_command_row("switch ID", "reactivate one live branch\n"))
+        fragments.extend(_command_row("switch N / ID", "reactivate one live branch\n"))
         fragments.extend(_command_row("rewind N", "trim this branch back to token N\n"))
     else:
         fragments.extend(_command_row("ls / ls all", "list open / all episodes\n"))
@@ -76,8 +76,10 @@ def _edge_header(
             _command_row("s random-seed", "choose and record a new random seed\n")
         )
     fragments.extend(
-        _command_row("f N", "fork at boundary N  ·  fm shows the fork map\n")
+        _command_row("f N", "fork at boundary N\n")
     )
+    if mode == "session":
+        fragments.extend(_command_row("fm", "show the fork map and choose a boundary\n"))
     if mode == "session":
         fragments.extend(_command_row("export FILE", "write the selected portable tape\n"))
         fragments.extend(_command_row("save WORKSPACE", "materialize this branch\n"))

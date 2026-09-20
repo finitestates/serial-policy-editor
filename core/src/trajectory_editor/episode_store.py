@@ -21,6 +21,7 @@ from .core.errors import EditorError
 from .core.results import ActionOutcome, ReplayExpectation
 from .core.sampler_config import SamplerConfig
 from .episode_hash import token_prefix_sha256, validate_coordinate, validate_fingerprint
+from .fork_materializer import materialize_stored_prefix
 from .surviving_procedure import ProcedureRecord, project_surviving_procedure
 
 SCHEMA_VERSION = 1
@@ -544,6 +545,156 @@ class EpisodeStore:
                     stream_fingerprint,
                     int(coordinate_offset),
                 ),
+            )
+
+    def copy_prefix(
+        self,
+        source_episode_id: str,
+        destination_episode_id: str,
+        boundary: int,
+        *,
+        visible_text: str,
+        max_tokens: int | None,
+    ) -> None:
+        """Copy a root-relative history prefix into a new episode.
+
+        A durable fork keeps the source episode's initial context and stores
+        the inherited teacher actions as ordinary destination history.  This
+        preserves one visible boundary coordinate system: boundary zero is
+        always immediately after ``initial_text``.  The final action may be
+        cut at an arbitrary visible-token boundary, just like ``rewind_to``.
+
+        Editorial interactions are intentionally not copied.  They describe
+        the source UI journey rather than the replayable branch history.
+        """
+        self.get_episode(source_episode_id)
+        self.get_episode(destination_episode_id)
+        if source_episode_id == destination_episode_id:
+            raise EditorError("cannot copy an episode prefix onto itself")
+        if type(boundary) is not int or boundary < 0:
+            raise EditorError("fork boundary must be a nonnegative integer")
+        if max_tokens is not None and (type(max_tokens) is not int or max_tokens < 1):
+            raise EditorError("max_tokens must be a positive integer")
+        if self.actions(destination_episode_id) or self.tokens(destination_episode_id):
+            raise EditorError("destination episode already has recorded history")
+        source_actions = self.actions(source_episode_id)
+        source_tokens = self.tokens(source_episode_id)
+        source_segments = self.connection.execute(
+            "SELECT * FROM sampler_segments "
+            "WHERE episode_id = ? AND start_boundary <= ? "
+            "ORDER BY start_boundary",
+            (source_episode_id, boundary),
+        ).fetchall()
+        source_budgets = self.connection.execute(
+            "SELECT * FROM budget_segments "
+            "WHERE episode_id = ? AND start_boundary <= ? "
+            "ORDER BY start_boundary",
+            (source_episode_id, boundary),
+        ).fetchall()
+        materialized = materialize_stored_prefix(
+            source_actions,
+            source_tokens,
+            [dict(segment) for segment in source_segments],
+            [dict(budget) for budget in source_budgets],
+            boundary,
+        )
+
+        # Keep the destination episode's identity and initial context, but
+        # replace its provisional control history with the copied root-relative
+        # prefix.  The caller supplies the current fork-edge budget/text.
+        with self.transaction() as db:
+            for ordinal, action in enumerate(materialized.actions):
+                db.execute(
+                    """
+                    INSERT INTO actions(
+                        episode_id, ordinal, boundary_before, boundary_after,
+                        kind, arguments_json, resolved_text, status,
+                        stop_reason, mismatch_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        destination_episode_id,
+                        ordinal,
+                        action.boundary_before,
+                        action.boundary_after,
+                        action.kind,
+                        _json(dict(action.arguments)),
+                        action.resolved_text,
+                        action.status,
+                        action.stop_reason,
+                        _json(dict(action.mismatch)) if action.mismatch is not None else None,
+                    ),
+                )
+                for token_index, token in enumerate(action.tokens):
+                    db.execute(
+                        """
+                        INSERT INTO tokens(
+                            episode_id, action_ordinal, action_token_index,
+                            boundary, token_id, text, realized_visible, is_eog,
+                            sampling_coordinate, proposal_token_id,
+                            raw_model_nll, raw_rank, policy_rank,
+                            decoder_probability, proposal_agreement
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            destination_episode_id,
+                            ordinal,
+                            token_index,
+                            int(token["boundary"]),
+                            int(token["token_id"]),
+                            str(token["text"]),
+                            int(token["realized_visible"]),
+                            int(token["is_eog"]),
+                            int(token["sampling_coordinate"]),
+                            int(token["proposal_token_id"]),
+                            float(token["raw_model_nll"]),
+                            int(token["raw_rank"]),
+                            int(token["policy_rank"]),
+                            float(token["decoder_probability"]),
+                            int(token["proposal_agreement"]),
+                        ),
+                    )
+
+            for segment in materialized.sampler_segments:
+                db.execute(
+                    """
+                    INSERT OR REPLACE INTO sampler_segments(
+                        episode_id, start_boundary, sampling_json,
+                        stream_fingerprint, coordinate_offset
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        destination_episode_id,
+                        int(segment["start_boundary"]),
+                        str(segment["sampling_json"]),
+                        str(segment["stream_fingerprint"]),
+                        int(segment["coordinate_offset"]),
+                    ),
+                )
+            for budget in materialized.budget_segments:
+                db.execute(
+                    """
+                    INSERT OR REPLACE INTO budget_segments(
+                        episode_id, start_boundary, max_tokens,
+                        checkpoint_boundary
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        destination_episode_id,
+                        int(budget["start_boundary"]),
+                        budget["max_tokens"],
+                        budget["checkpoint_boundary"],
+                    ),
+                )
+            db.execute(
+                """
+                UPDATE episodes
+                SET visible_text = ?, max_tokens = ?, status = 'open',
+                    terminal_token_id = NULL, terminal_reason = NULL,
+                    finished_at = NULL
+                WHERE episode_id = ?
+                """,
+                (visible_text, max_tokens or 0, destination_episode_id),
             )
 
     def record_action(

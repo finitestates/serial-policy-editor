@@ -47,6 +47,7 @@ def materialize_live_branch(
             "live_parent_branch_id": state.identity.parent_id,
             "live_fork_boundary": state.identity.fork_boundary,
             "live_materialization": "full-root-branch",
+            "coordinate_system": "root-relative",
         },
         checkpoint_boundary=initial.checkpoint_boundary,
     )

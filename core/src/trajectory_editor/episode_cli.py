@@ -32,7 +32,8 @@ from .core.cli_config import (
 )
 from .core.sampler_config import SamplerConfig
 from .episode_lifecycle import (
-    POLICY_FIELDS, _inherit_budget, _model_continuation, _visible_tokens, _restore_engine,
+    POLICY_FIELDS, _inherit_budget, _materialize_model_change_fork,
+    _model_continuation, _visible_tokens, _restore_engine,
     _create_episode, _rewind_episode, _fork_engine, _spr_engine_from_source,
 )
 from .core.actions import Write
@@ -49,7 +50,13 @@ from .episode_runner import (
     TapeStep,
     ReplayPlan,
 )
-from .projector import project_episode, project_fork_map, project_lineage, project_procedure
+from .projector import (
+    project_episode,
+    project_fork_map,
+    project_lineage,
+    project_live_fork_map,
+    project_procedure,
+)
 from .episode_store import EpisodeStore
 from .episode_session import LiveSession
 from .episode_materializer import save_live_branch, save_live_family
@@ -470,6 +477,56 @@ def _ephemeral_edge_menu(
     session: LiveSession,
 ) -> tuple[str, Any]:
     """Small branch-oriented EDGE surface for a session with no workspace."""
+    def branch_aliases() -> dict[str, str]:
+        return {
+            str(index): branch_id
+            for index, branch_id in enumerate(session.branch_tree.nodes, start=1)
+        }
+
+    def resolve_branch(reference: str) -> str:
+        cleaned = reference.strip()
+        if cleaned.startswith("#"):
+            cleaned = cleaned[1:]
+        return branch_aliases().get(cleaned, cleaned)
+
+    def branch_number(branch_id: str) -> str:
+        return next(
+            (
+                number
+                for number, identifier in branch_aliases().items()
+                if identifier == branch_id
+            ),
+            branch_id,
+        )
+
+    def show_fork_map() -> tuple[str, Any] | None:
+        state = session.branch_state()
+        io.page(
+            project_live_fork_map(
+                session.prompt,
+                state.visible_token_ids,
+                session.engine.backend,
+            )
+        )
+        while True:
+            entered = io.read(
+                f"Fork boundary (0..{state.boundary}; blank cancels) > "
+            )
+            if entered is None:
+                return "quit", None
+            value = entered.strip()
+            if not value:
+                return None
+            try:
+                target = int(value)
+            except ValueError:
+                io.write("Fork boundary must be an integer.")
+                continue
+            if not 0 <= target <= state.boundary:
+                io.write(f"Fork boundary must be 0..{state.boundary}.")
+                continue
+            return "fork", target
+
     live_surface = bool(
         getattr(io, "supports_live_choices", False)
         and callable(getattr(io, "read_live_edge_command", None))
@@ -477,7 +534,7 @@ def _ephemeral_edge_menu(
     while True:
         if live_surface:
             raw = io.read_live_edge_command(  # type: ignore[attr-defined]
-                episode_id=session.branch.branch_id,
+                episode_id=branch_number(session.branch.branch_id),
                 boundary=session.engine.boundary,
                 current_budget=session.engine.max_tokens,
                 remaining_tokens=session.engine.remaining,
@@ -486,12 +543,13 @@ def _ephemeral_edge_menu(
             )
         else:
             io.write(
-                f"Live branch {session.branch.branch_id} @ boundary {session.engine.boundary}"
+                f"Live branch {branch_number(session.branch.branch_id)}"
+                f" @ boundary {session.engine.boundary}"
                 f" · {_sampler_summary(session.sampler)}"
             )
             raw = io.read(
                 "[c]ontinue  [n N/off] budget  [s key=value] sampler  [rewind N] "
-                "[f N] fork  [branches]  [switch ID]  [export FILE] "
+                "[f N] fork  [fm] fork map  [branches]  [switch N/ID]  [export FILE] "
                 "[save WORKSPACE [ID]]  [save-family WORKSPACE [ROOT_ID]]  [e]nd  [q]uit > "
             )
         if raw is None:
@@ -507,22 +565,35 @@ def _ephemeral_edge_menu(
         if lower in {"branches", "ls"}:
             rows = []
             states = session.branch_states
+            aliases = branch_aliases()
+            reverse_aliases = {branch_id: number for number, branch_id in aliases.items()}
             for branch_id, node in session.branch_tree.nodes.items():
                 marker = "*" if branch_id == session.branch.branch_id else " "
-                parent = node.identity.parent_id or "root"
+                source = (
+                    reverse_aliases.get(node.identity.parent_id, "root")
+                    if node.identity.parent_id is not None
+                    else "root"
+                )
                 state = states[branch_id]
                 rows.append(
-                    f"{marker} {branch_id}  parent={parent}  fork={node.identity.fork_boundary} "
+                    f"{marker} {reverse_aliases[branch_id]}  from={source}  "
+                    f"fork={node.identity.fork_boundary} "
                     f"boundary={state.boundary}"
                 )
             io.page("Live branches:\n" + "\n".join(rows))
             continue
+        if lower in {"fm", "fork-map", "forkmap"}:
+            result = show_fork_map()
+            if result is not None:
+                return result
+            continue
         parts = text.split()
         if len(parts) == 2 and parts[0].lower() == "switch":
-            if parts[1] not in session.branch_states:
+            branch_id = resolve_branch(parts[1])
+            if branch_id not in session.branch_states:
                 io.write(f"Unknown live branch {parts[1]!r}.")
                 continue
-            return "switch", parts[1]
+            return "switch", branch_id
         if len(parts) == 2 and parts[0].lower() == "rewind":
             try:
                 return "rewind", int(parts[1])
@@ -683,7 +754,12 @@ def _run_ephemeral(
                 io.write(str(exc))
                 continue
             session.activate(child.branch.branch_id)
-            io.write(f"Forked live branch {child.branch.branch_id} at boundary {target}.")
+            alias = next(
+                number
+                for number, branch_id in enumerate(session.branch_tree.nodes, start=1)
+                if branch_id == child.branch.branch_id
+            )
+            io.write(f"Forked live branch {alias} at boundary {target}.")
             continue
         if action == "switch":
             session.activate(str(value))
@@ -779,6 +855,27 @@ def _confirm_runtime_plan(
         io.write("Launch cancelled.")
         return False
     return True
+
+
+def _record_fork_edge_state(
+    store: EpisodeStore,
+    episode_id: str,
+    engine: EpisodeEngine,
+) -> None:
+    """Record the child's active controls at its root-relative fork edge."""
+    store.record_sampling_segment(
+        episode_id,
+        start_boundary=engine.boundary,
+        sampling=engine.sampling,
+        stream_fingerprint=engine.stream_fingerprint,
+        coordinate_offset=engine.coordinate_offset,
+    )
+    store.record_budget(
+        episode_id,
+        engine.boundary,
+        engine.max_tokens,
+        engine.checkpoint_boundary,
+    )
 
 
 def _live_edge_menu(
@@ -1378,11 +1475,6 @@ def main(
                 target = len(visible) if args.at is None else args.at
                 if not 0 <= target <= len(visible):
                     raise EditorError(f"fork boundary must be 0..{len(visible)}")
-                prefix = [*source["initial_token_ids"], *visible[:target]]
-                if model_changed:
-                    retained = "".join(row["text"] for row in store.tokens(args.fork_from)
-                                       if row["realized_visible"] and row["boundary"] < target)
-                    prefix = backend.tokenize(source["initial_text"] + retained, add_bos=True, special=True)
                 segment = store.sampling_segment(args.fork_from, target)
                 source_sampling = sampling_factory(segment["sampling"])
                 explicit = sampler_overrides_present(args)
@@ -1394,29 +1486,64 @@ def main(
                     activation_artifact=activation_artifact,
                 ):
                     return 0
-                engine = EpisodeEngine(
-                    backend,
-                    sampling=sampling,
-                    max_tokens=source["max_tokens"] if args.max_tokens is None else args.max_tokens,
-                    initial_text=backend.render(prefix, special=True),
-                    initial_token_ids=prefix,
-                    stream_fingerprint=segment["stream_fingerprint"],
-                    coordinate_offset=segment["coordinate_offset"] + target,
-                    guidance_backend=cfg_backend_for(sampling),
-                    guidance_generated_prefix=visible[:target],
-                    guidance_tokens_consumed=target,
-                )
-                if args.max_tokens is None:
-                    _inherit_budget(store, args.fork_from, engine, target, rebase=True)
-                episode_id = _create_episode(
-                    store,
-                    engine,
-                    backend_provenance=provenance,
-                    requested_id=requested_id,
-                    parent_episode_id=args.fork_from,
-                    fork_boundary=target,
-                    mode="fork",
-                )
+                if model_changed:
+                    engine, episode_id = _materialize_model_change_fork(
+                        store,
+                        args.fork_from,
+                        target,
+                        backend,
+                        provenance,
+                        sampling=sampling,
+                        max_tokens=(
+                            source["max_tokens"]
+                            if args.max_tokens is None
+                            else args.max_tokens
+                        ),
+                        requested_id=requested_id,
+                        guidance_backend=cfg_backend_for(sampling),
+                    )
+                else:
+                    prefix = [*source["initial_token_ids"], *visible[:target]]
+                    branch = getattr(backend, "branch_to_prefix", None)
+                    if callable(branch):
+                        branch(prefix)
+                    else:
+                        backend.reset(prefix)
+                    engine = EpisodeEngine(
+                        backend,
+                        sampling=sampling,
+                        max_tokens=source["max_tokens"] if args.max_tokens is None else args.max_tokens,
+                        initial_text=str(source["initial_text"]),
+                        initial_token_ids=source["initial_token_ids"],
+                        stream_fingerprint=segment["stream_fingerprint"],
+                        coordinate_offset=segment["coordinate_offset"],
+                        backend_positioned=True,
+                        guidance_backend=cfg_backend_for(sampling),
+                        guidance_generated_prefix=visible[:target],
+                        guidance_tokens_consumed=target,
+                    )
+                    engine.visible_token_ids = list(visible[:target])
+                    if args.max_tokens is None:
+                        _inherit_budget(store, args.fork_from, engine, target)
+                    else:
+                        engine.trajectory.set_budget(args.max_tokens, target + args.max_tokens)
+                    episode_id = _create_episode(
+                        store,
+                        engine,
+                        backend_provenance=provenance,
+                        requested_id=requested_id,
+                        parent_episode_id=args.fork_from,
+                        fork_boundary=target,
+                        mode="fork",
+                    )
+                    store.copy_prefix(
+                        args.fork_from,
+                        episode_id,
+                        target,
+                        visible_text=backend.render(engine.visible_token_ids),
+                        max_tokens=engine.max_tokens,
+                    )
+                    _record_fork_edge_state(store, episode_id, engine)
 
             open_live_session = getattr(io, "live_session", None)
             if callable(open_live_session):
@@ -1547,21 +1674,38 @@ def main(
                         elif sealed:
                             visible = _visible_tokens(store, destination)
                             segment = store.sampling_segment(destination, len(visible))
-                            new_engine = EpisodeEngine(new_backend,
-                                initial_token_ids=[*target_episode["initial_token_ids"], *visible],
-                                    sampling=sampling_factory(segment["sampling"]),
+                            prefix = [*target_episode["initial_token_ids"], *visible]
+                            branch = getattr(new_backend, "branch_to_prefix", None)
+                            if callable(branch):
+                                branch(prefix)
+                            else:
+                                new_backend.reset(prefix)
+                            new_sampling = sampling_factory(segment["sampling"])
+                            new_engine = EpisodeEngine(
+                                new_backend,
+                                initial_token_ids=target_episode["initial_token_ids"],
+                                initial_text=str(target_episode["initial_text"]),
+                                sampling=new_sampling,
                                 stream_fingerprint=segment["stream_fingerprint"],
-                                coordinate_offset=segment["coordinate_offset"] + len(visible),
+                                coordinate_offset=segment["coordinate_offset"],
                                 max_tokens=target_episode["max_tokens"],
-                                guidance_backend=cfg_backend_for(
-                                    sampling_factory(segment["sampling"])
-                                ),
+                                backend_positioned=True,
+                                guidance_backend=cfg_backend_for(new_sampling),
                                 guidance_generated_prefix=visible,
                                 guidance_tokens_consumed=len(visible),
                             )
-                            _inherit_budget(store, destination, new_engine, len(visible), rebase=True)
+                            new_engine.visible_token_ids = list(visible)
+                            _inherit_budget(store, destination, new_engine, len(visible))
                             destination = _create_episode(store, new_engine, backend_provenance=new_provenance,
                                 parent_episode_id=destination, fork_boundary=len(visible), mode="fork")
+                            store.copy_prefix(
+                                target_episode["episode_id"],
+                                destination,
+                                len(visible),
+                                visible_text=new_backend.render(visible),
+                                max_tokens=new_engine.max_tokens,
+                            )
+                            _record_fork_edge_state(store, destination, new_engine)
                         else:
                             visible = _visible_tokens(store, destination)
                             new_engine = _restore_engine(store, destination, new_backend,
@@ -1633,6 +1777,14 @@ def main(
                         fork_boundary=target,
                         mode="fork",
                     )
+                    store.copy_prefix(
+                        parent_id,
+                        episode_id,
+                        target,
+                        visible_text=backend.render(engine.visible_token_ids),
+                        max_tokens=engine.max_tokens,
+                    )
+                    _record_fork_edge_state(store, episode_id, engine)
                     pending_tape = None
                     continue
                 if action == "spr":

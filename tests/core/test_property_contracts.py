@@ -91,7 +91,8 @@ def test_q04_fork_at_every_generated_boundary_preserves_the_prefix(tmp_path, bou
             store, identifier, parent, boundary, backend=NoEogBackend(), max_tokens=None
         )
 
-    assert child.initial_token_ids == (7, *outcome.visible_token_ids[:boundary])
+    assert child.initial_token_ids == (7,)
+    assert child.visible_token_ids == list(outcome.visible_token_ids[:boundary])
 
 
 def test_q05_generated_divergence_always_handoffs_or_goes_ballistic():

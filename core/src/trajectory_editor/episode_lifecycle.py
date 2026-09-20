@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import fields, replace
 from typing import Any, Callable
 from .core.errors import EditorError
+from .core.actions import Write
 from .core.sampler_config import SamplerConfig
 from .episode_engine import EpisodeEngine
 from .episode_store import EpisodeStore
 from .episode_runner import ReplayContext, ReplayPlan, TapeStep
+from .fork_materializer import visible_text_prefix
 
 SAMPLER_FIELDS = tuple(field.name for field in fields(SamplerConfig))
 POLICY_FIELDS = tuple(
@@ -14,17 +16,105 @@ POLICY_FIELDS = tuple(
     if field.name.startswith("activation_")
 )
 
-def _inherit_budget(store, episode_id, engine, boundary, *, rebase=False, notice=print):
+def _inherit_budget(store, episode_id, engine, boundary, *, notice=print):
     state = store.budget_at(episode_id, boundary)
     if state is None:
         if store.get_episode(episode_id)["max_tokens"] is not None:
             notice("Budget history is missing at this boundary; continuing with unlimited tokens.")
         engine.trajectory.set_budget(None, None)
         return
-    checkpoint = state["checkpoint_boundary"]
-    checkpoint = (max(0, checkpoint - boundary)
-                  if rebase and checkpoint is not None else checkpoint)
-    engine.trajectory.set_budget(state["max_tokens"], checkpoint)
+    engine.trajectory.set_budget(state["max_tokens"], state["checkpoint_boundary"])
+
+
+def _model_change_sampling(sampling: SamplerConfig) -> SamplerConfig:
+    """Remove controls whose token IDs belong to the old backend."""
+    return replace(
+        sampling,
+        bias_rules=(),
+        bias_groups=(),
+        activation_vector=(),
+        activation_vector_strength=0.0,
+        activation_vector_layer_start=None,
+        activation_vector_layer_end=None,
+        activation_vector_model="",
+        activation_vector_digest="",
+    )
+
+
+def _materialize_model_change_fork(
+    store: EpisodeStore,
+    source_id: str,
+    boundary: int,
+    backend: Any,
+    provenance: dict[str, Any],
+    *,
+    sampling: SamplerConfig,
+    max_tokens: int | None,
+    requested_id: str | None = None,
+    guidance_backend: Any | None = None,
+) -> tuple[EpisodeEngine, str]:
+    """Materialize a fork whose destination backend has a new tokenizer.
+
+    The source boundary selects text from the source coordinate space.  The
+    destination then starts at its own root prompt and records that retained
+    text as an exact write, so the child still has boundary zero immediately
+    after its root prompt.
+    """
+    source = store.get_episode(source_id)
+    source_tokens = store.tokens(source_id)
+    visible_count = sum(bool(row["realized_visible"]) for row in source_tokens)
+    if type(boundary) is not int or not 0 <= boundary <= visible_count:
+        raise EditorError(f"fork boundary must be between 0 and {visible_count}")
+    root_text = str(source["initial_text"])
+    root_token_ids = backend.tokenize(root_text, add_bos=True, special=True)
+    runtime = EpisodeEngine(
+        backend,
+        sampling=_model_change_sampling(sampling),
+        max_tokens=None,
+        initial_text=root_text,
+        initial_token_ids=root_token_ids,
+        coordinate_offset=0,
+        guidance_backend=guidance_backend,
+    )
+    identifier = _create_episode(
+        store,
+        runtime,
+        backend_provenance=provenance,
+        requested_id=requested_id,
+        parent_episode_id=source_id,
+        fork_boundary=boundary,
+        mode="model-change",
+        metadata={
+            "model_change_from": source_id,
+            "coordinate_system": "root-relative",
+        },
+    )
+    retained_text = visible_text_prefix(source_tokens, boundary)
+    if retained_text:
+        outcome = runtime.apply(Write(retained_text, mode="exact"))
+        store.record_action(identifier, 0, outcome)
+
+    budget = store.budget_at(source_id, boundary)
+    allowance = max_tokens
+    if allowance is None and budget is not None:
+        allowance = budget["max_tokens"]
+    checkpoint = None if allowance is None else runtime.boundary + allowance
+    runtime.trajectory.set_budget(allowance, checkpoint)
+    store.record_sampling_segment(
+        identifier,
+        start_boundary=runtime.boundary,
+        sampling=runtime.sampling,
+        stream_fingerprint=runtime.stream_fingerprint,
+        coordinate_offset=runtime.coordinate_offset,
+    )
+    store.record_budget(identifier, runtime.boundary, allowance, checkpoint)
+    store.update_episode(
+        identifier,
+        visible_text=backend.render(runtime.visible_token_ids),
+        max_tokens=allowance,
+    )
+    store.rename(identifier, store.label(source_id).split("  ", 1)[-1] + " · model change")
+    return runtime, identifier
 
 
 def _model_continuation(
@@ -34,30 +124,16 @@ def _model_continuation(
     source = store.get_episode(source_id)
     boundary = len(_visible_tokens(store, source_id))
     segment = store.sampling_segment(source_id, boundary)
-    # Token IDs and evidence belong to their original tokenizer. New model,
-    # new execution record, with the old text as its entrance.
-    engine = EpisodeEngine(
-        backend, sampling=replace(
-            sampling_factory(segment["sampling"]),
-            bias_rules=(), bias_groups=(),
-            activation_vector=(), activation_vector_strength=0.0,
-            activation_vector_layer_start=None, activation_vector_layer_end=None,
-            activation_vector_model="", activation_vector_digest="",
-        ),
-        initial_text=source["initial_text"] + source["visible_text"],
+    return _materialize_model_change_fork(
+        store,
+        source_id,
+        boundary,
+        backend,
+        provenance,
+        sampling=sampling_factory(segment["sampling"]),
         max_tokens=source["max_tokens"],
         guidance_backend=guidance_backend,
-        guidance_generated_prefix=_visible_tokens(store, source_id),
-        guidance_tokens_consumed=boundary,
     )
-    _inherit_budget(store, source_id, engine, boundary, rebase=True)
-    identifier = _create_episode(
-        store, engine, backend_provenance=provenance, parent_episode_id=source_id,
-        fork_boundary=boundary, mode="model-change",
-        metadata={"model_change_from": source_id},
-    )
-    store.rename(identifier, store.label(source_id).split("  ", 1)[-1] + " · model change")
-    return engine, identifier
 
 
 def _visible_tokens(store: EpisodeStore, episode_id: str) -> list[int]:
@@ -135,6 +211,12 @@ def _create_episode(
     metadata: dict[str, Any] | None = None,
 ) -> str:
     payload = {"mode": mode, **(metadata or {})}
+    if mode == "fork":
+        # Ordinary forks retain the source prompt/context and copy their
+        # inherited actions into the child.  Keep this explicit in metadata so
+        # tooling can distinguish the canonical representation from old local
+        # coordinate episodes without changing the compact schema.
+        payload.setdefault("coordinate_system", "root-relative")
     trajectory = engine.trajectory
     return store.create_episode(
         episode_id=requested_id,
@@ -220,17 +302,23 @@ def _fork_engine(
             if max_tokens is None
             else max_tokens
         ),
-        initial_text=backend.render(prefix, special=True),
-        initial_token_ids=prefix,
+        # Keep the original entrance and represent the retained parent
+        # actions as visible history.  Replacing initial_text with the fork
+        # prefix would silently rebase the child's public boundary zero.
+        initial_text=parent_engine.initial_text,
+        initial_token_ids=parent_engine.initial_token_ids,
         stream_fingerprint=segment["stream_fingerprint"],
-        coordinate_offset=segment["coordinate_offset"] + target,
+        coordinate_offset=segment["coordinate_offset"],
         backend_positioned=True,
         guidance_backend=guidance_backend,
         guidance_generated_prefix=parent_engine.trajectory.visible_token_ids[:target],
         guidance_tokens_consumed=target,
     )
+    engine.visible_token_ids = list(parent_engine.trajectory.visible_token_ids[:target])
     if max_tokens is None:
-        _inherit_budget(store, parent_id, engine, target, rebase=True, notice=notice)
+        _inherit_budget(store, parent_id, engine, target, notice=notice)
+    else:
+        engine.trajectory.set_budget(max_tokens, target + max_tokens)
     return engine
 
 

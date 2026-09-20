@@ -146,6 +146,30 @@ def test_cli_edge_replay_appends_live_text_without_mutating_the_source(source_wo
         assert project_fork_map(store, "destination") == "P|0| hello|1|P|2| A|3| B|4|!|5|!|6|"
 
 
+def test_cli_fork_from_persists_inherited_history_in_root_coordinates(source_workspace):
+    run_cli(
+        source_workspace,
+        ["q", "quit"],
+        "--fork-from", "#1",
+        "--at", "1",
+        "--episode-id", "child",
+    )
+
+    with EpisodeStore(source_workspace) as store:
+        child = store.get_episode("child")
+        assert child["initial_text"] == "P"
+        assert child["initial_token_ids"] == [7]
+        assert child["visible_text"] == " A"
+        assert [row["boundary"] for row in store.tokens("child") if row["realized_visible"]] == [0]
+        assert project_fork_map(store, "child") == "P|0| A|1|"
+
+    run_cli(source_workspace, ["q", "rewind 0", "quit"], "--resume", "child")
+
+    with EpisodeStore(source_workspace) as store:
+        assert store.actions("child") == []
+        assert project_fork_map(store, "child") == "P|0|"
+
+
 def test_cli_prompt_replay_uses_the_destination_tokenizer_and_remains_rewindable(tmp_path):
     path = tmp_path / "episodes.sqlite3"
     with EpisodeStore(path) as store:

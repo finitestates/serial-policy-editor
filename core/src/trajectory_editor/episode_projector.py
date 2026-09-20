@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -80,6 +81,20 @@ def project_fork_map(store: EpisodeStore, episode_id: str) -> str:
         pieces.append(str(token["text"]))
     live_boundary = int(visible[-1]["boundary"]) + 1 if visible else 0
     pieces.append(f"|{live_boundary}|")
+    return "".join(pieces)
+
+
+def project_live_fork_map(
+    prompt: str,
+    visible_token_ids: Sequence[int],
+    backend: Any,
+) -> str:
+    """Render the root-relative fork map for an in-memory live branch."""
+    pieces = [str(prompt)]
+    for boundary, token_id in enumerate(visible_token_ids):
+        pieces.append(f"|{boundary}|")
+        pieces.append(str(backend.token_text(int(token_id))))
+    pieces.append(f"|{len(visible_token_ids)}|")
     return "".join(pieces)
 
 

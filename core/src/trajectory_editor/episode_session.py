@@ -14,12 +14,13 @@ from types import MappingProxyType
 from typing import Any, Protocol
 from uuid import uuid4
 
-from .core.actions import Accept, Hold, PolicyAction, Write
+from .core.actions import Accept, PolicyAction
 from .core.errors import EditorError
 from .core.results import ActionOutcome, ReplayExpectation
 from .core.sampler_config import SamplerConfig
 from .episode_engine import EpisodeEngine
 from .episode_runner import TapeStep
+from .fork_materializer import trim_live_prefix
 
 
 @dataclass(frozen=True)
@@ -695,8 +696,8 @@ class LiveSession:
         if type(boundary) is not int or boundary < 0 or boundary > engine.boundary:
             raise EditorError(f"rewind boundary must be between 0 and {engine.boundary}")
         state = self._capture_active()
-        kept_tape, kept_outcomes, removed_tape, removed_outcomes = self._trim_records(
-            state.tape, state.outcomes, boundary, engine
+        kept_tape, kept_outcomes, removed_tape, removed_outcomes = trim_live_prefix(
+            state.tape, state.outcomes, boundary, engine.backend
         )
         point = self._control_at(state, boundary)
         engine.rewind_to(boundary)
@@ -727,75 +728,6 @@ class LiveSession:
         self._emit("rewound", self._state(branch_id).identity, boundary, {"rewind": rewind})
         return rewind
 
-    @staticmethod
-    def _trim_records(
-        tape: Sequence[TapeStep],
-        outcomes: Sequence[ActionOutcome],
-        boundary: int,
-        engine: EpisodeEngine,
-    ) -> tuple[list[TapeStep], list[ActionOutcome], list[TapeStep], list[ActionOutcome]]:
-        kept_tape: list[TapeStep] = []
-        kept_outcomes: list[ActionOutcome] = []
-        removed_tape: list[TapeStep] = []
-        removed_outcomes: list[ActionOutcome] = []
-        for step, outcome in zip(tape, outcomes):
-            # A zero-width handoff at the rewind boundary is an attempted
-            # action, not retained history.  This ordering also matches the
-            # durable store, which removes actions whose start is at the
-            # rewind boundary.
-            if outcome.boundary_before >= boundary:
-                removed_tape.append(step)
-                removed_outcomes.append(outcome)
-            elif outcome.boundary_after <= boundary:
-                kept_tape.append(step)
-                kept_outcomes.append(outcome)
-            elif outcome.boundary_before < boundary < outcome.boundary_after:
-                partial = LiveSession._partial_outcome(outcome, boundary, engine)
-                if partial is not None:
-                    kept_tape.append(TapeStep(partial.action, partial.expectation()))
-                    kept_outcomes.append(partial)
-                removed_tape.append(step)
-                removed_outcomes.append(outcome)
-            else:
-                removed_tape.append(step)
-                removed_outcomes.append(outcome)
-        return kept_tape, kept_outcomes, removed_tape, removed_outcomes
-
-    @staticmethod
-    def _partial_outcome(
-        outcome: ActionOutcome, boundary: int, engine: EpisodeEngine
-    ) -> ActionOutcome | None:
-        count = boundary - outcome.boundary_before
-        visible = outcome.visible_token_ids[:count]
-        if not visible:
-            return None
-        if isinstance(outcome.action, Hold):
-            # A retained prefix of a conditional hold is a finite hold.  The
-            # original sentence/newline condition describes the discarded
-            # future and must not be re-applied on replay.
-            action: PolicyAction = Hold(len(visible))
-            stop_reason = "requested-length"
-        else:
-            action = Write(engine.backend.render(list(visible)), mode="exact")
-            stop_reason = "completed"
-        evidence = tuple(
-            item for item in outcome.evidence if item.realized_visible and item.boundary < boundary
-        )
-        return replace(
-            outcome,
-            action=action,
-            boundary_after=boundary,
-            resolved_text=engine.backend.render(list(visible)),
-            resolved_token_ids=tuple(visible),
-            visible_token_ids=tuple(visible),
-            terminal_token_id=None,
-            stop_reason=stop_reason,
-            evidence=evidence,
-            status="completed",
-            divergence=None,
-            replay_eog_token_id=None,
-        )
-
     def fork(
         self,
         backend: Any | None = None,
@@ -819,8 +751,8 @@ class LiveSession:
         if type(target) is not int or target < 0 or target > engine.boundary:
             raise EditorError(f"fork boundary must be between 0 and {engine.boundary}")
         source = self._capture_active(capture_cache=True)
-        kept_tape, kept_outcomes, _, _ = self._trim_records(
-            source.tape, source.outcomes, target, engine
+        kept_tape, kept_outcomes, _, _ = trim_live_prefix(
+            source.tape, source.outcomes, target, engine.backend
         )
         identity = BranchIdentity(branch_id or self._new_branch_id(), source.identity.branch_id, target)
         child = replace(
