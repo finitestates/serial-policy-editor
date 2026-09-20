@@ -38,11 +38,12 @@ def _edge_header(
     current_budget: int | None,
     remaining_tokens: int | None,
     sampler_summary: str,
+    mode: str = "episode",
 ) -> StyleAndTextTuples:
     remaining_label = "token" if remaining_tokens == 1 else "tokens"
     fragments: StyleAndTextTuples = [
-        ("class:status-strong", "LIVE EDGE\n"),
-        ("class:section", "Episode "),
+        ("class:status-strong", "LIVE SESSION\n" if mode == "session" else "LIVE EDGE\n"),
+        ("class:section", "Branch " if mode == "session" else "Episode "),
         ("", f"{episode_id}"),
         ("class:muted", f"  ·  boundary {boundary}\n"),
         ("class:rule", "────────────────────────────────────────\n"),
@@ -59,23 +60,36 @@ def _edge_header(
         ("class:muted", f"  {sampler_summary}\n"),
         ("class:section", "Commands\n"),
     ]
-    fragments.extend(_command_row("ls / ls all", "list open / all episodes\n"))
-    fragments.extend(_command_row("#N", "switch episode\n"))
-    fragments.extend(_command_row("name TITLE", "rename this episode\n"))
-    fragments.extend(_command_row("rewind N", "delete continuation from token N\n"))
+    if mode == "session":
+        fragments.extend(_command_row("branches", "show retained live branches\n"))
+        fragments.extend(_command_row("switch ID", "reactivate one live branch\n"))
+        fragments.extend(_command_row("rewind N", "trim this branch back to token N\n"))
+    else:
+        fragments.extend(_command_row("ls / ls all", "list open / all episodes\n"))
+        fragments.extend(_command_row("#N", "switch episode\n"))
+        fragments.extend(_command_row("name TITLE", "rename this episode\n"))
+        fragments.extend(_command_row("rewind N", "delete continuation from token N\n"))
     fragments.extend(_command_row("c / continue", "resume the current tranche\n"))
     fragments.extend(_command_row("n N / n off", "set an allowance or remove the budget\n"))
     fragments.extend(_command_row("s key=value", "change sampler settings\n"))
-    fragments.extend(
-        _command_row("s random-seed", "choose and record a new random seed\n")
-    )
+    if mode != "session":
+        fragments.extend(
+            _command_row("s random-seed", "choose and record a new random seed\n")
+        )
     fragments.extend(
         _command_row("f N", "fork at boundary N  ·  fm shows the fork map\n")
     )
-    fragments.extend(_command_row("spr ID", "replay from another episode\n"))
-    fragments.extend(_command_row("p / project", "view the episode record\n"))
-    fragments.extend(_command_row("e / end", "end and seal the episode\n"))
-    fragments.extend(_command_row("q / quit", "leave without sealing\n"))
+    if mode == "session":
+        fragments.extend(_command_row("export FILE", "write the selected portable tape\n"))
+        fragments.extend(_command_row("save WORKSPACE", "materialize this branch\n"))
+        fragments.extend(_command_row("save-family WORKSPACE", "materialize this live family\n"))
+        fragments.extend(_command_row("e / end", "end this branch and show its text\n"))
+        fragments.extend(_command_row("q / quit", "discard the whole live session\n"))
+    else:
+        fragments.extend(_command_row("spr ID", "replay from another episode\n"))
+        fragments.extend(_command_row("p / project", "view the episode record\n"))
+        fragments.extend(_command_row("e / end", "end and seal the episode\n"))
+        fragments.extend(_command_row("q / quit", "leave without sealing\n"))
     return fragments
 
 
@@ -86,6 +100,7 @@ class EdgeViewState:
     current_budget: int | None
     remaining_tokens: int | None
     sampler_summary: str
+    mode: str = "episode"
 
 
 class LiveEdgeView:
@@ -161,13 +176,14 @@ def read_live_edge_command(
     current_budget: int | None,
     remaining_tokens: int | None,
     sampler_summary: str,
+    mode: str = "episode",
     input_device: object | None = None,
     output_device: object | None = None,
     theme: str = DEFAULT_LIVE_THEME,
 ) -> str | None:
     """Standalone edge adapter for callers without an interactive session."""
     view = LiveEdgeView(EdgeViewState(
-        episode_id, boundary, current_budget, remaining_tokens, sampler_summary,
+        episode_id, boundary, current_budget, remaining_tokens, sampler_summary, mode,
     ))
     application: Application[str | None] = Application(
         layout=view.layout, key_bindings=view.bindings, style=_live_style(theme),

@@ -41,6 +41,7 @@ from .episode_runner import (
     EdgeRequested,
     EpisodeRunner as CoreEpisodeRunner,
     ForkRequested,
+    LiveSessionRunner,
     ReplayContext,
     ReplayOrigin,
     SeamlessEdgeRequested,
@@ -50,12 +51,14 @@ from .episode_runner import (
 )
 from .projector import project_episode, project_fork_map, project_lineage, project_procedure
 from .episode_store import EpisodeStore
+from .episode_session import BranchState, LiveSession
 from .episode_ui import InteractivePolicy, PolicyViewPreferences
 from .transformers_backend import TransformersSettings
 from .runtime_setup import RuntimePlan, effective_plan_summary, run_runtime_setup_menu
 from .tui import TerminalIO
 from .ui_themes import LIVE_THEME_NAMES
 from .version import VERSION
+from .teacher_plan import export_live_teacher_tape, export_teacher_tape, load_teacher_tape_jsonl
 
 
 def _positive_int(value: str) -> int:
@@ -111,6 +114,22 @@ def build_parser(
         default=Path("episodes.sqlite3"),
         help="compact episode workspace used for SPR and token evidence",
     )
+    parser.add_argument(
+        "--ephemeral", action="store_true",
+        help="run a non-durable live session; export or save a branch explicitly",
+    )
+    parser.add_argument(
+        "--teacher-plan", type=Path, metavar="FILE",
+        help="execute a portable JSONL teacher tape from a new prompt",
+    )
+    parser.add_argument(
+        "--teacher-plan-envelope", type=Path, metavar="FILE",
+        help="optional JSON sidecar describing a portable teacher tape",
+    )
+    parser.add_argument(
+        "--export-teacher-plan", nargs=2, type=Path, metavar=("EPISODE_ID", "FILE"),
+        help="export an episode as a portable JSONL teacher tape",
+    )
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--new-prompt", metavar="TEXT")
     source.add_argument("--new-prompt-file", type=Path, metavar="FILE")
@@ -133,8 +152,8 @@ def build_parser(
         help="freeze source-initial sampler settings plus explicit overrides during --replay",
     )
     source.add_argument("--fork-from", metavar="EPISODE_ID")
-    source.add_argument("--project", metavar="EPISODE_ID")
-    parser.add_argument("--procedure", action="store_true", help="show a manual replay procedure with --project")
+    source.add_argument("--projector", metavar="EPISODE_ID")
+    parser.add_argument("--procedure", action="store_true", help="show a manual replay procedure with --projector")
     source.add_argument("--list", action="store_true", dest="list_episodes")
     parser.add_argument("--at", type=int, metavar="BOUNDARY")
     parser.add_argument(
@@ -417,6 +436,434 @@ def _interactive_policy(
         episode_id=episode_id,
         seamless=io.supports_live_choices,
     )
+
+
+def _ephemeral_policy(args: argparse.Namespace, io: TerminalIO) -> InteractivePolicy:
+    """Build the normal action chooser without a workspace-backed recorder."""
+    preferences = getattr(args, "_policy_view_preferences", None)
+    if preferences is None:
+        preferences = PolicyViewPreferences(
+            show=args.show_policy_rank,
+            logit_view=args.logit_view,
+        )
+        args._policy_view_preferences = preferences
+    return InteractivePolicy(
+        io=io,
+        menu_size=args.table_depth,
+        search_radius=args.search_radius,
+        default_hold_tokens=args.hold_default,
+        phrase_max_tokens=getattr(args, "phrase_max_tokens", 16),
+        phrase_max_shift=getattr(args, "phrase_max_shift", 6.0),
+        context_characters=args.context_chars,
+        manual_acceptance=args.manual_acceptance,
+        view_preferences=preferences,
+        # LiveSession supplies the same token-boundary semantics without a
+        # durable interaction recorder.  Keep the fullscreen review controls
+        # live so Enter on a historical boundary actually rewinds the branch.
+        seamless=bool(getattr(io, "supports_live_choices", False)),
+    )
+
+
+def _materialize_live_branch(
+    store: EpisodeStore,
+    session: LiveSession,
+    state: BranchState,
+    provenance: dict[str, Any],
+    *,
+    episode_id: str | None = None,
+    parent_episode_id: str | None = None,
+    mode: str = "ephemeral-save",
+) -> str:
+    """Write one canonical live branch as an independent durable episode.
+
+    Live branch records use root-relative boundaries, so materialization does
+    not need to manufacture a storage DAG or replay the branch just to save it.
+    A family save adds ordinary durable parent links separately.
+    """
+    initial = state.control_points[0]
+    if initial.stream_fingerprint is None:
+        raise EditorError("the selected branch has no stream fingerprint to save")
+    identifier = store.create_episode(
+        episode_id=episode_id,
+        parent_episode_id=parent_episode_id,
+        fork_boundary=state.identity.fork_boundary if parent_episode_id is not None else None,
+        initial_text=session.prompt,
+        initial_token_ids=state.initial_token_ids,
+        sampling=initial.sampling,
+        stream_fingerprint=initial.stream_fingerprint,
+        coordinate_offset=initial.coordinate_offset,
+        max_tokens=initial.max_tokens,
+        backend=provenance,
+        metadata={
+            "mode": mode,
+            "live_session_id": session.session_id,
+            "live_branch_id": state.identity.branch_id,
+            "live_parent_branch_id": state.identity.parent_id,
+            "live_fork_boundary": state.identity.fork_boundary,
+            "live_materialization": "full-root-branch",
+        },
+        checkpoint_boundary=initial.checkpoint_boundary,
+    )
+    prior = initial
+    for point in state.control_points[1:]:
+        if point.stream_fingerprint is None:
+            raise EditorError("the selected branch has no stream fingerprint to save")
+        if (
+            point.sampling,
+            point.stream_fingerprint,
+            point.coordinate_offset,
+        ) != (
+            prior.sampling,
+            prior.stream_fingerprint,
+            prior.coordinate_offset,
+        ):
+            store.record_sampling_segment(
+                identifier,
+                start_boundary=point.boundary,
+                sampling=point.sampling,
+                stream_fingerprint=point.stream_fingerprint,
+                coordinate_offset=point.coordinate_offset,
+            )
+        if (point.max_tokens, point.checkpoint_boundary) != (
+            prior.max_tokens,
+            prior.checkpoint_boundary,
+        ):
+            store.record_budget(
+                identifier,
+                point.boundary,
+                point.max_tokens,
+                point.checkpoint_boundary,
+            )
+        prior = point
+    for ordinal, outcome in enumerate(state.history_outcomes):
+        store.record_action(identifier, ordinal, outcome)
+    visible_text = session.engine.backend.render(list(state.visible_token_ids))
+    final = state.control_points[-1]
+    store.update_episode(
+        identifier,
+        visible_text=visible_text,
+        max_tokens=final.max_tokens,
+        status="completed" if state.terminal_reason is not None else "open",
+    )
+    if state.terminal_reason is not None:
+        store.finish_episode(
+            identifier,
+            visible_text=visible_text,
+            terminal_token_id=state.terminal_token_id,
+            terminal_reason=state.terminal_reason,
+        )
+    return identifier
+
+
+def _save_ephemeral_branch(
+    session: LiveSession,
+    workspace: Path,
+    provenance: dict[str, Any],
+    *,
+    episode_id: str | None = None,
+) -> str:
+    """Materialize only the currently selected branch after explicit save."""
+    state = session.branch_state()
+    with EpisodeStore(workspace) as store:
+        return _materialize_live_branch(
+            store, session, state, provenance, episode_id=episode_id
+        )
+
+
+def _save_ephemeral_family(
+    session: LiveSession,
+    workspace: Path,
+    provenance: dict[str, Any],
+    *,
+    root_episode_id: str | None = None,
+) -> dict[str, str]:
+    """Materialize every retained live branch and map its durable lineage."""
+    states = dict(session.branch_states)
+    pending = dict(states)
+    identifiers: dict[str, str] = {}
+    with EpisodeStore(workspace) as store:
+        while pending:
+            progressed = False
+            for branch_id, state in tuple(pending.items()):
+                parent = state.identity.parent_id
+                if parent is not None and parent not in identifiers:
+                    continue
+                identifier = _materialize_live_branch(
+                    store,
+                    session,
+                    state,
+                    provenance,
+                    episode_id=root_episode_id if parent is None else None,
+                    parent_episode_id=identifiers.get(parent),
+                    mode="ephemeral-family-save",
+                )
+                identifiers[branch_id] = identifier
+                del pending[branch_id]
+                progressed = True
+            if not progressed:
+                raise EditorError("live branch family has an unresolved parent")
+    return identifiers
+
+
+def _ephemeral_edge_menu(
+    io: TerminalIO,
+    session: LiveSession,
+) -> tuple[str, Any]:
+    """Small branch-oriented EDGE surface for a session with no workspace."""
+    live_surface = bool(
+        getattr(io, "supports_live_choices", False)
+        and callable(getattr(io, "read_live_edge_command", None))
+    )
+    while True:
+        if live_surface:
+            raw = io.read_live_edge_command(  # type: ignore[attr-defined]
+                episode_id=session.branch.branch_id,
+                boundary=session.engine.boundary,
+                current_budget=session.engine.max_tokens,
+                remaining_tokens=session.engine.remaining,
+                sampler_summary=_sampler_summary(session.sampler),
+                mode="session",
+            )
+        else:
+            io.write(
+                f"Live branch {session.branch.branch_id} @ boundary {session.engine.boundary}"
+                f" · {_sampler_summary(session.sampler)}"
+            )
+            raw = io.read(
+                "[c]ontinue  [n N/off] budget  [s key=value] sampler  [rewind N] "
+                "[f N] fork  [branches]  [switch ID]  [export FILE] "
+                "[save WORKSPACE [ID]]  [save-family WORKSPACE [ROOT_ID]]  [e]nd  [q]uit > "
+            )
+        if raw is None:
+            return "quit", None
+        text = raw.strip()
+        lower = text.lower()
+        if lower in {"q", "quit"}:
+            return "quit", None
+        if lower in {"e", "end"}:
+            return "end", None
+        if lower in {"c", "continue", ""}:
+            return "continue", "keep"
+        if lower in {"branches", "ls"}:
+            rows = []
+            states = session.branch_states
+            for branch_id, node in session.branch_tree.nodes.items():
+                marker = "*" if branch_id == session.branch.branch_id else " "
+                parent = node.identity.parent_id or "root"
+                state = states[branch_id]
+                rows.append(
+                    f"{marker} {branch_id}  parent={parent}  fork={node.identity.fork_boundary} "
+                    f"boundary={state.boundary}"
+                )
+            io.page("Live branches:\n" + "\n".join(rows))
+            continue
+        parts = text.split()
+        if len(parts) == 2 and parts[0].lower() == "switch":
+            if parts[1] not in session.branch_states:
+                io.write(f"Unknown live branch {parts[1]!r}.")
+                continue
+            return "switch", parts[1]
+        if len(parts) == 2 and parts[0].lower() == "rewind":
+            try:
+                return "rewind", int(parts[1])
+            except ValueError:
+                io.write("Rewind boundary must be an integer.")
+                continue
+        if len(parts) == 2 and parts[0].lower() in {"f", "fork"}:
+            try:
+                return "fork", int(parts[1])
+            except ValueError:
+                io.write("Fork boundary must be an integer.")
+                continue
+        if len(parts) == 2 and parts[0].lower() == "export":
+            return "export", Path(parts[1])
+        if parts and parts[0].lower() in {"save-family", "savefamily"}:
+            if len(parts) not in {2, 3}:
+                io.write("Use save-family WORKSPACE [ROOT_ID].")
+                continue
+            return "save-family", (Path(parts[1]), parts[2] if len(parts) == 3 else None)
+        if len(parts) >= 2 and parts[0].lower() == "save" and parts[1].lower() == "family":
+            if len(parts) not in {3, 4}:
+                io.write("Use save family WORKSPACE [ROOT_ID].")
+                continue
+            return "save-family", (Path(parts[2]), parts[3] if len(parts) == 4 else None)
+        if len(parts) in {2, 3} and parts[0].lower() == "save":
+            return "save", (Path(parts[1]), parts[2] if len(parts) == 3 else None)
+        if len(parts) == 2 and parts[0].lower() in {"n", "next"}:
+            if parts[1].lower() in {"off", "none", "unlimited"}:
+                return "continue", None
+            try:
+                budget = int(parts[1])
+                if budget < 1:
+                    raise ValueError
+                return "continue", budget
+            except ValueError:
+                io.write("Budget must be a positive integer.")
+                continue
+        if parts and parts[0].lower() in {"s", "sampler"}:
+            payload = text.split(maxsplit=1)[1] if len(parts) > 1 else ""
+            if not payload:
+                io.write("Use sampler key=value.")
+                continue
+            try:
+                session.set_sampler(sampler_override(session.sampler, payload))
+            except EditorError as exc:
+                io.write(f"[invalid sampler change] {exc}")
+            continue
+        io.write("Unknown live-session command.")
+
+
+def _run_ephemeral(
+    args: argparse.Namespace,
+    *,
+    io: TerminalIO,
+    teacher_tape: Any | None,
+) -> int:
+    """Run an explicit in-memory session without opening an episode workspace."""
+    if args.new_prompt is None and args.new_prompt_file is None:
+        raise EditorError("--ephemeral requires --new-prompt, --new-prompt-file, or a teacher-plan envelope prompt")
+    initial_text = args.new_prompt if args.new_prompt is not None else args.new_prompt_file.read_text(encoding="utf-8")
+    backend = _backend(args)
+    provenance = backend.provenance()
+    sampling = sampler_from_args(args)
+    activation_artifact = None
+    if args.activation_strength is not None and args.activation_vector is None:
+        raise EditorError("--steering-strength requires --steering-vector")
+    if args.activation_vector is not None:
+        from .activation_vectors import SteeringVectorArtifact
+        activation_artifact = SteeringVectorArtifact.from_path(args.activation_vector)
+        activation_artifact.validate_against_backend(backend, provenance)
+        sampling = apply_activation_artifact(sampling, activation_artifact, args)
+    if not _confirm_runtime_plan(io, args, backend, provenance, sampling, activation_artifact=activation_artifact):
+        return 0
+    guidance_backend = None
+    if sampling.cfg_unconditional_prompt is not None:
+        io.write("Loading second model copy for CFG prefix guidance...")
+        guidance_backend = _load_cfg_guidance_backend(args, provenance)
+    engine = EpisodeEngine(
+        backend,
+        sampling=sampling,
+        max_tokens=args.max_tokens,
+        initial_text=initial_text,
+        guidance_backend=guidance_backend,
+    )
+    session = LiveSession(
+        engine,
+        prompt=initial_text,
+        environment_stamp={"backend": provenance, "sampler": sampling.to_dict()},
+    )
+    pending_tape = teacher_tape.plan if teacher_tape is not None else None
+    while True:
+        announced_teacher_tape = (
+            teacher_tape is not None and pending_tape is teacher_tape.plan
+        )
+        runner = LiveSessionRunner(session, divergence_policy=args.divergence_policy)
+        try:
+            result = runner.run(
+                tape=pending_tape,
+                live_policy=_ephemeral_policy(args, io),
+                stop_after_tape=True,
+            )
+        except EdgeRequested:
+            pending_tape = None
+            action, value = _ephemeral_edge_menu(io, session)
+        except ForkRequested as request:
+            action, value = "fork", request.boundary
+        except SeamlessRewindRequested as request:
+            action, value = "rewind", request.boundary
+        except SeamlessEdgeRequested:
+            action, value = _ephemeral_edge_menu(io, session)
+        else:
+            pending_tape = None
+            if result.handed_off and result.handoff_reason:
+                io.write(result.handoff_reason)
+            if result.replay_exhausted and announced_teacher_tape:
+                io.write(f"Teacher plan exhausted at boundary {session.engine.boundary}; live edge reached.")
+            if session.engine.ended:
+                text = session.engine.text
+                if args.output is not None:
+                    args.output.parent.mkdir(parents=True, exist_ok=True)
+                    args.output.write_text(text, encoding="utf-8")
+                    print(f"Text: {args.output}", flush=True)
+                else:
+                    print("\n--- final text ---")
+                    print(text)
+                session.discard()
+                return 0
+            action, value = _ephemeral_edge_menu(io, session)
+        if action == "quit":
+            session.discard()
+            return 0
+        if action == "end":
+            session.quit("menu-end")
+            text = session.engine.text
+            if args.output is not None:
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(text, encoding="utf-8")
+                print(f"Text: {args.output}", flush=True)
+            else:
+                print("\n--- final text ---")
+                print(text)
+            session.discard()
+            return 0
+        if action == "continue":
+            session.resume(max_tokens=value)
+            continue
+        if action == "rewind":
+            try:
+                session.rewind(int(value))
+            except EditorError as exc:
+                io.write(str(exc))
+            continue
+        if action == "fork":
+            target = int(value)
+            try:
+                child = session.fork(boundary=target)
+            except EditorError as exc:
+                io.write(str(exc))
+                continue
+            session.activate(child.branch.branch_id)
+            io.write(f"Forked live branch {child.branch.branch_id} at boundary {target}.")
+            continue
+        if action == "switch":
+            session.activate(str(value))
+            continue
+        if action == "export":
+            try:
+                export_live_teacher_tape(session, value)
+                io.write(f"Exported selected branch to {value}.")
+            except EditorError as exc:
+                io.write(str(exc))
+            # Return to EDGE without asking the teacher policy for another
+            # action merely because a non-mutating command completed.
+            pending_tape = ReplayPlan()
+            continue
+        if action == "save":
+            workspace, requested_id = value
+            try:
+                identifier = _save_ephemeral_branch(session, workspace, provenance, episode_id=requested_id)
+                io.write(f"Saved selected branch as {identifier} in {workspace}.")
+            except (EditorError, OSError, RuntimeError) as exc:
+                io.write(str(exc))
+            pending_tape = ReplayPlan()
+            continue
+        if action == "save-family":
+            workspace, requested_root_id = value
+            try:
+                identifiers = _save_ephemeral_family(
+                    session,
+                    workspace,
+                    provenance,
+                    root_episode_id=requested_root_id,
+                )
+                io.write(
+                    f"Saved {len(identifiers)} live branches as a family in {workspace}."
+                )
+            except (EditorError, OSError, RuntimeError) as exc:
+                io.write(str(exc))
+            pending_tape = ReplayPlan()
+            continue
+        raise AssertionError(f"unhandled ephemeral action {action!r}")
 
 
 def _sampler_summary(config: SamplerConfig) -> str:
@@ -772,15 +1219,73 @@ def main(
             raise EditorError("--until requires --replay")
         if args.fixed_config and args.replay is None:
             raise EditorError("--fixed-config requires --replay")
+        if (
+            args.teacher_plan_envelope is not None
+            and args.teacher_plan is None
+            and args.export_teacher_plan is None
+        ):
+            raise EditorError("--teacher-plan-envelope requires --teacher-plan or --export-teacher-plan")
+        if args.export_teacher_plan is not None and any(
+            value is not None
+            for value in (
+                args.new_prompt,
+                args.new_prompt_file,
+                args.replay,
+                args.resume,
+                args.fork_from,
+                args.projector,
+            )
+        ):
+            raise EditorError("--export-teacher-plan cannot be combined with an episode source")
+        teacher_tape = None
+        if args.teacher_plan is not None:
+            if any(value is not None for value in (args.replay, args.resume, args.fork_from)):
+                raise EditorError("--teacher-plan currently starts a new episode only")
+            teacher_tape = load_teacher_tape_jsonl(
+                args.teacher_plan,
+                envelope_path=args.teacher_plan_envelope,
+                require_observations=args.divergence_policy == "handoff",
+            )
+            if args.new_prompt is None and args.new_prompt_file is None:
+                prompt_text = teacher_tape.envelope.get("prompt")
+                if not isinstance(prompt_text, str):
+                    raise EditorError("--teacher-plan requires --new-prompt, --new-prompt-file, or an envelope prompt")
+                args.new_prompt = prompt_text
+        if args.ephemeral:
+            incompatible = {
+                "--resume": args.resume,
+                "--replay": args.replay,
+                "--fork-from": args.fork_from,
+                "--projector": args.projector,
+                "--export-teacher-plan": args.export_teacher_plan,
+                "--list": args.list_episodes,
+                "--lineage": args.lineage,
+                "--setup-menu": args.setup_menu,
+            }
+            requested = next((flag for flag, value in incompatible.items() if value), None)
+            if requested is not None:
+                raise EditorError(f"--ephemeral cannot be combined with {requested}")
+            if args.at is not None or args.until is not None or args.fixed_config or args.procedure:
+                raise EditorError("--ephemeral accepts a new prompt and optional --teacher-plan only")
+            if args.random_seed:
+                args.seed = random_seed()
+                print(f"Random seed: {args.seed}", flush=True)
+            args._setup_menu_active = False
+            io = TerminalIO(live_choices=not args.plain_ui, live_theme=args.theme)
+            open_live_session = getattr(io, "live_session", None)
+            if callable(open_live_session):
+                with open_live_session():
+                    return _run_ephemeral(args, io=io, teacher_tape=teacher_tape)
+            return _run_ephemeral(args, io=io, teacher_tape=teacher_tape)
         with _SwitchableEpisodeStore(args.workspace) as store, ExitStack() as ui_stack:
-            for field in ("resume", "fork_from", "replay", "project", "lineage"):
+            for field in ("resume", "fork_from", "replay", "projector", "lineage"):
                 value = getattr(args, field)
                 if value:
                     setattr(args, field, store.resolve_id(value))
             if args.at is not None and args.fork_from is None:
                 raise EditorError("--at is only valid with --fork-from")
-            if args.procedure and not args.project:
-                raise EditorError("--procedure requires --project EPISODE_ID")
+            if args.procedure and not args.projector:
+                raise EditorError("--procedure requires --projector EPISODE_ID")
             if args.lineage is not None:
                 if not args.list_episodes:
                     raise EditorError("--lineage requires --list")
@@ -789,14 +1294,24 @@ def main(
             if args.list_episodes:
                 _print_list(store)
                 return 0
-            if args.project:
+            if args.export_teacher_plan is not None:
+                source, destination = args.export_teacher_plan
+                export_teacher_tape(
+                    store,
+                    store.resolve_id(str(source)),
+                    destination,
+                    envelope_path=args.teacher_plan_envelope,
+                )
+                print(f"Exported teacher tape to {destination}", flush=True)
+                return 0
+            if args.projector:
                 if args.procedure:
-                    print(project_procedure(store, args.project))
+                    print(project_procedure(store, args.projector))
                     return 0
                 print(
                     project_episode(
                         store,
-                        args.project,
+                        args.projector,
                         annotations=getattr(args, "annotations", "none"),
                         with_loss=getattr(args, "with_loss", False),
                         with_rank=getattr(args, "with_rank", False),
@@ -814,6 +1329,7 @@ def main(
                     args.replay is not None,
                     args.resume is not None,
                     args.fork_from is not None,
+                    args.teacher_plan is not None,
                 )
             )
             setup_menu = bool(
@@ -879,7 +1395,7 @@ def main(
             requested_id = args.episode_id
             parent_id: str | None = None
             fork_boundary: int | None = None
-            pending_tape: ReplayPlan | None = None
+            pending_tape: ReplayPlan | None = teacher_tape.plan if teacher_tape else None
             if args.resume is not None:
                 # Only explicit CLI sampler flags override the stored segment.
                 explicit = sampler_overrides_present(args)

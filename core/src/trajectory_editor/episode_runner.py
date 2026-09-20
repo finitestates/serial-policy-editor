@@ -9,13 +9,15 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from .core.actions import Phrase, PolicyAction
 from .core.results import ActionOutcome, ReplayExpectation
 from .core.sampler_config import SamplerConfig
 from .episode_engine import EpisodeEngine, InstructionRejected, Observation
-from .episode_store import EpisodeStore
+
+if TYPE_CHECKING:
+    from .episode_store import EpisodeStore
 
 
 class EdgeRequested(Exception):
@@ -140,7 +142,7 @@ class EpisodeRunner:
     def __init__(
         self,
         engine: EpisodeEngine,
-        store: EpisodeStore,
+        store: "EpisodeStore",
         episode_id: str,
         *,
         divergence_policy: str = "handoff",
@@ -356,10 +358,110 @@ class EpisodeRunner:
         )
 
 
+class LiveSessionRunner:
+    """Run a persistence-free :class:`LiveEpisode` at its current branch.
+
+    This is deliberately the sibling of :class:`EpisodeRunner`, rather than a
+    fake in-memory ``EpisodeStore``.  A live session owns its tape and outcomes
+    itself; its caller can later export or save a selected branch explicitly.
+    """
+
+    def __init__(self, session, *, divergence_policy: str = "handoff") -> None:
+        self.session = session
+        self.engine = session.engine
+        self.divergence_policy = divergence_policy
+
+    def run(
+        self,
+        *,
+        tape: Sequence[TapeStep] | ReplayPlan | None = None,
+        live_policy: LivePolicy | None = None,
+        stop_after_tape: bool = True,
+        max_live_actions: int | None = None,
+    ) -> RunResult:
+        outcomes: list[ActionOutcome] = []
+        replayed = 0
+        handed_off = False
+        handoff_reason: str | None = None
+        tape_input = tape
+        had_tape = tape is not None
+        plan = tape if isinstance(tape, ReplayPlan) else ReplayPlan(tuple(tape or ()))
+        replay_exhausted = False
+        active_action: PolicyAction | None = None
+        executing_replay = False
+        try:
+            for index, step in enumerate(plan.steps):
+                if self.engine.ended or self.engine.checkpointed:
+                    break
+                sampling = plan.context.sampling_at(index)
+                if plan.follow_source_sampling and sampling is not None:
+                    self.session.set_sampler(sampling)
+                active_action = step.action
+                executing_replay = True
+                outcome = self.session.generate(
+                    step.action,
+                    expectation=step.expectation,
+                    divergence_policy=self.divergence_policy,
+                    replay=True,
+                )
+                outcomes.append(outcome)
+                if outcome.status == "handed-off":
+                    handed_off = True
+                    break
+                replayed += 1
+            if had_tape and not handed_off and not self.engine.ended and not self.engine.checkpointed:
+                replay_exhausted = replayed == len(plan.steps)
+            if replay_exhausted and plan.follow_source_sampling and plan.final_sampling is not None:
+                self.session.set_sampler(plan.final_sampling)
+            should_run_live = not had_tape or (
+                replay_exhausted
+                and not stop_after_tape
+                and not isinstance(tape_input, ReplayPlan)
+            )
+            if outcomes and outcomes[-1].stop_reason == "replay-eog":
+                should_run_live = False
+            live_actions = 0
+            while (
+                (max_live_actions is None or live_actions < max_live_actions)
+                and should_run_live
+                and not self.engine.ended
+                and not self.engine.checkpointed
+                and live_policy is not None
+            ):
+                observation = self.engine.observe()
+                action = live_policy.choose(self.engine, observation)
+                active_action = action
+                executing_replay = False
+                try:
+                    outcome = self.session.generate(action)
+                except InstructionRejected as exc:
+                    if not isinstance(action, Phrase):
+                        raise
+                    rejected = getattr(live_policy, "action_rejected", None)
+                    if callable(rejected):
+                        rejected(action, str(exc))
+                    live_actions += 1
+                    continue
+                outcomes.append(outcome)
+                live_actions += 1
+        except InstructionRejected as exc:
+            handoff_reason = str(exc)
+            handed_off = True
+        return RunResult(
+            self.session.branch.branch_id,
+            tuple(outcomes),
+            replayed,
+            handed_off,
+            replay_exhausted,
+            handoff_reason,
+        )
+
+
 __all__ = [
     "EdgeRequested",
     "EpisodeRunner",
     "ForkRequested",
+    "LiveSessionRunner",
     "LivePolicy",
     "ReplayPlan",
     "RunResult",
