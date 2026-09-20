@@ -17,6 +17,7 @@ from .core.actions import action_from_dict
 from .core.errors import EditorError
 from .core.results import ReplayExpectation
 from .episode_runner import ReplayPlan, TapeStep
+from .surviving_procedure import ProcedureRecord, project_surviving_procedure
 
 
 TAPE_FORMAT = "serial-policy-tape"
@@ -189,6 +190,36 @@ def _write_teacher_tape(
     return envelope
 
 
+def _project_live_tape(session: Any) -> tuple[TapeStep, ...]:
+    """Project live attempts into the same procedure as durable export.
+
+    A live branch keeps both the attempted tape and its runtime outcomes so
+    that rewinds and handoffs remain inspectable.  A portable tape should only
+    contain the surviving procedure, however.  Keep the original tape
+    expectation for ordinary records, while leaving ``visible_text`` empty so
+    partial handoffs use SQLite's finite-Hold convention.
+    """
+    tape = tuple(session.history_tape)
+    outcomes = tuple(session.history_outcomes)
+    if len(tape) != len(outcomes):
+        raise EditorError("live teacher tape and outcomes must align")
+    records = tuple(
+        ProcedureRecord(
+            action=step.action,
+            expectation=step.expectation,
+            status=outcome.status,
+            visible_token_ids=tuple(outcome.visible_token_ids),
+            visible_text="",
+            boundary_before=outcome.boundary_before,
+        )
+        for step, outcome in zip(tape, outcomes)
+    )
+    return project_surviving_procedure(
+        records,
+        normalize_for_replay=False,
+    ).tape
+
+
 def export_teacher_tape(
     store: Any,
     episode_id: str,
@@ -231,7 +262,7 @@ def export_live_teacher_tape(
     return _write_teacher_tape(
         path,
         envelope,
-        session.history_tape,
+        _project_live_tape(session),
         envelope_path=envelope_path,
     )
 
