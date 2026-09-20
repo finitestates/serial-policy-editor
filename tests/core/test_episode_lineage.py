@@ -185,3 +185,34 @@ def test_records_and_views_are_immutable():
         record.status = "running"
     with pytest.raises(FrozenInstanceError):
         view.related_replays = ()
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"episode_id": ""},
+        {"episode_id": "contains whitespace"},
+        {"episode_id": []},
+        {"parent_id": []},
+        {"spr_source_id": {}},
+        {"fork_boundary": -1},
+        {"fork_boundary": True},
+        {"mode": None},
+        {"mode": ""},
+        {"status": 1},
+        {"status": " "},
+        {"visible_token_count": -1},
+        {"visible_token_count": False},
+    ],
+)
+def test_relation_constructor_rejects_malformed_typed_values(invalid):
+    with pytest.raises((TypeError, ValueError)):
+        EpisodeRelation(episode_id="valid", **invalid)
+
+
+def test_duplicate_relation_ids_are_rejected_instead_of_selected():
+    with pytest.raises(ValueError, match="duplicate episode relation ID"):
+        build_lineage(
+            [relation("same", created=1), relation("same", created=2)],
+            "same",
+        )

@@ -129,16 +129,12 @@ class EpisodeHistory:
                     "boundary width must equal the number of visible token ids"
                 )
 
-            visible = _visible_evidence(outcome)
-            if tuple(item.token_id for item in visible) != tuple(
-                outcome.visible_token_ids
-            ):
-                raise ValueError(
-                    "visible evidence token ids must match the outcome visible ids"
-                )
-            for item in outcome.evidence:
+            evidence = tuple(outcome.evidence)
+            for item in evidence:
                 if not isinstance(item, TokenEvidence):
                     raise TypeError("outcome evidence must contain TokenEvidence values")
+
+            for item in evidence:
                 if type(item.boundary) is not int or item.boundary < before:
                     raise ValueError("evidence boundaries must be root-relative")
                 if item.realized_visible:
@@ -150,6 +146,20 @@ class EpisodeHistory:
                     raise ValueError(
                         "non-visible evidence must not pass the outcome boundary"
                     )
+
+            visible = tuple(item for item in evidence if item.realized_visible)
+            if tuple(item.token_id for item in visible) != tuple(
+                outcome.visible_token_ids
+            ):
+                raise ValueError(
+                    "visible evidence token ids must match the outcome visible ids"
+                )
+            if tuple(item.boundary for item in visible) != tuple(
+                range(before, after)
+            ):
+                raise ValueError(
+                    "visible evidence boundaries must be contiguous and ordered"
+                )
 
             previous_ordinal = attempt.ordinal
             previous_boundary = after
@@ -242,10 +252,11 @@ class EpisodeHistory:
     def truncate(self, boundary: int) -> HistoryTruncation:
         """Retain the history through ``boundary`` without rebasing it.
 
-        A zero-width handed-off attempt contributes no semantic history and is
-        omitted.  A cut strictly inside an attempt creates one transformed
-        retained attempt; all later complete attempts are returned as the
-        discarded suffix.
+        Raw zero-width handed-off attempts before the requested boundary are
+        retained as attempted actions.  The surviving-procedure projector is
+        responsible for omitting them from replay.  A cut strictly inside an
+        attempt creates one transformed retained attempt; all later complete
+        attempts are returned as the discarded suffix.
         """
 
         if type(boundary) is not int or boundary < 0:
@@ -263,10 +274,6 @@ class EpisodeHistory:
             outcome = attempt.outcome
             before = outcome.boundary_before
             after = outcome.boundary_after
-
-            if outcome.status == "handed-off" and not outcome.visible_token_ids:
-                discarded.append(attempt)
-                continue
 
             if after < boundary or (after == boundary and before < boundary):
                 retained.append(attempt)

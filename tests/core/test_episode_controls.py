@@ -10,6 +10,7 @@ from trajectory_editor.episode_controls import (
     BudgetState,
     ControlState,
     ControlTimeline,
+    ControlTransition,
     SamplerState,
     append_transition,
     effective_state,
@@ -111,6 +112,13 @@ def test_unlimited_budget_is_an_explicit_valid_state():
     assert unlimited.allowance is None
     assert unlimited.checkpoint_boundary is None
     assert validate_budget_pair(12, None, None) == unlimited
+
+
+def test_timeline_requires_a_root_control_state():
+    with pytest.raises(EditorError, match="root transition"):
+        ControlTimeline()
+    with pytest.raises(EditorError, match="boundary zero"):
+        ControlTimeline((ControlTransition(1, _state()),))
 
 
 def test_value_records_are_immutable():

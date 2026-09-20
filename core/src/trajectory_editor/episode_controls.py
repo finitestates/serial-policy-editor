@@ -210,6 +210,10 @@ class ControlTimeline:
 
     def __post_init__(self) -> None:
         transitions = tuple(self.transitions)
+        if not transitions:
+            raise EditorError("control timeline requires a root transition")
+        if transitions[0].start_boundary != 0:
+            raise EditorError("control timeline must begin at boundary zero")
         previous = -1
         for transition in transitions:
             if not isinstance(transition, ControlTransition):

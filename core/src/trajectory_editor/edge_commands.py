@@ -56,7 +56,7 @@ class SwitchCommand:
 
 @dataclass(frozen=True, slots=True)
 class NewCommand:
-    prompt: str
+    prompt: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +85,20 @@ class BranchesCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class ListCommand:
+    """List the current context, optionally including finished entries."""
+
+    include_finished: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class RenameCommand:
+    """Rename the current durable episode; the caller owns the capability."""
+
+    title: str
+
+
+@dataclass(frozen=True, slots=True)
 class ExportCommand:
     path: Path
 
@@ -109,6 +123,13 @@ class ReplayCommand:
     until: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ReplaySelectionCommand:
+    """Open a source replay map and let the caller choose its boundary."""
+
+    source: str
+
+
 EdgeCommand: TypeAlias = (
     ContinueCommand
     | BudgetCommand
@@ -122,10 +143,13 @@ EdgeCommand: TypeAlias = (
     | ProjectCommand
     | ForkMapCommand
     | BranchesCommand
+    | ListCommand
+    | RenameCommand
     | ExportCommand
     | SaveCommand
     | SaveFamilyCommand
     | ReplayCommand
+    | ReplaySelectionCommand
 )
 
 
@@ -143,10 +167,18 @@ Quit = QuitCommand
 Project = ProjectCommand
 ForkMap = ForkMapCommand
 Branches = BranchesCommand
+List = ListCommand
+Rename = RenameCommand
 Export = ExportCommand
 Save = SaveCommand
 SaveFamily = SaveFamilyCommand
 Replay = ReplayCommand
+ReplaySelection = ReplaySelectionCommand
+
+# Descriptive aliases for callers that refer to the ``m`` form as a replay
+# map command, while keeping one concrete tagged variant in the union.
+NameCommand = RenameCommand
+ReplayMapCommand = ReplaySelectionCommand
 
 
 def _parse_error(message: str) -> NoReturn:
@@ -223,9 +255,7 @@ def parse_edge_command(raw: str) -> EdgeCommand:
 
     if command == "new":
         prompt = text[len(parts[0]) :].lstrip()
-        if not prompt:
-            _parse_error("new requires prompt text")
-        return NewCommand(prompt)
+        return NewCommand(prompt or None)
 
     if command in {"e", "end"}:
         _require_arity(parts, 1, usage="e or end")
@@ -243,9 +273,22 @@ def parse_edge_command(raw: str) -> EdgeCommand:
         _require_arity(parts, 1, usage="fm or fork-map")
         return ForkMapCommand()
 
-    if command in {"branches", "ls"}:
+    if command == "ls":
+        if len(parts) == 1:
+            return ListCommand()
+        if len(parts) == 2 and parts[1].lower() == "all":
+            return ListCommand(include_finished=True)
+        _parse_error("use ls or ls all")
+
+    if command == "branches":
         _require_arity(parts, 1, usage="branches")
         return BranchesCommand()
+
+    if command == "name":
+        title = text[len(parts[0]) :].lstrip()
+        if not title:
+            _parse_error("name requires a title")
+        return RenameCommand(title)
 
     if command == "export":
         _require_arity(parts, 2, usage="export FILE")
@@ -273,6 +316,8 @@ def parse_edge_command(raw: str) -> EdgeCommand:
         )
 
     if command in {"spr", "replay"}:
+        if len(parts) == 3 and parts[2] == "m":
+            return ReplaySelectionCommand(parts[1])
         _require_arity(parts, 2 if len(parts) == 2 else 4, usage="spr EPISODE [--until Y]")
         if len(parts) == 2:
             return ReplayCommand(parts[1])
@@ -303,6 +348,9 @@ __all__ = [
     "ForkCommand",
     "ForkMap",
     "ForkMapCommand",
+    "List",
+    "ListCommand",
+    "NameCommand",
     "New",
     "NewCommand",
     "Project",
@@ -310,7 +358,12 @@ __all__ = [
     "Quit",
     "QuitCommand",
     "Replay",
+    "ReplayMapCommand",
     "ReplayCommand",
+    "ReplaySelection",
+    "ReplaySelectionCommand",
+    "Rename",
+    "RenameCommand",
     "Rewind",
     "RewindCommand",
     "Sampler",

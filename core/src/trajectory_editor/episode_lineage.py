@@ -17,6 +17,41 @@ from typing import Any
 _UNSET = object()
 
 
+def _validate_relation_id(
+    value: object,
+    field: str,
+    *,
+    optional: bool = False,
+) -> str | None:
+    if value is None:
+        if optional:
+            return None
+        raise ValueError(f"{field} must be a nonempty relation ID")
+    if not isinstance(value, str):
+        raise TypeError(f"{field} must be a string or None")
+    if not value or any(character.isspace() for character in value):
+        raise ValueError(f"{field} must be a nonempty string without whitespace")
+    return value
+
+
+def _validate_label(value: object, field: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field} must be a string")
+    if not value or value != value.strip():
+        raise ValueError(
+            f"{field} must be a nonempty label without surrounding whitespace"
+        )
+    return value
+
+
+def _validate_nonnegative_int(value: object, field: str) -> int:
+    if type(value) is not int:
+        raise TypeError(f"{field} must be a nonnegative integer")
+    if value < 0:
+        raise ValueError(f"{field} must be a nonnegative integer")
+    return value
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class EpisodeRelation:
     """The typed relation facts needed to place one episode in a lineage.
@@ -94,15 +129,32 @@ class EpisodeRelation:
             alias="visible_tokens",
             default=0,
         )
-        object.__setattr__(self, "episode_id", episode_id)
-        object.__setattr__(self, "parent_id", parent)
+        validated_episode_id = _validate_relation_id(episode_id, "episode_id")
+        validated_parent = _validate_relation_id(parent, "parent_id", optional=True)
+        validated_source = _validate_relation_id(
+            source,
+            "spr_source_id",
+            optional=True,
+        )
+        if fork_boundary is not None:
+            fork_boundary = _validate_nonnegative_int(fork_boundary, "fork_boundary")
+        validated_mode = _validate_label(mode, "mode")
+        validated_status = _validate_label(status, "status")
+        validated_visible_count = _validate_nonnegative_int(
+            visible_count,
+            "visible_token_count",
+        )
+        if terminal_reason is not None and not isinstance(terminal_reason, str):
+            raise TypeError("terminal_reason must be a string or None")
+        object.__setattr__(self, "episode_id", validated_episode_id)
+        object.__setattr__(self, "parent_id", validated_parent)
         object.__setattr__(self, "fork_boundary", fork_boundary)
-        object.__setattr__(self, "mode", mode)
-        object.__setattr__(self, "spr_source_id", source)
-        object.__setattr__(self, "status", status)
+        object.__setattr__(self, "mode", validated_mode)
+        object.__setattr__(self, "spr_source_id", validated_source)
+        object.__setattr__(self, "status", validated_status)
         object.__setattr__(self, "creation_key", ordering)
         object.__setattr__(self, "terminal_reason", terminal_reason)
-        object.__setattr__(self, "visible_token_count", visible_count)
+        object.__setattr__(self, "visible_token_count", validated_visible_count)
 
     @property
     def is_replay(self) -> bool:
@@ -248,31 +300,14 @@ def _record_order(record: EpisodeRelation) -> tuple[Any, ...]:
     return (_sortable(record.creation_key), record.episode_id)
 
 
-def _duplicate_order(record: EpisodeRelation) -> tuple[Any, ...]:
-    return (
-        _record_order(record),
-        repr(
-            (
-                record.parent_id,
-                record.fork_boundary,
-                record.mode,
-                record.spr_source_id,
-                record.status,
-                record.terminal_reason,
-                record.visible_token_count,
-            )
-        ),
-    )
-
-
 def _index_records(records: Iterable[EpisodeRelation]) -> dict[str, EpisodeRelation]:
     indexed: dict[str, EpisodeRelation] = {}
     for record in records:
         if not isinstance(record, EpisodeRelation):
             raise TypeError("lineage facts must be EpisodeRelation instances")
-        previous = indexed.get(record.episode_id)
-        if previous is None or _duplicate_order(record) < _duplicate_order(previous):
-            indexed[record.episode_id] = record
+        if record.episode_id in indexed:
+            raise ValueError(f"duplicate episode relation ID {record.episode_id!r}")
+        indexed[record.episode_id] = record
     return indexed
 
 
