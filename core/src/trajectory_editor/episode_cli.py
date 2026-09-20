@@ -58,8 +58,9 @@ from .projector import (
     project_procedure,
 )
 from .episode_store import EpisodeStore
-from .episode_session import LiveSession
+from .episode_session import LiveSession, LiveSessionRoster
 from .episode_materializer import save_live_branch, save_live_family
+from .fresh_episode import fresh_root_from
 from .episode_ui import InteractivePolicy, PolicyViewPreferences
 from .transformers_backend import TransformersSettings
 from .runtime_setup import RuntimePlan, effective_plan_summary, run_runtime_setup_menu
@@ -99,6 +100,15 @@ def _read_initial_prompt() -> str:
         ),
         validate_while_typing=False,
     )
+
+
+def _read_new_prompt(io: TerminalIO) -> str | None:
+    """Use the initial multiline composer for a bare EDGE ``new``."""
+    reader = getattr(io, "read_multiline_prompt", None)
+    if callable(reader):
+        return reader()
+    # Lightweight test/script IOs do not own a prompt-toolkit surface.
+    return io.read("New prompt > ")
 
 
 def build_parser(
@@ -474,9 +484,16 @@ def _ephemeral_policy(args: argparse.Namespace, io: TerminalIO) -> InteractivePo
 
 def _ephemeral_edge_menu(
     io: TerminalIO,
-    session: LiveSession,
+    session_or_roster: LiveSession | LiveSessionRoster,
 ) -> tuple[str, Any]:
     """Small branch-oriented EDGE surface for a session with no workspace."""
+    roster = (
+        session_or_roster
+        if isinstance(session_or_roster, LiveSessionRoster)
+        else None
+    )
+    session = roster.active_session if roster is not None else session_or_roster
+
     def branch_aliases() -> dict[str, str]:
         return {
             str(index): branch_id
@@ -490,6 +507,8 @@ def _ephemeral_edge_menu(
         return branch_aliases().get(cleaned, cleaned)
 
     def branch_number(branch_id: str) -> str:
+        if roster is not None:
+            return str(roster.number_for(session, branch_id))
         return next(
             (
                 number
@@ -549,7 +568,8 @@ def _ephemeral_edge_menu(
             )
             raw = io.read(
                 "[c]ontinue  [n N/off] budget  [s key=value] sampler  [rewind N] "
-                "[f N] fork  [fm] fork map  [branches]  [switch N/ID]  [export FILE] "
+                "[f N] fork  [fm] fork map  [branches]  [#N] switch  [switch N] alias  "
+                "[new TEXT] new prompt root  [export FILE] "
                 "[save WORKSPACE [ID]]  [save-family WORKSPACE [ROOT_ID]]  [e]nd  [q]uit > "
             )
         if raw is None:
@@ -562,24 +582,48 @@ def _ephemeral_edge_menu(
             return "end", None
         if lower in {"c", "continue", ""}:
             return "continue", "keep"
+        if lower == "new" or lower.startswith("new "):
+            prompt_text = text[3:].lstrip()
+            if not prompt_text:
+                prompt_text = _read_new_prompt(io) or ""
+            if not prompt_text:
+                io.write("New prompt must not be empty.")
+                continue
+            return "new", prompt_text
         if lower in {"branches", "ls"}:
             rows = []
-            states = session.branch_states
-            aliases = branch_aliases()
-            reverse_aliases = {branch_id: number for number, branch_id in aliases.items()}
-            for branch_id, node in session.branch_tree.nodes.items():
-                marker = "*" if branch_id == session.branch.branch_id else " "
-                source = (
-                    reverse_aliases.get(node.identity.parent_id, "root")
-                    if node.identity.parent_id is not None
-                    else "root"
-                )
-                state = states[branch_id]
-                rows.append(
-                    f"{marker} {reverse_aliases[branch_id]}  from={source}  "
-                    f"fork={node.identity.fork_boundary} "
-                    f"boundary={state.boundary}"
-                )
+            if roster is not None:
+                for entry in roster.entries():
+                    identity = entry.identity
+                    marker = "*" if (
+                        entry.session is session
+                        and entry.branch_id == session.branch.branch_id
+                    ) else " "
+                    source = "root"
+                    if identity.parent_id is not None:
+                        source = str(roster.number_for(entry.session, identity.parent_id))
+                    rows.append(
+                        f"{marker} #{entry.number}  prompt={entry.session.prompt!r}  "
+                        f"from={source}  fork={identity.fork_boundary} "
+                        f"boundary={entry.state.boundary}"
+                    )
+            else:
+                states = session.branch_states
+                aliases = branch_aliases()
+                reverse_aliases = {branch_id: number for number, branch_id in aliases.items()}
+                for branch_id, node in session.branch_tree.nodes.items():
+                    marker = "*" if branch_id == session.branch.branch_id else " "
+                    source = (
+                        reverse_aliases.get(node.identity.parent_id, "root")
+                        if node.identity.parent_id is not None
+                        else "root"
+                    )
+                    state = states[branch_id]
+                    rows.append(
+                        f"{marker} {reverse_aliases[branch_id]}  from={source}  "
+                        f"fork={node.identity.fork_boundary} "
+                        f"boundary={state.boundary}"
+                    )
             io.page("Live branches:\n" + "\n".join(rows))
             continue
         if lower in {"fm", "fork-map", "forkmap"}:
@@ -588,12 +632,27 @@ def _ephemeral_edge_menu(
                 return result
             continue
         parts = text.split()
-        if len(parts) == 2 and parts[0].lower() == "switch":
-            branch_id = resolve_branch(parts[1])
-            if branch_id not in session.branch_states:
-                io.write(f"Unknown live branch {parts[1]!r}.")
+        if len(parts) == 1 and parts[0].startswith("#"):
+            try:
+                if roster is not None:
+                    roster.resolve(parts[0])
+                    return "switch", parts[0]
+                return "switch", resolve_branch(parts[0])
+            except EditorError as exc:
+                io.write(str(exc))
                 continue
-            return "switch", branch_id
+        if len(parts) == 2 and parts[0].lower() == "switch":
+            try:
+                if roster is not None:
+                    roster.resolve(parts[1])
+                    return "switch", parts[1]
+                branch_id = resolve_branch(parts[1])
+                if branch_id not in session.branch_states:
+                    raise EditorError(f"Unknown live branch {parts[1]!r}.")
+                return "switch", branch_id
+            except EditorError as exc:
+                io.write(str(exc))
+                continue
         if len(parts) == 2 and parts[0].lower() == "rewind":
             try:
                 return "rewind", int(parts[1])
@@ -683,8 +742,10 @@ def _run_ephemeral(
         prompt=initial_text,
         environment_stamp={"backend": provenance, "sampler": sampling.to_dict()},
     )
+    roster = LiveSessionRoster(session)
     pending_tape = teacher_tape.plan if teacher_tape is not None else None
     while True:
+        session = roster.active_session
         announced_teacher_tape = (
             teacher_tape is not None and pending_tape is teacher_tape.plan
         )
@@ -697,13 +758,13 @@ def _run_ephemeral(
             )
         except EdgeRequested:
             pending_tape = None
-            action, value = _ephemeral_edge_menu(io, session)
+            action, value = _ephemeral_edge_menu(io, roster)
         except ForkRequested as request:
             action, value = "fork", request.boundary
         except SeamlessRewindRequested as request:
             action, value = "rewind", request.boundary
         except SeamlessEdgeRequested:
-            action, value = _ephemeral_edge_menu(io, session)
+            action, value = _ephemeral_edge_menu(io, roster)
         else:
             pending_tape = None
             if result.handed_off and result.handoff_reason:
@@ -719,11 +780,11 @@ def _run_ephemeral(
                 else:
                     print("\n--- final text ---")
                     print(text)
-                session.discard()
+                roster.discard()
                 return 0
-            action, value = _ephemeral_edge_menu(io, session)
+            action, value = _ephemeral_edge_menu(io, roster)
         if action == "quit":
-            session.discard()
+            roster.discard()
             return 0
         if action == "end":
             session.quit("menu-end")
@@ -735,7 +796,7 @@ def _run_ephemeral(
             else:
                 print("\n--- final text ---")
                 print(text)
-            session.discard()
+            roster.discard()
             return 0
         if action == "continue":
             session.resume(max_tokens=value)
@@ -749,22 +810,29 @@ def _run_ephemeral(
         if action == "fork":
             target = int(value)
             try:
-                child = session.fork(boundary=target)
+                child = roster.fork(boundary=target)
             except EditorError as exc:
                 io.write(str(exc))
                 continue
             session.activate(child.branch.branch_id)
-            alias = next(
-                number
-                for number, branch_id in enumerate(session.branch_tree.nodes, start=1)
-                if branch_id == child.branch.branch_id
-            )
+            alias = roster.number_for(session, child.branch.branch_id)
             io.write(f"Forked live branch {alias} at boundary {target}.")
             continue
         if action == "switch":
-            session.activate(str(value))
+            try:
+                roster.switch(str(value))
+            except EditorError as exc:
+                io.write(str(exc))
+            continue
+        if action == "new":
+            try:
+                roster.new_root(str(value))
+            except (EditorError, ValueError) as exc:
+                io.write(str(exc))
+            pending_tape = None
             continue
         if action == "export":
+            session = roster.active_session
             try:
                 export_live_teacher_tape(session, value)
                 io.write(f"Exported selected branch to {value}.")
@@ -775,6 +843,7 @@ def _run_ephemeral(
             pending_tape = ReplayPlan()
             continue
         if action == "save":
+            session = roster.active_session
             workspace, requested_id = value
             try:
                 identifier = save_live_branch(session, workspace, provenance, episode_id=requested_id)
@@ -784,6 +853,7 @@ def _run_ephemeral(
             pending_tape = ReplayPlan()
             continue
         if action == "save-family":
+            session = roster.active_session
             workspace, requested_root_id = value
             try:
                 identifiers = save_live_family(
@@ -908,7 +978,8 @@ def _live_edge_menu(
             raw = io.read(
                 "[c]ontinue  [n N/off] budget  [s key=value] sampler  "
                 "([s random-seed] randomize)  [f N] fork  [fm] fork map  "
-                "[spr ID [--until Y | m]] replay  [p]roject  [e]nd  [q]uit > "
+                "[new TEXT] unrelated episode  [spr ID [--until Y | m]] replay  "
+                "[p]roject  [e]nd  [q]uit > "
             )
         if raw is None:
             return "quit", None
@@ -949,6 +1020,14 @@ def _live_edge_menu(
             return "end", None
         if lower in {"c", "continue", ""}:
             return "continue", "keep"
+        if lower == "new" or lower.startswith("new "):
+            prompt_text = text[3:].lstrip()
+            if not prompt_text:
+                prompt_text = _read_new_prompt(io) or ""
+            if not prompt_text:
+                io.write("New prompt must not be empty.")
+                continue
+            return "new", prompt_text
         if lower in {"p", "project", "r", "review"}:
             io.page(
                 project_episode(
@@ -1644,6 +1723,35 @@ def main(
                         sampling_factory=sampling_factory,
                     )
 
+                if action == "new":
+                    # Persist the current live edge before moving the shared
+                    # backend to an unrelated prompt root.  The factory keeps
+                    # only loaded backends, sampler settings, and the full
+                    # configured tranche allowance; the new episode is not a
+                    # fork or replay child.
+                    store.update_episode(
+                        episode_id,
+                        visible_text=engine.backend.render(engine.visible_token_ids),
+                        max_tokens=engine.max_tokens,
+                        status="open",
+                    )
+                    store.record_budget(
+                        episode_id,
+                        engine.boundary,
+                        engine.max_tokens,
+                        engine.checkpoint_boundary,
+                    )
+                    new_engine = fresh_root_from(engine, str(value))
+                    new_episode_id = _create_episode(
+                        store,
+                        new_engine,
+                        backend_provenance=provenance,
+                    )
+                    engine, episode_id = new_engine, new_episode_id
+                    store.visit(episode_id)
+                    pending_tape = None
+                    enter_edge = True
+                    continue
                 if action == "switch":
                     destination = str(value)
                     target_episode = store.get_episode(destination)

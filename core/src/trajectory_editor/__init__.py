@@ -24,9 +24,12 @@ from .episode_session import (
     ControlPoint,
     LiveBranch,
     LiveEpisode,
+    LiveRosterEntry,
     LiveSession,
+    LiveSessionRoster,
     Session,
 )
+from .fresh_episode import fresh_root_from
 from .version import VERSION
 
 __all__ = [
@@ -52,7 +55,9 @@ __all__ = [
     "LiveBranch",
     "Observation",
     "LiveEpisode",
+    "LiveRosterEntry",
     "LiveSession",
+    "LiveSessionRoster",
     "LiveSessionRunner",
     "Phrase",
     "ReplayExpectation",
@@ -64,6 +69,7 @@ __all__ = [
     "TokenEvidence",
     "Write",
     "project_episode",
+    "fresh_root_from",
     "VERSION",
 ]
 
