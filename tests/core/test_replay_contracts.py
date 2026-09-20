@@ -8,7 +8,8 @@ from trajectory_editor.core.actions import Accept, EndGeneration, Hold, Phrase, 
 from trajectory_editor.core.results import ReplayExpectation
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine
-from trajectory_editor.episode_runner import EpisodeRunner, TapeStep
+from trajectory_editor.episode_runner import EpisodeRunner, LiveSessionRunner, TapeStep
+from trajectory_editor.episode_session import LiveSession
 from trajectory_editor.episode_store import EpisodeStore
 from tests.core.test_lifecycle_contracts import PhraseBackend
 
@@ -89,6 +90,23 @@ def tape(store, episode_id):
 class NeverChoose:
     def choose(self, *args):
         raise AssertionError("replay should reach the live edge before requesting input")
+
+
+def test_r00_ephemeral_runner_uses_the_same_execution_path_without_a_store():
+    session = LiveSession(runtime([1, 3, 5]))
+
+    class LiveWrite:
+        def choose(self, *args):
+            return Hold(1)
+
+    result = LiveSessionRunner(session).run(
+        live_policy=LiveWrite(),
+        max_live_actions=1,
+    )
+
+    assert result.replayed_actions == 0
+    assert len(result.outcomes) == 1
+    assert session.history_visible_token_ids == (1,)
 
 
 def test_r01_exact_replay_reproduces_the_recorded_visible_prefix(tmp_path):

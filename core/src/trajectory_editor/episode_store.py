@@ -21,6 +21,7 @@ from .core.errors import EditorError
 from .core.results import ActionOutcome, ReplayExpectation
 from .core.sampler_config import SamplerConfig
 from .episode_hash import token_prefix_sha256, validate_coordinate, validate_fingerprint
+from .surviving_procedure import ProcedureRecord, project_surviving_procedure
 
 SCHEMA_VERSION = 1
 
@@ -944,7 +945,8 @@ class EpisodeStore:
         grouped: dict[int, list[dict[str, Any]]] = {}
         for token in token_rows:
             grouped.setdefault(int(token["action_ordinal"]), []).append(token)
-        tape: list[dict[str, Any]] = []
+        procedure_records: list[ProcedureRecord] = []
+        source_rows: list[tuple[dict[str, Any], list[dict[str, Any]], SamplerConfig]] = []
         for row in action_rows:
             records = grouped.get(int(row["ordinal"]), [])
             segment_index = bisect_right(starts, int(row["boundary_before"])) - 1
@@ -955,27 +957,6 @@ class EpisodeStore:
                     _loads(segments[segment_index]["sampling_json"], {})
                 )
             sampling = samplers[segment_index]
-            if row["status"] == "handed-off":
-                # This row records an action that was deliberately not applied.
-                # A partially realized autonomous span is retained as the
-                # finite Hold that actually happened; later rows came from the
-                # live teacher after handoff.
-                partial = tuple(
-                    int(record["token_id"])
-                    for record in records
-                    if bool(record["realized_visible"])
-                )
-                if partial:
-                    tape.append(
-                        {
-                            "action": Hold(len(partial)),
-                            "expectation": ReplayExpectation(partial, None, "requested-length"),
-                            "sampling": sampling,
-                            "boundary": int(row["boundary_before"]),
-                            "tokens": records,
-                        }
-                    )
-                continue
             visible = tuple(
                 int(record["token_id"])
                 for record in records
@@ -989,16 +970,38 @@ class EpisodeStore:
                 ),
                 None,
             )
-            tape.append(
-                {
-                    "action": action_from_dict(row["arguments"]),
-                    "expectation": ReplayExpectation(visible, terminal, str(row["stop_reason"])),
-                    "sampling": sampling,
-                    "boundary": int(row["boundary_before"]),
-                    "tokens": records,
-                }
+            procedure_records.append(
+                ProcedureRecord(
+                    action=action_from_dict(row["arguments"]),
+                    expectation=ReplayExpectation(
+                        visible, terminal, str(row["stop_reason"])
+                    ),
+                    status=str(row["status"]),
+                    visible_token_ids=visible,
+                    # Durable handoff projection historically replays a
+                    # partial span as a finite Hold. The in-memory adapter
+                    # can retain resolved text when it has it.
+                    visible_text="",
+                    boundary_before=int(row["boundary_before"]),
+                    sampling=sampling,
+                )
             )
-        return tape
+            source_rows.append((row, records, sampling))
+
+        projected = project_surviving_procedure(
+            procedure_records,
+            normalize_for_replay=False,
+        )
+        return [
+            {
+                "action": step.action,
+                "expectation": step.expectation,
+                "sampling": source_rows[step.source_index][2],
+                "boundary": step.boundary,
+                "tokens": source_rows[step.source_index][1],
+            }
+            for step in projected
+        ]
 
     def replay_until(
         self,

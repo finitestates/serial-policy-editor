@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Callable
 
-from prompt_toolkit.application import Application, get_app
+from prompt_toolkit.application import get_app
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition
@@ -35,6 +35,7 @@ from .tui import (
     SEAMLESS_REACTIVATE,
 )
 from .ui_themes import DEFAULT_LIVE_THEME
+from .tui_views import ViewLifecycle, run_standalone_view
 
 
 InsertionResolver = Callable[[str, InsertMode], str]
@@ -1073,12 +1074,12 @@ class ChoiceViewState:
     logit_view: str = "none"
 
 
-class LiveChoiceView:
+class LiveChoiceView(ViewLifecycle):
     """Reusable layout, bindings and buffer for live choices and history review."""
 
     def __init__(self, state: ChoiceViewState, *, submit=None, enabled=lambda: True,
                  terminal_size=None):
-        self.submit = submit
+        super().__init__(submit=submit)
         self.terminal_size = terminal_size or _terminal_size
         self.command_buffer = Buffer(multiline=True, read_only=Condition(lambda: not enabled()))
         self.bindings = KeyBindings()
@@ -1405,12 +1406,6 @@ class LiveChoiceView:
         text = state.initial_command if self.completion_owned else ""
         self.command_buffer.reset(document=Document(text, cursor_position=len(text)))
 
-    def _finish(self, event, *, result=None, exception=None) -> None:
-        if self.submit is None:
-            event.app.exit(result=result, exception=exception)
-        else:
-            self.submit(result=result, exception=exception)
-
     def _render(self):
         state = self.state
         if state.review is not None:
@@ -1463,9 +1458,9 @@ def read_live_choice(
         logit_view=logit_view,
     )
     view = LiveChoiceView(state)
-    application: Application[str | None] = Application(
-        layout=view.layout, key_bindings=view.bindings, style=_live_style(theme),
-        full_screen=True, erase_when_done=False, mouse_support=False,
-        input=input_device, output=output_device,
+    return run_standalone_view(
+        view,
+        theme=theme,
+        input_device=input_device,
+        output_device=output_device,
     )
-    return application.run()

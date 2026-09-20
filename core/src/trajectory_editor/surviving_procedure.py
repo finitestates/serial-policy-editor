@@ -153,6 +153,8 @@ def _surviving_action(action: PolicyAction) -> PolicyAction:
 
 def project_surviving_procedure(
     records: Iterable[ProcedureRecord],
+    *,
+    normalize_for_replay: bool = True,
 ) -> SurvivingProcedure:
     """Project recorded attempts into the procedure that should survive.
 
@@ -163,7 +165,8 @@ def project_surviving_procedure(
     check remains a check whose expectation can cause a future replay to
     hand off again if the target diverges.  Successful forced phrases are
     normalized to ordinary writes while retaining their continuation/exact
-    mode.
+    mode when ``normalize_for_replay`` is true. Persistence adapters that
+    preserve historical action kinds can disable that compatibility policy.
     """
 
     steps: list[ProcedureStep] = []
@@ -188,11 +191,14 @@ def project_surviving_procedure(
             )
             continue
 
+        action = (
+            _surviving_action(record.action)
+            if normalize_for_replay
+            else record.action
+        )
         steps.append(
             ProcedureStep(
-                tape_step=TapeStep(
-                    _surviving_action(record.action), record.expectation
-                ),
+                tape_step=TapeStep(action, record.expectation),
                 boundary=record.boundary_before,
                 source_index=source_index,
                 sampling=record.sampling,

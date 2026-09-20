@@ -135,6 +135,60 @@ def load_teacher_plan_jsonl(
     return load_teacher_tape_jsonl(path, require_observations=require_observations).plan
 
 
+def _write_teacher_tape(
+    path: Path,
+    envelope: dict[str, Any],
+    steps: Iterable[Any],
+    *,
+    envelope_path: Path | None,
+) -> dict[str, Any]:
+    """Write either a stored or live procedure through one serializer."""
+
+    try:
+        with path.open("w", encoding="utf-8") as handle:
+            if envelope_path is None:
+                header = {
+                    "type": TAPE_FORMAT,
+                    **{
+                        key: value
+                        for key, value in envelope.items()
+                        if key != "format"
+                    },
+                }
+                handle.write(
+                    json.dumps(header, ensure_ascii=False, sort_keys=True) + "\n"
+                )
+            for ordinal, step in enumerate(steps):
+                if isinstance(step, Mapping):
+                    action = step["action"]
+                    expectation = step["expectation"]
+                else:
+                    action = step.action
+                    expectation = step.expectation
+                record: dict[str, Any] = {
+                    "step": ordinal,
+                    "action": action.to_dict(),
+                }
+                if expectation is not None:
+                    record["observation"] = {
+                        "token_ids": list(expectation.token_ids),
+                        "terminal_token_id": expectation.terminal_token_id,
+                        "stop_reason": expectation.stop_reason,
+                    }
+                handle.write(
+                    json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+                )
+        if envelope_path is not None:
+            envelope_path.write_text(
+                json.dumps(envelope, ensure_ascii=False, indent=2, sort_keys=True)
+                + "\n",
+                encoding="utf-8",
+            )
+    except OSError as exc:
+        raise EditorError(f"could not write teacher tape {path}: {exc}") from exc
+    return envelope
+
+
 def export_teacher_tape(
     store: Any,
     episode_id: str,
@@ -151,26 +205,12 @@ def export_teacher_tape(
         "prompt": episode["initial_text"],
         "environment": {"backend": episode["backend"], "sampler": initial},
     }
-    steps = store.replay_procedure(episode_id)
-    try:
-        with path.open("w", encoding="utf-8") as handle:
-            if envelope_path is None:
-                handle.write(json.dumps({"type": TAPE_FORMAT, **{key: value for key, value in envelope.items() if key != "format"}}, ensure_ascii=False, sort_keys=True) + "\n")
-            for ordinal, step in enumerate(steps):
-                expectation = step["expectation"]
-                record: dict[str, Any] = {"step": ordinal, "action": step["action"].to_dict()}
-                if expectation is not None:
-                    record["observation"] = {
-                        "token_ids": list(expectation.token_ids),
-                        "terminal_token_id": expectation.terminal_token_id,
-                        "stop_reason": expectation.stop_reason,
-                    }
-                handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-        if envelope_path is not None:
-            envelope_path.write_text(json.dumps(envelope, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    except OSError as exc:
-        raise EditorError(f"could not write teacher tape {path}: {exc}") from exc
-    return envelope
+    return _write_teacher_tape(
+        path,
+        envelope,
+        store.replay_procedure(episode_id),
+        envelope_path=envelope_path,
+    )
 
 
 def export_live_teacher_tape(
@@ -188,25 +228,12 @@ def export_live_teacher_tape(
         "prompt": session.prompt,
         "environment": environment,
     }
-    steps = session.history_tape
-    try:
-        with path.open("w", encoding="utf-8") as handle:
-            if envelope_path is None:
-                handle.write(json.dumps({"type": TAPE_FORMAT, **{key: value for key, value in envelope.items() if key != "format"}}, ensure_ascii=False, sort_keys=True) + "\n")
-            for ordinal, step in enumerate(steps):
-                record: dict[str, Any] = {"step": ordinal, "action": step.action.to_dict()}
-                if step.expectation is not None:
-                    record["observation"] = {
-                        "token_ids": list(step.expectation.token_ids),
-                        "terminal_token_id": step.expectation.terminal_token_id,
-                        "stop_reason": step.expectation.stop_reason,
-                    }
-                handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-        if envelope_path is not None:
-            envelope_path.write_text(json.dumps(envelope, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    except OSError as exc:
-        raise EditorError(f"could not write teacher tape {path}: {exc}") from exc
-    return envelope
+    return _write_teacher_tape(
+        path,
+        envelope,
+        session.history_tape,
+        envelope_path=envelope_path,
+    )
 
 
 __all__ = ["TAPE_FORMAT", "TAPE_VERSION", "TeacherTape", "export_live_teacher_tape", "export_teacher_tape", "load_teacher_plan", "load_teacher_plan_jsonl", "load_teacher_tape_jsonl"]

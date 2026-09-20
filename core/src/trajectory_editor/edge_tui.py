@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 
-from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import StyleAndTextTuples
@@ -20,8 +19,8 @@ from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.layout import Layout
 
-from .live_tui import _live_style
 from .ui_themes import DEFAULT_LIVE_THEME
+from .tui_views import ViewLifecycle, run_standalone_view
 
 
 def _command_row(command: str, description: str) -> StyleAndTextTuples:
@@ -103,12 +102,12 @@ class EdgeViewState:
     mode: str = "episode"
 
 
-class LiveEdgeView:
+class LiveEdgeView(ViewLifecycle):
     """Reusable edge layout; commands remain interpreted by the episode CLI."""
 
     def __init__(self, state: EdgeViewState, *, submit=None, enabled=lambda: True):
         self.state = state
-        self.submit = submit
+        super().__init__(submit=submit)
         self.command_buffer = command_buffer = Buffer(multiline=False, read_only=Condition(lambda: not enabled()))
         self.bindings = bindings = KeyBindings()
 
@@ -162,12 +161,6 @@ class LiveEdgeView:
         self.state = state
         self.command_buffer.reset()
 
-    def _finish(self, event, *, result=None, exception=None) -> None:
-        if self.submit is None:
-            event.app.exit(result=result, exception=exception)
-        else:
-            self.submit(result=result, exception=exception)
-
 
 def read_live_edge_command(
     *,
@@ -185,9 +178,9 @@ def read_live_edge_command(
     view = LiveEdgeView(EdgeViewState(
         episode_id, boundary, current_budget, remaining_tokens, sampler_summary, mode,
     ))
-    application: Application[str | None] = Application(
-        layout=view.layout, key_bindings=view.bindings, style=_live_style(theme),
-        full_screen=True, erase_when_done=False, mouse_support=False,
-        input=input_device, output=output_device,
+    return run_standalone_view(
+        view,
+        theme=theme,
+        input_device=input_device,
+        output_device=output_device,
     )
-    return application.run()
