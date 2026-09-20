@@ -191,6 +191,7 @@ class TerminalIO:
         current_budget: int | None,
         remaining_tokens: int | None,
         sampler_summary: str,
+        mode: str = "episode",
     ) -> str | None:
         """Read one command from the structured live-edge surface."""
         if not self._live_choices:
@@ -199,7 +200,7 @@ class TerminalIO:
 
         options = dict(
             episode_id=episode_id, boundary=boundary, current_budget=current_budget,
-            remaining_tokens=remaining_tokens, sampler_summary=sampler_summary,
+            remaining_tokens=remaining_tokens, sampler_summary=sampler_summary, mode=mode,
         )
         if self._live_session is not None:
             return self._live_session.read_edge(EdgeViewState(**options))

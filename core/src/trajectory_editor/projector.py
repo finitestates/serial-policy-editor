@@ -20,6 +20,10 @@ def project_fork_map(*args: Any, **kwargs: Any) -> Any:
     return _legacy.project_fork_map(*args, **kwargs)
 
 
+def project_live_fork_map(*args: Any, **kwargs: Any) -> Any:
+    return _legacy.project_live_fork_map(*args, **kwargs)
+
+
 def project_lineage(*args: Any, **kwargs: Any) -> Any:
     return _legacy.project_lineage(*args, **kwargs)
 
@@ -31,6 +35,7 @@ __all__ = [
     "EpisodeProjection",
     "project_episode",
     "project_fork_map",
+    "project_live_fork_map",
     "project_lineage",
     "project_procedure",
 ]
