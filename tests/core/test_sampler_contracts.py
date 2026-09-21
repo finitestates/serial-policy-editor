@@ -10,7 +10,6 @@ from trajectory_editor.bias_rules import BiasMatcher, BiasRule
 from trajectory_editor.core.actions import (
     Accept,
     EndGeneration,
-    Finish,
     Hold,
     Phrase,
     SelectRawRank,
@@ -31,6 +30,7 @@ from trajectory_editor.core.sampling import (
     top_raw_ids,
 )
 from trajectory_editor.episode_engine import EpisodeEngine
+from trajectory_editor.teacher_plan import load_teacher_plan
 
 
 def test_s01_sampler_config_accepts_rejects_and_round_trips_core_state():
@@ -176,7 +176,6 @@ def test_s06_conditional_bias_waits_for_trigger_and_stops_at_terminator():
         Write(" hello", mode="exact"),
         Phrase("hello", mode="exact", force=True),
         Hold(2, boundary="sentence"),
-        Finish(),
         EndGeneration(),
     ],
 )
@@ -188,6 +187,14 @@ def test_s07_core_actions_and_replay_expectations_round_trip(action):
         "terminal_token_id": 0,
         "stop_reason": "eog",
     }) == expectation
+
+
+def test_replay_plan_rejects_finish_as_unrecognized_action():
+    with pytest.raises(
+        EditorError,
+        match="teacher plan step 0: invalid action: unsupported policy action kind 'finish'",
+    ):
+        load_teacher_plan([{"step": 0, "action": {"kind": "finish"}}])
     with pytest.raises(EditorError):
         SelectRawRank(0)
 

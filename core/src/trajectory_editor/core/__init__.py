@@ -8,7 +8,6 @@ research-only features.
 from .actions import (
     Accept,
     EndGeneration,
-    Finish,
     Hold,
     Phrase,
     PolicyAction,
@@ -56,7 +55,6 @@ __all__ = [
     "EditorError",
     "Divergence",
     "EndGeneration",
-    "Finish",
     "Hold",
     "InferenceBackend",
     "ObservationStatistics",

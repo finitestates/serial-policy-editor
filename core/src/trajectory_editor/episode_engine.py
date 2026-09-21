@@ -13,7 +13,6 @@ from .boundaries import token_boundaries
 from .core.actions import (
     Accept,
     EndGeneration,
-    Finish,
     Hold,
     Phrase,
     PolicyAction,
@@ -1070,11 +1069,9 @@ class EpisodeEngine:
                 if not item.realized_visible:
                     break
         else:
-            assert isinstance(action, (Hold, Finish))
-            limit = action.limit if isinstance(action, Hold) else self.remaining
-            if limit is None:
-                raise InstructionRejected("legacy finish requires a token budget; use hold")
-            boundary_kind = action.boundary if isinstance(action, Hold) else None
+            assert isinstance(action, Hold)
+            limit = action.limit
+            boundary_kind = action.boundary
             while (
                 len(visible) < limit
                 and not self.ended
@@ -1118,8 +1115,6 @@ class EpisodeEngine:
                         break
             else:
                 if self.checkpointed:
-                    stop_reason = "checkpoint"
-                elif isinstance(action, Finish):
                     stop_reason = "checkpoint"
                 else:
                     stop_reason = "requested-length"

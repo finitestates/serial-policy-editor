@@ -115,14 +115,6 @@ class Hold:
 
 
 @dataclass(frozen=True)
-class Finish:
-    kind: str = "finish"
-
-    def to_dict(self) -> dict[str, Any]:
-        return {"kind": self.kind}
-
-
-@dataclass(frozen=True)
 class EndGeneration:
     """Select the highest-raw-ranked terminal token at this boundary."""
 
@@ -133,7 +125,7 @@ class EndGeneration:
 
 
 PolicyAction: TypeAlias = (
-    Accept | SelectRawRank | Write | Phrase | Hold | Finish | EndGeneration
+    Accept | SelectRawRank | Write | Phrase | Hold | EndGeneration
 )
 
 
@@ -170,8 +162,6 @@ def action_from_dict(raw: Mapping[str, Any]) -> PolicyAction:
             raise EditorError("hold action has no valid limit")
         boundary = raw.get("boundary")
         return Hold(limit, str(boundary) if boundary is not None else None)
-    if kind == "finish":
-        return Finish()
     if kind in {"teacher-eog", "end-generation"}:
         return EndGeneration()
     raise EditorError(f"unsupported policy action kind {kind!r}")

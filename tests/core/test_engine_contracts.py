@@ -9,7 +9,6 @@ from tests.fakes import ConformingFakeBackend
 from trajectory_editor.core.actions import (
     Accept,
     EndGeneration,
-    Finish,
     Hold,
     Phrase,
     SelectRawRank,
@@ -195,13 +194,13 @@ def test_e07_check_and_force_are_durable_write_actions(force):
     [
         ([EndGeneration()], "eog", "teacher-eog"),
         ([Accept(), Accept(), Hold(3)], "eog", "model-eog"),
-        ([Finish()], "checkpoint", None),
+        ([Hold(1)], "requested-length", None),
     ],
 )
-def test_e08_eog_finish_and_checkpoint_have_distinct_terminal_semantics(
+def test_e08_eog_hold_and_menu_end_have_distinct_terminal_semantics(
     actions, stop_reason, terminal
 ):
-    runtime = engine(max_tokens=1 if actions == [Finish()] else 10)
+    runtime = engine()
 
     outcome = None
     for action in actions:

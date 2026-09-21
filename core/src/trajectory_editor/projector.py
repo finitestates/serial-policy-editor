@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from .core.actions import Accept, EndGeneration, Finish, Hold, Phrase, SelectRawRank, Write
+from .core.actions import Accept, EndGeneration, Hold, Phrase, SelectRawRank, Write
 from .core.errors import EditorError
 from .episode_lineage import EpisodeRelation, LineageNode, LineageView
 from .episode_lineage_source import EpisodeLineageReader, build_lineage_view
@@ -416,9 +416,6 @@ def project_procedure(store: EpisodeStore, episode_id: str) -> str:
         elif isinstance(action, Hold):
             marker = {"sentence": ". ", "newline": "| ", None: ""}[action.boundary]
             command = f"h {marker}{action.limit}"
-        elif isinstance(action, Finish):
-            command = f"h {len(step['expectation'].token_ids)}"
-            comment = (comment or "") + " [legacy finish shown as recorded span]"
         elif isinstance(action, EndGeneration):
             command = "e!"
         else:

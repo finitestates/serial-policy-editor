@@ -3,7 +3,6 @@
 from .core.actions import (
     Accept,
     EndGeneration,
-    Finish,
     Hold,
     Phrase,
     SelectRawRank,
@@ -44,7 +43,6 @@ __all__ = [
     "EpisodeProjection",
     "EpisodeRunner",
     "EpisodeStore",
-    "Finish",
     "Hold",
     "InferenceBackend",
     "BranchIdentity",

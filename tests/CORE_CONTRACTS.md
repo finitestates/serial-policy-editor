@@ -39,7 +39,7 @@ an optional benchmark or profiler check rather than a behavioral test.
 | E05 | force phrase commits through temporary bias without persistent residue | `test_engine_contracts.py` |
 | E06 | holds respect count, boundary, stop, and teacher limits | `test_engine_contracts.py` |
 | E07 | check and force are durable write actions, not menu-only events | `test_engine_contracts.py` |
-| E08 | model EOG, teacher EOG, finish, and menu termination are distinct | `test_engine_contracts.py` |
+| E08 | model EOG, teacher EOG, finite hold, and menu termination are distinct | `test_engine_contracts.py` |
 | E09 | budgets checkpoint without silently ending the episode | `test_engine_contracts.py` |
 | E10 | rejected or invalid actions leave token state unchanged | `test_engine_contracts.py` |
 

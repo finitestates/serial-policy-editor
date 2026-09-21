@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
-from .core.actions import Finish, Hold, Phrase, PolicyAction, Write, action_from_dict
+from .core.actions import Hold, Phrase, PolicyAction, Write, action_from_dict
 from .core.errors import EditorError
 from .core.results import ReplayExpectation
 from .core.sampler_config import SamplerConfig
@@ -198,10 +198,10 @@ def _select_through(
         action = step.action
         expectation = step.expectation
         cut = len(visible) > count
-        # A Hold or legacy Finish ending exactly at the selected boundary is
-        # made finite so the selected procedure yields at that live edge.
+        # A Hold ending exactly at the selected boundary is made finite so
+        # the selected procedure yields at that live edge.
         make_finite = cut or (
-            len(visible) == count and isinstance(action, (Hold, Finish))
+            len(visible) == count and isinstance(action, Hold)
         )
         if make_finite:
             retained = visible[:count]

@@ -18,7 +18,6 @@ from .core.errors import EditorError
 from .core.ui import ChoiceSet
 from .core.actions import (
     EndGeneration,
-    Finish,
     Hold,
     Phrase,
     PHRASE_DEFAULT_MAX_SHIFT,
