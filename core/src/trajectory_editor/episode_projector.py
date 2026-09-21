@@ -9,6 +9,9 @@ from typing import Any
 
 from .core.actions import Accept, EndGeneration, Finish, Hold, Phrase, SelectRawRank, Write
 from .core.errors import EditorError
+from .episode_lineage import EpisodeRelation, LineageNode, LineageView
+from .episode_lineage_source import EpisodeLineageReader, build_lineage_view
+from .episode_replay_source import final_sampling, replay_procedure
 from .episode_store import EpisodeStore
 
 
@@ -99,33 +102,33 @@ def project_live_fork_map(
 
 
 def _lineage_label(
-    node: dict[str, Any],
+    record: EpisodeRelation,
     *,
     selected_episode_id: str,
     relation: str,
 ) -> str:
-    marker = "* " if node["episode_id"] == selected_episode_id else ""
-    count = int(node["visible_tokens"])
+    marker = "* " if record.episode_id == selected_episode_id else ""
+    count = record.visible_token_count
     token_label = "token" if count == 1 else "tokens"
     label = (
-        f"{marker}{node['episode_id']} [{node['status']}]"
+        f"{marker}{record.episode_id} [{record.status}]"
         f" · {relation} · {count} {token_label}"
     )
-    terminal_reason = node.get("terminal_reason")
+    terminal_reason = record.terminal_reason
     if terminal_reason:
         label += f" · terminal={terminal_reason}"
     return label
 
 
 def _append_lineage_tree(
-    node: dict[str, Any],
+    node: LineageNode,
     lines: list[str],
     *,
     selected_episode_id: str,
     prefix: str = "",
     connector: str = "",
 ) -> None:
-    boundary = node.get("fork_boundary")
+    boundary = node.record.fork_boundary
     relation = (
         "root"
         if not connector
@@ -135,12 +138,12 @@ def _append_lineage_tree(
         prefix
         + connector
         + _lineage_label(
-            node,
+            node.record,
             selected_episode_id=selected_episode_id,
             relation=relation,
         )
     )
-    children = list(node.get("children") or [])
+    children = node.children
     for index, child in enumerate(children):
         is_last = index == len(children) - 1
         _append_lineage_tree(
@@ -154,46 +157,47 @@ def _append_lineage_tree(
         )
 
 
-def project_lineage(store: EpisodeStore, episode_id: str) -> str:
-    """Render the selected episode's fork family and related replays."""
-    details = store.lineage(episode_id)
+def render_lineage(view: LineageView) -> str:
+    """Render a typed lineage view without knowing how it was loaded."""
+
+    selected_episode_id = view.selected_episode_id
     lines = [
         "--- lineage ---",
-        f"selected: {details['selected_episode_id']}",
-        f"family root: {details['family_root_id'] or '-'}",
+        f"selected: {selected_episode_id}",
+        f"family root: {view.family_root_id or '-'}",
         "fork family:",
     ]
-    tree = details.get("tree")
+    tree = view.tree
     if tree is None:
         lines.append("  (no ordinary fork family)")
     else:
         _append_lineage_tree(
             tree,
             lines,
-            selected_episode_id=episode_id,
+            selected_episode_id=selected_episode_id,
         )
 
-    replays = list(details.get("replays") or [])
+    replays = view.replays
     if replays:
         lines.append("replays:")
         for replay in replays:
-            source = replay.get("replay_source_episode_id") or "-"
-            context = replay.get("parent_episode_id") or "-"
+            source = replay.replay_source_episode_id or "-"
+            context = replay.parent_episode_id or "-"
             lines.append(
                 "  "
                 + _lineage_label(
                     replay,
-                    selected_episode_id=episode_id,
+                    selected_episode_id=selected_episode_id,
                     relation=f"source={source} · context={context}",
                 )
             )
 
-    replay_derived_forks = list(details.get("replay_derived_forks") or [])
+    replay_derived_forks = view.replay_forks
     if replay_derived_forks:
         lines.append("forks from replay contexts:")
         for child in replay_derived_forks:
-            parent = child.get("parent_episode_id") or "-"
-            boundary = child.get("fork_boundary")
+            parent = child.parent_episode_id or "-"
+            boundary = child.fork_boundary
             relation = f"parent={parent}"
             if boundary is not None:
                 relation += f" · fork@{int(boundary)}"
@@ -201,11 +205,17 @@ def project_lineage(store: EpisodeStore, episode_id: str) -> str:
                 "  "
                 + _lineage_label(
                     child,
-                    selected_episode_id=episode_id,
+                    selected_episode_id=selected_episode_id,
                     relation=relation,
                 )
             )
     return "\n".join(lines)
+
+
+def project_lineage(reader: EpisodeLineageReader, episode_id: str) -> str:
+    """Load and render the selected episode's fork family and replays."""
+
+    return render_lineage(build_lineage_view(reader, episode_id))
 
 
 def project_episode(
@@ -327,7 +337,7 @@ def project_procedure(store: EpisodeStore, episode_id: str) -> str:
     from .core.sampler_config import SamplerConfig
 
     episode = store.get_episode(episode_id)
-    steps = store.replay_procedure(episode_id)
+    steps = replay_procedure(store, episode_id)
     initial = SamplerConfig.from_record(store.sampling_segment(episode_id, 0)["sampling"])
     backend = episode["backend"]
     model = backend.get("filename") or backend.get("model_path") or backend.get("model") or "unknown"
@@ -416,7 +426,7 @@ def project_procedure(store: EpisodeStore, episode_id: str) -> str:
         rows.append((boundary, command, comment))
         boundary += len(step["expectation"].token_ids)
 
-    transition(store.final_sampling(episode_id), boundary, trailing=True)
+    transition(final_sampling(store, episode_id), boundary, trailing=True)
     # Finite procedures return live control, never seal the destination.
     if not rows or rows[-1][1] not in {"q", "e!"} and not rows[-1][1].startswith("s "):
         rows.append((boundary, "q", None))

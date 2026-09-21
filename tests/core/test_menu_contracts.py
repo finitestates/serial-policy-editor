@@ -122,6 +122,8 @@ def test_m05_core_help_exposes_only_core_flags():
         parser.parse_args(["--online-learning"])
     with pytest.raises(SystemExit):
         parser.parse_args(["--steering-vector", "vector.json"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--setup-menu"])
 
     args = build_parser().parse_args([])
     with patch("sys.argv", ["policy-editor", "--help"]):

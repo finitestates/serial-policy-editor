@@ -108,8 +108,23 @@ policy-editor \
   --new-prompt 'Once upon a time'
 ```
 
-Running `policy-editor` without an episode source opens the pre-runtime setup
-menu. The editor supports sequential token selection, full-vocabulary search,
+Running `policy-editor` without an episode source opens the normal initial
+prompt flow. Reusable CLI values can be kept in a YAML profile and combined
+with explicit flags; explicit flags win:
+
+```yaml
+model: /path/to/model.gguf
+backend: llama.cpp
+temperature: 0.80
+top-k: 40
+no-policy-view: true
+```
+
+```bash
+policy-editor --profile profile.yaml --new-prompt 'Once upon a time'
+```
+
+The editor supports sequential token selection, full-vocabulary search,
 check/force actions, conditional and naive bias rules, CFG and Gumbel draws,
 raw/model/gap logit views, replay, rewind, fork, and live-edge continuation.
 

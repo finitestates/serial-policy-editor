@@ -9,20 +9,18 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from bisect import bisect_right
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .core.actions import Phrase, Write, Hold, Finish, PolicyAction, action_from_dict
+from .core.actions import Phrase, Write, Hold
 from .core.errors import EditorError
-from .core.results import ActionOutcome, ReplayExpectation
+from .core.results import ActionOutcome
 from .core.sampler_config import SamplerConfig
+from .episode_history import StoredHistoryPrefix, materialize_stored_prefix
 from .episode_hash import token_prefix_sha256, validate_coordinate, validate_fingerprint
-from .fork_materializer import materialize_stored_prefix
-from .surviving_procedure import ProcedureRecord, project_surviving_procedure
 
 SCHEMA_VERSION = 1
 
@@ -377,11 +375,8 @@ class EpisodeStore:
         visible_text: str,
         max_tokens: int | None,
     ) -> dict[str, Any]:
-        """Truncate one open episode at a visible-token boundary.
+        """Persist the root-relative history retained through ``boundary``."""
 
-        Partial holds become finite holds. Partial writes become exact writes
-        of the retained text, keeping the original submission in their metadata.
-        """
         if type(boundary) is not int or boundary < 0:
             raise EditorError("rewind boundary must be a nonnegative integer")
         if max_tokens is not None and (type(max_tokens) is not int or max_tokens < 1):
@@ -395,104 +390,46 @@ class EpisodeStore:
             raise EditorError(
                 f"rewind boundary must be between 0 and {visible_count}"
             )
+        try:
+            retained = materialize_stored_prefix(
+                self.actions(episode_id),
+                token_rows,
+                (),
+                (),
+                boundary,
+            )
+        except ValueError as exc:
+            raise EditorError(str(exc)) from exc
 
-        action_rows = self.actions(episode_id)
-        containing: dict[str, Any] | None = None
-        first_removed: dict[str, Any] | None = None
-        for row in action_rows:
-            before = int(row["boundary_before"])
-            after = int(row["boundary_after"])
-            if before < boundary < after:
-                containing = row
-                break
-            if before >= boundary:
-                first_removed = row
-                break
-
-        trimmed_action: dict[str, Any] | None = None
+        partial = retained.partial
+        trimmed_action = (
+            {
+                "ordinal": partial.ordinal,
+                "kind": partial.action.kind,
+                "original_boundary_after": partial.outcome.boundary_after,
+                "new_boundary_after": boundary,
+            }
+            if partial is not None
+            else None
+        )
         with self.transaction() as db:
-            if containing is not None:
-                ordinal = int(containing["ordinal"])
-                retained_rows = db.execute(
-                    """
-                    SELECT text FROM tokens
-                    WHERE episode_id = ? AND action_ordinal = ?
-                      AND boundary < ? AND realized_visible = 1
-                    ORDER BY action_token_index
-                    """,
-                    (episode_id, ordinal, boundary),
-                ).fetchall()
-                arguments = dict(containing["arguments"])
-                resolved_text = "".join(str(row["text"]) for row in retained_rows)
-                if containing["kind"] in {"write", "check-phrase", "force-phrase"}:
-                    original_key = (
-                        "original_write"
-                        if containing["kind"] == "write"
-                        else "original_action"
-                    )
-                    original = arguments.get(original_key, dict(arguments))
-                    arguments = {
-                        **arguments,
-                        "kind": "write",
-                        "mode": "exact",
-                        "text": resolved_text,
-                        original_key: original,
-                    }
-                else:
-                    arguments["limit"] = boundary - int(containing["boundary_before"])
-                    arguments["boundary"] = None
-                db.execute(
-                    "DELETE FROM actions WHERE episode_id = ? AND ordinal > ?",
-                    (episode_id, ordinal),
-                )
-                db.execute(
-                    """
-                    UPDATE actions
-                    SET boundary_after = ?, arguments_json = ?,
-                        resolved_text = ?, status = 'completed',
-                        stop_reason = ?, mismatch_json = NULL
-                    WHERE episode_id = ? AND ordinal = ?
-                    """,
-                    (
-                        boundary,
-                        _json(arguments),
-                        resolved_text,
-                        (
-                            "completed"
-                            if containing["kind"] in {"write", "check-phrase", "force-phrase"}
-                            else "requested-length"
-                        ),
-                        episode_id,
-                        ordinal,
-                    ),
-                )
-                trimmed_action = {
-                    "ordinal": ordinal,
-                    "kind": str(containing["kind"]),
-                    "original_boundary_after": int(containing["boundary_after"]),
-                    "new_boundary_after": boundary,
-                }
-            elif first_removed is not None:
-                db.execute(
-                    "DELETE FROM actions WHERE episode_id = ? AND ordinal >= ?",
-                    (episode_id, int(first_removed["ordinal"])),
-                )
-
-            db.execute(
-                "DELETE FROM tokens WHERE episode_id = ? AND boundary >= ?",
-                (episode_id, boundary),
+            self._replace_history_actions(
+                db,
+                episode_id,
+                retained,
+                preserve_ordinals=True,
             )
             db.execute(
                 "DELETE FROM interactions WHERE episode_id = ? AND boundary >= ?",
                 (episode_id, boundary),
             )
-            db.execute("DELETE FROM budget_segments WHERE episode_id = ? AND start_boundary > ?",
-                       (episode_id, boundary))
             db.execute(
-                """
-                DELETE FROM sampler_segments
-                WHERE episode_id = ? AND start_boundary > ?
-                """,
+                "DELETE FROM budget_segments WHERE episode_id = ? AND start_boundary > ?",
+                (episode_id, boundary),
+            )
+            db.execute(
+                "DELETE FROM sampler_segments "
+                "WHERE episode_id = ? AND start_boundary > ?",
                 (episode_id, boundary),
             )
             cursor = db.execute(
@@ -511,6 +448,7 @@ class EpisodeStore:
             "target_boundary": boundary,
             "trimmed_action": trimmed_action,
         }
+
 
     def record_sampling_segment(
         self,
@@ -556,17 +494,8 @@ class EpisodeStore:
         visible_text: str,
         max_tokens: int | None,
     ) -> None:
-        """Copy a root-relative history prefix into a new episode.
+        """Persist one source history prefix as a new root-relative episode."""
 
-        A durable fork keeps the source episode's initial context and stores
-        the inherited teacher actions as ordinary destination history.  This
-        preserves one visible boundary coordinate system: boundary zero is
-        always immediately after ``initial_text``.  The final action may be
-        cut at an arbitrary visible-token boundary, just like ``rewind_to``.
-
-        Editorial interactions are intentionally not copied.  They describe
-        the source UI journey rather than the replayable branch history.
-        """
         self.get_episode(source_episode_id)
         self.get_episode(destination_episode_id)
         if source_episode_id == destination_episode_id:
@@ -577,8 +506,12 @@ class EpisodeStore:
             raise EditorError("max_tokens must be a positive integer")
         if self.actions(destination_episode_id) or self.tokens(destination_episode_id):
             raise EditorError("destination episode already has recorded history")
+
         source_actions = self.actions(source_episode_id)
         source_tokens = self.tokens(source_episode_id)
+        visible_count = sum(bool(row["realized_visible"]) for row in source_tokens)
+        if boundary > visible_count:
+            raise EditorError(f"fork boundary must be between 0 and {visible_count}")
         source_segments = self.connection.execute(
             "SELECT * FROM sampler_segments "
             "WHERE episode_id = ? AND start_boundary <= ? "
@@ -591,70 +524,26 @@ class EpisodeStore:
             "ORDER BY start_boundary",
             (source_episode_id, boundary),
         ).fetchall()
-        materialized = materialize_stored_prefix(
-            source_actions,
-            source_tokens,
-            [dict(segment) for segment in source_segments],
-            [dict(budget) for budget in source_budgets],
-            boundary,
-        )
+        try:
+            materialized = materialize_stored_prefix(
+                source_actions,
+                source_tokens,
+                [dict(segment) for segment in source_segments],
+                [dict(budget) for budget in source_budgets],
+                boundary,
+            )
+        except ValueError as exc:
+            raise EditorError(str(exc)) from exc
 
-        # Keep the destination episode's identity and initial context, but
-        # replace its provisional control history with the copied root-relative
-        # prefix.  The caller supplies the current fork-edge budget/text.
+        # Keep the destination identity and root context, replacing only its
+        # provisional control rows with the copied root-relative prefix.
         with self.transaction() as db:
-            for ordinal, action in enumerate(materialized.actions):
-                db.execute(
-                    """
-                    INSERT INTO actions(
-                        episode_id, ordinal, boundary_before, boundary_after,
-                        kind, arguments_json, resolved_text, status,
-                        stop_reason, mismatch_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        destination_episode_id,
-                        ordinal,
-                        action.boundary_before,
-                        action.boundary_after,
-                        action.kind,
-                        _json(dict(action.arguments)),
-                        action.resolved_text,
-                        action.status,
-                        action.stop_reason,
-                        _json(dict(action.mismatch)) if action.mismatch is not None else None,
-                    ),
-                )
-                for token_index, token in enumerate(action.tokens):
-                    db.execute(
-                        """
-                        INSERT INTO tokens(
-                            episode_id, action_ordinal, action_token_index,
-                            boundary, token_id, text, realized_visible, is_eog,
-                            sampling_coordinate, proposal_token_id,
-                            raw_model_nll, raw_rank, policy_rank,
-                            decoder_probability, proposal_agreement
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            destination_episode_id,
-                            ordinal,
-                            token_index,
-                            int(token["boundary"]),
-                            int(token["token_id"]),
-                            str(token["text"]),
-                            int(token["realized_visible"]),
-                            int(token["is_eog"]),
-                            int(token["sampling_coordinate"]),
-                            int(token["proposal_token_id"]),
-                            float(token["raw_model_nll"]),
-                            int(token["raw_rank"]),
-                            int(token["policy_rank"]),
-                            float(token["decoder_probability"]),
-                            int(token["proposal_agreement"]),
-                        ),
-                    )
-
+            self._write_history_actions(
+                db,
+                destination_episode_id,
+                materialized,
+                preserve_ordinals=False,
+            )
             for segment in materialized.sampler_segments:
                 db.execute(
                     """
@@ -696,6 +585,90 @@ class EpisodeStore:
                 """,
                 (visible_text, max_tokens or 0, destination_episode_id),
             )
+
+    def _replace_history_actions(
+        self,
+        db: sqlite3.Connection,
+        episode_id: str,
+        prefix: StoredHistoryPrefix,
+        *,
+        preserve_ordinals: bool,
+    ) -> None:
+        """Replace persisted action/token rows with a projected history prefix."""
+
+        db.execute("DELETE FROM actions WHERE episode_id = ?", (episode_id,))
+        self._write_history_actions(
+            db,
+            episode_id,
+            prefix,
+            preserve_ordinals=preserve_ordinals,
+        )
+
+    @staticmethod
+    def _write_history_actions(
+        db: sqlite3.Connection,
+        episode_id: str,
+        prefix: StoredHistoryPrefix,
+        *,
+        preserve_ordinals: bool,
+    ) -> None:
+        """Insert projected action evidence using only SQLite primitives."""
+
+        for position, action in enumerate(prefix.actions):
+            ordinal = action.ordinal if preserve_ordinals else position
+            db.execute(
+                """
+                INSERT INTO actions(
+                    episode_id, ordinal, boundary_before, boundary_after,
+                    kind, arguments_json, resolved_text, status,
+                    stop_reason, mismatch_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    episode_id,
+                    ordinal,
+                    action.boundary_before,
+                    action.boundary_after,
+                    action.kind,
+                    _json(dict(action.arguments)),
+                    action.resolved_text,
+                    action.status,
+                    action.stop_reason,
+                    _json(dict(action.mismatch))
+                    if action.mismatch is not None
+                    else None,
+                ),
+            )
+            for token_index, token in enumerate(action.tokens):
+                db.execute(
+                    """
+                    INSERT INTO tokens(
+                        episode_id, action_ordinal, action_token_index,
+                        boundary, token_id, text, realized_visible, is_eog,
+                        sampling_coordinate, proposal_token_id,
+                        raw_model_nll, raw_rank, policy_rank,
+                        decoder_probability, proposal_agreement
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        episode_id,
+                        ordinal,
+                        token_index,
+                        int(token["boundary"]),
+                        int(token["token_id"]),
+                        str(token["text"]),
+                        int(token["realized_visible"]),
+                        int(token["is_eog"]),
+                        int(token["sampling_coordinate"]),
+                        int(token["proposal_token_id"]),
+                        float(token["raw_model_nll"]),
+                        int(token["raw_rank"]),
+                        int(token["policy_rank"]),
+                        float(token["decoder_probability"]),
+                        int(token["proposal_agreement"]),
+                    ),
+                )
+
 
     def record_action(
         self, episode_id: str, ordinal: int, outcome: ActionOutcome,
@@ -830,21 +803,19 @@ class EpisodeStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def lineage(self, episode_id: str) -> dict[str, Any]:
-        """Return ordinary fork ancestry plus separately typed replay links.
+    def episode_relation_rows(self) -> list[dict[str, Any]]:
+        """Return the flat persistence facts required for lineage projection."""
 
-        ``parent_episode_id`` predates the distinction between a fork and a
-        Serial Policy Replay episode.  The persisted ``metadata.mode`` and
-        ``metadata.spr_source`` values let this view preserve that distinction
-        without adding a schema column or treating replay runs as branches of
-        the ordinary family tree.
-        """
-        self.get_episode(episode_id)
         rows = self.connection.execute(
             """
             SELECT
-                episode.*,
-                length(episode.visible_text) AS visible_characters,
+                episode.episode_id,
+                episode.parent_episode_id,
+                episode.fork_boundary,
+                episode.status,
+                episode.created_at,
+                episode.terminal_reason,
+                episode.metadata_json,
                 COALESCE(
                     (
                         SELECT COUNT(*)
@@ -853,167 +824,12 @@ class EpisodeStore:
                           AND tokens.realized_visible = 1
                     ),
                     0
-                ) AS visible_tokens
+                ) AS visible_token_count
             FROM episodes AS episode
             ORDER BY episode.created_at, episode.episode_id
             """
         ).fetchall()
-
-        nodes: dict[str, dict[str, Any]] = {}
-        for row in rows:
-            metadata = _loads(row["metadata_json"], {})
-            if not isinstance(metadata, dict):
-                metadata = {}
-            mode = metadata.get("mode")
-            if not isinstance(mode, str) or not mode:
-                mode = "interactive"
-            replay_source = metadata.get("spr_source")
-            if replay_source is not None and not isinstance(replay_source, str):
-                replay_source = str(replay_source)
-            is_replay = mode == "serial-policy-replay" or replay_source is not None
-            if is_replay and replay_source is None:
-                replay_source = row["parent_episode_id"]
-            nodes[str(row["episode_id"])] = {
-                "episode_id": str(row["episode_id"]),
-                "parent_episode_id": row["parent_episode_id"],
-                "fork_boundary": row["fork_boundary"],
-                "status": str(row["status"]),
-                "created_at": row["created_at"],
-                "finished_at": row["finished_at"],
-                "terminal_reason": row["terminal_reason"],
-                "visible_characters": int(row["visible_characters"] or 0),
-                "visible_tokens": int(row["visible_tokens"] or 0),
-                "mode": mode,
-                "is_replay": is_replay,
-                "replay_source_episode_id": replay_source,
-            }
-
-        structural = {
-            identifier: node
-            for identifier, node in nodes.items()
-            if not bool(node["is_replay"])
-        }
-
-        def structural_root(identifier: str) -> str:
-            seen: set[str] = set()
-            current = identifier
-            while current in structural:
-                if current in seen:
-                    # Creation order and foreign keys prevent this in normal
-                    # operation; keeping the current node makes old/corrupt
-                    # workspaces inspectable instead of hanging here.
-                    return current
-                seen.add(current)
-                parent = structural[current]["parent_episode_id"]
-                if not isinstance(parent, str) or parent not in structural:
-                    return current
-                current = parent
-            return identifier
-
-        def structural_seed(identifier: str) -> str | None:
-            """Find the ordinary family context for an episode or replay."""
-            seen: set[str] = set()
-            current = identifier
-            while current in nodes and current not in seen:
-                seen.add(current)
-                node = nodes[current]
-                if not bool(node["is_replay"]):
-                    return current
-                for candidate in (
-                    node["parent_episode_id"],
-                    node["replay_source_episode_id"],
-                ):
-                    if isinstance(candidate, str) and candidate in nodes:
-                        current = candidate
-                        break
-                else:
-                    return None
-            return None
-
-        seed = structural_seed(episode_id)
-        family_root_id = structural_root(seed) if seed is not None else None
-        family_ids = {
-            identifier
-            for identifier in structural
-            if family_root_id is not None
-            and structural_root(identifier) == family_root_id
-        }
-
-        children_by_parent: dict[str, list[str]] = {}
-        for identifier in family_ids:
-            parent = structural[identifier]["parent_episode_id"]
-            if isinstance(parent, str) and parent in family_ids:
-                children_by_parent.setdefault(parent, []).append(identifier)
-        for children in children_by_parent.values():
-            children.sort(
-                key=lambda child: (
-                    str(structural[child]["created_at"]),
-                    child,
-                )
-            )
-
-        def tree_node(identifier: str, seen: set[str]) -> dict[str, Any]:
-            node = dict(structural[identifier])
-            if identifier in seen:
-                node["children"] = []
-                return node
-            next_seen = {*seen, identifier}
-            node["children"] = [
-                tree_node(child, next_seen)
-                for child in children_by_parent.get(identifier, [])
-            ]
-            return node
-
-        tree = (
-            tree_node(family_root_id, set())
-            if family_root_id is not None
-            else None
-        )
-
-        related_replay_ids: set[str] = {
-            identifier
-            for identifier, node in nodes.items()
-            if bool(node["is_replay"])
-            and (
-                identifier == episode_id
-                or node["parent_episode_id"] in family_ids
-                or node["replay_source_episode_id"] in family_ids
-            )
-        }
-        for identifier in family_ids:
-            parent = structural[identifier]["parent_episode_id"]
-            if isinstance(parent, str) and parent in nodes and nodes[parent]["is_replay"]:
-                related_replay_ids.add(parent)
-
-        replays = [
-            dict(nodes[identifier])
-            for identifier in sorted(
-                related_replay_ids,
-                key=lambda value: (
-                    str(nodes[value]["created_at"]),
-                    value,
-                ),
-            )
-        ]
-        replay_derived_forks = [
-            dict(node)
-            for node in nodes.values()
-            if not bool(node["is_replay"])
-            and isinstance(node["parent_episode_id"], str)
-            and node["parent_episode_id"] in related_replay_ids
-        ]
-        replay_derived_forks.sort(
-            key=lambda node: (str(node["created_at"]), str(node["episode_id"]))
-        )
-
-        return {
-            "selected_episode_id": episode_id,
-            "family_root_id": family_root_id,
-            "selected": dict(nodes[episode_id]),
-            "tree": tree,
-            "replays": replays,
-            "replay_derived_forks": replay_derived_forks,
-        }
+        return [dict(row) for row in rows]
 
     def actions(self, episode_id: str) -> list[dict[str, Any]]:
         self.get_episode(episode_id)
@@ -1057,170 +873,45 @@ class EpisodeStore:
             result.append(item)
         return result
 
-    def replay_tape(
-        self, episode_id: str
-    ) -> list[tuple[PolicyAction, ReplayExpectation]]:
-        return [
-            (action, expectation)
-            for action, expectation, _ in self.replay_tape_with_sampling(episode_id)
-        ]
-
-    def replay_tape_with_sampling(
-        self, episode_id: str, *, sampling_factory=SamplerConfig.from_record
-    ) -> list[tuple[PolicyAction, ReplayExpectation, SamplerConfig]]:
-        """Return recorded actions with the sampler active at each action boundary."""
-        return [
-            (step["action"], step["expectation"], step["sampling"])
-            for step in self.replay_procedure(episode_id, sampling_factory=sampling_factory)
-        ]
-
-    def replay_procedure(
-        self, episode_id: str, *, sampling_factory=SamplerConfig.from_record
-    ) -> list[dict[str, Any]]:
-        """Derive surviving moves with source labels and evidence for display."""
-        action_rows = self.actions(episode_id)
-        token_rows = self.tokens(episode_id)
-        if not action_rows:
-            return []
-        segments = self.connection.execute(
-            "SELECT * FROM sampler_segments "
-            "WHERE episode_id = ? ORDER BY start_boundary",
+    def sampler_segments(self, episode_id: str) -> list[dict[str, Any]]:
+        """Return decoded sampler-coordinate records in root-boundary order."""
+        self.get_episode(episode_id)
+        rows = self.connection.execute(
+            "SELECT * FROM sampler_segments WHERE episode_id = ? ORDER BY start_boundary",
             (episode_id,),
         ).fetchall()
-        for segment in segments:
-            validate_coordinate(segment["start_boundary"], "start_boundary")
-            validate_coordinate(segment["coordinate_offset"], "coordinate_offset")
-            validate_fingerprint(segment["stream_fingerprint"])
-        starts = [segment["start_boundary"] for segment in segments]
-        samplers: dict[int, SamplerConfig] = {}
-        grouped: dict[int, list[dict[str, Any]]] = {}
-        for token in token_rows:
-            grouped.setdefault(int(token["action_ordinal"]), []).append(token)
-        procedure_records: list[ProcedureRecord] = []
-        source_rows: list[tuple[dict[str, Any], list[dict[str, Any]], SamplerConfig]] = []
-        for row in action_rows:
-            records = grouped.get(int(row["ordinal"]), [])
-            segment_index = bisect_right(starts, int(row["boundary_before"])) - 1
-            if segment_index < 0:
-                raise EditorError(f"episode {episode_id!r} has no sampler segment")
-            if segment_index not in samplers:
-                samplers[segment_index] = sampling_factory(
-                    _loads(segments[segment_index]["sampling_json"], {})
-                )
-            sampling = samplers[segment_index]
-            visible = tuple(
-                int(record["token_id"])
-                for record in records
-                if bool(record["realized_visible"])
-            )
-            terminal = next(
-                (
-                    int(record["token_id"])
-                    for record in records
-                    if bool(record["is_eog"])
-                ),
-                None,
-            )
-            procedure_records.append(
-                ProcedureRecord(
-                    action=action_from_dict(row["arguments"]),
-                    expectation=ReplayExpectation(
-                        visible, terminal, str(row["stop_reason"])
-                    ),
-                    status=str(row["status"]),
-                    visible_token_ids=visible,
-                    # Durable handoff projection historically replays a
-                    # partial span as a finite Hold. The in-memory adapter
-                    # can retain resolved text when it has it.
-                    visible_text="",
-                    boundary_before=int(row["boundary_before"]),
-                    sampling=sampling,
-                )
-            )
-            source_rows.append((row, records, sampling))
-
-        projected = project_surviving_procedure(
-            procedure_records,
-            normalize_for_replay=False,
-        )
-        return [
-            {
-                "action": step.action,
-                "expectation": step.expectation,
-                "sampling": source_rows[step.source_index][2],
-                "boundary": step.boundary,
-                "tokens": source_rows[step.source_index][1],
-            }
-            for step in projected
-        ]
-
-    def replay_until(
-        self,
-        episode_id: str,
-        until: int | None = None,
-        *,
-        sampling_factory=SamplerConfig.from_record,
-    ) -> list[dict[str, Any]]:
-        """Select source boundaries; destination writes retain normal token indexing."""
-        if until is None:
-            return self.replay_procedure(episode_id, sampling_factory=sampling_factory)
-        length = sum(bool(row["realized_visible"]) for row in self.tokens(episode_id))
-        if type(until) is not int or not 0 <= until <= length:
-            raise EditorError(f"Replay boundary must be 0..{length}.")
-        result = []
-        for original in self.replay_procedure(episode_id, sampling_factory=sampling_factory):
-            if original["boundary"] >= until:
-                break
-            step = dict(original)
-            count = until - step["boundary"]
-            visible = [row for row in step["tokens"] if row["realized_visible"]]
-            if len(visible) > count or (len(visible) == count and isinstance(step["action"], (Hold, Finish))):
-                retained = visible[:count]
-                if isinstance(step["action"], (Write, Phrase)):
-                    step["action"] = Write("".join(row["text"] for row in retained), "exact")
-                    reason = "completed"
-                else:
-                    step["action"] = Hold(count)
-                    reason = "requested-length"
-                step["tokens"] = retained
-                step["expectation"] = ReplayExpectation(
-                    tuple(row["token_id"] for row in retained), None, reason)
-            result.append(step)
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["sampling"] = _loads(item.pop("sampling_json"), {})
+            if not isinstance(item["sampling"], dict):
+                raise EditorError("saved sampler settings must be an object")
+            SamplerConfig.from_record(item["sampling"])
+            validate_coordinate(item["start_boundary"], "start_boundary")
+            validate_coordinate(item["coordinate_offset"], "coordinate_offset")
+            validate_fingerprint(item["stream_fingerprint"])
+            result.append(item)
         return result
 
-    def final_sampling(self, episode_id: str) -> SamplerConfig:
-        """Return the latest source setting, including changes after its last move."""
-        return SamplerConfig.from_record(self.final_sampling_record(episode_id))
-
-    def final_sampling_record(self, episode_id: str) -> dict[str, Any]:
-        """Return the latest raw sampler mapping for optional adapters."""
-        row = self.connection.execute(
-            "SELECT sampling_json FROM sampler_segments WHERE episode_id = ? "
-            "ORDER BY start_boundary DESC LIMIT 1", (episode_id,),
-        ).fetchone()
-        if row is None:
-            raise EditorError(f"episode {episode_id!r} has no sampler segment")
-        result = _loads(row["sampling_json"], {})
-        if not isinstance(result, dict):
-            raise EditorError("saved sampler settings must be an object")
-        SamplerConfig.from_record(result)
+    def budget_segments(self, episode_id: str) -> list[dict[str, Any]]:
+        """Return budget-control records in root-boundary order."""
+        self.get_episode(episode_id)
+        rows = self.connection.execute(
+            "SELECT * FROM budget_segments WHERE episode_id = ? ORDER BY start_boundary",
+            (episode_id,),
+        ).fetchall()
+        result = [dict(row) for row in rows]
+        for item in result:
+            validate_coordinate(item["start_boundary"], "start_boundary")
         return result
 
     def sampling_segment(self, episode_id: str, boundary: int = 0) -> dict[str, Any]:
-        row = self.connection.execute(
-            """
-            SELECT * FROM sampler_segments
-            WHERE episode_id = ? AND start_boundary <= ?
-            ORDER BY start_boundary DESC LIMIT 1
-            """,
-            (episode_id, boundary),
-        ).fetchone()
-        if row is None:
+        validate_coordinate(boundary, "boundary")
+        matches = [
+            segment
+            for segment in self.sampler_segments(episode_id)
+            if int(segment["start_boundary"]) <= boundary
+        ]
+        if not matches:
             raise EditorError(f"episode {episode_id!r} has no sampler segment")
-        result = dict(row)
-        result["sampling"] = _loads(result.pop("sampling_json"), {})
-        SamplerConfig.from_record(result["sampling"])
-        validate_coordinate(result["start_boundary"], "start_boundary")
-        validate_coordinate(result["coordinate_offset"], "coordinate_offset")
-        validate_fingerprint(result["stream_fingerprint"])
-        return result
+        return dict(matches[-1])

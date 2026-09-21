@@ -8,10 +8,12 @@ from unittest.mock import patch
 from tests.fakes import ConformingFakeBackend, ScriptedIO
 from trajectory_editor.core.actions import Write
 from trajectory_editor.core.sampler_config import SamplerConfig
-from trajectory_editor.episode_cli import _ephemeral_edge_menu, main
+from trajectory_editor.episode_cli import main
 from trajectory_editor.episode_engine import EpisodeEngine
+from trajectory_editor.episode_replay_source import replay_procedure
 from trajectory_editor.episode_session import LiveSession
 from trajectory_editor.episode_store import EpisodeStore
+from trajectory_editor.ephemeral_runtime import ephemeral_edge_menu
 from trajectory_editor.teacher_plan import load_teacher_tape_jsonl
 
 
@@ -24,7 +26,7 @@ def _run(
     io = ScriptedIO(commands)
     ui_flag = ["--plain-ui"] if plain_ui else []
     with patch(
-        "trajectory_editor.episode_cli._backend",
+        "trajectory_editor.episode_backend_loader.load_backend",
         side_effect=lambda _args: ConformingFakeBackend(),
     ), patch("trajectory_editor.episode_cli.TerminalIO", return_value=io):
         assert main(["--ephemeral", "--model", "fake", *ui_flag, *flags]) == 0
@@ -54,7 +56,7 @@ def test_ephemeral_export_and_save_materialize_only_the_selected_branch(tmp_path
     with EpisodeStore(workspace) as store:
         saved = store.get_episode("selected")
         assert saved["metadata"]["mode"] == "ephemeral-save"
-        assert len(store.replay_procedure("selected")) == 1
+        assert len(replay_procedure(store, "selected")) == 1
 
 
 def test_ephemeral_fork_selects_a_new_live_branch_without_a_workspace(tmp_path):
@@ -123,7 +125,7 @@ def test_ephemeral_fork_map_uses_root_relative_boundaries():
     session.generate(Write(" A", mode="exact"))
     io = ScriptedIO(["fm", "", "q"])
 
-    action, value = _ephemeral_edge_menu(io, session)
+    action, value = ephemeral_edge_menu(io, session)
 
     assert (action, value) == ("quit", None)
     assert any(item == "P|0| A|1|" for item in io.output)
@@ -144,7 +146,7 @@ def test_ephemeral_branches_use_numeric_aliases_for_switching():
     session.activate(child.branch.branch_id)
     io = ScriptedIO(["branches", "switch 1"])
 
-    action, value = _ephemeral_edge_menu(io, session)
+    action, value = ephemeral_edge_menu(io, session)
 
     assert action == "switch"
     assert value == next(iter(session.branch_tree.nodes))
@@ -206,7 +208,7 @@ def test_ephemeral_uses_live_ui_by_default_and_plain_ui_is_an_opt_out(tmp_path):
         return io
 
     with patch(
-        "trajectory_editor.episode_cli._backend",
+        "trajectory_editor.episode_backend_loader.load_backend",
         side_effect=lambda _args: ConformingFakeBackend(),
     ), patch("trajectory_editor.episode_cli.TerminalIO", side_effect=terminal_io):
         assert main(["--ephemeral", "--model", "fake", "--new-prompt", "P"]) == 0
@@ -218,7 +220,7 @@ def test_ephemeral_uses_live_ui_by_default_and_plain_ui_is_an_opt_out(tmp_path):
     captured.clear()
     plain = _LiveContextIO(["q", "q"], supports_live_choices=False)
     with patch(
-        "trajectory_editor.episode_cli._backend",
+        "trajectory_editor.episode_backend_loader.load_backend",
         side_effect=lambda _args: ConformingFakeBackend(),
     ), patch(
         "trajectory_editor.episode_cli.TerminalIO",
@@ -234,10 +236,15 @@ def test_ephemeral_uses_live_ui_by_default_and_plain_ui_is_an_opt_out(tmp_path):
 
 
 def test_ephemeral_live_policy_keeps_seamless_review_enabled():
-    from trajectory_editor.episode_cli import _ephemeral_policy, build_parser
+    from trajectory_editor.episode_cli import build_parser
+    from trajectory_editor.episode_policy_setup import ephemeral_policy
 
     live = _LiveContextIO([])
     args = build_parser(include_vector=False).parse_args([])
 
-    assert _ephemeral_policy(args, live).seamless is True
-    assert _ephemeral_policy(args, ScriptedIO([])).seamless is False
+    live_policy = ephemeral_policy(args, live)
+    plain_policy = ephemeral_policy(args, ScriptedIO([]))
+
+    assert live_policy.seamless is True
+    assert plain_policy.seamless is False
+    assert live_policy.view_preferences is plain_policy.view_preferences

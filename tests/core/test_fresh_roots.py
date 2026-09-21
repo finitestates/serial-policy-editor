@@ -6,11 +6,11 @@ from tests.fakes import ConformingFakeBackend, ScriptedIO
 from trajectory_editor.core.actions import Write
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_cli import main
-from trajectory_editor.episode_cli import _ephemeral_edge_menu
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_materializer import save_live_family
 from trajectory_editor.episode_session import LiveSession, LiveSessionRoster
 from trajectory_editor.episode_store import EpisodeStore
+from trajectory_editor.ephemeral_runtime import ephemeral_edge_menu
 from trajectory_editor.fresh_episode import fresh_root_from
 
 
@@ -105,7 +105,7 @@ def test_ephemeral_help_and_bare_new_expose_the_polished_commands():
             return "Q"
 
     io = PromptIO()
-    action, value = _ephemeral_edge_menu(io, _session())
+    action, value = ephemeral_edge_menu(io, _session())
     assert (action, value) == ("new", "Q")
     assert io.multiline_calls == 1
 
@@ -133,7 +133,7 @@ def test_ephemeral_new_has_one_model_load_and_global_stable_addresses(tmp_path):
         loads.append(object())
         return backend
 
-    from trajectory_editor import episode_cli
+    from trajectory_editor import ephemeral_runtime
 
     class RecordingRoster(LiveSessionRoster):
         def new_root(self, prompt):
@@ -141,9 +141,9 @@ def test_ephemeral_new_has_one_model_load_and_global_stable_addresses(tmp_path):
             new_root_samplers.append(root.sampler)
             return root
 
-    with patch("trajectory_editor.episode_cli._backend", side_effect=load), patch(
+    with patch("trajectory_editor.episode_backend_loader.load_backend", side_effect=load), patch(
         "trajectory_editor.episode_cli.TerminalIO", return_value=io
-    ), patch.object(episode_cli, "LiveSessionRoster", RecordingRoster):
+    ), patch.object(ephemeral_runtime, "LiveSessionRoster", RecordingRoster):
         assert main(
             [
                 "--ephemeral",
@@ -173,7 +173,7 @@ def test_durable_new_is_parentless_and_bare_number_returns_to_prior_episode(tmp_
     backend = DurableFakeBackend()
     io = ScriptedIO(["1", "s temperature=0.7", "new Q", "#1", "q"])
 
-    with patch("trajectory_editor.episode_cli._backend", return_value=backend), patch(
+    with patch("trajectory_editor.episode_backend_loader.load_backend", return_value=backend), patch(
         "trajectory_editor.episode_cli.TerminalIO", return_value=io
     ):
         assert main(

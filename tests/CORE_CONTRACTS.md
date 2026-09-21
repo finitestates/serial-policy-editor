@@ -79,7 +79,7 @@ an optional benchmark or profiler check rather than a behavioral test.
 | M02 | absolute/relative rank navigation resolves the requested candidate | `test_menu_contracts.py` |
 | M03 | menu commands distinguish editorial moves from token actions | `test_menu_contracts.py` |
 | M04 | `l` and `L` expose sticky raw/model/gap logit views | `test_menu_contracts.py` |
-| M05 | setup and edge menus expose only the installed core surface | `test_menu_contracts.py`, `test_runtime_setup.py` |
+| M05 | the CLI exposes only the installed core surface and supports reusable profiles | `test_menu_contracts.py`, `test_controller_profiles.py` |
 
 ## Vector and backend contracts — 5
 

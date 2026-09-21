@@ -8,6 +8,7 @@ from trajectory_editor.core.actions import Accept, EndGeneration, Hold, Phrase, 
 from trajectory_editor.core.results import ReplayExpectation
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine
+from trajectory_editor.episode_replay_source import replay_tape
 from trajectory_editor.episode_runner import EpisodeRunner, LiveSessionRunner, TapeStep
 from trajectory_editor.episode_session import LiveSession
 from trajectory_editor.episode_store import EpisodeStore
@@ -83,7 +84,7 @@ def create_legacy(store, episode, identifier="test"):
 def tape(store, episode_id):
     return [
         TapeStep(action, expectation)
-        for action, expectation in store.replay_tape(episode_id)
+        for action, expectation in replay_tape(store, episode_id)
     ]
 
 
@@ -135,7 +136,7 @@ def test_r02_replay_tape_contains_only_action_and_optional_result(tmp_path):
         store.record_action(source_id, 0, outcome)
         store.record_interaction(source_id, 1, "search", {"query": "word"})
         store.record_interaction(source_id, 1, "rewind-requested", {"boundary": 0})
-        tape = store.replay_tape(source_id)
+        tape = replay_tape(store, source_id)
 
     assert len(tape) == 1
     assert isinstance(tape[0][0], Hold)
@@ -190,7 +191,7 @@ def test_r07_editorial_moves_never_become_replay_steps(tmp_path):
         store.record_interaction(source_id, 1, "fork-requested", {"boundary": 0})
         store.record_interaction(source_id, 1, "rewind-requested", {"boundary": 0})
 
-        tape = store.replay_tape(source_id)
+        tape = replay_tape(store, source_id)
 
     assert len(tape) == 1
     assert tape[0][0] == Accept()

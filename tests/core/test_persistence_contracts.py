@@ -11,6 +11,7 @@ from trajectory_editor.episode_projector import (
     project_lineage,
     project_procedure,
 )
+from trajectory_editor.episode_replay_source import replay_tape
 from trajectory_editor.episode_store import EpisodeStore
 
 
@@ -83,7 +84,7 @@ def test_p02_persisted_tape_excludes_editorial_interactions(tmp_path):
             "SELECT kind, arguments_json, mismatch_json FROM actions WHERE episode_id = ?",
             (identifier,),
         ).fetchall()
-        tape = store.replay_tape(identifier)
+        tape = replay_tape(store, identifier)
 
     assert len(rows) == 1
     assert rows[0]["kind"] == "hold"
@@ -129,9 +130,34 @@ def test_p04_exports_preserve_procedure_and_lineage_semantics(tmp_path):
         plain = project_episode(store, parent_id)
         procedure = project_procedure(store, parent_id)
         lineage = project_lineage(store, child_id)
+        relation_rows = store.episode_relation_rows()
 
     assert plain.text == "P A"
     assert "P       : P" in procedure
     assert "0 : x  A" in procedure
     assert "fork family:" in lineage
     assert "child" in lineage
+    assert [
+        {key: value for key, value in row.items() if key != "created_at"}
+        for row in relation_rows
+    ] == [
+        {
+            "episode_id": "parent",
+            "parent_episode_id": None,
+            "fork_boundary": None,
+            "status": "open",
+            "terminal_reason": None,
+            "metadata_json": "{}",
+            "visible_token_count": 1,
+        },
+        {
+            "episode_id": "child",
+            "parent_episode_id": "parent",
+            "fork_boundary": 1,
+            "status": "running",
+            "terminal_reason": None,
+            "metadata_json": '{"mode":"fork"}',
+            "visible_token_count": 0,
+        },
+    ]
+    assert all(isinstance(row["created_at"], str) for row in relation_rows)

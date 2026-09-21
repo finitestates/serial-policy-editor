@@ -9,9 +9,10 @@ from tests.core.runtime_helpers import NoEogBackend
 from tests.fakes import ScriptedIO
 from trajectory_editor.core.actions import Hold, Write
 from trajectory_editor.core.sampler_config import SamplerConfig
-from trajectory_editor.episode_cli import main
+from trajectory_editor.episode_cli import _live_edge_menu, main
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_projector import project_fork_map
+from trajectory_editor.episode_replay_source import final_sampling
 from trajectory_editor.episode_store import EpisodeStore
 
 
@@ -48,7 +49,7 @@ def source_workspace(tmp_path):
 
 def run_cli(path, commands, *flags):
     io = ScriptedIO(commands)
-    with patch("trajectory_editor.episode_cli._backend", return_value=NoEogBackend()), patch(
+    with patch("trajectory_editor.episode_backend_loader.load_backend", return_value=NoEogBackend()), patch(
         "trajectory_editor.episode_cli.TerminalIO", return_value=io
     ):
         status = main(["--workspace", str(path), "--model", "fake", "--plain-ui", *flags])
@@ -127,7 +128,7 @@ def test_cli_replay_until_uses_sampler_state_at_the_selected_boundary(
         "--episode-id", "destination",
     )
     with EpisodeStore(source_workspace) as store:
-        assert store.final_sampling("destination").seed == seed
+        assert final_sampling(store, "destination").seed == seed
 
 
 def test_cli_edge_replay_appends_live_text_without_mutating_the_source(source_workspace):
@@ -186,7 +187,7 @@ def test_cli_prompt_replay_uses_the_destination_tokenizer_and_remains_rewindable
         )
 
     backend = NoEogBackend()
-    with patch("trajectory_editor.episode_cli._backend", return_value=backend), patch(
+    with patch("trajectory_editor.episode_backend_loader.load_backend", return_value=backend), patch(
         "trajectory_editor.episode_cli.TerminalIO",
         return_value=ScriptedIO(["t hello", "q", "spr #1", "rewind 2", "quit"]),
     ):
@@ -200,3 +201,22 @@ def test_cli_prompt_replay_uses_the_destination_tokenizer_and_remains_rewindable
         assert destination["initial_token_ids"] == [7]
         assert destination["visible_text"] == " hello A"
         assert store.actions("destination")[1]["arguments"]["mode"] == "exact"
+
+
+def test_durable_edge_bare_sampler_opens_the_existing_override_prompt(source_workspace):
+    with EpisodeStore(source_workspace) as store:
+        engine = EpisodeEngine(
+            NoEogBackend(),
+            sampling=SamplerConfig(temperature=0.0),
+            initial_text="P",
+            initial_token_ids=[7],
+        )
+        action, value = _live_edge_menu(
+            ScriptedIO(["s", "temperature=0.7", "q"]),
+            store,
+            "source",
+            engine,
+        )
+
+    assert (action, value) == ("quit", None)
+    assert engine.sampling.temperature == 0.7

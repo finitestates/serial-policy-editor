@@ -16,6 +16,7 @@ from typing import Any
 from .core.actions import action_from_dict
 from .core.errors import EditorError
 from .core.results import ReplayExpectation
+from .episode_replay_source import replay_procedure
 from .episode_runner import ReplayPlan, TapeStep
 from .surviving_procedure import ProcedureRecord, project_surviving_procedure
 
@@ -239,7 +240,7 @@ def export_teacher_tape(
     return _write_teacher_tape(
         path,
         envelope,
-        store.replay_procedure(episode_id),
+        replay_procedure(store, episode_id),
         envelope_path=envelope_path,
     )
 

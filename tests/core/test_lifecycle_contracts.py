@@ -16,6 +16,7 @@ from trajectory_editor.episode_lifecycle import (
     _rewind_episode,
 )
 from trajectory_editor.episode_engine import EpisodeEngine
+from trajectory_editor.episode_replay_source import replay_tape
 from trajectory_editor.episode_projector import project_fork_map, project_lineage
 from trajectory_editor.episode_store import EpisodeStore
 
@@ -98,7 +99,7 @@ def test_l03_rewind_can_cut_inside_a_checked_multitoken_write(tmp_path):
         store.update_episode(identifier, visible_text=episode.text, max_tokens=None)
 
         _rewind_episode(store, identifier, episode, 1)
-        action, expectation = store.replay_tape(identifier)[0]
+        action, expectation = replay_tape(store, identifier)[0]
 
     assert action == Write(" C", mode="exact")
     assert expectation.token_ids == (3,)

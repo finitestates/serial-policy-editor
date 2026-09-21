@@ -32,9 +32,9 @@ class BudgetCommand:
 
 @dataclass(frozen=True, slots=True)
 class SamplerCommand:
-    """Pass raw sampler override text to the sampler-aware caller."""
+    """Pass an optional raw sampler override to the sampler-aware caller."""
 
-    text: str
+    text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,9 +232,7 @@ def parse_edge_command(raw: str) -> EdgeCommand:
 
     if command in {"s", "sampler"}:
         payload = text[len(parts[0]) :].strip()
-        if not payload:
-            _parse_error("use sampler key=value")
-        return SamplerCommand(payload)
+        return SamplerCommand(payload or None)
 
     if command == "rewind":
         _require_arity(parts, 2, usage="rewind N")
