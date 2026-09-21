@@ -5,7 +5,7 @@ from dataclasses import replace
 from tests.fakes import ConformingFakeBackend
 from trajectory_editor.core.actions import Accept, Hold, Write
 from trajectory_editor.core.sampler_config import SamplerConfig
-from trajectory_editor.episode_projector import (
+from trajectory_editor.projector import (
     project_episode,
     project_fork_map,
     project_lineage,

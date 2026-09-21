@@ -94,8 +94,7 @@ The live token ledger and branch cursor now begin their migration in
 `trajectory_editor.core.trajectory.TrajectoryState`; `EpisodeEngine` forwards
 its historical state attributes to this object for compatibility.
 `episode_actions` and `episode_backend` remain compatibility import paths.
-`projector` is the canonical export name while `episode_projector` remains
-available during the transition. The steering/activation-vector command is
-supplied by the optional vectors build.
+`projector` owns the typed episode projection implementation. The
+steering/activation-vector command is supplied by the optional vectors build.
 The package root and core `EpisodeRunner` do not eagerly import archived
 learning, token-preference, comparison, or experimental vector extensions.

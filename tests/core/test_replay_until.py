@@ -11,7 +11,7 @@ from trajectory_editor.core.actions import Hold, Write
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_cli import _live_edge_menu, main
 from trajectory_editor.episode_engine import EpisodeEngine
-from trajectory_editor.episode_projector import project_fork_map
+from trajectory_editor.projector import project_fork_map
 from trajectory_editor.episode_replay_source import final_sampling
 from trajectory_editor.episode_store import EpisodeStore
 
