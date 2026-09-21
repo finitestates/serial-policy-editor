@@ -163,8 +163,6 @@ class RunTarget(Protocol):
 
     def record_control_flow(self) -> None: ...
 
-    def record_failure(self) -> None: ...
-
     def complete(self, had_tape: bool) -> None: ...
 
 
@@ -279,10 +277,6 @@ def run_plan(
     ):
         target.record_control_flow()
         raise
-    except BaseException:
-        target.record_failure()
-        raise
-
     target.complete(had_tape)
     return RunResult(
         target.identifier,

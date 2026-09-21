@@ -483,7 +483,7 @@ class InteractivePolicy:
             else:
                 raw = self.io.read("\nTeacher action> ")
             if raw is None:
-                raise EditorError("teacher input closed; use finish explicitly")
+                raise EdgeRequested()
             if (
                 self.seamless
                 and review_boundary is not None

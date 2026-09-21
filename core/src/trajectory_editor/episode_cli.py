@@ -2,7 +2,7 @@
 
 A live episode alternates between the ordinary teacher loop and live edges.
 Token budgets, replay exhaustion, and replay divergence yield at a live edge;
-only EOG or explicit ``finish`` seals the episode.
+only EOG or explicit ``end`` seals the episode.
 """
 
 from __future__ import annotations
@@ -623,18 +623,20 @@ def _seal(
     episode_id: str,
     engine: EpisodeEngine,
     *,
-    reason: str | None = None,
+    reason: str,
     output: Path | None = None,
 ) -> None:
-    if reason is not None and not engine.ended:
-        engine.terminate(reason)
+    engine.terminate(reason)
     store.finish_episode(
         episode_id,
         visible_text=engine.backend.render(engine.visible_token_ids),
         terminal_token_id=engine.terminal_token_id,
         terminal_reason=engine.terminal_reason,
-        status="completed",
     )
+    _print_final_text(engine, output=output)
+
+
+def _print_final_text(engine: EpisodeEngine, *, output: Path | None = None) -> None:
     text = engine.text
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -1045,7 +1047,7 @@ def main(
                     action, value = "fork", request.boundary
                 else:
                     if engine.ended:
-                        _seal(store, episode_id, engine, output=args.output)
+                        _print_final_text(engine, output=args.output)
                         return 0
                     if result.outcomes and result.outcomes[-1].stop_reason == "replay-eog":
                         io.write("Replay encountered EOG; tape stopped, live edge reached.")
@@ -1272,7 +1274,7 @@ def main(
                     # prefix, sampler stream, and remaining budget do not move.
                     continue
                 raise AssertionError(f"unhandled live-edge action {action!r}")
-    except (EditorError, OSError, RuntimeError) as exc:
+    except (EditorError, OSError, RuntimeError, EOFError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

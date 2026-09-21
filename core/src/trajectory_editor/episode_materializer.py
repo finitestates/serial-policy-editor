@@ -86,18 +86,18 @@ def materialize_live_branch(
         store.record_action(identifier, ordinal, outcome)
     visible_text = session.engine.backend.render(list(state.visible_token_ids))
     final = state.control_points[-1]
-    store.update_episode(
-        identifier,
-        visible_text=visible_text,
-        max_tokens=final.max_tokens,
-        status="completed" if state.terminal_reason is not None else "open",
-    )
     if state.terminal_reason is not None:
         store.finish_episode(
             identifier,
             visible_text=visible_text,
             terminal_token_id=state.terminal_token_id,
             terminal_reason=state.terminal_reason,
+        )
+    else:
+        store.update_episode(
+            identifier,
+            visible_text=visible_text,
+            max_tokens=final.max_tokens,
         )
     return identifier
 

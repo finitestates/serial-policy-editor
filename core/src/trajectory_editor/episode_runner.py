@@ -69,9 +69,6 @@ class _RunnerTarget:
     def record_control_flow(self) -> None:
         return None
 
-    def record_failure(self) -> None:
-        return None
-
     def complete(self, had_tape: bool) -> None:
         del had_tape
 
@@ -202,15 +199,6 @@ class EpisodeRunner(_RunnerTarget):
             status="open",
         )
 
-    def record_failure(self) -> None:
-        self.store.finish_episode(
-            self.episode_id,
-            visible_text=self.engine.backend.render(self.engine.visible_token_ids),
-            terminal_token_id=self.engine.terminal_token_id,
-            terminal_reason=self.engine.terminal_reason or "error",
-            status="failed",
-        )
-
     def complete(self, had_tape: bool) -> None:
         visible_text = self.engine.backend.render(self.engine.visible_token_ids)
         if self.engine.ended:
@@ -219,7 +207,6 @@ class EpisodeRunner(_RunnerTarget):
                 visible_text=visible_text,
                 terminal_token_id=self.engine.terminal_token_id,
                 terminal_reason=self.engine.terminal_reason,
-                status="completed",
             )
             return
         self.store.update_episode(

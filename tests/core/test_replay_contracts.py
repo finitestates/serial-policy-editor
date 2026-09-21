@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import numpy as np
 import pytest
 
-from tests.fakes import ConformingFakeBackend
+from tests.fakes import ConformingFakeBackend, ScriptedIO
 from trajectory_editor.core.actions import Accept, EndGeneration, Hold, Phrase, Write
 from trajectory_editor.core.results import ReplayExpectation
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine
+from trajectory_editor.episode_cli import main
+from trajectory_editor.episode_lifecycle import _restore_engine
 from trajectory_editor.episode_replay_source import replay_tape
 from trajectory_editor.episode_runner import (
     EpisodeRunner,
@@ -18,6 +22,8 @@ from trajectory_editor.episode_runner import (
 )
 from trajectory_editor.episode_session import LiveSession
 from trajectory_editor.episode_store import EpisodeStore
+from trajectory_editor.episode_ui import InteractivePolicy
+from trajectory_editor.run_loop import EdgeRequested
 from tests.core.test_lifecycle_contracts import PhraseBackend
 
 
@@ -114,6 +120,180 @@ def test_r00_ephemeral_runner_uses_the_same_execution_path_without_a_store():
     assert result.replayed_actions == 0
     assert len(result.outcomes) == 1
     assert session.history_visible_token_ids == (1,)
+
+
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, RuntimeError, EOFError])
+def test_aborted_run_leaves_recorded_durable_actions_resumable(tmp_path, error_type):
+    class AbortAfterOneAction:
+        def __init__(self):
+            self.choices = 0
+
+        def choose(self, *args):
+            self.choices += 1
+            if self.choices == 2:
+                raise error_type("run stopped")
+            return Hold(1)
+
+    with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
+        first = runtime([1, 3, 5])
+        episode_id = create(store, "interrupted", first)
+        with pytest.raises(error_type):
+            EpisodeRunner(first, store, episode_id).run(
+                live_policy=AbortAfterOneAction()
+            )
+
+        episode = store.get_episode(episode_id)
+        assert episode["status"] == "running"
+        assert episode["finished_at"] is None
+        assert [token["token_id"] for token in store.tokens(episode_id)] == [1]
+
+        restored = _restore_engine(
+            store,
+            episode_id,
+            SequenceBackend([1, 3, 5]),
+            max_tokens=None,
+            sampling_override=None,
+        )
+        assert restored.visible_token_ids == [1]
+
+        class ContinueOneAction:
+            def choose(self, *args):
+                return Hold(1)
+
+        EpisodeRunner(restored, store, episode_id).run(
+            live_policy=ContinueOneAction(), max_live_actions=1
+        )
+        assert restored.visible_token_ids == [1, 3]
+        assert len(store.actions(episode_id)) == 2
+
+
+def test_mid_action_error_resumes_from_last_recorded_boundary(tmp_path):
+    class FailingBackend(SequenceBackend):
+        def last_logits(self):
+            if len(self.tokens) > 1:
+                raise RuntimeError("model stopped mid-action")
+            return super().last_logits()
+
+    class HoldTwo:
+        def choose(self, *args):
+            return Hold(2)
+
+    with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
+        episode = EpisodeEngine(
+            FailingBackend([1, 3, 5]),
+            initial_token_ids=[7],
+            sampling=SamplerConfig(temperature=0.0),
+        )
+        episode_id = create(store, "partial", episode)
+        with pytest.raises(RuntimeError, match="mid-action"):
+            EpisodeRunner(episode, store, episode_id).run(live_policy=HoldTwo())
+
+        assert episode.visible_token_ids == [1]
+        assert store.actions(episode_id) == []
+        assert store.tokens(episode_id) == []
+        assert store.get_episode(episode_id)["status"] == "running"
+
+        restored = _restore_engine(
+            store,
+            episode_id,
+            SequenceBackend([1, 3, 5]),
+            max_tokens=None,
+            sampling_override=None,
+        )
+        assert restored.visible_token_ids == []
+
+
+def test_teacher_input_eof_yields_to_an_unsealed_edge(tmp_path):
+    with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
+        episode = runtime([1, 3, 5])
+        episode_id = create(store, "input-eof", episode)
+
+        with pytest.raises(EdgeRequested):
+            EpisodeRunner(episode, store, episode_id).run(
+                live_policy=InteractivePolicy(io=ScriptedIO([None]))
+            )
+
+        saved = store.get_episode(episode_id)
+        assert saved["status"] == "open"
+        assert saved["finished_at"] is None
+        assert saved["terminal_reason"] is None
+
+
+@pytest.mark.parametrize(
+    "action, reason",
+    [(Accept(), "teacher-eog"), (Hold(1), "model-eog")],
+)
+def test_genuine_eog_completes_and_seals_durable_episode(tmp_path, action, reason):
+    class ChooseAction:
+        def choose(self, *args):
+            return action
+
+    with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
+        episode = runtime([0])
+        episode_id = create(store, "eog", episode)
+        EpisodeRunner(episode, store, episode_id).run(live_policy=ChooseAction())
+
+        saved = store.get_episode(episode_id)
+        assert saved["status"] == "completed"
+        assert saved["finished_at"] is not None
+        assert saved["terminal_reason"] == reason
+
+
+@pytest.mark.parametrize(
+    "commands, sequence, reason",
+    [(["q", "end"], [1], "menu-end"), (["h 1"], [0], "model-eog")],
+)
+def test_cli_completes_durable_episode_once(tmp_path, commands, sequence, reason):
+    finishes = []
+
+    class CountingStore(EpisodeStore):
+        def finish_episode(self, *args, **kwargs):
+            finishes.append(args[0])
+            return super().finish_episode(*args, **kwargs)
+
+    workspace = tmp_path / "episodes.sqlite3"
+    io = ScriptedIO(commands)
+    with patch("trajectory_editor.episode_cli.EpisodeStore", CountingStore), patch(
+        "trajectory_editor.episode_backend_loader.load_backend",
+        side_effect=lambda _args: SequenceBackend(sequence),
+    ), patch("trajectory_editor.episode_cli.TerminalIO", return_value=io):
+        assert main([
+            "--workspace", str(workspace), "--model", "fake", "--plain-ui",
+            "--new-prompt", "P", "--episode-id", "terminal",
+        ]) == 0
+
+    with EpisodeStore(workspace) as store:
+        saved = store.get_episode("terminal")
+        assert saved["status"] == "completed"
+        assert saved["terminal_reason"] == reason
+    assert finishes == ["terminal"]
+
+
+@pytest.mark.parametrize(
+    "raises_eof, expected_exit, expected_status",
+    [(False, 0, "open"), (True, 2, "running")],
+)
+def test_cli_input_eof_never_seals(tmp_path, raises_eof, expected_exit, expected_status):
+    class ClosedInput(ScriptedIO):
+        def read(self, prompt):
+            raise EOFError("terminal input closed")
+
+    workspace = tmp_path / "episodes.sqlite3"
+    io = ClosedInput([]) if raises_eof else ScriptedIO([None, None])
+    with patch(
+        "trajectory_editor.episode_backend_loader.load_backend",
+        side_effect=lambda _args: SequenceBackend([1]),
+    ), patch("trajectory_editor.episode_cli.TerminalIO", return_value=io):
+        assert main([
+            "--workspace", str(workspace), "--model", "fake", "--plain-ui",
+            "--new-prompt", "P", "--episode-id", "input-eof",
+        ]) == expected_exit
+
+    with EpisodeStore(workspace) as store:
+        saved = store.get_episode("input-eof")
+        assert saved["status"] == expected_status
+        assert saved["finished_at"] is None
+        assert saved["terminal_reason"] is None
 
 
 def test_ephemeral_replay_plan_uses_source_sampling_on_an_inactive_branch():

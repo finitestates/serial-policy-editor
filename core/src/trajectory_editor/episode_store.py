@@ -358,18 +358,21 @@ class EpisodeStore:
         status: str = "open",
     ) -> None:
         """Persist the current live edge without sealing the episode."""
+        if status not in {"open", "checkpoint", "replay-edge"}:
+            raise EditorError(f"invalid unsealed episode status {status!r}")
         with self.transaction() as db:
             cursor = db.execute(
                 """
                 UPDATE episodes
                 SET status = ?, visible_text = ?, max_tokens = ?,
                     terminal_token_id = NULL, terminal_reason = NULL, finished_at = NULL
-                WHERE episode_id = ?
+                WHERE episode_id = ? AND status NOT IN ('completed', 'failed')
                 """,
                 (status, visible_text, max_tokens or 0, episode_id),
             )
             if cursor.rowcount != 1:
-                raise EditorError(f"unknown episode {episode_id!r}")
+                self.get_episode(episode_id)
+                raise EditorError(f"episode {episode_id!r} is sealed")
 
     def rewind_to(
         self,
@@ -759,19 +762,20 @@ class EpisodeStore:
         *,
         visible_text: str,
         terminal_token_id: int | None,
-        terminal_reason: str | None,
-        status: str = "completed",
+        terminal_reason: str,
     ) -> None:
+        """Record a genuine terminal event and seal an unsealed episode."""
+        if not isinstance(terminal_reason, str) or not terminal_reason:
+            raise EditorError("completed episode requires a terminal reason")
         with self.transaction() as db:
             cursor = db.execute(
                 """
                 UPDATE episodes
-                SET status = ?, finished_at = ?, visible_text = ?,
+                SET status = 'completed', finished_at = ?, visible_text = ?,
                     terminal_token_id = ?, terminal_reason = ?
-                WHERE episode_id = ?
+                WHERE episode_id = ? AND status NOT IN ('completed', 'failed')
                 """,
                 (
-                    status,
                     _utc_now(),
                     visible_text,
                     terminal_token_id,
@@ -780,7 +784,8 @@ class EpisodeStore:
                 ),
             )
             if cursor.rowcount != 1:
-                raise EditorError(f"unknown episode {episode_id!r}")
+                self.get_episode(episode_id)
+                raise EditorError(f"episode {episode_id!r} is sealed")
 
     def get_episode(self, episode_id: str) -> dict[str, Any]:
         row = self.connection.execute(
