@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from tests.fakes import ConformingFakeBackend
 from trajectory_editor.core.actions import Accept, Hold, Write
+from trajectory_editor.core.errors import EditorError
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.projector import (
     project_episode,
@@ -161,3 +164,32 @@ def test_p04_exports_preserve_procedure_and_lineage_semantics(tmp_path):
         },
     ]
     assert all(isinstance(row["created_at"], str) for row in relation_rows)
+
+
+@pytest.mark.parametrize("failure", ["invalid allowance", "budget insert"])
+def test_p05_failed_initial_budget_rolls_back_episode_creation(tmp_path, failure):
+    path = tmp_path / "episodes.sqlite3"
+    episode = runtime()
+    with EpisodeStore(path) as store:
+        if failure == "budget insert":
+            store.connection.execute("""
+                CREATE TRIGGER reject_initial_budget BEFORE INSERT ON budget_segments
+                BEGIN SELECT RAISE(ABORT, 'budget insert failed'); END
+            """)
+        error = ("invalid budget allowance or checkpoint" if failure == "invalid allowance"
+                 else "budget insert failed")
+        with pytest.raises(EditorError, match=error):
+            store.create_episode(
+                episode_id="failed",
+                initial_text=episode.initial_text,
+                initial_token_ids=episode.initial_token_ids,
+                sampling=episode.sampling,
+                stream_fingerprint=episode.stream_fingerprint,
+                coordinate_offset=episode.coordinate_offset,
+                max_tokens=0 if failure == "invalid allowance" else 5,
+                backend=episode.backend.provenance(),
+            )
+
+    with EpisodeStore(path) as store:
+        for table in ("episodes", "episode_names", "sampler_segments", "budget_segments"):
+            assert store.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0

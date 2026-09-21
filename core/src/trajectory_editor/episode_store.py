@@ -264,7 +264,7 @@ class EpisodeStore:
                 raise EditorError(f"episode {identifier!r} already exists") from exc
             db.execute("INSERT INTO episode_names(episode_id, title, visited_at) VALUES (?, ?, ?)",
                        (identifier, " ".join(initial_text.split())[:60] or "Untitled", _utc_now()))
-        self.record_budget(identifier, 0, max_tokens, checkpoint_boundary)
+            self._record_budget(db, identifier, 0, max_tokens, checkpoint_boundary)
         return identifier
 
     def resolve_id(self, value: str) -> str:
@@ -332,18 +332,22 @@ class EpisodeStore:
     def record_budget(self, episode_id: str, boundary: int, max_tokens: int | None,
                       checkpoint_boundary: int | None) -> None:
         """Record edits and renewals, not ordinary consumption of an allowance."""
+        with self.transaction() as db:
+            self._record_budget(db, episode_id, boundary, max_tokens, checkpoint_boundary)
+
+    def _record_budget(self, db: sqlite3.Connection, episode_id: str, boundary: int,
+                       max_tokens: int | None, checkpoint_boundary: int | None) -> None:
         if (max_tokens is None) != (checkpoint_boundary is None):
             raise EditorError("budget allowance and checkpoint must both be set or unlimited")
         if max_tokens is not None and (type(max_tokens) is not int or max_tokens <= 0
                 or type(checkpoint_boundary) is not int or checkpoint_boundary < boundary):
             raise EditorError("invalid budget allowance or checkpoint")
         state = {"max_tokens": max_tokens, "checkpoint_boundary": checkpoint_boundary}
-        with self.transaction() as db:
-            if self.budget_at(episode_id, boundary) != state:
-                db.execute("INSERT OR REPLACE INTO budget_segments VALUES (?, ?, ?, ?)",
-                           (episode_id, boundary, max_tokens, checkpoint_boundary))
-            db.execute("UPDATE episodes SET max_tokens = ?, checkpoint_boundary = ? WHERE episode_id = ?",
-                       (max_tokens or 0, checkpoint_boundary, episode_id))
+        if self.budget_at(episode_id, boundary) != state:
+            db.execute("INSERT OR REPLACE INTO budget_segments VALUES (?, ?, ?, ?)",
+                       (episode_id, boundary, max_tokens, checkpoint_boundary))
+        db.execute("UPDATE episodes SET max_tokens = ?, checkpoint_boundary = ? WHERE episode_id = ?",
+                   (max_tokens or 0, checkpoint_boundary, episode_id))
 
     def update_episode(
         self,
