@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.0 — 2026-09-21
+
+- Add teacher replay plans and storage-independent replay recipes, including
+  explicit source boundaries and destination placement semantics.
+- Share live and durable execution paths while supporting ephemeral runs and
+  representation-independent surviving-procedure export.
+- Make episode history, controls, lineage, and EDGE command parsing explicit
+  semantic seams, with persistence remaining an adapter concern.
+- Refactor episode runtime setup, storage boundaries, and root-relative episode
+  semantics while preserving live/durable behavior parity.
+
 ## 0.5.0 — 2026-09-18
 
 - Establish `core/` as the standalone runtime package with replayable actions,
