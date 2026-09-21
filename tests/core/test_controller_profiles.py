@@ -1,140 +1,151 @@
 from pathlib import Path
 
 import pytest
-import yaml
 
 from trajectory_editor.core.errors import EditorError
-from trajectory_editor.runtime_setup import (
-    RuntimePlan,
-    apply_controller_profile,
-    apply_setup_command,
+from trajectory_editor.controller_profiles import (
     controller_profile_fingerprint,
-    controller_profile_json,
     controller_profile_yaml,
+    explicit_option_dests,
     load_controller_profile,
-    save_controller_profile,
+    profile_arguments,
 )
+from trajectory_editor.episode_cli import build_parser
 
 
-def _core_plan(tmp_path: Path) -> RuntimePlan:
-    return RuntimePlan(
-        workspace=tmp_path / "episodes.sqlite3",
-        model=tmp_path / "model.gguf",
-        backend="llama.cpp",
-        max_tokens=32,
-        activation_vector=tmp_path / "style.json",
-        temperature=0.72,
-        top_k=23,
-        cfg_scale=1.2,
-        explicit_options={
-            "workspace", "model", "backend", "max_tokens", "activation_vector",
-            "temperature", "top_k", "cfg_scale",
-        },
-    )
-
-
-def test_core_profile_yaml_round_trips_sampler_and_vector_intent(tmp_path):
-    plan = _core_plan(tmp_path)
-    rendered = controller_profile_yaml(plan)
-    document = yaml.safe_load(rendered)
-
-    assert document["format"] == "spe-controller-profile-v1"
-    assert document["controllers"]["sampler"]["temperature"] == 0.72
-    assert document["controllers"]["steering"]["vector"] == str(
-        tmp_path / "style.json"
-    )
-    assert "workspace" not in rendered
-    assert "model" not in rendered
-    assert document["fingerprint"] == controller_profile_fingerprint(plan)
-
+def test_profile_values_are_cli_typed_using_visible_option_names(tmp_path):
+    parser = build_parser(include_vector=False)
     path = tmp_path / "profile.yaml"
-    assert save_controller_profile(plan, path) == document["fingerprint"]
-    payload, fingerprint = load_controller_profile(path)
-    restored = RuntimePlan()
-    assert apply_controller_profile(restored, payload) == fingerprint
-    assert controller_profile_json(restored) == controller_profile_json(plan)
-
-
-def test_core_profile_load_does_not_replace_launch_context(tmp_path):
-    source = _core_plan(tmp_path)
-    path = tmp_path / "profile.yaml"
-    save_controller_profile(source, path)
-    target = RuntimePlan(
-        replay="#2",
-        workspace=tmp_path / "other.sqlite3",
-        model=tmp_path / "other.gguf",
-        backend="transformers",
-        temperature=0.3,
-        explicit_options={"replay", "workspace", "model", "backend", "temperature"},
-    )
-
-    assert apply_setup_command(f"profile load {path}", target) == "profile-loaded"
-    assert target.replay == "#2"
-    assert target.workspace == tmp_path / "other.sqlite3"
-    assert target.model == tmp_path / "other.gguf"
-    assert target.backend == "transformers"
-    assert target.temperature == source.temperature
-    assert target.top_k == source.top_k
-
-
-def test_core_profile_rejects_unknown_malformed_and_tampered_documents(tmp_path):
-    invalid_documents = (
-        (
-            "format: spe-controller-profile-v1\ncontrollers: {}\nextra: true\n",
-            "unknown top-level",
-        ),
-        (
-            "format: spe-controller-profile-v1\ncontrollers:\n  sampler:\n    mystery: 1\n",
-            "unknown fields",
-        ),
-        (
-            "format: spe-controller-profile-v1\ncontrollers:\n  sampler:\n    top_k: many\n",
-            "must be an integer",
-        ),
-    )
-    for index, (body, message) in enumerate(invalid_documents):
-        path = tmp_path / f"bad-{index}.yaml"
-        path.write_text(body, encoding="utf-8")
-        with pytest.raises(EditorError, match=message):
-            load_controller_profile(path)
-
-    duplicate = tmp_path / "duplicate.yaml"
-    duplicate.write_text(
-        "format: spe-controller-profile-v1\n"
-        "controllers: {}\ncontrollers: {}\n",
+    path.write_text(
+        "model: /tmp/model.gguf\n"
+        "temperature: 0.80\n"
+        "top-k: 24\n"
+        "new-prompt: A saved prompt\n",
         encoding="utf-8",
     )
-    with pytest.raises(EditorError, match="duplicate key"):
-        load_controller_profile(duplicate)
 
-    tampered = tmp_path / "tampered.yaml"
-    tampered.write_text(
-        controller_profile_yaml(RuntimePlan(temperature=0.8)).replace("0.8", "0.7"),
+    values, fingerprint = load_controller_profile(path, parser)
+
+    assert values == {
+        "model": Path("/tmp/model.gguf"),
+        "temperature": 0.8,
+        "top-k": 24,
+        "new-prompt": "A saved prompt",
+    }
+    assert fingerprint == controller_profile_fingerprint(values)
+
+
+def test_visible_negated_flags_are_presence_booleans(tmp_path):
+    parser = build_parser(include_vector=False)
+    path = tmp_path / "profile.yaml"
+    path.write_text(
+        "ephemeral: true\n"
+        "no-flash-attn: true\n"
+        "no-policy-view: true\n"
+        "temperature: 0.8\n",
+        encoding="utf-8",
+    )
+
+    values, _ = load_controller_profile(path, parser)
+    tokens, applied = profile_arguments(parser, values)
+    args = parser.parse_args(tokens)
+
+    assert values["ephemeral"] is True
+    assert values["no-flash-attn"] is True
+    assert values["no-policy-view"] is True
+    assert args.ephemeral is True
+    assert args.no_flash_attn is True
+    assert args.show_policy_rank is False
+    assert args.temperature == 0.8
+    assert {"ephemeral", "no_flash_attn", "show_policy_rank"} <= applied
+
+
+def test_false_profile_flags_are_omitted(tmp_path):
+    parser = build_parser(include_vector=False)
+    path = tmp_path / "profile.yaml"
+    path.write_text(
+        "no-flash-attn: false\n"
+        "no-policy-view: false\n",
+        encoding="utf-8",
+    )
+
+    values, _ = load_controller_profile(path, parser)
+    tokens, applied = profile_arguments(parser, values)
+    args = parser.parse_args(tokens)
+
+    assert "--no-flash-attn" not in tokens
+    assert "--no-policy-view" not in tokens
+    assert args.no_flash_attn is False
+    assert args.show_policy_rank is None
+    assert "no_flash_attn" not in applied
+    assert "show_policy_rank" not in applied
+
+
+def test_cli_values_override_profile_values_even_in_mutually_exclusive_groups(tmp_path):
+    parser = build_parser(include_vector=False)
+    path = tmp_path / "profile.yaml"
+    path.write_text(
+        "model: profile.gguf\n"
+        "temperature: 0.80\n"
+        "new-prompt: from profile\n"
+        "seed: 11\n",
+        encoding="utf-8",
+    )
+    values, _ = load_controller_profile(path, parser)
+    argv = ["--profile", str(path), "--model", "cli.gguf", "--replay", "#2", "--random-seed"]
+    explicit = explicit_option_dests(parser, argv)
+    profile_tokens, applied = profile_arguments(parser, values, overridden=explicit)
+    args = parser.parse_args([*profile_tokens, *argv])
+
+    assert args.model == Path("cli.gguf")
+    assert args.temperature == 0.8
+    assert args.new_prompt is None
+    assert args.replay == "#2"
+    assert args.seed is None
+    assert args.random_seed is True
+    assert {"model", "replay", "random_seed"}.isdisjoint(applied)
+    assert "temperature" in applied
+
+
+def test_profile_fingerprint_can_be_embedded_and_is_checked(tmp_path):
+    parser = build_parser(include_vector=False)
+    values = {"model": Path("model.gguf"), "temperature": 0.8}
+    path = tmp_path / "profile.yaml"
+    path.write_text(controller_profile_yaml(values), encoding="utf-8")
+
+    loaded, fingerprint = load_controller_profile(path, parser)
+
+    assert loaded == values
+    assert fingerprint == controller_profile_fingerprint(values)
+
+    path.write_text(
+        controller_profile_yaml(values).replace("temperature: 0.8", "temperature: 0.7"),
         encoding="utf-8",
     )
     with pytest.raises(EditorError, match="fingerprint mismatch"):
-        load_controller_profile(tampered)
+        load_controller_profile(path, parser)
 
 
-def test_core_profile_load_is_transactional_and_save_rejects_directories(tmp_path):
-    plan = _core_plan(tmp_path)
-    before = (plan.workspace, plan.model, plan.temperature, plan.top_k)
-    bad = tmp_path / "bad.yaml"
-    bad.write_text(
-        "format: spe-controller-profile-v1\n"
-        "controllers:\n"
-        "  sampler:\n"
-        "    top_k: 0\n",
-        encoding="utf-8",
-    )
+@pytest.mark.parametrize(
+    "body, message",
+    [
+        ("unknown: true\n", "unknown option"),
+        ("temp: 0.8\n", "unknown option"),
+        ("top-k: many\n", "invalid controller profile CLI value"),
+        ("top-k: 0\n", "top_k must be at least 1"),
+        ("format: other\nmodel: model.gguf\n", "unsupported controller profile format"),
+    ],
+)
+def test_profile_validation_rejects_unknown_or_malformed_values(tmp_path, body, message):
+    path = tmp_path / "bad.yaml"
+    path.write_text(body, encoding="utf-8")
+    with pytest.raises(EditorError, match=message):
+        load_controller_profile(path, build_parser(include_vector=False))
 
-    with pytest.raises(EditorError, match="must be positive"):
-        apply_setup_command(f"profile load {bad}", plan)
-    assert (plan.workspace, plan.model, plan.temperature, plan.top_k) == before
 
-    with pytest.raises(EditorError, match="cannot read"):
-        apply_setup_command(f"profile load {tmp_path / 'missing.yaml'}", plan)
-    assert (plan.workspace, plan.model, plan.temperature, plan.top_k) == before
+def test_profile_validation_rejects_duplicate_yaml_keys(tmp_path):
+    path = tmp_path / "duplicate.yaml"
+    path.write_text("model: one\nmodel: two\n", encoding="utf-8")
 
-    with pytest.raises(EditorError, match="is a directory"):
-        save_controller_profile(RuntimePlan(), tmp_path)
+    with pytest.raises(EditorError, match="duplicate key"):
+        load_controller_profile(path, build_parser(include_vector=False))

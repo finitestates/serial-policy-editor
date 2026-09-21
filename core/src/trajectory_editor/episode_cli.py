@@ -63,7 +63,11 @@ from .episode_store import EpisodeStore
 from .episode_session import LiveSession, LiveSessionRoster
 from .episode_materializer import save_live_branch, save_live_family
 from .fresh_episode import fresh_root_from
-from .runtime_setup import RuntimePlan, effective_plan_summary, run_runtime_setup_menu
+from .controller_profiles import (
+    explicit_option_dests,
+    load_controller_profile,
+    profile_arguments,
+)
 from .tui import TerminalIO
 from .ui_themes import LIVE_THEME_NAMES
 from .version import VERSION
@@ -189,6 +193,12 @@ def build_parser(
     parser.add_argument("--backend", choices=BACKEND_NAMES, default=None)
     parser.add_argument("--model", type=Path)
     parser.add_argument(
+        "--profile",
+        type=Path,
+        metavar="FILE",
+        help="load reusable CLI values from a YAML controller profile",
+    )
+    parser.add_argument(
         "--max-tokens",
         type=int,
         default=None,
@@ -211,11 +221,6 @@ def build_parser(
     )
     parser.add_argument("--context-chars", type=int, default=0, help="Context character limit (0 keeps all context)")
     parser.add_argument("--plain-ui", action="store_true")
-    parser.add_argument(
-        "--setup-menu",
-        action="store_true",
-        help="open the pre-runtime setup menu before creating or restoring an episode",
-    )
     parser.add_argument(
         "--cache",
         choices=("auto", "off"),
@@ -518,8 +523,6 @@ def _run_ephemeral(
         activation_artifact = SteeringVectorArtifact.from_path(args.activation_vector)
         activation_artifact.validate_against_backend(backend, provenance)
         sampling = apply_activation_artifact(sampling, activation_artifact, args)
-    if not _confirm_runtime_plan(io, args, backend, provenance, sampling, activation_artifact=activation_artifact):
-        return 0
     guidance_backend = None
     if sampling.cfg_unconditional_prompt is not None:
         io.write("Loading second model copy for CFG prefix guidance...")
@@ -689,39 +692,6 @@ def _sampler_summary(config: SamplerConfig) -> str:
             f" steering_digest={config.activation_vector_digest[:12]}"
         )
     return summary
-
-
-def _confirm_runtime_plan(
-    io: TerminalIO,
-    args: argparse.Namespace,
-    backend: Any,
-    provenance: dict[str, Any],
-    sampling: SamplerConfig,
-    *,
-    source_sampling: SamplerConfig | None = None,
-    activation_artifact: SteeringVectorArtifact | None = None,
-) -> bool:
-    """Show the resolved plan and require an explicit final go in setup mode."""
-    if not getattr(args, "_setup_menu_active", False):
-        return True
-    validated: list[str] = []
-    if activation_artifact is not None:
-        validated.append("steering vector: model and width matched")
-    plan = RuntimePlan.from_args(args)
-    io.page(
-        effective_plan_summary(
-            plan,
-            sampling,
-            source_sampling=source_sampling,
-            provenance=provenance,
-            validated_artifacts=tuple(validated),
-        )
-    )
-    answer = io.read("Final go? [go/q] > ")
-    if answer is None or answer.strip().lower() not in {"go", "g", "yes", "y"}:
-        io.write("Launch cancelled.")
-        return False
-    return True
 
 
 def _record_fork_edge_state(
@@ -984,43 +954,6 @@ def _print_list(store: EpisodeStore) -> None:
     print(store.workspace_list(include_finished=True))
 
 
-class _SwitchableEpisodeStore:
-    """Keep the setup menu's workspace choice inside one managed context."""
-
-    def __init__(self, path: Path | str) -> None:
-        self._path = Path(path)
-        self._store: EpisodeStore | None = None
-
-    def __enter__(self):
-        self._store = EpisodeStore(self._path)
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        if self._store is not None:
-            self._store.close()
-            self._store = None
-
-    @property
-    def path(self) -> Path:
-        return self._path
-
-    def switch_workspace(self, path: Path | str) -> None:
-        selected = Path(path)
-        if selected == self._path:
-            return
-        replacement = EpisodeStore(selected)
-        previous = self._store
-        self._store = replacement
-        self._path = selected
-        if previous is not None:
-            previous.close()
-
-    def __getattr__(self, name: str):
-        if self._store is None:
-            raise RuntimeError("episode workspace is not open")
-        return getattr(self._store, name)
-
-
 def main(
     argv: list[str] | None = None,
     *,
@@ -1043,12 +976,20 @@ def main(
     )
     arguments = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(arguments)
-    sampling_factory = SamplerConfig.from_record
-    args._explicit_options = {
-        action.dest for action in parser._actions
-        if any(token.split("=", 1)[0] in action.option_strings for token in arguments)
-    }
     try:
+        cli_explicit = explicit_option_dests(parser, arguments)
+        profile_values: dict[str, Any] = {}
+        profile_applied: set[str] = set()
+        if args.profile is not None:
+            profile_values, _ = load_controller_profile(args.profile, parser)
+            profile_tokens, profile_applied = profile_arguments(
+                parser,
+                profile_values,
+                overridden=cli_explicit,
+            )
+            args = parser.parse_args([*profile_tokens, *arguments])
+        args._explicit_options = cli_explicit | profile_applied
+        sampling_factory = SamplerConfig.from_record
         if args.until is not None and args.replay is None:
             raise EditorError("--until requires --replay")
         if args.fixed_config and args.replay is None:
@@ -1094,7 +1035,6 @@ def main(
                 "--export-teacher-plan": args.export_teacher_plan,
                 "--list": args.list_episodes,
                 "--lineage": args.lineage,
-                "--setup-menu": args.setup_menu,
             }
             requested = next((flag for flag, value in incompatible.items() if value), None)
             if requested is not None:
@@ -1104,14 +1044,13 @@ def main(
             if args.random_seed:
                 args.seed = random_seed()
                 print(f"Random seed: {args.seed}", flush=True)
-            args._setup_menu_active = False
             io = TerminalIO(live_choices=not args.plain_ui, live_theme=args.theme)
             open_live_session = getattr(io, "live_session", None)
             if callable(open_live_session):
                 with open_live_session():
                     return _run_ephemeral(args, io=io, teacher_tape=teacher_tape)
             return _run_ephemeral(args, io=io, teacher_tape=teacher_tape)
-        with _SwitchableEpisodeStore(args.workspace) as store, ExitStack() as ui_stack:
+        with EpisodeStore(args.workspace) as store, ExitStack() as ui_stack:
             for field in ("resume", "fork_from", "replay", "projector", "lineage"):
                 value = getattr(args, field)
                 if value:
@@ -1166,24 +1105,8 @@ def main(
                     args.teacher_plan is not None,
                 )
             )
-            setup_menu = bool(
-                args.setup_menu
-                or (
-                    not has_episode_source
-                    and not args.plain_ui
-                    and sys.stdin.isatty()
-                    and sys.stdout.isatty()
-                )
-            )
-            args._setup_menu_active = setup_menu
             io: TerminalIO | None = None
-            if setup_menu:
-                if not sys.stdin.isatty() or not sys.stdout.isatty():
-                    raise EditorError("--setup-menu requires an interactive terminal")
-                io = TerminalIO(live_choices=not args.plain_ui, live_theme=args.theme)
-                if not run_runtime_setup_menu(io, args, store=store):
-                    return 0
-            elif not has_episode_source:
+            if not has_episode_source:
                 if not sys.stdin.isatty() or not sys.stdout.isatty():
                     raise EditorError(
                         "no episode source supplied; use --new-prompt, "
@@ -1250,12 +1173,6 @@ def main(
                     else source_sampling
                 )
                 sampling = apply_activation_artifact(sampling, activation_artifact, args)
-                if not _confirm_runtime_plan(
-                    io, args, backend, provenance, sampling,
-                    source_sampling=source_sampling,
-                    activation_artifact=activation_artifact,
-                ):
-                    return 0
                 explicit = sampling != source_sampling
                 io.write("Restoring saved context...")
                 if model_changed:
@@ -1286,11 +1203,6 @@ def main(
                 )
                 sampling = sampler_from_args(args)
                 sampling = apply_activation_artifact(sampling, activation_artifact, args)
-                if not _confirm_runtime_plan(
-                    io, args, backend, provenance, sampling,
-                    activation_artifact=activation_artifact,
-                ):
-                    return 0
                 engine = EpisodeEngine(
                     backend,
                     sampling=sampling,
@@ -1318,12 +1230,6 @@ def main(
                 }
                 sampling = sampler_from_args(args, source_sampling)
                 sampling = apply_activation_artifact(sampling, activation_artifact, args)
-                if not _confirm_runtime_plan(
-                    io, args, backend, provenance, sampling,
-                    source_sampling=source_sampling,
-                    activation_artifact=activation_artifact,
-                ):
-                    return 0
                 # Explicit steering imports apply to every replay segment, just
                 # like explicit sampler flags. Unspecified fields follow source.
                 if activation_artifact is not None:
@@ -1376,12 +1282,6 @@ def main(
                 explicit = sampler_overrides_present(args)
                 sampling = sampler_from_args(args, source_sampling)
                 sampling = apply_activation_artifact(sampling, activation_artifact, args)
-                if not _confirm_runtime_plan(
-                    io, args, backend, provenance, sampling,
-                    source_sampling=source_sampling,
-                    activation_artifact=activation_artifact,
-                ):
-                    return 0
                 if model_changed:
                     engine, episode_id = _materialize_model_change_fork(
                         store,

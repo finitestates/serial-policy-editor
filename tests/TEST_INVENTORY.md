@@ -42,7 +42,7 @@ slice that should be rewritten into the reduced suite.
 | `test_cli_surface.py` | deleted | clean-install surface is covered by M05 and the install smoke |
 | `test_concrete_teacher_ranks.py` | deleted | rank/evidence cases are covered by E01 and replay contracts |
 | `test_continuation_spacing.py` | deleted | its token-write cases are now E03; removed CLI-flag assertion was obsolete |
-| `test_controller_profiles.py` | reduce | core profile round-trip |
+| `test_controller_profiles.py` | retain/rewrite | storage-neutral CLI profile parsing and precedence |
 | `test_core_actions.py` | retain/rewrite | canonical actions and `SamplerConfig` boundary |
 | `test_core_install_surface.py` | retain | core-only install smoke |
 | `test_edge_replay_continuation.py` | deleted | its CLI replay cases are now the compact replay-until boundary |
@@ -56,7 +56,7 @@ slice that should be rewritten into the reduced suite.
 | `test_rank_neighborhood.py` | deleted | its meaningful rank cases are now M02 |
 | `test_replay_contracts.py` | retain | replay divergence, handoff, ballistic, and stop semantics |
 | `test_replay_until.py` | retain/rewrite | live-edge cutoff and handoff |
-| `test_runtime_setup.py` | retain/rewrite | compact core setup/menu boundary |
+| `test_controller_profiles.py` | retain/rewrite | storage-neutral CLI profile parsing and precedence |
 | `test_sampler_contracts.py` | retain | eight sampler/action contract slots |
 | `test_unexposed_ranks.py` | deleted | its meaningful rank cases are now M02/E02 |
 | `test_menu_contracts.py` | retain | five vocabulary/menu contract slots |
@@ -140,7 +140,7 @@ No whole module is being declared a duplicate without a function-level check.
 The following are the first known obsolete or replacement targets:
 
 - extension CLI-flag assertions embedded in `test_commands.py` and
-  `test_runtime_setup.py`;
+  `test_controller_profiles.py`;
 - core construction calls for removed prompt-pair/vector helpers in
   `test_activation_vectors.py`, `test_llama_worker.py`, and
   `test_transformers_hidden_state.py`;
