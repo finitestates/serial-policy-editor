@@ -14,7 +14,6 @@ from .core.errors import EditorError
 from .core.observation import ControllerTrace, ControllerTraceStage
 from .core.results import ActionOutcome, Divergence, ReplayExpectation, TokenEvidence
 from .core.sampler_config import SamplerConfig
-from .episode_backend import EpisodeBackend
 from .episode_engine import EpisodeEngine, Observation
 from .episode_runner import TapeStep
 from .episode_session import (
@@ -38,7 +37,6 @@ __all__ = [
     "Divergence",
     "EditorError",
     "EndGeneration",
-    "EpisodeBackend",
     "EpisodeEngine",
     "EpisodeProjection",
     "EpisodeRunner",

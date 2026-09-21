@@ -68,48 +68,6 @@ class SourceReplayRecipe:
         if self.source_id is not None and not isinstance(self.source_id, str):
             raise TypeError("source id must be a string or None")
 
-    @property
-    def prompt(self) -> str:
-        """Short alias for callers that call the source entrance a prompt."""
-
-        return self.source_prompt
-
-    @property
-    def surviving_procedure(self) -> SurvivingProcedure:
-        """Explicit alias for the projected source procedure."""
-
-        return self.procedure
-
-    @property
-    def control_timeline(self) -> ControlTimeline:
-        """Explicit alias for the source control timeline."""
-
-        return self.controls
-
-    @property
-    def end_boundary(self) -> int:
-        """Short alias for the selected source end boundary."""
-
-        return self.source_end_boundary
-
-    @property
-    def available_boundary(self) -> int:
-        """Alias for the explicitly supplied source visible boundary."""
-
-        return self.source_visible_boundary
-
-    @property
-    def source_label(self) -> str | None:
-        """Alias for adapters that use a label rather than an id."""
-
-        return self.source_id
-
-
-# A concise name is useful to callers that refer to this as the SPR seam.
-SPRRecipe = SourceReplayRecipe
-ControlPolicy = ReplayControlPolicy
-
-
 _SAMPLER_FIELDS = frozenset(
     field.name for field in fields(SamplerConfig) if field.init
 )
@@ -226,15 +184,9 @@ def compose_replay_plan(
     )
 
 
-compose_spr_plan = compose_replay_plan
-
-
 __all__ = [
-    "ControlPolicy",
     "ReplayControlPolicy",
     "ReplayPlacement",
-    "SPRRecipe",
     "SourceReplayRecipe",
     "compose_replay_plan",
-    "compose_spr_plan",
 ]
