@@ -141,7 +141,7 @@ def test_ephemeral_new_has_one_model_load_and_global_stable_addresses(tmp_path):
             new_root_samplers.append(root.sampler)
             return root
 
-    with patch("trajectory_editor.episode_cli._backend", side_effect=load), patch(
+    with patch("trajectory_editor.episode_backend_loader.load_backend", side_effect=load), patch(
         "trajectory_editor.episode_cli.TerminalIO", return_value=io
     ), patch.object(episode_cli, "LiveSessionRoster", RecordingRoster):
         assert main(
@@ -173,7 +173,7 @@ def test_durable_new_is_parentless_and_bare_number_returns_to_prior_episode(tmp_
     backend = DurableFakeBackend()
     io = ScriptedIO(["1", "s temperature=0.7", "new Q", "#1", "q"])
 
-    with patch("trajectory_editor.episode_cli._backend", return_value=backend), patch(
+    with patch("trajectory_editor.episode_backend_loader.load_backend", return_value=backend), patch(
         "trajectory_editor.episode_cli.TerminalIO", return_value=io
     ):
         assert main(

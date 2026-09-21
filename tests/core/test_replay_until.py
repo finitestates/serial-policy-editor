@@ -49,7 +49,7 @@ def source_workspace(tmp_path):
 
 def run_cli(path, commands, *flags):
     io = ScriptedIO(commands)
-    with patch("trajectory_editor.episode_cli._backend", return_value=NoEogBackend()), patch(
+    with patch("trajectory_editor.episode_backend_loader.load_backend", return_value=NoEogBackend()), patch(
         "trajectory_editor.episode_cli.TerminalIO", return_value=io
     ):
         status = main(["--workspace", str(path), "--model", "fake", "--plain-ui", *flags])
@@ -187,7 +187,7 @@ def test_cli_prompt_replay_uses_the_destination_tokenizer_and_remains_rewindable
         )
 
     backend = NoEogBackend()
-    with patch("trajectory_editor.episode_cli._backend", return_value=backend), patch(
+    with patch("trajectory_editor.episode_backend_loader.load_backend", return_value=backend), patch(
         "trajectory_editor.episode_cli.TerminalIO",
         return_value=ScriptedIO(["t hello", "q", "spr #1", "rewind 2", "quit"]),
     ):

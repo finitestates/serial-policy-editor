@@ -25,7 +25,7 @@ def _run(
     io = ScriptedIO(commands)
     ui_flag = ["--plain-ui"] if plain_ui else []
     with patch(
-        "trajectory_editor.episode_cli._backend",
+        "trajectory_editor.episode_backend_loader.load_backend",
         side_effect=lambda _args: ConformingFakeBackend(),
     ), patch("trajectory_editor.episode_cli.TerminalIO", return_value=io):
         assert main(["--ephemeral", "--model", "fake", *ui_flag, *flags]) == 0
@@ -207,7 +207,7 @@ def test_ephemeral_uses_live_ui_by_default_and_plain_ui_is_an_opt_out(tmp_path):
         return io
 
     with patch(
-        "trajectory_editor.episode_cli._backend",
+        "trajectory_editor.episode_backend_loader.load_backend",
         side_effect=lambda _args: ConformingFakeBackend(),
     ), patch("trajectory_editor.episode_cli.TerminalIO", side_effect=terminal_io):
         assert main(["--ephemeral", "--model", "fake", "--new-prompt", "P"]) == 0
@@ -219,7 +219,7 @@ def test_ephemeral_uses_live_ui_by_default_and_plain_ui_is_an_opt_out(tmp_path):
     captured.clear()
     plain = _LiveContextIO(["q", "q"], supports_live_choices=False)
     with patch(
-        "trajectory_editor.episode_cli._backend",
+        "trajectory_editor.episode_backend_loader.load_backend",
         side_effect=lambda _args: ConformingFakeBackend(),
     ), patch(
         "trajectory_editor.episode_cli.TerminalIO",
@@ -235,10 +235,15 @@ def test_ephemeral_uses_live_ui_by_default_and_plain_ui_is_an_opt_out(tmp_path):
 
 
 def test_ephemeral_live_policy_keeps_seamless_review_enabled():
-    from trajectory_editor.episode_cli import _ephemeral_policy, build_parser
+    from trajectory_editor.episode_cli import build_parser
+    from trajectory_editor.episode_policy_setup import ephemeral_policy
 
     live = _LiveContextIO([])
     args = build_parser(include_vector=False).parse_args([])
 
-    assert _ephemeral_policy(args, live).seamless is True
-    assert _ephemeral_policy(args, ScriptedIO([])).seamless is False
+    live_policy = ephemeral_policy(args, live)
+    plain_policy = ephemeral_policy(args, ScriptedIO([]))
+
+    assert live_policy.seamless is True
+    assert plain_policy.seamless is False
+    assert live_policy.view_preferences is plain_policy.view_preferences

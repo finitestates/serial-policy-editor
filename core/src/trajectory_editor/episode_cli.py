@@ -8,7 +8,6 @@ only EOG or explicit ``finish`` seals the episode.
 from __future__ import annotations
 
 import argparse
-import copy
 import math
 from contextlib import ExitStack
 import sys
@@ -18,9 +17,9 @@ from typing import Any
 from prompt_toolkit import prompt
 from prompt_toolkit.validation import Validator
 
-from . import edge_commands
-from .backend_factory import BACKEND_NAMES, create_backend
-from .decoder import KV_CACHE_TYPES, LlamaCppSettings
+from . import edge_commands, episode_backend_loader, episode_policy_setup
+from .backend_factory import BACKEND_NAMES
+from .decoder import KV_CACHE_TYPES
 from .core.errors import EditorError
 from .core.cli_config import (
     CORE_SAMPLER_FIELDS,
@@ -64,8 +63,6 @@ from .episode_store import EpisodeStore
 from .episode_session import LiveSession, LiveSessionRoster
 from .episode_materializer import save_live_branch, save_live_family
 from .fresh_episode import fresh_root_from
-from .episode_ui import InteractivePolicy, PolicyViewPreferences
-from .transformers_backend import TransformersSettings
 from .runtime_setup import RuntimePlan, effective_plan_summary, run_runtime_setup_menu
 from .tui import TerminalIO
 from .ui_themes import LIVE_THEME_NAMES
@@ -305,186 +302,6 @@ def build_parser(
     return parser
 
 
-def _backend(args: argparse.Namespace):
-    args.backend = args.backend or "llama.cpp"
-    if args.model is None:
-        raise EditorError("--model is required to start, resume, fork, or replay")
-    llama = LlamaCppSettings(
-        type_k=args.type_k,
-        type_v=args.type_v,
-        n_ctx=args.n_ctx,
-        n_batch=args.n_batch,
-        n_ubatch=args.n_ubatch,
-        n_threads=args.n_threads,
-        n_threads_batch=args.n_threads_batch,
-        n_gpu_layers=args.n_gpu_layers,
-        main_gpu=args.main_gpu,
-        flash_attn=not args.no_flash_attn,
-        use_mmap=not args.no_mmap,
-        use_mlock=args.use_mlock,
-    )
-    transformers = TransformersSettings(
-        device=args.transformers_device,
-        dtype=args.transformers_dtype,
-        device_map=args.transformers_device_map,
-        attention_implementation=args.transformers_attention_implementation,
-        quantization_method=args.transformers_quantization,
-        trust_remote_code=args.transformers_trust_remote_code,
-        use_fast_tokenizer=not args.transformers_slow_tokenizer,
-        torch_num_threads=args.transformers_torch_threads,
-        torch_num_interop_threads=args.transformers_torch_interop_threads,
-    )
-    print(f"Loading model with {args.backend}: {args.model} ...", flush=True)
-    result = create_backend(
-        args.backend,
-        args.model,
-        llama_settings=llama,
-        transformers_settings=transformers,
-        cache_mode=args.cache,
-    )
-    print("Model loaded.", flush=True)
-    return result
-
-
-def _load_episode_backend(args, source, io, *, use_saved=False, current_backend=None, current_provenance=None):
-    """Load a saved execution context, confirming deliberate model changes."""
-    selected = copy.copy(args)
-    saved = source["backend"] if source else {}
-    old_path = saved.get("model_path")
-    if use_saved:
-        selected.model = None
-        selected.backend = None
-    if selected.model is None and old_path:
-        selected.model = Path(old_path)
-    selected.backend = selected.backend or saved.get("backend") or "llama.cpp"
-    if selected.backend not in BACKEND_NAMES:
-        selected.backend = args.backend or "llama.cpp"
-    # Persisted launch options avoid reconstructing device/quantization settings
-    # from diagnostic effective values. Explicit launch flags take precedence.
-    explicit = getattr(args, "_explicit_options", set()) if not use_saved else set()
-    saved_options = dict(saved.get("load_options", {}))
-    if not saved_options:
-        for key, value in saved.get("runtime_configuration", {}).items():
-            if saved.get("backend") == "transformers":
-                key = "transformers_" + key
-            elif key in {"flash_attn", "use_mmap"}:
-                key, value = {"flash_attn": "no_flash_attn", "use_mmap": "no_mmap"}[key], not value
-            if hasattr(selected, key) and key != "seed":
-                saved_options[key] = value
-    for key, value in saved_options.items():
-        if key not in explicit:
-            setattr(selected, key, value)
-    while True:
-        if selected.model is None:
-            path = io.read("Saved model location unavailable. Model path (Enter cancels)> ")
-            if not path:
-                raise EditorError("model loading cancelled")
-            selected.model = Path(path).expanduser()
-        changed = bool(source and old_path and (
-            Path(old_path).resolve() != selected.model.resolve()
-            or (saved.get("backend") in BACKEND_NAMES and saved.get("backend") != selected.backend)
-        ))
-        if changed:
-            answer = io.read(f"Previously used {old_path} ({saved.get('backend')}). Continue with {selected.model} ({selected.backend}) in a new linked episode? [y/N]> ")
-            if not answer or answer.strip().lower() not in {"y", "yes"}:
-                raise EditorError("model change cancelled")
-        try:
-            if (current_backend is not None and current_provenance
-                and current_provenance.get("model_path") == str(selected.model.resolve())
-                and current_provenance.get("backend") == selected.backend
-                and all(getattr(selected, key, None) == value
-                        for key, value in current_provenance.get("load_options", {}).items())):
-                return current_backend, current_provenance, changed
-            backend = _backend(selected)
-            provenance = dict(backend.provenance(include_model_sha256=True))
-            provenance["model_path"] = str(selected.model.resolve())
-            provenance["load_options"] = {
-                key: value for key, value in vars(selected).items()
-                if key.startswith("transformers_") or key in {
-                    "n_ctx", "n_batch", "n_ubatch", "n_threads", "n_threads_batch",
-                    "n_gpu_layers", "main_gpu", "no_flash_attn", "no_mmap", "use_mlock", "cache", "type_k", "type_v"
-                }
-            }
-            return backend, provenance, changed
-        except (EditorError, OSError, RuntimeError) as exc:
-            if not source:
-                raise
-            io.write(f"Could not load {selected.model}: {exc}")
-            path = io.read("Replacement model path (Enter cancels)> ")
-            if not path:
-                raise EditorError("model loading cancelled") from exc
-            kind = io.read("Backend: llama.cpp or transformers (Enter keeps current)> ")
-            if kind:
-                if kind.strip() not in BACKEND_NAMES:
-                    io.write("Unknown backend.")
-                    continue
-                selected.backend = kind.strip()
-            selected.model = Path(path).expanduser()
-
-
-def _load_cfg_guidance_backend(args, provenance):
-    """Load a second copy of the active model for CFG's unconditional branch."""
-    selected = copy.copy(args)
-    selected.model = Path(provenance["model_path"])
-    selected.backend = provenance["backend"]
-    for key, value in provenance.get("load_options", {}).items():
-        if hasattr(selected, key):
-            setattr(selected, key, value)
-    return _backend(selected)
-
-
-def _interactive_policy(
-    args: argparse.Namespace, store: EpisodeStore, episode_id: str, io: TerminalIO,
-) -> InteractivePolicy:
-    preferences = getattr(args, "_policy_view_preferences", None)
-    if preferences is None:
-        preferences = PolicyViewPreferences(
-            show=args.show_policy_rank,
-            logit_view=args.logit_view,
-        )
-        args._policy_view_preferences = preferences
-    return InteractivePolicy(
-        io=io,
-        menu_size=args.table_depth,
-        search_radius=args.search_radius,
-        default_hold_tokens=args.hold_default,
-        phrase_max_tokens=getattr(args, "phrase_max_tokens", 16),
-        phrase_max_shift=getattr(args, "phrase_max_shift", 6.0),
-        context_characters=args.context_chars,
-        manual_acceptance=args.manual_acceptance,
-        view_preferences=preferences,
-        store=store,
-        episode_id=episode_id,
-        seamless=io.supports_live_choices,
-    )
-
-
-def _ephemeral_policy(args: argparse.Namespace, io: TerminalIO) -> InteractivePolicy:
-    """Build the normal action chooser without a workspace-backed recorder."""
-    preferences = getattr(args, "_policy_view_preferences", None)
-    if preferences is None:
-        preferences = PolicyViewPreferences(
-            show=args.show_policy_rank,
-            logit_view=args.logit_view,
-        )
-        args._policy_view_preferences = preferences
-    return InteractivePolicy(
-        io=io,
-        menu_size=args.table_depth,
-        search_radius=args.search_radius,
-        default_hold_tokens=args.hold_default,
-        phrase_max_tokens=getattr(args, "phrase_max_tokens", 16),
-        phrase_max_shift=getattr(args, "phrase_max_shift", 6.0),
-        context_characters=args.context_chars,
-        manual_acceptance=args.manual_acceptance,
-        view_preferences=preferences,
-        # LiveSession supplies the same token-boundary semantics without a
-        # durable interaction recorder.  Keep the fullscreen review controls
-        # live so Enter on a historical boundary actually rewinds the branch.
-        seamless=bool(getattr(io, "supports_live_choices", False)),
-    )
-
-
 def _ephemeral_edge_menu(
     io: TerminalIO,
     session_or_roster: LiveSession | LiveSessionRoster,
@@ -690,7 +507,7 @@ def _run_ephemeral(
     if args.new_prompt is None and args.new_prompt_file is None:
         raise EditorError("--ephemeral requires --new-prompt, --new-prompt-file, or a teacher-plan envelope prompt")
     initial_text = args.new_prompt if args.new_prompt is not None else args.new_prompt_file.read_text(encoding="utf-8")
-    backend = _backend(args)
+    backend = episode_backend_loader.load_backend(args)
     provenance = backend.provenance()
     sampling = sampler_from_args(args)
     activation_artifact = None
@@ -706,7 +523,10 @@ def _run_ephemeral(
     guidance_backend = None
     if sampling.cfg_unconditional_prompt is not None:
         io.write("Loading second model copy for CFG prefix guidance...")
-        guidance_backend = _load_cfg_guidance_backend(args, provenance)
+        guidance_backend = episode_backend_loader.load_cfg_guidance_backend(
+            args,
+            provenance,
+        )
     engine = EpisodeEngine(
         backend,
         sampling=sampling,
@@ -730,7 +550,7 @@ def _run_ephemeral(
         try:
             result = runner.run(
                 tape=pending_tape,
-                live_policy=_ephemeral_policy(args, io),
+                live_policy=episode_policy_setup.ephemeral_policy(args, io),
                 stop_after_tape=True,
             )
         except EdgeRequested:
@@ -1379,7 +1199,9 @@ def main(
                 io = TerminalIO(live_choices=not args.plain_ui, live_theme=args.theme)
             source_id = args.resume or args.fork_from or args.replay
             source = store.get_episode(source_id) if source_id else None
-            backend, provenance, model_changed = _load_episode_backend(args, source, io)
+            backend, provenance, model_changed = (
+                episode_backend_loader.load_episode_backend(args, source, io)
+            )
             cfg_guidance_backend = None
 
             def cfg_backend_for(sampling):
@@ -1388,7 +1210,12 @@ def main(
                     return None
                 if cfg_guidance_backend is None:
                     io.write("Loading second model copy for CFG prefix guidance...")
-                    cfg_guidance_backend = _load_cfg_guidance_backend(args, provenance)
+                    cfg_guidance_backend = (
+                        episode_backend_loader.load_cfg_guidance_backend(
+                            args,
+                            provenance,
+                        )
+                    )
                 return cfg_guidance_backend
 
             args._model_changed = model_changed
@@ -1635,7 +1462,7 @@ def main(
                         raise EdgeRequested()
                     result = runner.run(
                         tape=pending_tape,
-                        live_policy=_interactive_policy(
+                        live_policy=episode_policy_setup.durable_policy(
                             args, store, episode_id, io
                         ),
                         stop_after_tape=True,
@@ -1757,8 +1584,16 @@ def main(
                     store.record_budget(episode_id, engine.boundary, engine.max_tokens, engine.checkpoint_boundary)
                     try:
                         target_episode = store.get_episode(destination)
-                        new_backend, new_provenance, changed = _load_episode_backend(args, target_episode, io, use_saved=True,
-                            current_backend=backend, current_provenance=provenance)
+                        new_backend, new_provenance, changed = (
+                            episode_backend_loader.load_episode_backend(
+                                args,
+                                target_episode,
+                                io,
+                                use_saved=True,
+                                current_backend=backend,
+                                current_provenance=provenance,
+                            )
+                        )
                         if changed:
                             new_engine, destination = _model_continuation(
                                 store, destination, new_backend, new_provenance,
