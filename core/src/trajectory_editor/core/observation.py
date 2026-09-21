@@ -3,9 +3,9 @@
 The core observer owns the surfaces required by the interactive projector:
 raw model logits, history penalties, manual/conditional biases, optional
 output-head steering, candidate filtering, and replay-stable draw metadata.
-Research actuators are intentionally absent.  The legacy sampling module
-keeps its wider observer for historical records and delegates to it only from
-the compatibility adapter.
+Research actuators are intentionally absent. The wider historical observer
+lives in the separate archive/research package; the core episode engine uses
+this observer for its policy calculations.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from .sampling import (
     _top_ids,
     _validated_logits,
     apply_candidate_filter,
+    top_raw_ids,
 )
 
 
@@ -396,10 +397,6 @@ class ObservationStatistics:
                 (token_id, rank) for rank, token_id in enumerate(self._policy_ordered, 1)
             )
         return self._policy_ordered[:count]
-
-
-def top_raw_ids(logits: np.ndarray, count: int) -> list[int]:
-    return [int(value) for value in _top_ids(np.asarray(logits), count)]
 
 
 __all__ = [

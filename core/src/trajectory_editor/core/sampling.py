@@ -1,10 +1,10 @@
 """Dependency-light sampling kernels used by the episode editor.
 
-This module deliberately contains only the numeric part of sampling:
-candidate filtering, rank calculations, stable coordinate-derived quantiles,
-and the final token draw.  Policy surfaces such as history penalties,
-reference priors, token preference, and controller traces remain outside the
-core package.
+This module contains the numeric sampling kernels: candidate filtering, rank
+calculations, stable coordinate-derived quantiles, and the final token draw.
+The core observer in observation.py assembles policy surfaces and controller
+traces. Research-only policy surfaces live in the separate archive/research
+package.
 """
 
 from __future__ import annotations
