@@ -828,21 +828,19 @@ class EpisodeStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def lineage(self, episode_id: str) -> dict[str, Any]:
-        """Return ordinary fork ancestry plus separately typed replay links.
+    def episode_relation_rows(self) -> list[dict[str, Any]]:
+        """Return the flat persistence facts required for lineage projection."""
 
-        ``parent_episode_id`` predates the distinction between a fork and a
-        Serial Policy Replay episode.  The persisted ``metadata.mode`` and
-        ``metadata.spr_source`` values let this view preserve that distinction
-        without adding a schema column or treating replay runs as branches of
-        the ordinary family tree.
-        """
-        self.get_episode(episode_id)
         rows = self.connection.execute(
             """
             SELECT
-                episode.*,
-                length(episode.visible_text) AS visible_characters,
+                episode.episode_id,
+                episode.parent_episode_id,
+                episode.fork_boundary,
+                episode.status,
+                episode.created_at,
+                episode.terminal_reason,
+                episode.metadata_json,
                 COALESCE(
                     (
                         SELECT COUNT(*)
@@ -851,167 +849,12 @@ class EpisodeStore:
                           AND tokens.realized_visible = 1
                     ),
                     0
-                ) AS visible_tokens
+                ) AS visible_token_count
             FROM episodes AS episode
             ORDER BY episode.created_at, episode.episode_id
             """
         ).fetchall()
-
-        nodes: dict[str, dict[str, Any]] = {}
-        for row in rows:
-            metadata = _loads(row["metadata_json"], {})
-            if not isinstance(metadata, dict):
-                metadata = {}
-            mode = metadata.get("mode")
-            if not isinstance(mode, str) or not mode:
-                mode = "interactive"
-            replay_source = metadata.get("spr_source")
-            if replay_source is not None and not isinstance(replay_source, str):
-                replay_source = str(replay_source)
-            is_replay = mode == "serial-policy-replay" or replay_source is not None
-            if is_replay and replay_source is None:
-                replay_source = row["parent_episode_id"]
-            nodes[str(row["episode_id"])] = {
-                "episode_id": str(row["episode_id"]),
-                "parent_episode_id": row["parent_episode_id"],
-                "fork_boundary": row["fork_boundary"],
-                "status": str(row["status"]),
-                "created_at": row["created_at"],
-                "finished_at": row["finished_at"],
-                "terminal_reason": row["terminal_reason"],
-                "visible_characters": int(row["visible_characters"] or 0),
-                "visible_tokens": int(row["visible_tokens"] or 0),
-                "mode": mode,
-                "is_replay": is_replay,
-                "replay_source_episode_id": replay_source,
-            }
-
-        structural = {
-            identifier: node
-            for identifier, node in nodes.items()
-            if not bool(node["is_replay"])
-        }
-
-        def structural_root(identifier: str) -> str:
-            seen: set[str] = set()
-            current = identifier
-            while current in structural:
-                if current in seen:
-                    # Creation order and foreign keys prevent this in normal
-                    # operation; keeping the current node makes old/corrupt
-                    # workspaces inspectable instead of hanging here.
-                    return current
-                seen.add(current)
-                parent = structural[current]["parent_episode_id"]
-                if not isinstance(parent, str) or parent not in structural:
-                    return current
-                current = parent
-            return identifier
-
-        def structural_seed(identifier: str) -> str | None:
-            """Find the ordinary family context for an episode or replay."""
-            seen: set[str] = set()
-            current = identifier
-            while current in nodes and current not in seen:
-                seen.add(current)
-                node = nodes[current]
-                if not bool(node["is_replay"]):
-                    return current
-                for candidate in (
-                    node["parent_episode_id"],
-                    node["replay_source_episode_id"],
-                ):
-                    if isinstance(candidate, str) and candidate in nodes:
-                        current = candidate
-                        break
-                else:
-                    return None
-            return None
-
-        seed = structural_seed(episode_id)
-        family_root_id = structural_root(seed) if seed is not None else None
-        family_ids = {
-            identifier
-            for identifier in structural
-            if family_root_id is not None
-            and structural_root(identifier) == family_root_id
-        }
-
-        children_by_parent: dict[str, list[str]] = {}
-        for identifier in family_ids:
-            parent = structural[identifier]["parent_episode_id"]
-            if isinstance(parent, str) and parent in family_ids:
-                children_by_parent.setdefault(parent, []).append(identifier)
-        for children in children_by_parent.values():
-            children.sort(
-                key=lambda child: (
-                    str(structural[child]["created_at"]),
-                    child,
-                )
-            )
-
-        def tree_node(identifier: str, seen: set[str]) -> dict[str, Any]:
-            node = dict(structural[identifier])
-            if identifier in seen:
-                node["children"] = []
-                return node
-            next_seen = {*seen, identifier}
-            node["children"] = [
-                tree_node(child, next_seen)
-                for child in children_by_parent.get(identifier, [])
-            ]
-            return node
-
-        tree = (
-            tree_node(family_root_id, set())
-            if family_root_id is not None
-            else None
-        )
-
-        related_replay_ids: set[str] = {
-            identifier
-            for identifier, node in nodes.items()
-            if bool(node["is_replay"])
-            and (
-                identifier == episode_id
-                or node["parent_episode_id"] in family_ids
-                or node["replay_source_episode_id"] in family_ids
-            )
-        }
-        for identifier in family_ids:
-            parent = structural[identifier]["parent_episode_id"]
-            if isinstance(parent, str) and parent in nodes and nodes[parent]["is_replay"]:
-                related_replay_ids.add(parent)
-
-        replays = [
-            dict(nodes[identifier])
-            for identifier in sorted(
-                related_replay_ids,
-                key=lambda value: (
-                    str(nodes[value]["created_at"]),
-                    value,
-                ),
-            )
-        ]
-        replay_derived_forks = [
-            dict(node)
-            for node in nodes.values()
-            if not bool(node["is_replay"])
-            and isinstance(node["parent_episode_id"], str)
-            and node["parent_episode_id"] in related_replay_ids
-        ]
-        replay_derived_forks.sort(
-            key=lambda node: (str(node["created_at"]), str(node["episode_id"]))
-        )
-
-        return {
-            "selected_episode_id": episode_id,
-            "family_root_id": family_root_id,
-            "selected": dict(nodes[episode_id]),
-            "tree": tree,
-            "replays": replays,
-            "replay_derived_forks": replay_derived_forks,
-        }
+        return [dict(row) for row in rows]
 
     def actions(self, episode_id: str) -> list[dict[str, Any]]:
         self.get_episode(episode_id)
