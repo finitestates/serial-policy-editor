@@ -18,6 +18,7 @@ from typing import Any
 from prompt_toolkit import prompt
 from prompt_toolkit.validation import Validator
 
+from . import edge_commands
 from .backend_factory import BACKEND_NAMES, create_backend
 from .decoder import KV_CACHE_TYPES, LlamaCppSettings
 from .core.errors import EditorError
@@ -576,23 +577,32 @@ def _ephemeral_edge_menu(
             )
         if raw is None:
             return "quit", None
-        text = raw.strip()
-        lower = text.lower()
-        if lower in {"q", "quit"}:
+        try:
+            command = edge_commands.parse_edge_command(raw)
+        except edge_commands.EdgeCommandParseError as exc:
+            io.write(str(exc))
+            continue
+        if isinstance(command, edge_commands.QuitCommand):
             return "quit", None
-        if lower in {"e", "end"}:
+        if isinstance(command, edge_commands.EndCommand):
             return "end", None
-        if lower in {"c", "continue", ""}:
+        if isinstance(command, edge_commands.ContinueCommand):
             return "continue", "keep"
-        if lower == "new" or lower.startswith("new "):
-            prompt_text = text[3:].lstrip()
+        if isinstance(command, edge_commands.NewCommand):
+            prompt_text = command.prompt or ""
             if not prompt_text:
                 prompt_text = _read_new_prompt(io) or ""
             if not prompt_text:
                 io.write("New prompt must not be empty.")
                 continue
             return "new", prompt_text
-        if lower in {"branches", "ls"}:
+        if (
+            isinstance(command, edge_commands.BranchesCommand)
+            or (
+                isinstance(command, edge_commands.ListCommand)
+                and not command.include_finished
+            )
+        ):
             rows = []
             if roster is not None:
                 for entry in roster.entries():
@@ -628,72 +638,37 @@ def _ephemeral_edge_menu(
                     )
             io.page("Live branches:\n" + "\n".join(rows))
             continue
-        if lower in {"fm", "fork-map", "forkmap"}:
+        if isinstance(command, edge_commands.ForkMapCommand):
             result = show_fork_map()
             if result is not None:
                 return result
             continue
-        parts = text.split()
-        if len(parts) == 1 and parts[0].startswith("#"):
+        if isinstance(command, edge_commands.SwitchCommand):
             try:
                 if roster is not None:
-                    roster.resolve(parts[0])
-                    return "switch", parts[0]
-                return "switch", resolve_branch(parts[0])
-            except EditorError as exc:
-                io.write(str(exc))
-                continue
-        if len(parts) == 2 and parts[0].lower() == "switch":
-            try:
-                if roster is not None:
-                    roster.resolve(parts[1])
-                    return "switch", parts[1]
-                branch_id = resolve_branch(parts[1])
+                    roster.resolve(command.reference)
+                    return "switch", command.reference
+                branch_id = resolve_branch(command.reference)
                 if branch_id not in session.branch_states:
-                    raise EditorError(f"Unknown live branch {parts[1]!r}.")
+                    raise EditorError(f"Unknown live branch {command.reference!r}.")
                 return "switch", branch_id
             except EditorError as exc:
                 io.write(str(exc))
                 continue
-        if len(parts) == 2 and parts[0].lower() == "rewind":
-            try:
-                return "rewind", int(parts[1])
-            except ValueError:
-                io.write("Rewind boundary must be an integer.")
-                continue
-        if len(parts) == 2 and parts[0].lower() in {"f", "fork"}:
-            try:
-                return "fork", int(parts[1])
-            except ValueError:
-                io.write("Fork boundary must be an integer.")
-                continue
-        if len(parts) == 2 and parts[0].lower() == "export":
-            return "export", Path(parts[1])
-        if parts and parts[0].lower() in {"save-family", "savefamily"}:
-            if len(parts) not in {2, 3}:
-                io.write("Use save-family WORKSPACE [ROOT_ID].")
-                continue
-            return "save-family", (Path(parts[1]), parts[2] if len(parts) == 3 else None)
-        if len(parts) >= 2 and parts[0].lower() == "save" and parts[1].lower() == "family":
-            if len(parts) not in {3, 4}:
-                io.write("Use save family WORKSPACE [ROOT_ID].")
-                continue
-            return "save-family", (Path(parts[2]), parts[3] if len(parts) == 4 else None)
-        if len(parts) in {2, 3} and parts[0].lower() == "save":
-            return "save", (Path(parts[1]), parts[2] if len(parts) == 3 else None)
-        if len(parts) == 2 and parts[0].lower() in {"n", "next"}:
-            if parts[1].lower() in {"off", "none", "unlimited"}:
-                return "continue", None
-            try:
-                budget = int(parts[1])
-                if budget < 1:
-                    raise ValueError
-                return "continue", budget
-            except ValueError:
-                io.write("Budget must be a positive integer.")
-                continue
-        if parts and parts[0].lower() in {"s", "sampler"}:
-            payload = text.split(maxsplit=1)[1] if len(parts) > 1 else ""
+        if isinstance(command, edge_commands.RewindCommand):
+            return "rewind", command.boundary
+        if isinstance(command, edge_commands.ForkCommand):
+            return "fork", command.boundary
+        if isinstance(command, edge_commands.ExportCommand):
+            return "export", command.path
+        if isinstance(command, edge_commands.SaveFamilyCommand):
+            return "save-family", (command.workspace, command.root_reference)
+        if isinstance(command, edge_commands.SaveCommand):
+            return "save", (command.workspace, command.reference)
+        if isinstance(command, edge_commands.BudgetCommand):
+            return "continue", command.tokens
+        if isinstance(command, edge_commands.SamplerCommand):
+            payload = command.text or ""
             if not payload:
                 io.write("Use sampler key=value.")
                 continue
@@ -702,7 +677,7 @@ def _ephemeral_edge_menu(
             except EditorError as exc:
                 io.write(f"[invalid sampler change] {exc}")
             continue
-        io.write("Unknown live-session command.")
+        io.write("This command is not available in an ephemeral session.")
 
 
 def _run_ephemeral(
@@ -985,10 +960,18 @@ def _live_edge_menu(
             )
         if raw is None:
             return "quit", None
-        text = raw.strip()
-        lower = text.lower()
-        if lower in {"ls", "ls all"}:
-            io.page(store.workspace_list(include_finished=lower == "ls all", current=episode_id))
+        try:
+            command = edge_commands.parse_edge_command(raw)
+        except edge_commands.EdgeCommandParseError as exc:
+            io.write(str(exc))
+            continue
+        if isinstance(command, edge_commands.ListCommand):
+            io.page(
+                store.workspace_list(
+                    include_finished=command.include_finished,
+                    current=episode_id,
+                )
+            )
             selected = io.read("Episode #number (Enter returns)> ")
             if selected and selected.strip():
                 try:
@@ -996,18 +979,18 @@ def _live_edge_menu(
                 except EditorError as exc:
                     io.write(str(exc))
             continue
-        if lower.startswith("name "):
-            store.rename(episode_id, text[5:])
+        if isinstance(command, edge_commands.RenameCommand):
+            store.rename(episode_id, command.title)
             continue
-        if lower.startswith("#"):
+        if isinstance(command, edge_commands.SwitchCommand):
             try:
-                return "switch", store.resolve_id(text)
+                return "switch", store.resolve_id(command.reference)
             except EditorError as exc:
                 io.write(str(exc))
             continue
-        if lower.startswith("rewind "):
+        if isinstance(command, edge_commands.RewindCommand):
             try:
-                target = int(text.split()[1])
+                target = command.boundary
                 _rewind_episode(
                     store, episode_id, engine, target,
                     sampling_factory=sampling_factory,
@@ -1016,21 +999,21 @@ def _live_edge_menu(
             except (ValueError, EditorError) as exc:
                 io.write(str(exc))
             continue
-        if lower in {"q", "quit"}:
+        if isinstance(command, edge_commands.QuitCommand):
             return "quit", None
-        if lower in {"e", "end"}:
+        if isinstance(command, edge_commands.EndCommand):
             return "end", None
-        if lower in {"c", "continue", ""}:
+        if isinstance(command, edge_commands.ContinueCommand):
             return "continue", "keep"
-        if lower == "new" or lower.startswith("new "):
-            prompt_text = text[3:].lstrip()
+        if isinstance(command, edge_commands.NewCommand):
+            prompt_text = command.prompt or ""
             if not prompt_text:
                 prompt_text = _read_new_prompt(io) or ""
             if not prompt_text:
                 io.write("New prompt must not be empty.")
                 continue
             return "new", prompt_text
-        if lower in {"p", "project", "r", "review"}:
+        if isinstance(command, edge_commands.ProjectCommand):
             io.page(
                 project_episode(
                     store,
@@ -1040,7 +1023,7 @@ def _live_edge_menu(
                 ).text
             )
             continue
-        if lower in {"fm", "fork-map", "forkmap"}:
+        if isinstance(command, edge_commands.ForkMapCommand):
             io.page(project_fork_map(store, episode_id))
             while True:
                 entered = io.read(
@@ -1061,22 +1044,11 @@ def _live_edge_menu(
                     continue
                 return "fork", target
             continue
-        parts = text.split(maxsplit=1)
-        if len(parts) == 2 and parts[0].lower() in {"n", "next"}:
-            if parts[1].lower() in {"off", "none", "unlimited"}:
-                return "continue", None
-            try:
-                budget = int(parts[1])
-            except ValueError:
-                io.write("Budget must be a positive integer.")
-                continue
-            if budget < 1:
-                io.write("Budget must be at least 1.")
-                continue
-            return "continue", budget
-        if parts and parts[0].lower() in {"s", "sampler"}:
-            payload = parts[1] if len(parts) == 2 else ""
-            if not payload:
+        if isinstance(command, edge_commands.BudgetCommand):
+            return "continue", command.tokens
+        if isinstance(command, edge_commands.SamplerCommand):
+            payload = command.text
+            if payload is None:
                 entered = io.read(
                     "sampler key=value changes (blank cancels; e.g. top_k=20 temperature=.8)> "
                 )
@@ -1103,53 +1075,38 @@ def _live_edge_menu(
                 {"sampling": updated.to_dict()},
             )
             continue
-        if len(parts) == 2 and parts[0].lower() in {"f", "fork"}:
-            try:
-                target = int(parts[1])
-            except ValueError:
-                io.write("Fork boundary must be an integer.")
-                continue
+        if isinstance(command, edge_commands.ForkCommand):
+            target = command.boundary
             if not 0 <= target <= engine.boundary:
                 io.write(f"Fork boundary must be 0..{engine.boundary}.")
                 continue
             return "fork", target
-        if len(parts) == 2 and parts[0].lower() in {"spr", "replay"}:
+        if isinstance(command, edge_commands.ReplaySelectionCommand):
             try:
-                replay_args = parts[1].split()
-                if not replay_args:
-                    raise EditorError("Use spr EPISODE [--until Y | m].")
-                source_id = store.resolve_id(replay_args[0])
+                source_id = store.resolve_id(command.source)
                 until = None
-                if replay_args[1:] == ["m"]:
-                    io.page("Source replay map (recorded output; replay may differ).\n"
-                            "Source 0 inserts only the prompt; destination tokens remain individually indexed.\n"
-                            + project_fork_map(store, source_id))
-                    while True:
-                        entered = io.read("Replay through source boundary (blank cancels) > ")
-                        if entered is None or not entered.strip():
-                            break
-                        try:
-                            until = int(entered)
-                            build_source_replay_recipe(
-                                store,
-                                source_id,
-                                until,
-                                sampling_factory=sampling_factory,
-                            )
-                        except (ValueError, EditorError):
-                            until = None
-                            io.write("Choose a valid source token boundary.")
-                            continue
+                io.page("Source replay map (recorded output; replay may differ).\n"
+                        "Source 0 inserts only the prompt; destination tokens remain individually indexed.\n"
+                        + project_fork_map(store, source_id))
+                while True:
+                    entered = io.read("Replay through source boundary (blank cancels) > ")
+                    if entered is None or not entered.strip():
                         break
-                    if until is None:
-                        continue
-                elif len(replay_args) == 3 and replay_args[1] == "--until":
                     try:
-                        until = int(replay_args[2])
-                    except ValueError:
-                        raise EditorError("Replay boundary must be an integer.") from None
-                elif len(replay_args) != 1:
-                    raise EditorError("Use spr EPISODE [--until Y | m].")
+                        until = int(entered)
+                        build_source_replay_recipe(
+                            store,
+                            source_id,
+                            until,
+                            sampling_factory=sampling_factory,
+                        )
+                    except (ValueError, EditorError):
+                        until = None
+                        io.write("Choose a valid source token boundary.")
+                        continue
+                    break
+                if until is None:
+                    continue
                 build_source_replay_recipe(
                     store,
                     source_id,
@@ -1160,7 +1117,20 @@ def _live_edge_menu(
             except EditorError as exc:
                 io.write(str(exc))
             continue
-        io.write("Unknown live-edge command.")
+        if isinstance(command, edge_commands.ReplayCommand):
+            try:
+                source_id = store.resolve_id(command.source)
+                build_source_replay_recipe(
+                    store,
+                    source_id,
+                    command.until,
+                    sampling_factory=sampling_factory,
+                )
+                return "spr", (source_id, command.until)
+            except EditorError as exc:
+                io.write(str(exc))
+            continue
+        io.write("This command is not available at a durable EDGE.")
 
 
 def _seal(

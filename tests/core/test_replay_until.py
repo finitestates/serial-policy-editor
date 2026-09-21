@@ -9,7 +9,7 @@ from tests.core.runtime_helpers import NoEogBackend
 from tests.fakes import ScriptedIO
 from trajectory_editor.core.actions import Hold, Write
 from trajectory_editor.core.sampler_config import SamplerConfig
-from trajectory_editor.episode_cli import main
+from trajectory_editor.episode_cli import _live_edge_menu, main
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_projector import project_fork_map
 from trajectory_editor.episode_replay_source import final_sampling
@@ -201,3 +201,22 @@ def test_cli_prompt_replay_uses_the_destination_tokenizer_and_remains_rewindable
         assert destination["initial_token_ids"] == [7]
         assert destination["visible_text"] == " hello A"
         assert store.actions("destination")[1]["arguments"]["mode"] == "exact"
+
+
+def test_durable_edge_bare_sampler_opens_the_existing_override_prompt(source_workspace):
+    with EpisodeStore(source_workspace) as store:
+        engine = EpisodeEngine(
+            NoEogBackend(),
+            sampling=SamplerConfig(temperature=0.0),
+            initial_text="P",
+            initial_token_ids=[7],
+        )
+        action, value = _live_edge_menu(
+            ScriptedIO(["s", "temperature=0.7", "q"]),
+            store,
+            "source",
+            engine,
+        )
+
+    assert (action, value) == ("quit", None)
+    assert engine.sampling.temperature == 0.7

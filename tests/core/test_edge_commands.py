@@ -40,6 +40,7 @@ from trajectory_editor.edge_commands import (
         ("next +3", BudgetCommand(3)),
         ("n off", BudgetCommand(None)),
         ("next none", BudgetCommand(None)),
+        ("s", SamplerCommand()),
         ("s temperature=.8 top_k=20", SamplerCommand("temperature=.8 top_k=20")),
         ("SAMPLER random-seed", SamplerCommand("random-seed")),
         ("rewind 12", RewindCommand(12)),
@@ -93,7 +94,6 @@ def test_malformed_budgets_are_parse_errors(raw):
 @pytest.mark.parametrize(
     "raw",
     [
-        "sampler",
         "export",
         "export a b",
         "save",
