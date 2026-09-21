@@ -160,14 +160,14 @@ def _append_lineage_tree(
 def render_lineage(view: LineageView) -> str:
     """Render a typed lineage view without knowing how it was loaded."""
 
-    selected_episode_id = view.selected_episode_id
+    selected_episode_id = view.selected_record.episode_id
     lines = [
         "--- lineage ---",
         f"selected: {selected_episode_id}",
-        f"family root: {view.family_root_id or '-'}",
+        f"family root: {view.ordinary_family_root_id or '-'}",
         "fork family:",
     ]
-    tree = view.tree
+    tree = view.ordinary_fork_tree
     if tree is None:
         lines.append("  (no ordinary fork family)")
     else:
@@ -177,12 +177,12 @@ def render_lineage(view: LineageView) -> str:
             selected_episode_id=selected_episode_id,
         )
 
-    replays = view.replays
+    replays = view.related_replays
     if replays:
         lines.append("replays:")
         for replay in replays:
-            source = replay.replay_source_episode_id or "-"
-            context = replay.parent_episode_id or "-"
+            source = replay.spr_source_id or "-"
+            context = replay.parent_id or "-"
             lines.append(
                 "  "
                 + _lineage_label(
@@ -192,11 +192,11 @@ def render_lineage(view: LineageView) -> str:
                 )
             )
 
-    replay_derived_forks = view.replay_forks
+    replay_derived_forks = view.replay_derived_forks
     if replay_derived_forks:
         lines.append("forks from replay contexts:")
         for child in replay_derived_forks:
-            parent = child.parent_episode_id or "-"
+            parent = child.parent_id or "-"
             boundary = child.fork_boundary
             relation = f"parent={parent}"
             if boundary is not None:

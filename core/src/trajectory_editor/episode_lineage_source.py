@@ -28,6 +28,9 @@ def _metadata(row: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def _relation(row: Mapping[str, Any]) -> EpisodeRelation:
+    # Translate persistence names here; lineage facts use only model names.
+    parent_id = row.get("parent_episode_id")
+    creation_key = row.get("created_at")
     metadata = _metadata(row)
     mode = metadata.get("mode")
     if not isinstance(mode, str) or not mode or mode != mode.strip():
@@ -43,16 +46,16 @@ def _relation(row: Mapping[str, Any]) -> EpisodeRelation:
         mode = "serial-policy-replay"
         source = None
     if mode == "serial-policy-replay" and raw_source is None:
-        source = row.get("parent_episode_id")
+        source = parent_id
     try:
         return EpisodeRelation(
             episode_id=row.get("episode_id"),
-            parent_id=row.get("parent_episode_id"),
+            parent_id=parent_id,
             fork_boundary=row.get("fork_boundary"),
             mode=mode,
             spr_source_id=source,
             status=row.get("status"),
-            creation_key=row.get("created_at"),
+            creation_key=creation_key,
             terminal_reason=row.get("terminal_reason"),
             visible_token_count=row.get("visible_token_count"),
         )

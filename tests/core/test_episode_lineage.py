@@ -113,9 +113,9 @@ def test_selecting_a_replay_locates_its_ordinary_family_seed():
     view = build_lineage(records, "replay")
 
     assert view.ordinary_family_root_id == "root"
-    assert tree_ids(view.tree) == ["root", [["child", []]]]
-    assert [record.episode_id for record in view.replays] == ["replay"]
-    assert [record.episode_id for record in view.replay_forks] == ["from-replay"]
+    assert tree_ids(view.ordinary_fork_tree) == ["root", [["child", []]]]
+    assert [record.episode_id for record in view.related_replays] == ["replay"]
+    assert [record.episode_id for record in view.replay_derived_forks] == ["from-replay"]
 
 
 def test_siblings_and_related_records_are_sorted_by_creation_then_id():
@@ -135,8 +135,8 @@ def test_siblings_and_related_records_are_sorted_by_creation_then_id():
 
     view = build_lineage(reversed(records), "root")
 
-    assert [child.episode_id for child in view.tree.children] == ["a-child", "z-child"]
-    assert [record.episode_id for record in view.replays] == [
+    assert [child.episode_id for child in view.ordinary_fork_tree.children] == ["a-child", "z-child"]
+    assert [record.episode_id for record in view.related_replays] == [
         "replay-early",
         "replay-a",
         "replay-z",
@@ -158,10 +158,10 @@ def test_missing_references_produce_partial_inspectable_results():
     replay = build_lineage(records, "source-missing")
 
     assert orphan.ordinary_family_root_id == "orphan"
-    assert orphan.tree.episode_id == "orphan"
+    assert orphan.ordinary_fork_tree.episode_id == "orphan"
     assert replay.ordinary_family_root is None
-    assert replay.tree is None
-    assert [record.episode_id for record in replay.replays] == ["source-missing"]
+    assert replay.ordinary_fork_tree is None
+    assert [record.episode_id for record in replay.related_replays] == ["source-missing"]
 
 
 def test_parent_cycles_are_finite_and_do_not_crash():
@@ -174,7 +174,7 @@ def test_parent_cycles_are_finite_and_do_not_crash():
     view = build_lineage(records, "child")
 
     assert view.ordinary_family_root_id == "b"
-    assert tree_ids(view.tree) == ["b", [["a", [["child", []]]]]]
+    assert tree_ids(view.ordinary_fork_tree) == ["b", [["a", [["child", []]]]]]
 
 
 def test_records_and_views_are_immutable():

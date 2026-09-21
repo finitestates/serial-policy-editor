@@ -57,12 +57,12 @@ class MemoryReader:
 def test_reader_adapter_builds_typed_lineage_without_a_store():
     view = build_lineage_view(MemoryReader(), "child")
 
-    assert view.family_root_id == "root"
-    assert view.tree.episode_id == "root"
-    assert [node.episode_id for node in view.tree.children] == ["child"]
-    assert [record.episode_id for record in view.replays] == ["replay"]
-    assert view.replays[0].spr_source_id == "root"
-    assert [record.episode_id for record in view.replay_forks] == ["from-replay"]
+    assert view.ordinary_family_root_id == "root"
+    assert view.ordinary_fork_tree.episode_id == "root"
+    assert [node.episode_id for node in view.ordinary_fork_tree.children] == ["child"]
+    assert [record.episode_id for record in view.related_replays] == ["replay"]
+    assert view.related_replays[0].spr_source_id == "root"
+    assert [record.episode_id for record in view.replay_derived_forks] == ["from-replay"]
 
 
 def test_reader_adapter_keeps_durable_unknown_episode_error():

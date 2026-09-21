@@ -14,9 +14,6 @@ from dataclasses import dataclass
 from typing import Any
 
 
-_UNSET = object()
-
-
 def _validate_relation_id(
     value: object,
     field: str,
@@ -52,7 +49,7 @@ def _validate_nonnegative_int(value: object, field: str) -> int:
     return value
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True)
 class EpisodeRelation:
     """The typed relation facts needed to place one episode in a lineage.
 
@@ -61,155 +58,36 @@ class EpisodeRelation:
     ``spr_source_id`` identifies an SPR provenance source and never makes the
     record an ordinary family node.
 
-    The keyword aliases accepted by ``__init__`` keep this seam convenient for
-    adapters whose field names still include the older ``*_episode_id``
-    spelling.  The stored value remains one immutable typed record.
+    Database field names are translated by the storage adapter.
     """
 
     episode_id: str
-    parent_id: str | None
-    fork_boundary: int | None
-    mode: str
-    spr_source_id: str | None
-    status: str
-    creation_key: Any
-    terminal_reason: str | None
-    visible_token_count: int
+    parent_id: str | None = None
+    fork_boundary: int | None = None
+    mode: str = "interactive"
+    spr_source_id: str | None = None
+    status: str = "unknown"
+    creation_key: Any = 0
+    terminal_reason: str | None = None
+    visible_token_count: int = 0
 
-    def __init__(
-        self,
-        episode_id: str,
-        parent_id: str | None | object = _UNSET,
-        fork_boundary: int | None = None,
-        mode: str = "interactive",
-        spr_source_id: str | None | object = _UNSET,
-        status: str = "unknown",
-        creation_key: Any = _UNSET,
-        terminal_reason: str | None = None,
-        visible_token_count: int | object = _UNSET,
-        *,
-        parent_episode_id: str | None | object = _UNSET,
-        spr_source_episode_id: str | None | object = _UNSET,
-        replay_source_episode_id: str | None | object = _UNSET,
-        creation_order_key: Any = _UNSET,
-        visible_tokens: int | object = _UNSET,
-    ) -> None:
-        parent = _coalesce_alias(
-            parent_id,
-            parent_episode_id,
-            canonical="parent_id",
-            alias="parent_episode_id",
-            default=None,
-        )
-        source_alias = _coalesce_alias(
-            spr_source_episode_id,
-            replay_source_episode_id,
-            canonical="spr_source_episode_id",
-            alias="replay_source_episode_id",
-            default=_UNSET,
-        )
-        source = _coalesce_alias(
-            spr_source_id,
-            source_alias,
-            canonical="spr_source_id",
-            alias="spr_source_episode_id/replay_source_episode_id",
-            default=None,
-        )
-        ordering = _coalesce_alias(
-            creation_key,
-            creation_order_key,
-            canonical="creation_key",
-            alias="creation_order_key",
-            default=0,
-        )
-        visible_count = _coalesce_alias(
-            visible_token_count,
-            visible_tokens,
-            canonical="visible_token_count",
-            alias="visible_tokens",
-            default=0,
-        )
-        validated_episode_id = _validate_relation_id(episode_id, "episode_id")
-        validated_parent = _validate_relation_id(parent, "parent_id", optional=True)
-        validated_source = _validate_relation_id(
-            source,
-            "spr_source_id",
-            optional=True,
-        )
-        if fork_boundary is not None:
-            fork_boundary = _validate_nonnegative_int(fork_boundary, "fork_boundary")
-        validated_mode = _validate_label(mode, "mode")
-        validated_status = _validate_label(status, "status")
-        validated_visible_count = _validate_nonnegative_int(
-            visible_count,
-            "visible_token_count",
-        )
-        if terminal_reason is not None and not isinstance(terminal_reason, str):
+    def __post_init__(self) -> None:
+        _validate_relation_id(self.episode_id, "episode_id")
+        _validate_relation_id(self.parent_id, "parent_id", optional=True)
+        _validate_relation_id(self.spr_source_id, "spr_source_id", optional=True)
+        if self.fork_boundary is not None:
+            _validate_nonnegative_int(self.fork_boundary, "fork_boundary")
+        _validate_label(self.mode, "mode")
+        _validate_label(self.status, "status")
+        _validate_nonnegative_int(self.visible_token_count, "visible_token_count")
+        if self.terminal_reason is not None and not isinstance(self.terminal_reason, str):
             raise TypeError("terminal_reason must be a string or None")
-        object.__setattr__(self, "episode_id", validated_episode_id)
-        object.__setattr__(self, "parent_id", validated_parent)
-        object.__setattr__(self, "fork_boundary", fork_boundary)
-        object.__setattr__(self, "mode", validated_mode)
-        object.__setattr__(self, "spr_source_id", validated_source)
-        object.__setattr__(self, "status", validated_status)
-        object.__setattr__(self, "creation_key", ordering)
-        object.__setattr__(self, "terminal_reason", terminal_reason)
-        object.__setattr__(self, "visible_token_count", validated_visible_count)
 
     @property
     def is_replay(self) -> bool:
         """Whether this record represents replay provenance."""
 
         return self.mode == "serial-policy-replay" or self.spr_source_id is not None
-
-    @property
-    def parent_episode_id(self) -> str | None:
-        """Persistence-shaped spelling for an adapter boundary."""
-
-        return self.parent_id
-
-    @property
-    def spr_source_episode_id(self) -> str | None:
-        """Persistence-shaped spelling for the SPR source reference."""
-
-        return self.spr_source_id
-
-    @property
-    def replay_source_episode_id(self) -> str | None:
-        """Alias used by the existing durable lineage projection."""
-
-        return self.spr_source_id
-
-    @property
-    def creation_order_key(self) -> Any:
-        return self.creation_key
-
-    @property
-    def visible_tokens(self) -> int:
-        return self.visible_token_count
-
-
-def _coalesce_alias(
-    canonical_value: Any,
-    alias_value: Any,
-    *,
-    canonical: str,
-    alias: str,
-    default: Any,
-) -> Any:
-    canonical_set = canonical_value is not _UNSET
-    alias_set = alias_value is not _UNSET
-    if canonical_set and alias_set and canonical_value != alias_value:
-        raise TypeError(f"{canonical} and {alias} disagree")
-    if canonical_set:
-        return canonical_value
-    if alias_set:
-        return alias_value
-    return default
-
-
-LineageRecord = EpisodeRelation
-
 
 @dataclass(frozen=True, slots=True)
 class LineageNode:
@@ -227,9 +105,6 @@ class LineageNode:
         return self.record.parent_id
 
 
-ForkTreeNode = LineageNode
-
-
 @dataclass(frozen=True, slots=True)
 class LineageView:
     """Immutable result of projecting flat relation facts into lineage."""
@@ -241,10 +116,6 @@ class LineageView:
     replay_derived_forks: tuple[EpisodeRelation, ...]
 
     @property
-    def selected(self) -> EpisodeRelation:
-        return self.selected_record
-
-    @property
     def selected_episode_id(self) -> str:
         return self.selected_record.episode_id
 
@@ -253,34 +124,6 @@ class LineageView:
         if self.ordinary_family_root is None:
             return None
         return self.ordinary_family_root.episode_id
-
-    @property
-    def family_root(self) -> EpisodeRelation | None:
-        return self.ordinary_family_root
-
-    @property
-    def family_root_id(self) -> str | None:
-        return self.ordinary_family_root_id
-
-    @property
-    def tree(self) -> LineageNode | None:
-        return self.ordinary_fork_tree
-
-    @property
-    def ordinary_tree(self) -> LineageNode | None:
-        return self.ordinary_fork_tree
-
-    @property
-    def replays(self) -> tuple[EpisodeRelation, ...]:
-        return self.related_replays
-
-    @property
-    def replay_forks(self) -> tuple[EpisodeRelation, ...]:
-        return self.replay_derived_forks
-
-
-EpisodeLineage = LineageView
-
 
 def _sortable(value: Any) -> tuple[Any, ...]:
     """Make even malformed mixed creation keys sortable and deterministic."""
@@ -475,32 +318,9 @@ def build_lineage(
     )
 
 
-def build_episode_lineage(
-    records: Iterable[EpisodeRelation],
-    selected_episode_id: str,
-) -> LineageView:
-    """Descriptive alias for :func:`build_lineage`."""
-
-    return build_lineage(records, selected_episode_id)
-
-
-def lineage_view(
-    records: Iterable[EpisodeRelation],
-    selected_episode_id: str,
-) -> LineageView:
-    """Short alias for callers that treat the result as a view."""
-
-    return build_lineage(records, selected_episode_id)
-
-
 __all__ = [
-    "EpisodeLineage",
     "EpisodeRelation",
-    "ForkTreeNode",
     "LineageNode",
-    "LineageRecord",
     "LineageView",
-    "build_episode_lineage",
     "build_lineage",
-    "lineage_view",
 ]
