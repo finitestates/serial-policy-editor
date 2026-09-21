@@ -19,9 +19,9 @@ from .core.errors import EditorError
 from .core.results import ActionOutcome, ReplayExpectation
 from .core.sampler_config import SamplerConfig
 from .episode_engine import EpisodeEngine
+from .episode_live_history import truncate_live_history
 from .episode_runner import TapeStep
 from .fresh_episode import fresh_root_from
-from .fork_materializer import trim_live_prefix
 
 
 @dataclass(frozen=True)
@@ -730,8 +730,8 @@ class LiveSession:
         if type(boundary) is not int or boundary < 0 or boundary > engine.boundary:
             raise EditorError(f"rewind boundary must be between 0 and {engine.boundary}")
         state = self._capture_active()
-        kept_tape, kept_outcomes, removed_tape, removed_outcomes = trim_live_prefix(
-            state.tape, state.outcomes, boundary, engine.backend
+        prefix = truncate_live_history(
+            state.tape, state.outcomes, boundary
         )
         point = self._control_at(state, boundary)
         engine.rewind_to(boundary)
@@ -741,18 +741,22 @@ class LiveSession:
             coordinate_offset=point.coordinate_offset,
         )
         engine.trajectory.set_budget(point.max_tokens, point.checkpoint_boundary)
-        rewind = RewindState(boundary, tuple(removed_tape), tuple(removed_outcomes))
+        rewind = RewindState(
+            boundary,
+            prefix.discarded_tape,
+            prefix.discarded_outcomes,
+        )
         self._branches[branch_id] = replace(
             state,
             visible_token_ids=tuple(engine.visible_token_ids),
-            tape=tuple(kept_tape),
-            outcomes=tuple(kept_outcomes),
+            tape=prefix.retained_tape,
+            outcomes=prefix.retained_outcomes,
             control_points=self._control_prefix(state, boundary),
             # Rewinding before a branch's original fork point removes some or
             # all inherited actions.  The first remaining action is then the
             # new local divergence point; keeping the old offset makes the
             # BranchState invalid (and would hide newly generated actions).
-            local_action_start=min(state.local_action_start, len(kept_tape)),
+            local_action_start=min(state.local_action_start, len(prefix.retained_tape)),
             terminal_token_id=None,
             terminal_reason=None,
             status="open",
@@ -785,18 +789,18 @@ class LiveSession:
         if type(target) is not int or target < 0 or target > engine.boundary:
             raise EditorError(f"fork boundary must be between 0 and {engine.boundary}")
         source = self._capture_active(capture_cache=True)
-        kept_tape, kept_outcomes, _, _ = trim_live_prefix(
-            source.tape, source.outcomes, target, engine.backend
+        prefix = truncate_live_history(
+            source.tape, source.outcomes, target
         )
         identity = BranchIdentity(branch_id or self._new_branch_id(), source.identity.branch_id, target)
         child = replace(
             source,
             identity=identity,
             visible_token_ids=source.visible_token_ids[:target],
-            tape=tuple(kept_tape),
-            outcomes=tuple(kept_outcomes),
+            tape=prefix.retained_tape,
+            outcomes=prefix.retained_outcomes,
             control_points=self._control_prefix(source, target),
-            local_action_start=len(kept_tape),
+            local_action_start=len(prefix.retained_tape),
             terminal_token_id=None,
             terminal_reason=None,
             status="open",

@@ -1,21 +1,12 @@
-"""Storage-neutral construction of root-relative fork prefixes.
-
-Forking is a semantic operation: retain a visible prefix, keep the original
-root prompt, and make the retained history ordinary destination history.  The
-durable adapter serializes the result; the live-session adapter keeps the same
-shape in memory.
-"""
+"""Storage-neutral construction of root-relative durable fork prefixes."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
-from .core.actions import Hold, PolicyAction, Write
 from .core.errors import EditorError
-from .core.results import ActionOutcome
-from .episode_runner import TapeStep
 
 
 @dataclass(frozen=True)
@@ -153,42 +144,6 @@ def materialize_stored_prefix(
     )
 
 
-def trim_live_prefix(
-    tape: Sequence[TapeStep],
-    outcomes: Sequence[ActionOutcome],
-    boundary: int,
-    backend: Any,
-) -> tuple[list[TapeStep], list[ActionOutcome], list[TapeStep], list[ActionOutcome]]:
-    """Trim live-session records to a root-relative fork boundary."""
-    if type(boundary) is not int or boundary < 0:
-        raise EditorError("fork boundary must be a nonnegative integer")
-    if len(tape) != len(outcomes):
-        raise EditorError("live fork tape and outcomes must align")
-
-    kept_tape: list[TapeStep] = []
-    kept_outcomes: list[ActionOutcome] = []
-    removed_tape: list[TapeStep] = []
-    removed_outcomes: list[ActionOutcome] = []
-    for step, outcome in zip(tape, outcomes):
-        if outcome.boundary_before >= boundary:
-            removed_tape.append(step)
-            removed_outcomes.append(outcome)
-        elif outcome.boundary_after <= boundary:
-            kept_tape.append(step)
-            kept_outcomes.append(outcome)
-        elif outcome.boundary_before < boundary < outcome.boundary_after:
-            partial = _partial_live_outcome(outcome, boundary, backend)
-            if partial is not None:
-                kept_tape.append(TapeStep(partial.action, partial.expectation()))
-                kept_outcomes.append(partial)
-            removed_tape.append(step)
-            removed_outcomes.append(outcome)
-        else:
-            removed_tape.append(step)
-            removed_outcomes.append(outcome)
-    return kept_tape, kept_outcomes, removed_tape, removed_outcomes
-
-
 def _stored_action(
     source: Mapping[str, Any],
     tokens: Sequence[Mapping[str, Any]],
@@ -207,46 +162,9 @@ def _stored_action(
     )
 
 
-def _partial_live_outcome(
-    outcome: ActionOutcome,
-    boundary: int,
-    backend: Any,
-) -> ActionOutcome | None:
-    count = boundary - outcome.boundary_before
-    visible = outcome.visible_token_ids[:count]
-    if not visible:
-        return None
-    if isinstance(outcome.action, Hold):
-        action: PolicyAction = Hold(len(visible))
-        stop_reason = "requested-length"
-    else:
-        action = Write(backend.render(list(visible)), mode="exact")
-        stop_reason = "completed"
-    evidence = tuple(
-        item
-        for item in outcome.evidence
-        if item.realized_visible and item.boundary < boundary
-    )
-    return replace(
-        outcome,
-        action=action,
-        boundary_after=boundary,
-        resolved_text=backend.render(list(visible)),
-        resolved_token_ids=tuple(visible),
-        visible_token_ids=tuple(visible),
-        terminal_token_id=None,
-        stop_reason=stop_reason,
-        evidence=evidence,
-        status="completed",
-        divergence=None,
-        replay_eog_token_id=None,
-    )
-
-
 __all__ = [
     "StoredForkAction",
     "StoredForkPrefix",
     "materialize_stored_prefix",
     "visible_text_prefix",
-    "trim_live_prefix",
 ]
