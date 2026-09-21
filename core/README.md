@@ -33,7 +33,7 @@ control points, branch lineage, and rewind/fork state without importing or
 requiring `EpisodeStore`. A fork is a lightweight session event: it retains a
 reconstructible token prefix and reactivates on the one loaded backend. An
 optional backend cache snapshot can make that faster, but is never branch
-identity. `LiveEpisode` remains a compatibility root-branch facade.
+identity. Use `LiveSession.branch_handle(...)` for a branch-bound view.
 
 The terminal editor exposes the same lifecycle with `--ephemeral`; it does
 not open the default workspace (or create one) during a normal run:

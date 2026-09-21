@@ -23,11 +23,9 @@ from .episode_session import (
     BranchState,
     ControlPoint,
     LiveBranch,
-    LiveEpisode,
     LiveRosterEntry,
     LiveSession,
     LiveSessionRoster,
-    Session,
 )
 from .fresh_episode import fresh_root_from
 from .version import VERSION
@@ -54,7 +52,6 @@ __all__ = [
     "ControlPoint",
     "LiveBranch",
     "Observation",
-    "LiveEpisode",
     "LiveRosterEntry",
     "LiveSession",
     "LiveSessionRoster",
@@ -64,7 +61,6 @@ __all__ = [
     "RunResult",
     "SamplerConfig",
     "SelectRawRank",
-    "Session",
     "TapeStep",
     "TokenEvidence",
     "Write",

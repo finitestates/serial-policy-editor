@@ -1,4 +1,4 @@
-"""Contracts for the persistence-free live episode facade."""
+"""Contracts for persistence-free live sessions and branch handles."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import sys
 import pytest
 
 from tests.fakes import ConformingFakeBackend
-from trajectory_editor import EpisodeEngine, LiveEpisode, LiveSession, SamplerConfig
+from trajectory_editor import EpisodeEngine, LiveSession, SamplerConfig
 from trajectory_editor.core.actions import Accept, Hold, Write
 from trajectory_editor.core.errors import EditorError
 from trajectory_editor.core.results import ReplayExpectation
@@ -24,16 +24,17 @@ def engine() -> EpisodeEngine:
     )
 
 
-def test_live_episode_owns_records_metadata_and_adapter_hooks():
+def test_live_session_owns_records_metadata_and_adapter_hooks():
     events = []
     exports = []
-    episode = LiveEpisode(
+    session = LiveSession(
         engine(),
         prompt="Prompt",
         environment_stamp={"model": "fake", "revision": "test"},
         recorder=events.append,
         export_targets={"memory": lambda session: exports.append(session.history_tape)},
     )
+    episode = session.branch_handle(session.branch.branch_id)
 
     outcome = episode.generate(Accept())
     result = episode.export("memory")
@@ -49,7 +50,8 @@ def test_live_episode_owns_records_metadata_and_adapter_hooks():
 
 
 def test_rewind_trims_records_restores_live_engine_and_retains_tail_for_review():
-    episode = LiveEpisode(engine())
+    session = LiveSession(engine())
+    episode = session.branch_handle(session.branch.branch_id)
     episode.generate(Write(" A B", mode="exact"))
 
     rewind = episode.rewind(1)
@@ -62,13 +64,14 @@ def test_rewind_trims_records_restores_live_engine_and_retains_tail_for_review()
 
 
 def test_rewind_inside_a_conditional_hold_clears_the_discarded_stop_condition():
-    episode = LiveEpisode(
+    session = LiveSession(
         EpisodeEngine(
             NoEogBackend(),
             initial_token_ids=[7],
             sampling=SamplerConfig(temperature=0.0),
         )
     )
+    episode = session.branch_handle(session.branch.branch_id)
     episode.generate(Hold(3, "sentence"))
 
     episode.rewind(1)
@@ -78,7 +81,8 @@ def test_rewind_inside_a_conditional_hold_clears_the_discarded_stop_condition():
 
 
 def test_rewind_removes_a_zero_width_replay_handoff_at_the_target_boundary():
-    episode = LiveEpisode(engine())
+    session = LiveSession(engine())
+    episode = session.branch_handle(session.branch.branch_id)
     expected = ReplayExpectation((2,))
     outcome = episode.generate(Accept(), expectation=expected, replay=True)
 
@@ -105,7 +109,8 @@ def test_forked_branch_can_rewind_before_its_fork_point_and_continue_locally():
 
 
 def test_fork_creates_an_independent_child_with_lineage_and_inherited_history():
-    parent = LiveEpisode(engine(), branch_id="root")
+    session = LiveSession(engine(), branch_id="root")
+    parent = session.branch_handle("root")
     parent.generate(Accept())
 
     child = parent.fork(backend=ConformingFakeBackend(), boundary=1, branch_id="child")
@@ -206,7 +211,8 @@ def test_optional_cache_snapshots_do_not_change_branch_semantics():
 
 
 def test_quit_and_discard_need_no_persistence_and_prevent_further_generation():
-    episode = LiveEpisode(engine())
+    session = LiveSession(engine())
+    episode = session.branch_handle(session.branch.branch_id)
     episode.quit("user-quit")
 
     assert episode.status == "quit"
@@ -214,7 +220,8 @@ def test_quit_and_discard_need_no_persistence_and_prevent_further_generation():
     with pytest.raises(EditorError, match="quit"):
         episode.generate()
 
-    discarded = LiveEpisode(engine())
+    discarded_session = LiveSession(engine())
+    discarded = discarded_session.branch_handle(discarded_session.branch.branch_id)
     discarded.generate(Accept())
     discarded.discard()
 
@@ -224,7 +231,7 @@ def test_quit_and_discard_need_no_persistence_and_prevent_further_generation():
         discarded.generate()
 
 
-def test_live_episode_import_does_not_load_episode_store():
+def test_live_session_import_does_not_load_episode_store():
     # Check the actual package import graph in a clean interpreter; other test
     # modules are allowed to use persistence in the main test process.
     source_root = Path(__file__).parents[2] / "core" / "src"
@@ -233,7 +240,7 @@ def test_live_episode_import_does_not_load_episode_store():
         [
             sys.executable,
             "-c",
-            "import sys; from trajectory_editor import LiveEpisode; "
+            "import sys; from trajectory_editor import LiveSession; "
             "assert 'trajectory_editor.episode_store' not in sys.modules",
         ],
         check=False,

@@ -1144,18 +1144,6 @@ class LiveSessionRoster:
             session.discard()
 
 
-class LiveEpisode(LiveBranch):
-    """Compatibility branch facade rooted in a new :class:`LiveSession`."""
-
-    def __init__(self, engine: EpisodeEngine, **kwargs: Any) -> None:
-        session = LiveSession(engine, **kwargs)
-        super().__init__(session, session.branch)
-
-
-# New code should use LiveSession; LiveEpisode remains a compatible root handle.
-Session = LiveSession
-
-
 __all__ = [
     "BackendFactory",
     "BranchIdentity",
@@ -1165,12 +1153,10 @@ __all__ = [
     "ControlPoint",
     "ForkState",
     "LiveBranch",
-    "LiveEpisode",
     "LiveRosterEntry",
     "LiveSession",
     "LiveSessionRoster",
     "RewindState",
-    "Session",
     "SessionEvent",
     "SessionExportTarget",
     "SessionRecorder",
