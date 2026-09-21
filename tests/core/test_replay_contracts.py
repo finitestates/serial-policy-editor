@@ -9,7 +9,7 @@ from trajectory_editor.core.results import ReplayExpectation
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_replay_source import replay_tape
-from trajectory_editor.episode_runner import EpisodeRunner, LiveSessionRunner, TapeStep
+from trajectory_editor.episode_runner import EpisodeRunner, LiveSessionRunner, ReplayPlan, TapeStep
 from trajectory_editor.episode_session import LiveSession
 from trajectory_editor.episode_store import EpisodeStore
 from tests.core.test_lifecycle_contracts import PhraseBackend
@@ -197,7 +197,8 @@ def test_r07_editorial_moves_never_become_replay_steps(tmp_path):
     assert tape[0][0] == Accept()
 
 
-def test_r08_exhausted_replay_yields_to_a_usable_live_edge(tmp_path):
+@pytest.mark.parametrize("as_plan", [False, True])
+def test_r08_exhausted_replay_yields_to_a_usable_live_edge(tmp_path, as_plan):
     with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
         source = runtime([1, 3, 5])
         source_id = create(store, "source", source)
@@ -209,16 +210,24 @@ def test_r08_exhausted_replay_yields_to_a_usable_live_edge(tmp_path):
             def choose(self, *args):
                 return Write("hello", mode="exact")
 
+        steps = tape(store, source_id)
         result = EpisodeRunner(target, store, target_id).run(
-            tape=tape(store, source_id),
-            live_policy=LiveWrite(),
-            stop_after_tape=False,
+            tape=ReplayPlan(tuple(steps)) if as_plan else steps,
+            live_policy=NeverChoose(),
             max_live_actions=1,
         )
+        assert result.replay_exhausted
+        assert target.visible_token_ids == [1]
+        assert len(result.outcomes) == 1
+        assert store.get_episode(target_id)["status"] == "replay-edge"
 
-    assert result.replay_exhausted
+        resumed = EpisodeRunner(target, store, target_id).run(
+            live_policy=LiveWrite(), max_live_actions=1
+        )
+
+    assert not resumed.replay_exhausted
     assert target.visible_token_ids == [1, 4]
-    assert len(result.outcomes) == 2
+    assert len(resumed.outcomes) == 1
 
 
 def test_r09_replay_never_mutates_the_recorded_source_prefix(tmp_path):

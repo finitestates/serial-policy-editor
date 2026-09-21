@@ -35,7 +35,6 @@ class _RunnerTarget:
         *,
         tape: Sequence[TapeStep] | ReplayPlan | None = None,
         live_policy: LivePolicy | None = None,
-        stop_after_tape: bool = True,
         max_live_actions: int | None = None,
     ) -> RunResult:
         return run_plan(
@@ -43,7 +42,6 @@ class _RunnerTarget:
             divergence_policy=self.divergence_policy,
             tape=tape,
             live_policy=live_policy,
-            stop_after_tape=stop_after_tape,
             max_live_actions=max_live_actions,
         )
 

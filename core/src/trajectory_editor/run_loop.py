@@ -174,16 +174,14 @@ def run_plan(
     divergence_policy: str,
     tape: Sequence[TapeStep] | ReplayPlan | None = None,
     live_policy: LivePolicy | None = None,
-    stop_after_tape: bool = True,
     max_live_actions: int | None = None,
 ) -> RunResult:
-    """Run one replay/live turn against either kind of episode target."""
+    """Run replay or live actions; any supplied tape returns at the live edge."""
 
     outcomes: list[ActionOutcome] = []
     replayed = 0
     handed_off = False
     handoff_reason: str | None = None
-    tape_input = tape
     had_tape = tape is not None
     plan = tape if isinstance(tape, ReplayPlan) else ReplayPlan(tuple(tape or ()))
     replay_exhausted = False
@@ -235,19 +233,10 @@ def run_plan(
         ):
             target.set_sampler(plan.final_sampling)
 
-        # Explicit plans return through the edge. Legacy callers may ask for
-        # live continuation after a successfully exhausted plain tape.
-        should_run_live = not had_tape or (
-            replay_exhausted
-            and not stop_after_tape
-            and not isinstance(tape_input, ReplayPlan)
-        )
-        if outcomes and outcomes[-1].stop_reason == "replay-eog":
-            should_run_live = False
         live_actions = 0
         while (
             (max_live_actions is None or live_actions < max_live_actions)
-            and should_run_live
+            and not had_tape
             and not target.engine.ended
             and not target.engine.checkpointed
             and live_policy is not None

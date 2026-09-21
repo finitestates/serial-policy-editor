@@ -993,7 +993,6 @@ def main(
                         live_policy=episode_policy_setup.durable_policy(
                             args, store, episode_id, io
                         ),
-                        stop_after_tape=True,
                     )
                 except EdgeRequested:
                     pending_tape = None

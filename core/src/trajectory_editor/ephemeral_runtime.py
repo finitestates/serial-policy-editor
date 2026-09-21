@@ -300,7 +300,6 @@ def run_ephemeral(
             result = runner.run(
                 tape=pending_tape,
                 live_policy=episode_policy_setup.ephemeral_policy(args, io),
-                stop_after_tape=True,
             )
         except EdgeRequested:
             pending_tape = None
