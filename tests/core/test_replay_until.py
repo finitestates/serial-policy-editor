@@ -12,6 +12,7 @@ from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_cli import main
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_projector import project_fork_map
+from trajectory_editor.episode_replay_source import final_sampling
 from trajectory_editor.episode_store import EpisodeStore
 
 
@@ -127,7 +128,7 @@ def test_cli_replay_until_uses_sampler_state_at_the_selected_boundary(
         "--episode-id", "destination",
     )
     with EpisodeStore(source_workspace) as store:
-        assert store.final_sampling("destination").seed == seed
+        assert final_sampling(store, "destination").seed == seed
 
 
 def test_cli_edge_replay_appends_live_text_without_mutating_the_source(source_workspace):

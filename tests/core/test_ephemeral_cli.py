@@ -10,6 +10,7 @@ from trajectory_editor.core.actions import Write
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_cli import _ephemeral_edge_menu, main
 from trajectory_editor.episode_engine import EpisodeEngine
+from trajectory_editor.episode_replay_source import replay_procedure
 from trajectory_editor.episode_session import LiveSession
 from trajectory_editor.episode_store import EpisodeStore
 from trajectory_editor.teacher_plan import load_teacher_tape_jsonl
@@ -54,7 +55,7 @@ def test_ephemeral_export_and_save_materialize_only_the_selected_branch(tmp_path
     with EpisodeStore(workspace) as store:
         saved = store.get_episode("selected")
         assert saved["metadata"]["mode"] == "ephemeral-save"
-        assert len(store.replay_procedure("selected")) == 1
+        assert len(replay_procedure(store, "selected")) == 1
 
 
 def test_ephemeral_fork_selects_a_new_live_branch_without_a_workspace(tmp_path):

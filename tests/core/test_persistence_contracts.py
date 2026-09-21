@@ -11,6 +11,7 @@ from trajectory_editor.episode_projector import (
     project_lineage,
     project_procedure,
 )
+from trajectory_editor.episode_replay_source import replay_tape
 from trajectory_editor.episode_store import EpisodeStore
 
 
@@ -83,7 +84,7 @@ def test_p02_persisted_tape_excludes_editorial_interactions(tmp_path):
             "SELECT kind, arguments_json, mismatch_json FROM actions WHERE episode_id = ?",
             (identifier,),
         ).fetchall()
-        tape = store.replay_tape(identifier)
+        tape = replay_tape(store, identifier)
 
     assert len(rows) == 1
     assert rows[0]["kind"] == "hold"

@@ -36,19 +36,21 @@ from .episode_lifecycle import (
     _model_continuation, _visible_tokens, _restore_engine,
     _create_episode, _rewind_episode, _fork_engine, _spr_engine_from_source,
 )
-from .core.actions import Write
 from .episode_engine import EpisodeEngine
+from .episode_replay_source import build_source_replay_recipe
 from .episode_runner import (
     EdgeRequested,
     EpisodeRunner as CoreEpisodeRunner,
     ForkRequested,
     LiveSessionRunner,
-    ReplayContext,
-    ReplayOrigin,
     SeamlessEdgeRequested,
     SeamlessRewindRequested,
-    TapeStep,
     ReplayPlan,
+)
+from .spr_recipe import (
+    ReplayControlPolicy,
+    ReplayPlacement,
+    compose_replay_plan,
 )
 from .projector import (
     project_episode,
@@ -1128,8 +1130,11 @@ def _live_edge_menu(
                             break
                         try:
                             until = int(entered)
-                            store.replay_until(
-                                source_id, until, sampling_factory=sampling_factory
+                            build_source_replay_recipe(
+                                store,
+                                source_id,
+                                until,
+                                sampling_factory=sampling_factory,
                             )
                         except (ValueError, EditorError):
                             until = None
@@ -1145,8 +1150,11 @@ def _live_edge_menu(
                         raise EditorError("Replay boundary must be an integer.") from None
                 elif len(replay_args) != 1:
                     raise EditorError("Use spr EPISODE [--until Y | m].")
-                store.replay_until(
-                    source_id, until, sampling_factory=sampling_factory
+                build_source_replay_recipe(
+                    store,
+                    source_id,
+                    until,
+                    sampling_factory=sampling_factory,
                 )
                 return "spr", (source_id, until)
             except EditorError as exc:
@@ -1500,8 +1508,13 @@ def main(
                     requested_id=requested_id,
                 )
             elif args.replay is not None:
-                source_segment = store.sampling_segment(args.replay, 0)
-                source_sampling = sampling_factory(source_segment["sampling"])
+                recipe = build_source_replay_recipe(
+                    store,
+                    args.replay,
+                    args.until,
+                    sampling_factory=sampling_factory,
+                )
+                source_sampling = recipe.controls.effective_at(0).sampling
                 overrides = {
                     name: getattr(args, name) for name in CORE_SAMPLER_FIELDS
                     if getattr(args, name) is not None
@@ -1521,21 +1534,28 @@ def main(
                         overrides[name] = getattr(sampling, name)
                 replay_prefix = None
                 if model_changed:
-                    replay_prefix = backend.tokenize(store.get_episode(args.replay)["initial_text"], add_bos=True, special=True)
+                    replay_prefix = backend.tokenize(
+                        recipe.source_prompt,
+                        add_bos=True,
+                        special=True,
+                    )
                 engine, pending_tape = _spr_engine_from_source(
-                    store,
-                    args.replay,
+                    recipe,
                     backend,
                     sampling=sampling,
                     max_tokens=args.max_tokens,
-                    until=args.until,
-                    follow_source_sampling=not args.fixed_config,
+                    control_policy=(
+                        ReplayControlPolicy.PRESERVE_DESTINATION
+                        if args.fixed_config
+                        else ReplayControlPolicy.FOLLOW_SOURCE
+                    ),
                     sampling_overrides=overrides,
-                    initial_token_ids=replay_prefix,
-                    stream_fingerprint=source_segment["stream_fingerprint"] if model_changed else None,
-                    coordinate_offset=source_segment["coordinate_offset"] if model_changed else None,
+                    initial_token_ids=(
+                        replay_prefix
+                        if replay_prefix is not None
+                        else list(source["initial_token_ids"])
+                    ),
                     guidance_backend=cfg_backend_for(sampling),
-                    sampling_factory=sampling_factory,
                 )
                 episode_id = _create_episode(
                     store,
@@ -1897,45 +1917,24 @@ def main(
                     continue
                 if action == "spr":
                     source_id, until = value
-                    # Snapshot before appending, including self-replay. EDGE
-                    # composition inserts the source prompt as literal text;
-                    # CLI replay continues to use it as initial context.
-                    source_prompt = store.get_episode(source_id)["initial_text"]
-                    source_steps = store.replay_until(
-                        source_id, until, sampling_factory=sampling_factory
+                    recipe = build_source_replay_recipe(
+                        store,
+                        source_id,
+                        until,
+                        sampling_factory=sampling_factory,
                     )
-                    steps = []
-                    origins = []
-                    if source_prompt:
-                        steps.append(TapeStep(
-                            Write(source_prompt, "exact"), None,
-                        ))
-                        origins.append(ReplayOrigin(
-                            source_episode_id=source_id,
-                            source_boundary=0,
-                            source_part="prompt",
-                        ))
-                    steps.extend(
-                        TapeStep(
-                            step["action"], step["expectation"],
-                        )
-                        for step in source_steps
-                    )
-                    origins.extend(
-                        ReplayOrigin(
-                            source_episode_id=source_id,
-                            source_boundary=step["boundary"],
-                        )
-                        for step in source_steps
-                    )
-                    pending_tape = ReplayPlan(
-                        tuple(steps),
-                        follow_source_sampling=False,
-                        context=ReplayContext(origins=tuple(origins)),
+                    pending_tape = compose_replay_plan(
+                        recipe,
+                        ReplayPlacement.APPEND_TO_CURRENT_BRANCH,
+                        ReplayControlPolicy.PRESERVE_DESTINATION,
                     )
                     store.record_interaction(
                         episode_id, engine.boundary, "replay-start",
-                        {"source_episode_id": source_id, "action_count": len(steps), "until": until},
+                        {
+                            "source_episode_id": source_id,
+                            "action_count": len(pending_tape),
+                            "until": until,
+                        },
                     )
                     # Keep the existing engine and ledger: boundary zero,
                     # prefix, sampler stream, and remaining budget do not move.

@@ -9,6 +9,7 @@ from typing import Any
 
 from .core.actions import Accept, EndGeneration, Finish, Hold, Phrase, SelectRawRank, Write
 from .core.errors import EditorError
+from .episode_replay_source import final_sampling, replay_procedure
 from .episode_store import EpisodeStore
 
 
@@ -327,7 +328,7 @@ def project_procedure(store: EpisodeStore, episode_id: str) -> str:
     from .core.sampler_config import SamplerConfig
 
     episode = store.get_episode(episode_id)
-    steps = store.replay_procedure(episode_id)
+    steps = replay_procedure(store, episode_id)
     initial = SamplerConfig.from_record(store.sampling_segment(episode_id, 0)["sampling"])
     backend = episode["backend"]
     model = backend.get("filename") or backend.get("model_path") or backend.get("model") or "unknown"
@@ -416,7 +417,7 @@ def project_procedure(store: EpisodeStore, episode_id: str) -> str:
         rows.append((boundary, command, comment))
         boundary += len(step["expectation"].token_ids)
 
-    transition(store.final_sampling(episode_id), boundary, trailing=True)
+    transition(final_sampling(store, episode_id), boundary, trailing=True)
     # Finite procedures return live control, never seal the destination.
     if not rows or rows[-1][1] not in {"q", "e!"} and not rows[-1][1].startswith("s "):
         rows.append((boundary, "q", None))

@@ -6,8 +6,14 @@ from .core.errors import EditorError
 from .core.actions import Write
 from .core.sampler_config import SamplerConfig
 from .episode_engine import EpisodeEngine
+from .spr_recipe import (
+    ReplayControlPolicy,
+    ReplayPlacement,
+    SourceReplayRecipe,
+    compose_replay_plan,
+)
 from .episode_store import EpisodeStore
-from .episode_runner import ReplayContext, ReplayPlan, TapeStep
+from .episode_runner import ReplayPlan
 from .fork_materializer import visible_text_prefix
 
 SAMPLER_FIELDS = tuple(field.name for field in fields(SamplerConfig))
@@ -323,76 +329,45 @@ def _fork_engine(
 
 
 def _spr_engine_from_source(
-    store: EpisodeStore,
-    source_id: str,
+    recipe: SourceReplayRecipe,
     backend: Any,
     *,
     sampling: SamplerConfig,
     max_tokens: int | None,
-    until: int | None = None,
-    follow_source_sampling: bool | None = None,
+    control_policy: ReplayControlPolicy,
     sampling_overrides: dict[str, Any] | None = None,
-    initial_token_ids: list[int] | None = None,
+    initial_token_ids: list[int],
     stream_fingerprint: str | None = None,
     coordinate_offset: int | None = None,
     guidance_backend: Any | None = None,
-    sampling_factory: Callable = SamplerConfig.from_record,
 ) -> tuple[EpisodeEngine, ReplayPlan]:
-    source = store.get_episode(source_id)
+    """Build a root-entered runtime and plan from a semantic replay recipe."""
+
     overrides = dict(sampling_overrides or {})
     if overrides.keys() - set(SAMPLER_FIELDS):
         raise EditorError("unknown replay sampler override")
     sampling = replace(sampling, **overrides)
-    if follow_source_sampling is None:
-        # Replays from the original entrance follow the source.  A caller that
-        # supplies a current prefix is performing counterfactual SPR and keeps
-        # its current sampler unless it opts into source-following explicitly.
-        follow_source_sampling = initial_token_ids is None
-    source_steps = store.replay_until(
-        source_id, until, sampling_factory=sampling_factory
+    root_controls = recipe.controls.effective_at(0)
+    if stream_fingerprint is None:
+        stream_fingerprint = root_controls.stream_fingerprint
+    if coordinate_offset is None:
+        coordinate_offset = root_controls.coordinate_offset
+    if stream_fingerprint is None:
+        raise EditorError("source replay requires a sampler stream fingerprint")
+    plan = compose_replay_plan(
+        recipe,
+        ReplayPlacement.SOURCE_ROOT,
+        control_policy,
+        sampler_overrides=overrides,
     )
-    tape = [TapeStep(step["action"], step["expectation"]) for step in source_steps]
-    context = ReplayContext(
-        sampling=tuple(
-            replace(step["sampling"], **overrides)
-            if follow_source_sampling else None
-            for step in source_steps
-        )
-    )
-    # Only an explicit target allowance limits replay.
-    if initial_token_ids is None:
-        segment = store.sampling_segment(source_id, 0)
-        initial_token_ids = list(source["initial_token_ids"])
-        stream_fingerprint = segment["stream_fingerprint"] if stream_fingerprint is None else stream_fingerprint
-        coordinate_offset = (
-            segment["coordinate_offset"]
-            if coordinate_offset is None
-            else coordinate_offset
-        )
-        initial_text = str(source["initial_text"])
-    else:
-        initial_text = backend.render(initial_token_ids, special=True)
-        if stream_fingerprint is None or coordinate_offset is None:
-            raise EditorError("counterfactual SPR requires sampler stream coordinates")
     runtime = EpisodeEngine(
         backend,
         sampling=sampling,
         max_tokens=max_tokens,
-        initial_text=initial_text,
+        initial_text=recipe.source_prompt,
         initial_token_ids=initial_token_ids,
         stream_fingerprint=stream_fingerprint,
         coordinate_offset=coordinate_offset,
         guidance_backend=guidance_backend,
     )
-    final_sampling = (
-        replace(
-            sampling_factory(store.final_sampling_record(source_id))
-            if until is None
-            else sampling_factory(store.sampling_segment(source_id, until)["sampling"]),
-            **overrides,
-        )
-        if follow_source_sampling else None
-    )
-    return runtime, ReplayPlan(
-        tuple(tape), follow_source_sampling, final_sampling, context
-    )
+    return runtime, plan

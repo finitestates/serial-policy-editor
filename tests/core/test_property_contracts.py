@@ -12,6 +12,7 @@ from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.core.results import ReplayExpectation
 from trajectory_editor.episode_cli import _fork_engine, _rewind_episode
 from trajectory_editor.episode_engine import EpisodeEngine
+from trajectory_editor.episode_replay_source import replay_tape
 from trajectory_editor.episode_store import EpisodeStore
 
 
@@ -66,7 +67,7 @@ def test_q03_rewind_then_replay_reproduces_each_retained_prefix(tmp_path):
             _rewind_episode(store, identifier, source, boundary)
             retained = tuple(source.visible_token_ids)
             replay = runtime([1, 3, 5])
-            tape = store.replay_tape(identifier)
+            tape = replay_tape(store, identifier)
             if tape:
                 replay_action, expectation = tape[0]
                 replay.apply(replay_action, replay=True, expectation=expectation)

@@ -9,20 +9,18 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from bisect import bisect_right
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .core.actions import Phrase, Write, Hold, Finish, PolicyAction, action_from_dict
+from .core.actions import Phrase, Write, Hold
 from .core.errors import EditorError
-from .core.results import ActionOutcome, ReplayExpectation
+from .core.results import ActionOutcome
 from .core.sampler_config import SamplerConfig
 from .episode_hash import token_prefix_sha256, validate_coordinate, validate_fingerprint
 from .fork_materializer import materialize_stored_prefix
-from .surviving_procedure import ProcedureRecord, project_surviving_procedure
 
 SCHEMA_VERSION = 1
 
@@ -1057,170 +1055,45 @@ class EpisodeStore:
             result.append(item)
         return result
 
-    def replay_tape(
-        self, episode_id: str
-    ) -> list[tuple[PolicyAction, ReplayExpectation]]:
-        return [
-            (action, expectation)
-            for action, expectation, _ in self.replay_tape_with_sampling(episode_id)
-        ]
-
-    def replay_tape_with_sampling(
-        self, episode_id: str, *, sampling_factory=SamplerConfig.from_record
-    ) -> list[tuple[PolicyAction, ReplayExpectation, SamplerConfig]]:
-        """Return recorded actions with the sampler active at each action boundary."""
-        return [
-            (step["action"], step["expectation"], step["sampling"])
-            for step in self.replay_procedure(episode_id, sampling_factory=sampling_factory)
-        ]
-
-    def replay_procedure(
-        self, episode_id: str, *, sampling_factory=SamplerConfig.from_record
-    ) -> list[dict[str, Any]]:
-        """Derive surviving moves with source labels and evidence for display."""
-        action_rows = self.actions(episode_id)
-        token_rows = self.tokens(episode_id)
-        if not action_rows:
-            return []
-        segments = self.connection.execute(
-            "SELECT * FROM sampler_segments "
-            "WHERE episode_id = ? ORDER BY start_boundary",
+    def sampler_segments(self, episode_id: str) -> list[dict[str, Any]]:
+        """Return decoded sampler-coordinate records in root-boundary order."""
+        self.get_episode(episode_id)
+        rows = self.connection.execute(
+            "SELECT * FROM sampler_segments WHERE episode_id = ? ORDER BY start_boundary",
             (episode_id,),
         ).fetchall()
-        for segment in segments:
-            validate_coordinate(segment["start_boundary"], "start_boundary")
-            validate_coordinate(segment["coordinate_offset"], "coordinate_offset")
-            validate_fingerprint(segment["stream_fingerprint"])
-        starts = [segment["start_boundary"] for segment in segments]
-        samplers: dict[int, SamplerConfig] = {}
-        grouped: dict[int, list[dict[str, Any]]] = {}
-        for token in token_rows:
-            grouped.setdefault(int(token["action_ordinal"]), []).append(token)
-        procedure_records: list[ProcedureRecord] = []
-        source_rows: list[tuple[dict[str, Any], list[dict[str, Any]], SamplerConfig]] = []
-        for row in action_rows:
-            records = grouped.get(int(row["ordinal"]), [])
-            segment_index = bisect_right(starts, int(row["boundary_before"])) - 1
-            if segment_index < 0:
-                raise EditorError(f"episode {episode_id!r} has no sampler segment")
-            if segment_index not in samplers:
-                samplers[segment_index] = sampling_factory(
-                    _loads(segments[segment_index]["sampling_json"], {})
-                )
-            sampling = samplers[segment_index]
-            visible = tuple(
-                int(record["token_id"])
-                for record in records
-                if bool(record["realized_visible"])
-            )
-            terminal = next(
-                (
-                    int(record["token_id"])
-                    for record in records
-                    if bool(record["is_eog"])
-                ),
-                None,
-            )
-            procedure_records.append(
-                ProcedureRecord(
-                    action=action_from_dict(row["arguments"]),
-                    expectation=ReplayExpectation(
-                        visible, terminal, str(row["stop_reason"])
-                    ),
-                    status=str(row["status"]),
-                    visible_token_ids=visible,
-                    # Durable handoff projection historically replays a
-                    # partial span as a finite Hold. The in-memory adapter
-                    # can retain resolved text when it has it.
-                    visible_text="",
-                    boundary_before=int(row["boundary_before"]),
-                    sampling=sampling,
-                )
-            )
-            source_rows.append((row, records, sampling))
-
-        projected = project_surviving_procedure(
-            procedure_records,
-            normalize_for_replay=False,
-        )
-        return [
-            {
-                "action": step.action,
-                "expectation": step.expectation,
-                "sampling": source_rows[step.source_index][2],
-                "boundary": step.boundary,
-                "tokens": source_rows[step.source_index][1],
-            }
-            for step in projected
-        ]
-
-    def replay_until(
-        self,
-        episode_id: str,
-        until: int | None = None,
-        *,
-        sampling_factory=SamplerConfig.from_record,
-    ) -> list[dict[str, Any]]:
-        """Select source boundaries; destination writes retain normal token indexing."""
-        if until is None:
-            return self.replay_procedure(episode_id, sampling_factory=sampling_factory)
-        length = sum(bool(row["realized_visible"]) for row in self.tokens(episode_id))
-        if type(until) is not int or not 0 <= until <= length:
-            raise EditorError(f"Replay boundary must be 0..{length}.")
-        result = []
-        for original in self.replay_procedure(episode_id, sampling_factory=sampling_factory):
-            if original["boundary"] >= until:
-                break
-            step = dict(original)
-            count = until - step["boundary"]
-            visible = [row for row in step["tokens"] if row["realized_visible"]]
-            if len(visible) > count or (len(visible) == count and isinstance(step["action"], (Hold, Finish))):
-                retained = visible[:count]
-                if isinstance(step["action"], (Write, Phrase)):
-                    step["action"] = Write("".join(row["text"] for row in retained), "exact")
-                    reason = "completed"
-                else:
-                    step["action"] = Hold(count)
-                    reason = "requested-length"
-                step["tokens"] = retained
-                step["expectation"] = ReplayExpectation(
-                    tuple(row["token_id"] for row in retained), None, reason)
-            result.append(step)
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["sampling"] = _loads(item.pop("sampling_json"), {})
+            if not isinstance(item["sampling"], dict):
+                raise EditorError("saved sampler settings must be an object")
+            SamplerConfig.from_record(item["sampling"])
+            validate_coordinate(item["start_boundary"], "start_boundary")
+            validate_coordinate(item["coordinate_offset"], "coordinate_offset")
+            validate_fingerprint(item["stream_fingerprint"])
+            result.append(item)
         return result
 
-    def final_sampling(self, episode_id: str) -> SamplerConfig:
-        """Return the latest source setting, including changes after its last move."""
-        return SamplerConfig.from_record(self.final_sampling_record(episode_id))
-
-    def final_sampling_record(self, episode_id: str) -> dict[str, Any]:
-        """Return the latest raw sampler mapping for optional adapters."""
-        row = self.connection.execute(
-            "SELECT sampling_json FROM sampler_segments WHERE episode_id = ? "
-            "ORDER BY start_boundary DESC LIMIT 1", (episode_id,),
-        ).fetchone()
-        if row is None:
-            raise EditorError(f"episode {episode_id!r} has no sampler segment")
-        result = _loads(row["sampling_json"], {})
-        if not isinstance(result, dict):
-            raise EditorError("saved sampler settings must be an object")
-        SamplerConfig.from_record(result)
+    def budget_segments(self, episode_id: str) -> list[dict[str, Any]]:
+        """Return budget-control records in root-boundary order."""
+        self.get_episode(episode_id)
+        rows = self.connection.execute(
+            "SELECT * FROM budget_segments WHERE episode_id = ? ORDER BY start_boundary",
+            (episode_id,),
+        ).fetchall()
+        result = [dict(row) for row in rows]
+        for item in result:
+            validate_coordinate(item["start_boundary"], "start_boundary")
         return result
 
     def sampling_segment(self, episode_id: str, boundary: int = 0) -> dict[str, Any]:
-        row = self.connection.execute(
-            """
-            SELECT * FROM sampler_segments
-            WHERE episode_id = ? AND start_boundary <= ?
-            ORDER BY start_boundary DESC LIMIT 1
-            """,
-            (episode_id, boundary),
-        ).fetchone()
-        if row is None:
+        validate_coordinate(boundary, "boundary")
+        matches = [
+            segment
+            for segment in self.sampler_segments(episode_id)
+            if int(segment["start_boundary"]) <= boundary
+        ]
+        if not matches:
             raise EditorError(f"episode {episode_id!r} has no sampler segment")
-        result = dict(row)
-        result["sampling"] = _loads(result.pop("sampling_json"), {})
-        SamplerConfig.from_record(result["sampling"])
-        validate_coordinate(result["start_boundary"], "start_boundary")
-        validate_coordinate(result["coordinate_offset"], "coordinate_offset")
-        validate_fingerprint(result["stream_fingerprint"])
-        return result
+        return dict(matches[-1])
