@@ -19,8 +19,8 @@ from .core.actions import Phrase, Write, Hold
 from .core.errors import EditorError
 from .core.results import ActionOutcome
 from .core.sampler_config import SamplerConfig
+from .episode_history import StoredHistoryPrefix, materialize_stored_prefix
 from .episode_hash import token_prefix_sha256, validate_coordinate, validate_fingerprint
-from .fork_materializer import materialize_stored_prefix
 
 SCHEMA_VERSION = 1
 
@@ -375,11 +375,8 @@ class EpisodeStore:
         visible_text: str,
         max_tokens: int | None,
     ) -> dict[str, Any]:
-        """Truncate one open episode at a visible-token boundary.
+        """Persist the root-relative history retained through ``boundary``."""
 
-        Partial holds become finite holds. Partial writes become exact writes
-        of the retained text, keeping the original submission in their metadata.
-        """
         if type(boundary) is not int or boundary < 0:
             raise EditorError("rewind boundary must be a nonnegative integer")
         if max_tokens is not None and (type(max_tokens) is not int or max_tokens < 1):
@@ -393,104 +390,46 @@ class EpisodeStore:
             raise EditorError(
                 f"rewind boundary must be between 0 and {visible_count}"
             )
+        try:
+            retained = materialize_stored_prefix(
+                self.actions(episode_id),
+                token_rows,
+                (),
+                (),
+                boundary,
+            )
+        except ValueError as exc:
+            raise EditorError(str(exc)) from exc
 
-        action_rows = self.actions(episode_id)
-        containing: dict[str, Any] | None = None
-        first_removed: dict[str, Any] | None = None
-        for row in action_rows:
-            before = int(row["boundary_before"])
-            after = int(row["boundary_after"])
-            if before < boundary < after:
-                containing = row
-                break
-            if before >= boundary:
-                first_removed = row
-                break
-
-        trimmed_action: dict[str, Any] | None = None
+        partial = retained.partial
+        trimmed_action = (
+            {
+                "ordinal": partial.ordinal,
+                "kind": partial.action.kind,
+                "original_boundary_after": partial.outcome.boundary_after,
+                "new_boundary_after": boundary,
+            }
+            if partial is not None
+            else None
+        )
         with self.transaction() as db:
-            if containing is not None:
-                ordinal = int(containing["ordinal"])
-                retained_rows = db.execute(
-                    """
-                    SELECT text FROM tokens
-                    WHERE episode_id = ? AND action_ordinal = ?
-                      AND boundary < ? AND realized_visible = 1
-                    ORDER BY action_token_index
-                    """,
-                    (episode_id, ordinal, boundary),
-                ).fetchall()
-                arguments = dict(containing["arguments"])
-                resolved_text = "".join(str(row["text"]) for row in retained_rows)
-                if containing["kind"] in {"write", "check-phrase", "force-phrase"}:
-                    original_key = (
-                        "original_write"
-                        if containing["kind"] == "write"
-                        else "original_action"
-                    )
-                    original = arguments.get(original_key, dict(arguments))
-                    arguments = {
-                        **arguments,
-                        "kind": "write",
-                        "mode": "exact",
-                        "text": resolved_text,
-                        original_key: original,
-                    }
-                else:
-                    arguments["limit"] = boundary - int(containing["boundary_before"])
-                    arguments["boundary"] = None
-                db.execute(
-                    "DELETE FROM actions WHERE episode_id = ? AND ordinal > ?",
-                    (episode_id, ordinal),
-                )
-                db.execute(
-                    """
-                    UPDATE actions
-                    SET boundary_after = ?, arguments_json = ?,
-                        resolved_text = ?, status = 'completed',
-                        stop_reason = ?, mismatch_json = NULL
-                    WHERE episode_id = ? AND ordinal = ?
-                    """,
-                    (
-                        boundary,
-                        _json(arguments),
-                        resolved_text,
-                        (
-                            "completed"
-                            if containing["kind"] in {"write", "check-phrase", "force-phrase"}
-                            else "requested-length"
-                        ),
-                        episode_id,
-                        ordinal,
-                    ),
-                )
-                trimmed_action = {
-                    "ordinal": ordinal,
-                    "kind": str(containing["kind"]),
-                    "original_boundary_after": int(containing["boundary_after"]),
-                    "new_boundary_after": boundary,
-                }
-            elif first_removed is not None:
-                db.execute(
-                    "DELETE FROM actions WHERE episode_id = ? AND ordinal >= ?",
-                    (episode_id, int(first_removed["ordinal"])),
-                )
-
-            db.execute(
-                "DELETE FROM tokens WHERE episode_id = ? AND boundary >= ?",
-                (episode_id, boundary),
+            self._replace_history_actions(
+                db,
+                episode_id,
+                retained,
+                preserve_ordinals=True,
             )
             db.execute(
                 "DELETE FROM interactions WHERE episode_id = ? AND boundary >= ?",
                 (episode_id, boundary),
             )
-            db.execute("DELETE FROM budget_segments WHERE episode_id = ? AND start_boundary > ?",
-                       (episode_id, boundary))
             db.execute(
-                """
-                DELETE FROM sampler_segments
-                WHERE episode_id = ? AND start_boundary > ?
-                """,
+                "DELETE FROM budget_segments WHERE episode_id = ? AND start_boundary > ?",
+                (episode_id, boundary),
+            )
+            db.execute(
+                "DELETE FROM sampler_segments "
+                "WHERE episode_id = ? AND start_boundary > ?",
                 (episode_id, boundary),
             )
             cursor = db.execute(
@@ -509,6 +448,7 @@ class EpisodeStore:
             "target_boundary": boundary,
             "trimmed_action": trimmed_action,
         }
+
 
     def record_sampling_segment(
         self,
@@ -554,17 +494,8 @@ class EpisodeStore:
         visible_text: str,
         max_tokens: int | None,
     ) -> None:
-        """Copy a root-relative history prefix into a new episode.
+        """Persist one source history prefix as a new root-relative episode."""
 
-        A durable fork keeps the source episode's initial context and stores
-        the inherited teacher actions as ordinary destination history.  This
-        preserves one visible boundary coordinate system: boundary zero is
-        always immediately after ``initial_text``.  The final action may be
-        cut at an arbitrary visible-token boundary, just like ``rewind_to``.
-
-        Editorial interactions are intentionally not copied.  They describe
-        the source UI journey rather than the replayable branch history.
-        """
         self.get_episode(source_episode_id)
         self.get_episode(destination_episode_id)
         if source_episode_id == destination_episode_id:
@@ -575,8 +506,12 @@ class EpisodeStore:
             raise EditorError("max_tokens must be a positive integer")
         if self.actions(destination_episode_id) or self.tokens(destination_episode_id):
             raise EditorError("destination episode already has recorded history")
+
         source_actions = self.actions(source_episode_id)
         source_tokens = self.tokens(source_episode_id)
+        visible_count = sum(bool(row["realized_visible"]) for row in source_tokens)
+        if boundary > visible_count:
+            raise EditorError(f"fork boundary must be between 0 and {visible_count}")
         source_segments = self.connection.execute(
             "SELECT * FROM sampler_segments "
             "WHERE episode_id = ? AND start_boundary <= ? "
@@ -589,70 +524,26 @@ class EpisodeStore:
             "ORDER BY start_boundary",
             (source_episode_id, boundary),
         ).fetchall()
-        materialized = materialize_stored_prefix(
-            source_actions,
-            source_tokens,
-            [dict(segment) for segment in source_segments],
-            [dict(budget) for budget in source_budgets],
-            boundary,
-        )
+        try:
+            materialized = materialize_stored_prefix(
+                source_actions,
+                source_tokens,
+                [dict(segment) for segment in source_segments],
+                [dict(budget) for budget in source_budgets],
+                boundary,
+            )
+        except ValueError as exc:
+            raise EditorError(str(exc)) from exc
 
-        # Keep the destination episode's identity and initial context, but
-        # replace its provisional control history with the copied root-relative
-        # prefix.  The caller supplies the current fork-edge budget/text.
+        # Keep the destination identity and root context, replacing only its
+        # provisional control rows with the copied root-relative prefix.
         with self.transaction() as db:
-            for ordinal, action in enumerate(materialized.actions):
-                db.execute(
-                    """
-                    INSERT INTO actions(
-                        episode_id, ordinal, boundary_before, boundary_after,
-                        kind, arguments_json, resolved_text, status,
-                        stop_reason, mismatch_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        destination_episode_id,
-                        ordinal,
-                        action.boundary_before,
-                        action.boundary_after,
-                        action.kind,
-                        _json(dict(action.arguments)),
-                        action.resolved_text,
-                        action.status,
-                        action.stop_reason,
-                        _json(dict(action.mismatch)) if action.mismatch is not None else None,
-                    ),
-                )
-                for token_index, token in enumerate(action.tokens):
-                    db.execute(
-                        """
-                        INSERT INTO tokens(
-                            episode_id, action_ordinal, action_token_index,
-                            boundary, token_id, text, realized_visible, is_eog,
-                            sampling_coordinate, proposal_token_id,
-                            raw_model_nll, raw_rank, policy_rank,
-                            decoder_probability, proposal_agreement
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            destination_episode_id,
-                            ordinal,
-                            token_index,
-                            int(token["boundary"]),
-                            int(token["token_id"]),
-                            str(token["text"]),
-                            int(token["realized_visible"]),
-                            int(token["is_eog"]),
-                            int(token["sampling_coordinate"]),
-                            int(token["proposal_token_id"]),
-                            float(token["raw_model_nll"]),
-                            int(token["raw_rank"]),
-                            int(token["policy_rank"]),
-                            float(token["decoder_probability"]),
-                            int(token["proposal_agreement"]),
-                        ),
-                    )
-
+            self._write_history_actions(
+                db,
+                destination_episode_id,
+                materialized,
+                preserve_ordinals=False,
+            )
             for segment in materialized.sampler_segments:
                 db.execute(
                     """
@@ -694,6 +585,90 @@ class EpisodeStore:
                 """,
                 (visible_text, max_tokens or 0, destination_episode_id),
             )
+
+    def _replace_history_actions(
+        self,
+        db: sqlite3.Connection,
+        episode_id: str,
+        prefix: StoredHistoryPrefix,
+        *,
+        preserve_ordinals: bool,
+    ) -> None:
+        """Replace persisted action/token rows with a projected history prefix."""
+
+        db.execute("DELETE FROM actions WHERE episode_id = ?", (episode_id,))
+        self._write_history_actions(
+            db,
+            episode_id,
+            prefix,
+            preserve_ordinals=preserve_ordinals,
+        )
+
+    @staticmethod
+    def _write_history_actions(
+        db: sqlite3.Connection,
+        episode_id: str,
+        prefix: StoredHistoryPrefix,
+        *,
+        preserve_ordinals: bool,
+    ) -> None:
+        """Insert projected action evidence using only SQLite primitives."""
+
+        for position, action in enumerate(prefix.actions):
+            ordinal = action.ordinal if preserve_ordinals else position
+            db.execute(
+                """
+                INSERT INTO actions(
+                    episode_id, ordinal, boundary_before, boundary_after,
+                    kind, arguments_json, resolved_text, status,
+                    stop_reason, mismatch_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    episode_id,
+                    ordinal,
+                    action.boundary_before,
+                    action.boundary_after,
+                    action.kind,
+                    _json(dict(action.arguments)),
+                    action.resolved_text,
+                    action.status,
+                    action.stop_reason,
+                    _json(dict(action.mismatch))
+                    if action.mismatch is not None
+                    else None,
+                ),
+            )
+            for token_index, token in enumerate(action.tokens):
+                db.execute(
+                    """
+                    INSERT INTO tokens(
+                        episode_id, action_ordinal, action_token_index,
+                        boundary, token_id, text, realized_visible, is_eog,
+                        sampling_coordinate, proposal_token_id,
+                        raw_model_nll, raw_rank, policy_rank,
+                        decoder_probability, proposal_agreement
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        episode_id,
+                        ordinal,
+                        token_index,
+                        int(token["boundary"]),
+                        int(token["token_id"]),
+                        str(token["text"]),
+                        int(token["realized_visible"]),
+                        int(token["is_eog"]),
+                        int(token["sampling_coordinate"]),
+                        int(token["proposal_token_id"]),
+                        float(token["raw_model_nll"]),
+                        int(token["raw_rank"]),
+                        int(token["policy_rank"]),
+                        float(token["decoder_probability"]),
+                        int(token["proposal_agreement"]),
+                    ),
+                )
+
 
     def record_action(
         self, episode_id: str, ordinal: int, outcome: ActionOutcome,

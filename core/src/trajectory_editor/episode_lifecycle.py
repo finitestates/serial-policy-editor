@@ -14,7 +14,7 @@ from .spr_recipe import (
 )
 from .episode_store import EpisodeStore
 from .episode_runner import ReplayPlan
-from .fork_materializer import visible_text_prefix
+from .episode_history import visible_text_prefix
 
 SAMPLER_FIELDS = tuple(field.name for field in fields(SamplerConfig))
 POLICY_FIELDS = tuple(

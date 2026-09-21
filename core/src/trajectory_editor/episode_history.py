@@ -9,10 +9,11 @@ the recorded :class:`~trajectory_editor.core.results.TokenEvidence`.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
+from typing import Any
 
-from .core.actions import Hold, Phrase, PolicyAction, Write
+from .core.actions import Hold, Phrase, PolicyAction, Write, action_from_dict
 from .core.results import ActionOutcome, ReplayExpectation, TokenEvidence
 from .surviving_procedure import (
     ProcedureRecord,
@@ -93,6 +94,33 @@ class HistoryTruncation:
     @property
     def discarded_attempts(self) -> tuple[RecordedAttempt, ...]:
         return self.discarded
+
+
+@dataclass(frozen=True, slots=True)
+class StoredHistoryAction:
+    """One persistence-neutral action record in a retained history prefix."""
+
+    ordinal: int
+    boundary_before: int
+    boundary_after: int
+    kind: str
+    arguments: Mapping[str, Any]
+    resolved_text: str
+    status: str
+    stop_reason: str
+    mismatch: Mapping[str, Any] | None
+    tokens: tuple[Mapping[str, Any], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class StoredHistoryPrefix:
+    """A root-relative durable prefix projected from action and token records."""
+
+    actions: tuple[StoredHistoryAction, ...]
+    sampler_segments: tuple[Mapping[str, Any], ...]
+    budget_segments: tuple[Mapping[str, Any], ...]
+    source_boundary: int
+    partial: RecordedAttempt | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,8 +377,218 @@ class EpisodeHistory:
         )
 
 
+def visible_text_prefix(
+    tokens: Sequence[Mapping[str, Any]],
+    boundary: int,
+) -> str:
+    """Render visible record text strictly before a root-relative boundary."""
+
+    if type(boundary) is not int or boundary < 0:
+        raise ValueError("retained boundary must be a nonnegative integer")
+    return "".join(
+        str(token["text"])
+        for token in tokens
+        if bool(token["realized_visible"]) and int(token["boundary"]) < boundary
+    )
+
+
+def materialize_stored_prefix(
+    actions: Sequence[Mapping[str, Any]],
+    tokens: Sequence[Mapping[str, Any]],
+    sampler_segments: Sequence[Mapping[str, Any]],
+    budget_segments: Sequence[Mapping[str, Any]],
+    boundary: int,
+) -> StoredHistoryPrefix:
+    """Project durable records into one retained root-relative history prefix.
+
+    The records are adapter-shaped mappings rather than SQLite rows.  This
+    function delegates action truncation to :class:`EpisodeHistory` and only
+    preserves the extra serializable details that execution outcomes do not
+    model, such as token diagnostics and replay metadata.
+    """
+
+    if type(boundary) is not int or boundary < 0:
+        raise ValueError("retained boundary must be a nonnegative integer")
+    visible_count = sum(bool(token.get("realized_visible")) for token in tokens)
+    if boundary > visible_count:
+        raise ValueError(
+            f"retained boundary must be between 0 and {visible_count}"
+        )
+
+    grouped_tokens: dict[int, tuple[Mapping[str, Any], ...]] = {}
+    for token in tokens:
+        try:
+            ordinal = int(token["action_ordinal"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("stored token has no valid action ordinal") from exc
+        grouped_tokens[ordinal] = (*grouped_tokens.get(ordinal, ()), token)
+
+    source_actions: dict[int, Mapping[str, Any]] = {}
+    attempts: list[RecordedAttempt] = []
+    try:
+        ordered_actions = sorted(actions, key=lambda item: int(item["ordinal"]))
+        for source in ordered_actions:
+            ordinal = int(source["ordinal"])
+            source_actions[ordinal] = source
+            arguments = source.get("arguments")
+            if not isinstance(arguments, Mapping):
+                raise ValueError("stored action arguments must be an object")
+            action = action_from_dict(dict(arguments))
+            evidence = tuple(
+                _evidence_from_record(record)
+                for record in grouped_tokens.get(ordinal, ())
+            )
+            visible = tuple(
+                item.token_id for item in evidence if item.realized_visible
+            )
+            terminal = next(
+                (item.token_id for item in evidence if item.is_eog),
+                None,
+            )
+            outcome = ActionOutcome(
+                action=action,
+                boundary_before=int(source["boundary_before"]),
+                boundary_after=int(source["boundary_after"]),
+                resolved_text=str(source["resolved_text"]),
+                resolved_token_ids=tuple(item.token_id for item in evidence),
+                visible_token_ids=visible,
+                terminal_token_id=terminal,
+                stop_reason=str(source["stop_reason"]),
+                evidence=evidence,
+                status=str(source["status"]),
+            )
+            attempts.append(RecordedAttempt(ordinal, action, outcome))
+        history = EpisodeHistory(tuple(attempts))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"stored history is invalid: {exc}") from exc
+
+    truncation = history.truncate(boundary)
+    partial_ordinal = (
+        truncation.partial.ordinal if truncation.partial is not None else None
+    )
+    materialized_actions = tuple(
+        _stored_history_action(
+            source_actions[attempt.ordinal],
+            grouped_tokens.get(attempt.ordinal, ()),
+            attempt,
+            boundary=boundary,
+            partial=attempt.ordinal == partial_ordinal,
+        )
+        for attempt in truncation.retained
+    )
+    return StoredHistoryPrefix(
+        actions=materialized_actions,
+        sampler_segments=tuple(
+            dict(segment)
+            for segment in sampler_segments
+            if int(segment["start_boundary"]) <= boundary
+        ),
+        budget_segments=tuple(
+            dict(segment)
+            for segment in budget_segments
+            if int(segment["start_boundary"]) <= boundary
+        ),
+        source_boundary=boundary,
+        partial=truncation.partial,
+    )
+
+
+def _evidence_from_record(record: Mapping[str, Any]) -> TokenEvidence:
+    """Adapt a serializable evidence record for storage-neutral validation."""
+
+    boundary = int(record["boundary"])
+    # Lightweight adapters that only need boundary/text projection may omit a
+    # token id; use the distinct root coordinate as a harmless placeholder.
+    token_id = int(record.get("token_id", boundary))
+    return TokenEvidence(
+        boundary=boundary,
+        sampling_coordinate=int(record.get("sampling_coordinate", boundary)),
+        token_id=token_id,
+        text=str(record["text"]),
+        proposal_token_id=int(record.get("proposal_token_id", token_id)),
+        raw_model_nll=float(record.get("raw_model_nll", 0.0)),
+        raw_rank=int(record.get("raw_rank", 0)),
+        policy_rank=int(record.get("policy_rank", 0)),
+        decoder_probability=float(record.get("decoder_probability", 0.0)),
+        proposal_agreement=bool(record.get("proposal_agreement", False)),
+        is_eog=bool(record.get("is_eog", False)),
+        realized_visible=bool(record.get("realized_visible", False)),
+    )
+
+
+def _stored_history_action(
+    source: Mapping[str, Any],
+    source_tokens: Sequence[Mapping[str, Any]],
+    attempt: RecordedAttempt,
+    *,
+    boundary: int,
+    partial: bool,
+) -> StoredHistoryAction:
+    """Keep source records intact except for the one action cut by a prefix."""
+
+    if not partial:
+        arguments = source.get("arguments")
+        if not isinstance(arguments, Mapping):
+            raise ValueError("stored action arguments must be an object")
+        mismatch = source.get("mismatch")
+        return StoredHistoryAction(
+            ordinal=attempt.ordinal,
+            boundary_before=attempt.outcome.boundary_before,
+            boundary_after=attempt.outcome.boundary_after,
+            kind=str(source["kind"]),
+            arguments=dict(arguments),
+            resolved_text=str(source["resolved_text"]),
+            status=str(source["status"]),
+            stop_reason=str(source["stop_reason"]),
+            mismatch=dict(mismatch) if isinstance(mismatch, Mapping) else None,
+            tokens=tuple(source_tokens),
+        )
+
+    arguments = source.get("arguments")
+    if not isinstance(arguments, Mapping):
+        raise ValueError("stored action arguments must be an object")
+    original_arguments = dict(arguments)
+    original_kind = str(source["kind"])
+    outcome = attempt.outcome
+    if isinstance(attempt.action, Write):
+        original_key = "original_write" if original_kind == "write" else "original_action"
+        arguments = {
+            **original_arguments,
+            "kind": "write",
+            "mode": "exact",
+            "text": outcome.resolved_text,
+            original_key: original_arguments.get(original_key, original_arguments),
+        }
+    else:
+        arguments = {
+            **original_arguments,
+            "limit": len(outcome.visible_token_ids),
+            "boundary": None,
+        }
+    return StoredHistoryAction(
+        ordinal=attempt.ordinal,
+        boundary_before=outcome.boundary_before,
+        boundary_after=outcome.boundary_after,
+        kind=outcome.action.kind,
+        arguments=arguments,
+        resolved_text=outcome.resolved_text,
+        status=outcome.status,
+        stop_reason=outcome.stop_reason,
+        mismatch=None,
+        tokens=tuple(
+            token
+            for token in source_tokens
+            if int(token["boundary"]) < boundary
+        ),
+    )
+
+
 __all__ = [
     "EpisodeHistory",
     "HistoryTruncation",
     "RecordedAttempt",
+    "StoredHistoryAction",
+    "StoredHistoryPrefix",
+    "materialize_stored_prefix",
+    "visible_text_prefix",
 ]
