@@ -8,11 +8,12 @@ from unittest.mock import patch
 from tests.fakes import ConformingFakeBackend, ScriptedIO
 from trajectory_editor.core.actions import Write
 from trajectory_editor.core.sampler_config import SamplerConfig
-from trajectory_editor.episode_cli import _ephemeral_edge_menu, main
+from trajectory_editor.episode_cli import main
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_replay_source import replay_procedure
 from trajectory_editor.episode_session import LiveSession
 from trajectory_editor.episode_store import EpisodeStore
+from trajectory_editor.ephemeral_runtime import ephemeral_edge_menu
 from trajectory_editor.teacher_plan import load_teacher_tape_jsonl
 
 
@@ -124,7 +125,7 @@ def test_ephemeral_fork_map_uses_root_relative_boundaries():
     session.generate(Write(" A", mode="exact"))
     io = ScriptedIO(["fm", "", "q"])
 
-    action, value = _ephemeral_edge_menu(io, session)
+    action, value = ephemeral_edge_menu(io, session)
 
     assert (action, value) == ("quit", None)
     assert any(item == "P|0| A|1|" for item in io.output)
@@ -145,7 +146,7 @@ def test_ephemeral_branches_use_numeric_aliases_for_switching():
     session.activate(child.branch.branch_id)
     io = ScriptedIO(["branches", "switch 1"])
 
-    action, value = _ephemeral_edge_menu(io, session)
+    action, value = ephemeral_edge_menu(io, session)
 
     assert action == "switch"
     assert value == next(iter(session.branch_tree.nodes))

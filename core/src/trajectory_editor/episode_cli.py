@@ -14,10 +14,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from prompt_toolkit import prompt
-from prompt_toolkit.validation import Validator
-
-from . import edge_commands, episode_backend_loader, episode_policy_setup
+from . import (
+    edge_commands,
+    ephemeral_runtime,
+    episode_backend_loader,
+    episode_policy_setup,
+    episode_prompts,
+)
 from .backend_factory import BACKEND_NAMES
 from .decoder import KV_CACHE_TYPES
 from .core.errors import EditorError
@@ -42,7 +45,6 @@ from .episode_runner import (
     EdgeRequested,
     EpisodeRunner as CoreEpisodeRunner,
     ForkRequested,
-    LiveSessionRunner,
     SeamlessEdgeRequested,
     SeamlessRewindRequested,
     ReplayPlan,
@@ -56,12 +58,10 @@ from .projector import (
     project_episode,
     project_fork_map,
     project_lineage,
-    project_live_fork_map,
     project_procedure,
 )
 from .episode_store import EpisodeStore
-from .episode_session import LiveSession, LiveSessionRoster
-from .episode_materializer import save_live_branch, save_live_family
+from .edge_status import sampler_summary
 from .fresh_episode import fresh_root_from
 from .controller_profiles import (
     explicit_option_dests,
@@ -71,7 +71,7 @@ from .controller_profiles import (
 from .tui import TerminalIO
 from .ui_themes import LIVE_THEME_NAMES
 from .version import VERSION
-from .teacher_plan import export_live_teacher_tape, export_teacher_tape, load_teacher_tape_jsonl
+from .teacher_plan import export_teacher_tape, load_teacher_tape_jsonl
 
 
 def _positive_int(value: str) -> int:
@@ -92,27 +92,6 @@ def _nonnegative_float(value: str) -> float:
     if not math.isfinite(parsed) or parsed < 0.0:
         raise argparse.ArgumentTypeError("must be a finite nonnegative number")
     return parsed
-
-
-def _read_initial_prompt() -> str:
-    return prompt(
-        "Write at least one character. Press Escape then Enter to continue.\n\n",
-        multiline=True,
-        validator=Validator.from_callable(
-            lambda text: len(text) >= 1,
-            error_message="Write at least one character.",
-        ),
-        validate_while_typing=False,
-    )
-
-
-def _read_new_prompt(io: TerminalIO) -> str | None:
-    """Use the initial multiline composer for a bare EDGE ``new``."""
-    reader = getattr(io, "read_multiline_prompt", None)
-    if callable(reader):
-        return reader()
-    # Lightweight test/script IOs do not own a prompt-toolkit surface.
-    return io.read("New prompt > ")
 
 
 def build_parser(
@@ -307,393 +286,6 @@ def build_parser(
     return parser
 
 
-def _ephemeral_edge_menu(
-    io: TerminalIO,
-    session_or_roster: LiveSession | LiveSessionRoster,
-) -> tuple[str, Any]:
-    """Small branch-oriented EDGE surface for a session with no workspace."""
-    roster = (
-        session_or_roster
-        if isinstance(session_or_roster, LiveSessionRoster)
-        else None
-    )
-    session = roster.active_session if roster is not None else session_or_roster
-
-    def branch_aliases() -> dict[str, str]:
-        return {
-            str(index): branch_id
-            for index, branch_id in enumerate(session.branch_tree.nodes, start=1)
-        }
-
-    def resolve_branch(reference: str) -> str:
-        cleaned = reference.strip()
-        if cleaned.startswith("#"):
-            cleaned = cleaned[1:]
-        return branch_aliases().get(cleaned, cleaned)
-
-    def branch_number(branch_id: str) -> str:
-        if roster is not None:
-            return str(roster.number_for(session, branch_id))
-        return next(
-            (
-                number
-                for number, identifier in branch_aliases().items()
-                if identifier == branch_id
-            ),
-            branch_id,
-        )
-
-    def show_fork_map() -> tuple[str, Any] | None:
-        state = session.branch_state()
-        io.page(
-            project_live_fork_map(
-                session.prompt,
-                state.visible_token_ids,
-                session.engine.backend,
-            )
-        )
-        while True:
-            entered = io.read(
-                f"Fork boundary (0..{state.boundary}; blank cancels) > "
-            )
-            if entered is None:
-                return "quit", None
-            value = entered.strip()
-            if not value:
-                return None
-            try:
-                target = int(value)
-            except ValueError:
-                io.write("Fork boundary must be an integer.")
-                continue
-            if not 0 <= target <= state.boundary:
-                io.write(f"Fork boundary must be 0..{state.boundary}.")
-                continue
-            return "fork", target
-
-    live_surface = bool(
-        getattr(io, "supports_live_choices", False)
-        and callable(getattr(io, "read_live_edge_command", None))
-    )
-    while True:
-        if live_surface:
-            raw = io.read_live_edge_command(  # type: ignore[attr-defined]
-                episode_id=branch_number(session.branch.branch_id),
-                boundary=session.engine.boundary,
-                current_budget=session.engine.max_tokens,
-                remaining_tokens=session.engine.remaining,
-                sampler_summary=_sampler_summary(session.sampler),
-                mode="session",
-            )
-        else:
-            io.write(
-                f"Live branch {branch_number(session.branch.branch_id)}"
-                f" @ boundary {session.engine.boundary}"
-                f" · {_sampler_summary(session.sampler)}"
-            )
-            raw = io.read(
-                "[c]ontinue  [n N/off] budget  [s key=value] sampler  [rewind N] "
-                "[f N] fork  [fm] fork map  [branches]  [#N] switch  [switch N] alias  "
-                "[new TEXT] new prompt root  [export FILE] "
-                "[save WORKSPACE [ID]]  [save-family WORKSPACE [ROOT_ID]]  [e]nd  [q]uit > "
-            )
-        if raw is None:
-            return "quit", None
-        try:
-            command = edge_commands.parse_edge_command(raw)
-        except edge_commands.EdgeCommandParseError as exc:
-            io.write(str(exc))
-            continue
-        if isinstance(command, edge_commands.QuitCommand):
-            return "quit", None
-        if isinstance(command, edge_commands.EndCommand):
-            return "end", None
-        if isinstance(command, edge_commands.ContinueCommand):
-            return "continue", "keep"
-        if isinstance(command, edge_commands.NewCommand):
-            prompt_text = command.prompt or ""
-            if not prompt_text:
-                prompt_text = _read_new_prompt(io) or ""
-            if not prompt_text:
-                io.write("New prompt must not be empty.")
-                continue
-            return "new", prompt_text
-        if (
-            isinstance(command, edge_commands.BranchesCommand)
-            or (
-                isinstance(command, edge_commands.ListCommand)
-                and not command.include_finished
-            )
-        ):
-            rows = []
-            if roster is not None:
-                for entry in roster.entries():
-                    identity = entry.identity
-                    marker = "*" if (
-                        entry.session is session
-                        and entry.branch_id == session.branch.branch_id
-                    ) else " "
-                    source = "root"
-                    if identity.parent_id is not None:
-                        source = str(roster.number_for(entry.session, identity.parent_id))
-                    rows.append(
-                        f"{marker} #{entry.number}  prompt={entry.session.prompt!r}  "
-                        f"from={source}  fork={identity.fork_boundary} "
-                        f"boundary={entry.state.boundary}"
-                    )
-            else:
-                states = session.branch_states
-                aliases = branch_aliases()
-                reverse_aliases = {branch_id: number for number, branch_id in aliases.items()}
-                for branch_id, node in session.branch_tree.nodes.items():
-                    marker = "*" if branch_id == session.branch.branch_id else " "
-                    source = (
-                        reverse_aliases.get(node.identity.parent_id, "root")
-                        if node.identity.parent_id is not None
-                        else "root"
-                    )
-                    state = states[branch_id]
-                    rows.append(
-                        f"{marker} {reverse_aliases[branch_id]}  from={source}  "
-                        f"fork={node.identity.fork_boundary} "
-                        f"boundary={state.boundary}"
-                    )
-            io.page("Live branches:\n" + "\n".join(rows))
-            continue
-        if isinstance(command, edge_commands.ForkMapCommand):
-            result = show_fork_map()
-            if result is not None:
-                return result
-            continue
-        if isinstance(command, edge_commands.SwitchCommand):
-            try:
-                if roster is not None:
-                    roster.resolve(command.reference)
-                    return "switch", command.reference
-                branch_id = resolve_branch(command.reference)
-                if branch_id not in session.branch_states:
-                    raise EditorError(f"Unknown live branch {command.reference!r}.")
-                return "switch", branch_id
-            except EditorError as exc:
-                io.write(str(exc))
-                continue
-        if isinstance(command, edge_commands.RewindCommand):
-            return "rewind", command.boundary
-        if isinstance(command, edge_commands.ForkCommand):
-            return "fork", command.boundary
-        if isinstance(command, edge_commands.ExportCommand):
-            return "export", command.path
-        if isinstance(command, edge_commands.SaveFamilyCommand):
-            return "save-family", (command.workspace, command.root_reference)
-        if isinstance(command, edge_commands.SaveCommand):
-            return "save", (command.workspace, command.reference)
-        if isinstance(command, edge_commands.BudgetCommand):
-            return "continue", command.tokens
-        if isinstance(command, edge_commands.SamplerCommand):
-            payload = command.text or ""
-            if not payload:
-                io.write("Use sampler key=value.")
-                continue
-            try:
-                session.set_sampler(sampler_override(session.sampler, payload))
-            except EditorError as exc:
-                io.write(f"[invalid sampler change] {exc}")
-            continue
-        io.write("This command is not available in an ephemeral session.")
-
-
-def _run_ephemeral(
-    args: argparse.Namespace,
-    *,
-    io: TerminalIO,
-    teacher_tape: Any | None,
-) -> int:
-    """Run an explicit in-memory session without opening an episode workspace."""
-    if args.new_prompt is None and args.new_prompt_file is None:
-        raise EditorError("--ephemeral requires --new-prompt, --new-prompt-file, or a teacher-plan envelope prompt")
-    initial_text = args.new_prompt if args.new_prompt is not None else args.new_prompt_file.read_text(encoding="utf-8")
-    backend = episode_backend_loader.load_backend(args)
-    provenance = backend.provenance()
-    sampling = sampler_from_args(args)
-    activation_artifact = None
-    if args.activation_strength is not None and args.activation_vector is None:
-        raise EditorError("--steering-strength requires --steering-vector")
-    if args.activation_vector is not None:
-        from .activation_vectors import SteeringVectorArtifact
-        activation_artifact = SteeringVectorArtifact.from_path(args.activation_vector)
-        activation_artifact.validate_against_backend(backend, provenance)
-        sampling = apply_activation_artifact(sampling, activation_artifact, args)
-    guidance_backend = None
-    if sampling.cfg_unconditional_prompt is not None:
-        io.write("Loading second model copy for CFG prefix guidance...")
-        guidance_backend = episode_backend_loader.load_cfg_guidance_backend(
-            args,
-            provenance,
-        )
-    engine = EpisodeEngine(
-        backend,
-        sampling=sampling,
-        max_tokens=args.max_tokens,
-        initial_text=initial_text,
-        guidance_backend=guidance_backend,
-    )
-    session = LiveSession(
-        engine,
-        prompt=initial_text,
-        environment_stamp={"backend": provenance, "sampler": sampling.to_dict()},
-    )
-    roster = LiveSessionRoster(session)
-    pending_tape = teacher_tape.plan if teacher_tape is not None else None
-    while True:
-        session = roster.active_session
-        announced_teacher_tape = (
-            teacher_tape is not None and pending_tape is teacher_tape.plan
-        )
-        runner = LiveSessionRunner(session, divergence_policy=args.divergence_policy)
-        try:
-            result = runner.run(
-                tape=pending_tape,
-                live_policy=episode_policy_setup.ephemeral_policy(args, io),
-                stop_after_tape=True,
-            )
-        except EdgeRequested:
-            pending_tape = None
-            action, value = _ephemeral_edge_menu(io, roster)
-        except ForkRequested as request:
-            action, value = "fork", request.boundary
-        except SeamlessRewindRequested as request:
-            action, value = "rewind", request.boundary
-        except SeamlessEdgeRequested:
-            action, value = _ephemeral_edge_menu(io, roster)
-        else:
-            pending_tape = None
-            if result.handed_off and result.handoff_reason:
-                io.write(result.handoff_reason)
-            if result.replay_exhausted and announced_teacher_tape:
-                io.write(f"Teacher plan exhausted at boundary {session.engine.boundary}; live edge reached.")
-            if session.engine.ended:
-                text = session.engine.text
-                if args.output is not None:
-                    args.output.parent.mkdir(parents=True, exist_ok=True)
-                    args.output.write_text(text, encoding="utf-8")
-                    print(f"Text: {args.output}", flush=True)
-                else:
-                    print("\n--- final text ---")
-                    print(text)
-                roster.discard()
-                return 0
-            action, value = _ephemeral_edge_menu(io, roster)
-        if action == "quit":
-            roster.discard()
-            return 0
-        if action == "end":
-            session.quit("menu-end")
-            text = session.engine.text
-            if args.output is not None:
-                args.output.parent.mkdir(parents=True, exist_ok=True)
-                args.output.write_text(text, encoding="utf-8")
-                print(f"Text: {args.output}", flush=True)
-            else:
-                print("\n--- final text ---")
-                print(text)
-            roster.discard()
-            return 0
-        if action == "continue":
-            session.resume(max_tokens=value)
-            continue
-        if action == "rewind":
-            try:
-                session.rewind(int(value))
-            except EditorError as exc:
-                io.write(str(exc))
-            continue
-        if action == "fork":
-            target = int(value)
-            try:
-                child = roster.fork(boundary=target)
-            except EditorError as exc:
-                io.write(str(exc))
-                continue
-            session.activate(child.branch.branch_id)
-            alias = roster.number_for(session, child.branch.branch_id)
-            io.write(f"Forked live branch {alias} at boundary {target}.")
-            continue
-        if action == "switch":
-            try:
-                roster.switch(str(value))
-            except EditorError as exc:
-                io.write(str(exc))
-            continue
-        if action == "new":
-            try:
-                roster.new_root(str(value))
-            except (EditorError, ValueError) as exc:
-                io.write(str(exc))
-            pending_tape = None
-            continue
-        if action == "export":
-            session = roster.active_session
-            try:
-                export_live_teacher_tape(session, value)
-                io.write(f"Exported selected branch to {value}.")
-            except EditorError as exc:
-                io.write(str(exc))
-            # Return to EDGE without asking the teacher policy for another
-            # action merely because a non-mutating command completed.
-            pending_tape = ReplayPlan()
-            continue
-        if action == "save":
-            session = roster.active_session
-            workspace, requested_id = value
-            try:
-                identifier = save_live_branch(session, workspace, provenance, episode_id=requested_id)
-                io.write(f"Saved selected branch as {identifier} in {workspace}.")
-            except (EditorError, OSError, RuntimeError) as exc:
-                io.write(str(exc))
-            pending_tape = ReplayPlan()
-            continue
-        if action == "save-family":
-            session = roster.active_session
-            workspace, requested_root_id = value
-            try:
-                identifiers = save_live_family(
-                    session,
-                    workspace,
-                    provenance,
-                    root_episode_id=requested_root_id,
-                )
-                io.write(
-                    f"Saved {len(identifiers)} live branches as a family in {workspace}."
-                )
-            except (EditorError, OSError, RuntimeError) as exc:
-                io.write(str(exc))
-            pending_tape = ReplayPlan()
-            continue
-        raise AssertionError(f"unhandled ephemeral action {action!r}")
-
-
-def _sampler_summary(config: SamplerConfig) -> str:
-    summary = (
-        f"temp={config.temperature:g} top_k={config.top_k} top_p={config.top_p:g} "
-        f"min_p={config.min_p:g} typical_p={config.typical_p:g} tfs_z={config.tail_free_z:g} "
-        f"draw={config.draw_kernel} rep={config.repeat_penalty:g}/{config.repeat_last_n} "
-        f"presence={config.presence_penalty:g} frequency={config.frequency_penalty:g} "
-        f"seed={config.seed}"
-    )
-    if config.bias_groups:
-        summary += " groups=" + ",".join(
-            f"{group.name}:{group.bias:g}" for group in config.bias_groups
-        )
-    if config.activation_vector or config.activation_vector_digest:
-        norm = sum(value * value for value in config.activation_vector) ** 0.5
-        summary += (
-            f" steering_vector_norm={norm:g}"
-            f" steering_strength={config.activation_vector_strength:g}"
-            f" steering_digest={config.activation_vector_digest[:12]}"
-        )
-    return summary
-
-
 def _record_fork_edge_state(
     store: EpisodeStore,
     episode_id: str,
@@ -734,13 +326,13 @@ def _live_edge_menu(
                 boundary=engine.boundary,
                 current_budget=engine.max_tokens,
                 remaining_tokens=engine.remaining,
-                sampler_summary=_sampler_summary(engine.sampling),
+                sampler_summary=sampler_summary(engine.sampling),
             )
         else:
             io.write(store.label(episode_id))
             io.write("[ls / ls all] episodes  [#N] switch  [name TITLE] rename  [rewind N] delete back to N")
             io.write(
-                f"\nLive edge @ boundary {engine.boundary} · {_sampler_summary(engine.sampling)}"
+                f"\nLive edge @ boundary {engine.boundary} · {sampler_summary(engine.sampling)}"
             )
             raw = io.read(
                 "[c]ontinue  [n N/off] budget  [s key=value] sampler  "
@@ -798,7 +390,7 @@ def _live_edge_menu(
         if isinstance(command, edge_commands.NewCommand):
             prompt_text = command.prompt or ""
             if not prompt_text:
-                prompt_text = _read_new_prompt(io) or ""
+                prompt_text = episode_prompts.read_new_prompt(io) or ""
             if not prompt_text:
                 io.write("New prompt must not be empty.")
                 continue
@@ -1048,8 +640,16 @@ def main(
             open_live_session = getattr(io, "live_session", None)
             if callable(open_live_session):
                 with open_live_session():
-                    return _run_ephemeral(args, io=io, teacher_tape=teacher_tape)
-            return _run_ephemeral(args, io=io, teacher_tape=teacher_tape)
+                    return ephemeral_runtime.run_ephemeral(
+                        args,
+                        io=io,
+                        teacher_tape=teacher_tape,
+                    )
+            return ephemeral_runtime.run_ephemeral(
+                args,
+                io=io,
+                teacher_tape=teacher_tape,
+            )
         with EpisodeStore(args.workspace) as store, ExitStack() as ui_stack:
             for field in ("resume", "fork_from", "replay", "projector", "lineage"):
                 value = getattr(args, field)
@@ -1112,7 +712,7 @@ def main(
                         "no episode source supplied; use --new-prompt, "
                         "--new-prompt-file, --replay, --resume, or --fork-from"
                     )
-                args.new_prompt = _read_initial_prompt()
+                args.new_prompt = episode_prompts.read_initial_prompt()
 
             if args.random_seed:
                 args.seed = random_seed()
