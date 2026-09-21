@@ -10,9 +10,10 @@ from __future__ import annotations
 import argparse
 import math
 from contextlib import ExitStack
+from dataclasses import dataclass
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from . import (
     edge_commands,
@@ -71,7 +72,109 @@ from .controller_profiles import (
 from .tui import TerminalIO
 from .ui_themes import LIVE_THEME_NAMES
 from .version import VERSION
-from .teacher_plan import export_teacher_tape, load_teacher_tape_jsonl
+from .teacher_plan import TeacherTape, export_teacher_tape, load_teacher_tape_jsonl
+
+
+@dataclass(frozen=True)
+class LaunchSource:
+    """Validated source for starting a live episode."""
+
+    kind: Literal["new", "resume", "replay", "fork"]
+    episode_id: str | None = None
+    teacher_tape: TeacherTape | None = None
+
+
+def _select_launch_source(args: argparse.Namespace) -> LaunchSource:
+    """Validate launch flags and load any external teacher plan."""
+
+    if args.until is not None and args.replay is None:
+        raise EditorError("--until requires --replay")
+    if args.fixed_config and args.replay is None:
+        raise EditorError("--fixed-config requires --replay")
+    if (
+        args.teacher_plan_envelope is not None
+        and args.teacher_plan is None
+        and args.export_teacher_plan is None
+    ):
+        raise EditorError("--teacher-plan-envelope requires --teacher-plan or --export-teacher-plan")
+    if args.export_teacher_plan is not None and any(
+        value is not None
+        for value in (
+            args.new_prompt, args.new_prompt_file, args.replay,
+            args.resume, args.fork_from, args.projector,
+        )
+    ):
+        raise EditorError("--export-teacher-plan cannot be combined with an episode source")
+
+    teacher_tape = None
+    if args.teacher_plan is not None:
+        if any(value is not None for value in (args.replay, args.resume, args.fork_from)):
+            raise EditorError("--teacher-plan currently starts a new episode only")
+        teacher_tape = load_teacher_tape_jsonl(
+            args.teacher_plan,
+            envelope_path=args.teacher_plan_envelope,
+            require_observations=args.divergence_policy == "handoff",
+        )
+        if args.new_prompt is None and args.new_prompt_file is None:
+            prompt_text = teacher_tape.envelope.get("prompt")
+            if not isinstance(prompt_text, str):
+                raise EditorError("--teacher-plan requires --new-prompt, --new-prompt-file, or an envelope prompt")
+            args.new_prompt = prompt_text
+
+    if args.ephemeral:
+        incompatible = {
+            "--resume": args.resume, "--replay": args.replay,
+            "--fork-from": args.fork_from, "--projector": args.projector,
+            "--export-teacher-plan": args.export_teacher_plan,
+            "--list": args.list_episodes, "--lineage": args.lineage,
+        }
+        requested = next((flag for flag, value in incompatible.items() if value), None)
+        if requested is not None:
+            raise EditorError(f"--ephemeral cannot be combined with {requested}")
+        if args.at is not None or args.until is not None or args.fixed_config or args.procedure:
+            raise EditorError("--ephemeral accepts a new prompt and optional --teacher-plan only")
+
+    if args.resume is not None:
+        return LaunchSource("resume", args.resume, teacher_tape)
+    if args.new_prompt is not None or args.new_prompt_file is not None:
+        return LaunchSource("new", teacher_tape=teacher_tape)
+    if args.replay is not None:
+        return LaunchSource("replay", args.replay, teacher_tape)
+    if args.fork_from is not None:
+        return LaunchSource("fork", args.fork_from, teacher_tape)
+    return LaunchSource("new", teacher_tape=teacher_tape)
+
+
+def _resolve_launch_source(
+    args: argparse.Namespace, store: EpisodeStore, selection: LaunchSource,
+) -> LaunchSource:
+    """Resolve stored IDs and obtain a prompt for an interactive new launch."""
+
+    for field in ("resume", "fork_from", "replay", "projector", "lineage"):
+        value = getattr(args, field)
+        if value:
+            setattr(args, field, store.resolve_id(value))
+    if args.at is not None and args.fork_from is None:
+        raise EditorError("--at is only valid with --fork-from")
+    if args.procedure and not args.projector:
+        raise EditorError("--procedure requires --projector EPISODE_ID")
+    if selection.kind == "new" and not any((
+        args.new_prompt is not None, args.new_prompt_file is not None,
+        args.teacher_plan is not None, args.list_episodes,
+        args.lineage is not None, args.export_teacher_plan is not None,
+        args.projector is not None,
+    )):
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            raise EditorError(
+                "no episode source supplied; use --new-prompt, "
+                "--new-prompt-file, --replay, --resume, or --fork-from"
+            )
+        args.new_prompt = episode_prompts.read_initial_prompt()
+    # Backend provenance historically prefers resume, then fork, then replay
+    # even when a prompt is also supplied. Keep that lookup independent of the
+    # execution branch chosen below.
+    source_id = args.resume or args.fork_from or args.replay
+    return LaunchSource(selection.kind, source_id, selection.teacher_tape)
 
 
 def _positive_int(value: str) -> int:
@@ -582,57 +685,9 @@ def main(
             args = parser.parse_args([*profile_tokens, *arguments])
         args._explicit_options = cli_explicit | profile_applied
         sampling_factory = SamplerConfig.from_record
-        if args.until is not None and args.replay is None:
-            raise EditorError("--until requires --replay")
-        if args.fixed_config and args.replay is None:
-            raise EditorError("--fixed-config requires --replay")
-        if (
-            args.teacher_plan_envelope is not None
-            and args.teacher_plan is None
-            and args.export_teacher_plan is None
-        ):
-            raise EditorError("--teacher-plan-envelope requires --teacher-plan or --export-teacher-plan")
-        if args.export_teacher_plan is not None and any(
-            value is not None
-            for value in (
-                args.new_prompt,
-                args.new_prompt_file,
-                args.replay,
-                args.resume,
-                args.fork_from,
-                args.projector,
-            )
-        ):
-            raise EditorError("--export-teacher-plan cannot be combined with an episode source")
-        teacher_tape = None
-        if args.teacher_plan is not None:
-            if any(value is not None for value in (args.replay, args.resume, args.fork_from)):
-                raise EditorError("--teacher-plan currently starts a new episode only")
-            teacher_tape = load_teacher_tape_jsonl(
-                args.teacher_plan,
-                envelope_path=args.teacher_plan_envelope,
-                require_observations=args.divergence_policy == "handoff",
-            )
-            if args.new_prompt is None and args.new_prompt_file is None:
-                prompt_text = teacher_tape.envelope.get("prompt")
-                if not isinstance(prompt_text, str):
-                    raise EditorError("--teacher-plan requires --new-prompt, --new-prompt-file, or an envelope prompt")
-                args.new_prompt = prompt_text
+        selection = _select_launch_source(args)
+        teacher_tape = selection.teacher_tape
         if args.ephemeral:
-            incompatible = {
-                "--resume": args.resume,
-                "--replay": args.replay,
-                "--fork-from": args.fork_from,
-                "--projector": args.projector,
-                "--export-teacher-plan": args.export_teacher_plan,
-                "--list": args.list_episodes,
-                "--lineage": args.lineage,
-            }
-            requested = next((flag for flag, value in incompatible.items() if value), None)
-            if requested is not None:
-                raise EditorError(f"--ephemeral cannot be combined with {requested}")
-            if args.at is not None or args.until is not None or args.fixed_config or args.procedure:
-                raise EditorError("--ephemeral accepts a new prompt and optional --teacher-plan only")
             if args.random_seed:
                 args.seed = random_seed()
                 print(f"Random seed: {args.seed}", flush=True)
@@ -651,14 +706,7 @@ def main(
                 teacher_tape=teacher_tape,
             )
         with EpisodeStore(args.workspace) as store, ExitStack() as ui_stack:
-            for field in ("resume", "fork_from", "replay", "projector", "lineage"):
-                value = getattr(args, field)
-                if value:
-                    setattr(args, field, store.resolve_id(value))
-            if args.at is not None and args.fork_from is None:
-                raise EditorError("--at is only valid with --fork-from")
-            if args.procedure and not args.projector:
-                raise EditorError("--procedure requires --projector EPISODE_ID")
+            selection = _resolve_launch_source(args, store, selection)
             if args.lineage is not None:
                 if not args.list_episodes:
                     raise EditorError("--lineage requires --list")
@@ -695,32 +743,12 @@ def main(
                     ).text
                 )
                 return 0
-            has_episode_source = any(
-                (
-                    args.new_prompt is not None,
-                    args.new_prompt_file is not None,
-                    args.replay is not None,
-                    args.resume is not None,
-                    args.fork_from is not None,
-                    args.teacher_plan is not None,
-                )
-            )
-            io: TerminalIO | None = None
-            if not has_episode_source:
-                if not sys.stdin.isatty() or not sys.stdout.isatty():
-                    raise EditorError(
-                        "no episode source supplied; use --new-prompt, "
-                        "--new-prompt-file, --replay, --resume, or --fork-from"
-                    )
-                args.new_prompt = episode_prompts.read_initial_prompt()
-
             if args.random_seed:
                 args.seed = random_seed()
                 print(f"Random seed: {args.seed}", flush=True)
 
-            if io is None:
-                io = TerminalIO(live_choices=not args.plain_ui, live_theme=args.theme)
-            source_id = args.resume or args.fork_from or args.replay
+            io = TerminalIO(live_choices=not args.plain_ui, live_theme=args.theme)
+            source_id = selection.episode_id
             source = store.get_episode(source_id) if source_id else None
             backend, provenance, model_changed = (
                 episode_backend_loader.load_episode_backend(args, source, io)
@@ -760,7 +788,7 @@ def main(
             parent_id: str | None = None
             fork_boundary: int | None = None
             pending_tape: ReplayPlan | None = teacher_tape.plan if teacher_tape else None
-            if args.resume is not None:
+            if selection.kind == "resume":
                 # Only explicit CLI sampler flags override the stored segment.
                 explicit = sampler_overrides_present(args)
                 segment = store.sampling_segment(
@@ -795,7 +823,7 @@ def main(
                         sampling_factory=sampling_factory,
                     )
                     episode_id = args.resume
-            elif args.new_prompt is not None or args.new_prompt_file is not None:
+            elif selection.kind == "new":
                 initial_text = (
                     args.new_prompt
                     if args.new_prompt is not None
@@ -816,7 +844,7 @@ def main(
                     backend_provenance=provenance,
                     requested_id=requested_id,
                 )
-            elif args.replay is not None:
+            elif selection.kind == "replay":
                 recipe = build_source_replay_recipe(
                     store,
                     args.replay,
