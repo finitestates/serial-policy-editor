@@ -15,7 +15,6 @@ import numpy as np
 import pytest
 
 from trajectory_editor.activation_vectors import SteeringVectorArtifact
-from trajectory_editor.controller_pipeline import ControllerPipeline
 from trajectory_editor.decoder import LlamaCppDecoder, LlamaCppSettings
 from trajectory_editor.domain import EditorError, SamplingConfig
 from trajectory_editor.episode_actions import Accept, Phrase
@@ -80,22 +79,17 @@ def test_real_llama_p0_state_paths_and_sampling_invariants(model: Path):
             guidance_backend=guidance,
             initial_token_ids=prefix,
             sampling=sampling,
-            controller_pipeline=ControllerPipeline(capture_trace=True),
         )
 
         for consumed in (0, 1):
             observation = engine.observe()
-            trace = observation.statistics.controller_trace
-            assert trace is not None
-            guidance_stage = trace.stage("classifier-free guidance")
-            assert guidance_stage.diagnostics["tokens_consumed"] == consumed
             assert observation.distribution.ids.size > 0
             assert observation.statistics.candidate_filter_diagnostics["draw_kernel"] == "gumbel-max"
             engine.apply(Accept())
             assert engine.boundary == consumed + 1
         assert not engine._cfg_active()
         post_cfg = engine.observe()
-        assert all(stage.name != "classifier-free guidance" for stage in post_cfg.statistics.controller_trace.stages)
+        assert post_cfg.distribution.ids.size > 0
 
         # The branch path must restore the exact intended prefix.
         engine.apply(Accept())

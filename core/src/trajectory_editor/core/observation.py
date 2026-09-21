@@ -3,9 +3,8 @@
 The core observer owns the surfaces required by the interactive projector:
 raw model logits, history penalties, manual/conditional biases, optional
 output-head steering, candidate filtering, and replay-stable draw metadata.
-Research actuators are intentionally absent. The wider historical observer
-lives in the separate archive/research package; the core episode engine uses
-this observer for its policy calculations.
+Research actuators are intentionally absent. The core episode engine uses
+this observer for all policy calculations.
 """
 
 from __future__ import annotations

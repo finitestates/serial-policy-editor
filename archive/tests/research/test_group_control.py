@@ -20,7 +20,6 @@ from trajectory_editor.episode_ui import InteractivePolicy
 from trajectory_editor.group_control import GroupControl, appearances, control_adjustments
 from trajectory_editor.lexical_reference import compile_reference, load_reference
 from trajectory_editor.online_learning import OnlineLearningConfig, OnlineLearner
-from trajectory_editor.sampling import ObservationStatistics
 from trajectory_editor.tui import parse_bias_command
 
 
@@ -184,14 +183,6 @@ def test_off_is_durable_and_numeric_bias_remains_manual():
     assert s.bias_groups[0].bias == 2 and not s.group_controls
 
 
-def test_same_history_and_saved_configuration_reconstruct_same_control():
-    sampling = SamplingConfig(bias_groups=(group(),), group_controls=(GroupControl("concrete", "promote", .1, history_start=1),))
-    restored = SamplingConfig.from_record(json.loads(json.dumps(sampling.to_dict())))
-    for history in ([7], [7, 3], [7, 1, 2, 3] * 10):
-        a = ObservationStatistics(np.zeros(8), sampling, history)
-        b = ObservationStatistics(np.zeros(8), restored, history)
-        np.testing.assert_array_equal(a.policy_probabilities, b.policy_probabilities)
-        assert a.group_control_diagnostics == b.group_control_diagnostics
 
 
 def test_compiler_runtime_uses_canonical_routes_even_when_exploring():
@@ -212,12 +203,8 @@ def test_reference_works_without_groups_and_is_scale_invariant(tmp_path):
     routes = load_reference(path, b)
     assert routes == compile_reference({'shadow': 10, 'shadowing': .1}, b)
     config = SamplingConfig(reference_prior_routes=routes, reference_prior_scope="global", reference_prior_mode="lexical")
-    plain = ObservationStatistics(np.zeros(b.vocabulary_size()), SamplingConfig(), [])
-    weighted = ObservationStatistics(np.zeros(b.vocabulary_size()), config, [])
-    assert weighted.policy_probabilities[1] > plain.policy_probabilities[1]
-    assert weighted.policy_probabilities[6] < plain.policy_probabilities[6]
-    assert weighted.policy_probabilities[14] > 0
-    assert max(abs(v) for v in weighted.reference_prior_biases.values()) <= 2
+    assert config.active_reference_prior([])
+    assert max(abs(v) for v in config.active_reference_prior([]).values()) <= 2
     for amount in (-1, 0, 1):
         varied = replace(config, bias_groups=(BiasGroup("shadow", (BiasRule(routes=((1,),), bias=0),), bias=amount),))
         assert varied.active_reference_prior([]) == config.active_reference_prior([])

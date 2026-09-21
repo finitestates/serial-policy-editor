@@ -25,14 +25,25 @@ from .activation_vectors import (
 )
 from .domain import EditorError, SamplingConfig
 from .episode_engine import EpisodeEngine
-from .controller_pipeline import ControllerPipeline
 from .episode_store import EpisodeStore
-from .sampling import policy_kl
 from .token_preference_features import DEFAULT_PROJECTION_CHUNK_SIZE
 from .vector_artifacts import (
     FORMAT as TOKEN_PREFERENCE_FORMAT,
     TokenPreferenceVectorArtifact,
 )
+
+
+def policy_kl(probabilities: np.ndarray, reference: np.ndarray) -> float:
+    """Return KL(probabilities || reference), tolerating underflowed tails."""
+    left = np.asarray(probabilities, dtype=np.float64)
+    right = np.asarray(reference, dtype=np.float64)
+    if left.shape != right.shape or left.ndim != 1:
+        raise ValueError("KL inputs must be one-dimensional arrays of equal shape")
+    mask = left > 0.0
+    return float(np.sum(left[mask] * (
+        np.log(np.maximum(left[mask], np.finfo(np.float64).tiny))
+        - np.log(np.maximum(right[mask], np.finfo(np.float64).tiny))
+    )))
 
 
 FORMAT = "spe-vector-impact-v1"
@@ -239,7 +250,6 @@ def _condition_snapshots(
         initial_token_ids=[int(value) for value in episode["initial_token_ids"]],
         stream_fingerprint=segments[0][1],
         coordinate_offset=segments[0][2],
-        controller_pipeline=ControllerPipeline(),
     )
     snapshots: list[_Snapshot] = []
     for row, (sampling, _fingerprint, _offset) in zip(selected, segments):
@@ -489,7 +499,6 @@ def _rollout(
         initial_token_ids=[int(value) for value in episode["initial_token_ids"]],
         stream_fingerprint=str(first["stream_fingerprint"]),
         coordinate_offset=int(first["coordinate_offset"]),
-        controller_pipeline=ControllerPipeline(),
     )
     generated: list[int] = []
     terminal: int | None = None

@@ -17,8 +17,6 @@ from tests.fakes import ConformingFakeBackend, ScriptedIO
 from tests.research.test_token_preference import FEATURES
 from trajectory_editor.bias_rules import BiasGroup, BiasRule
 from trajectory_editor.controller_stack import build_controller_stack
-from trajectory_editor import controller_pipeline
-from trajectory_editor.controller_pipeline import ControllerPipeline
 from trajectory_editor.domain import EditorError, SamplingConfig
 from trajectory_editor.episode_actions import Accept, Hold, SelectRawRank
 from trajectory_editor.episode_engine import EpisodeEngine
@@ -31,7 +29,6 @@ from trajectory_editor.episode_policy import EpisodeRunner, TapeStep
 from trajectory_editor.episode_store import EpisodeStore
 from trajectory_editor.episode_ui import InteractivePolicy
 from trajectory_editor.group_control import GroupControl
-from trajectory_editor.sampling import ObservationStatistics
 
 
 def plain_sampling(**kwargs) -> SamplingConfig:
@@ -124,144 +121,10 @@ class ActivationPreferenceBackend(ConformingFakeBackend):
         return FEATURES
 
 
-def test_golden_intermediate_surface_trace_covers_actual_order():
-    base = np.asarray([0.2, 1.4, -0.3, 0.8, 0.2, -0.1, 0.0, -0.2])
-    history = [1, 1]
-    output_raw_delta = np.asarray(
-        [0.0, 0.1, -0.2, 0.3, 0.4, 0.0, -0.1, 0.2]
-    )
-    manual = BiasRule(routes=((3,),), bias=1.25)
-    group = BiasGroup(
-        "g",
-        (BiasRule(routes=((6,),), bias=0.0),),
-    )
-    config = plain_sampling(
-        repeat_penalty=2.0,
-        repeat_last_n=-1,
-        presence_penalty=0.3,
-        frequency_penalty=0.1,
-        bias_rules=(manual,),
-        reference_prior_routes=(((4,), 1.0), ((5,), 2.0)),
-        reference_prior_scope="global",
-        reference_prior_mode="contrastive",
-        reference_prior_strength=0.5,
-        activation_vector=(1.0, 2.0, 3.0),
-        activation_vector_strength=0.5,
-        token_preference_vector=(0.2, -0.1),
-        token_preference_strength=1.5,
-        bias_groups=(group,),
-        group_controls=(GroupControl("g", "promote", 0.1),),
-        top_k=3,
-        temperature=1.0,
-    )
-    captured = {}
-
-    def fake_group_control(
-        controls, groups, observed_history, baseline_logits, *args, **kwargs
-    ):
-        del controls, groups, observed_history, args, kwargs
-        captured["before_group_control"] = np.asarray(baseline_logits).copy()
-        return {6: 0.25}, ({"stage": "group-control"},)
-
-    with patch(
-        "trajectory_editor.group_control.control_adjustments",
-        side_effect=fake_group_control,
-    ):
-        stats = ObservationStatistics(
-            base,
-            config,
-            history,
-            token_preference_features=FEATURES,
-            activation_logit_adjustments=output_raw_delta,
-        )
-
-    history_surface = base.copy()
-    history_surface[1] = base[1] / 2.0 - 0.3 - 2.0 * 0.1
-    activation_delta = 0.5 * output_raw_delta
-    before_preference = history_surface + activation_delta
-    before_preference[3] += 1.25
-    before_preference[4] -= log(2.0) / 4.0
-    before_preference[5] += log(2.0) / 4.0
-    preference_delta = 1.5 * (
-        FEATURES @ np.asarray(config.token_preference_vector, dtype=np.float32)
-    )
-    before_group = before_preference + preference_delta
-    expected = before_group.copy()
-    expected[6] += 0.25
-
-    np.testing.assert_allclose(stats.activation_logit_adjustments, activation_delta)
-    np.testing.assert_allclose(stats.preference_base_logits, before_preference)
-    np.testing.assert_allclose(stats.token_preference_logit_adjustments, preference_delta)
-    np.testing.assert_allclose(captured["before_group_control"], before_group)
-    np.testing.assert_allclose(stats.adjusted, expected)
-    assert stats.group_control_biases == {6: 0.25}
-    assert stats.reference_prior_biases[4] == pytest.approx(-log(2.0) / 4.0)
-    assert stats.reference_prior_biases[5] == pytest.approx(log(2.0) / 4.0)
-
-    expected_ids = sorted(range(len(expected)), key=lambda token: (-expected[token], token))[:3]
-    assert stats.distribution.ids.tolist() == expected_ids
-    assert float(np.sum(stats.distribution.probabilities)) == pytest.approx(1.0)
 
 
-def test_controller_pipeline_emits_named_trace_without_changing_statistics():
-    backend = ActivationPreferenceBackend()
-    config = plain_sampling(
-        repeat_penalty=2.0,
-        repeat_last_n=-1,
-        activation_vector=(0.5, -0.25, 0.75),
-        activation_vector_strength=0.5,
-        token_preference_vector=(0.2, -0.1),
-        token_preference_strength=1.5,
-    )
-    stats = ControllerPipeline(capture_trace=True).build_statistics(
-        backend.last_logits(),
-        config,
-        [1, 1],
-        render_tokens=backend.render,
-        activation_logit_adjustments=backend.activation_logit_adjustments(
-            config.activation_vector,
-        ),
-        token_preference_features=FEATURES,
-    )
-
-    trace = stats.controller_trace
-    assert trace is not None
-    assert [stage.name for stage in trace.stages] == [
-        "backend logits",
-        "history penalties",
-        "output-head steering",
-        "manual/reference",
-        "token preference",
-        "group control",
-        "sampler / token draw",
-    ]
-    np.testing.assert_allclose(
-        trace.stage("token preference").surface,
-        stats.adjusted,
-    )
-    assert trace.stage("output-head steering").diagnostics["affected_tokens"] > 0
-    assert trace.filtered_token_ids == tuple(stats.distribution.ids.tolist())
-    assert trace.to_dict()["stages"][0]["shape"] == [8]
 
 
-def test_episode_engine_uses_the_exported_controller_statistics_seam():
-    calls = []
-    original = controller_pipeline.ObservationStatistics
-
-    def factory(*args, **kwargs):
-        calls.append((args, kwargs))
-        return original(*args, **kwargs)
-
-    with patch.object(controller_pipeline, "ObservationStatistics", factory):
-        engine = EpisodeEngine(
-            ConformingFakeBackend(),
-            initial_token_ids=[7],
-            sampling=plain_sampling(),
-        )
-        engine.observe()
-
-    assert len(calls) == 1
-    assert calls[0][1]["render_tokens"] is not None
 
 
 def test_controller_display_contract_exposes_missing_model_and_group_stages():

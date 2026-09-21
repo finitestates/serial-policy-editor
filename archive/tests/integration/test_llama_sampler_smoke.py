@@ -15,7 +15,6 @@ from trajectory_editor.decoder import LlamaCppDecoder, LlamaCppSettings
 from trajectory_editor.episode_cli import main
 from trajectory_editor.episode_store import EpisodeStore
 from trajectory_editor import episode_engine
-from trajectory_editor import controller_pipeline
 
 pytestmark = pytest.mark.llama_smoke
 INITIAL = SamplingConfig(temperature=.83, top_k=31, top_p=.91, min_p=.07,
@@ -99,15 +98,15 @@ class CheckedIO(ScriptedIO):
 
 def run(path, model, commands, expected, *flags, first_edge=None):
     io = CheckedIO(commands, expected, first_edge)
-    original_statistics = controller_pipeline.ObservationStatistics
+    original_statistics = episode_engine.ObservationStatistics
     original_draw = episode_engine.draw_token
     calls = []
     pending = {}
 
-    def statistics(logits, config, history, boundaries=None, **kwargs):
+    def statistics(logits, config, history, **kwargs):
         assert config == io.expected, 'Actual sampler configuration disagrees with scenario/UI'
         assert len(logits) > 10000 and np.isfinite(logits).all()
-        result = original_statistics(logits, config, history, boundaries, **kwargs)
+        result = original_statistics(logits, config, history, **kwargs)
         ids, probabilities = reference(logits, io.expected, list(history))
         np.testing.assert_array_equal(result.distribution.ids, ids)
         np.testing.assert_allclose(result.distribution.probabilities, probabilities, rtol=1e-11, atol=1e-14)
@@ -126,7 +125,7 @@ def run(path, model, commands, expected, *flags, first_edge=None):
         return token
 
     with patch('trajectory_editor.episode_cli.TerminalIO', return_value=io), patch.object(
-        controller_pipeline, 'ObservationStatistics', statistics
+        episode_engine, 'ObservationStatistics', statistics
     ), patch.object(
         episode_engine, 'draw_token', draw
     ):

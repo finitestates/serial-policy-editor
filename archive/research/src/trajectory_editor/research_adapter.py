@@ -382,7 +382,6 @@ class ResearchSurface:
     TokenPreferenceLearner: type
     OnlineLearner: type
     episode_runner: type
-    ControllerPipeline: type
     research_sampler_from_args: Any
     research_sampler_overrides_present: Any
     validate_research_sampler_seed: Any
@@ -410,7 +409,6 @@ def load_surface() -> ResearchSurface:
     from .token_preference import TokenPreferenceLearner
     from .online_learning import OnlineLearner
     from .episode_policy import EpisodeRunner
-    from .controller_pipeline import ControllerPipeline
 
     return ResearchSurface(
         research_sampler_config=ResearchSamplerConfig,
@@ -425,7 +423,6 @@ def load_surface() -> ResearchSurface:
         TokenPreferenceLearner=TokenPreferenceLearner,
         OnlineLearner=OnlineLearner,
         episode_runner=EpisodeRunner,
-        ControllerPipeline=ControllerPipeline,
         research_sampler_from_args=research_sampler_from_args,
         research_sampler_overrides_present=research_sampler_overrides_present,
         validate_research_sampler_seed=validate_research_sampler_seed,

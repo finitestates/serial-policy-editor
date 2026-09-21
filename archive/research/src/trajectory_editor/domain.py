@@ -237,7 +237,7 @@ class SamplingConfig(SamplerConfig):
             self, "reference_prior_exit_strength", float(self.reference_prior_exit_strength)
         )
         if prior_routes:
-            from .sampling import reference_trie
+            from .reference_priors import reference_trie
             object.__setattr__(self, "_reference_prior_trie", reference_trie(tuple(prior_routes)))
 
     @property
@@ -282,7 +282,7 @@ class SamplingConfig(SamplerConfig):
 
     def active_reference_prior_snapshot(self, history, boundaries=None):
         if not self.reference_prior_active:
-            from .sampling import ReferencePriorSnapshot
+            from .reference_priors import ReferencePriorSnapshot
             return ReferencePriorSnapshot(
                 self.reference_prior_scope, self.reference_prior_mode,
                 (), 0.0, 0.0, 0.0, (), {}
@@ -293,7 +293,7 @@ class SamplingConfig(SamplerConfig):
             active_routes = BiasMatcher(self.effective_bias_rules).active_routes(
                 history, boundaries
             )
-        from .sampling import reference_prior_snapshot
+        from .reference_priors import reference_prior_snapshot
         return reference_prior_snapshot(
             self.reference_prior_routes,
             history,

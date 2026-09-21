@@ -12,7 +12,7 @@ from tests.fakes import ScriptedIO
 from trajectory_editor.domain import SamplingConfig
 from trajectory_editor.episode_cli import main
 from trajectory_editor.episode_store import EpisodeStore
-from trajectory_editor import controller_pipeline, episode_engine
+from trajectory_editor import episode_engine
 from trajectory_editor.transformers_backend import TransformersBackend
 
 pytestmark = pytest.mark.transformers_smoke
@@ -103,7 +103,7 @@ class CheckedIO(ScriptedIO):
 
 def run(path, model, commands, expected, *flags, first_edge=None, cache='auto'):
     io = CheckedIO(commands, expected, first_edge)
-    original_statistics = controller_pipeline.ObservationStatistics
+    original_statistics = episode_engine.ObservationStatistics
     original_draw = episode_engine.draw_token
     original_last_logits = TransformersBackend.last_logits
     original_observe = episode_engine.EpisodeEngine.observe
@@ -149,7 +149,7 @@ def run(path, model, commands, expected, *flags, first_edge=None, cache='auto'):
         pending['oracle_logits'] = oracle
         return actual
 
-    def statistics(logits, config, history, boundaries=None, **kwargs):
+    def statistics(logits, config, history, **kwargs):
         assert config == io.expected, 'Actual sampler configuration disagrees with scenario/UI'
         assert len(logits) > 100 and np.isfinite(logits).all()
         assert tuple(history) == pending['engine_prefix'], 'Sampler history disagrees with episode prefix'
@@ -163,7 +163,7 @@ def run(path, model, commands, expected, *flags, first_edge=None, cache='auto'):
         np.testing.assert_allclose(actual_probabilities, oracle_probabilities, rtol=2e-4, atol=2e-6)
 
         # Then prove SPE's sampler agrees with the independent reference.
-        result = original_statistics(logits, config, history, boundaries, **kwargs)
+        result = original_statistics(logits, config, history, **kwargs)
         np.testing.assert_array_equal(result.distribution.ids, actual_ids)
         np.testing.assert_allclose(result.distribution.probabilities, actual_probabilities, rtol=1e-11, atol=1e-14)
         pending.update(ids=actual_ids, probabilities=actual_probabilities,
@@ -191,7 +191,7 @@ def run(path, model, commands, expected, *flags, first_edge=None, cache='auto'):
         episode_engine.EpisodeEngine, 'observe', checked_observe
     ), patch.object(
         TransformersBackend, 'last_logits', checked_last_logits
-    ), patch.object(controller_pipeline, 'ObservationStatistics', statistics), patch.object(
+    ), patch.object(episode_engine, 'ObservationStatistics', statistics), patch.object(
         episode_engine, 'draw_token', draw
     ):
         status = main(['--workspace', str(path), '--model', str(model), '--backend', 'transformers',

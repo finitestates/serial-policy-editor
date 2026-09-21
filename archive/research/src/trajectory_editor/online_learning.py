@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from .domain import EditorError, SamplingConfig
-from .sampling import ObservationStatistics
+from .core.observation import ObservationStatistics
 from .learning_controls import decay_applies, validate_controls, write_scale
 from .learning_observation import CompiledLearningObservation
 
@@ -41,7 +41,7 @@ class _GroupFeatureCompiler:
         if key not in prepared.group_scales:
             prepared.group_scales[key] = self._matcher(group).active_biases(
                 prepared.observation.prefix_token_ids,
-                prepared.statistics.boundaries,
+                getattr(prepared.statistics, "boundaries", None),
             )
         return prepared.group_scales[key]
 
@@ -252,8 +252,6 @@ class OnlineLearner:
             observation.logits,
             sampling,
             observation.prefix_token_ids,
-            observation.statistics.boundaries,
-            token_preference_features=getattr(observation.statistics, "token_preference_features", None),
             render_tokens=getattr(observation.statistics, "render_tokens", None),
         )
 

@@ -1,6 +1,6 @@
 """Reusable numeric inputs for one teacher-learning observation.
 
-The policy surface is already fully assembled by ``ObservationStatistics``.
+The core observation path has already assembled the policy surface.
 This small wrapper keeps the learners from repeatedly normalizing and looking
 up the same arrays while leaving the persisted episode state unchanged.
 """
@@ -31,10 +31,7 @@ class CompiledLearningObservation:
         return cls(
             observation=observation,
             policy_probabilities=np.asarray(statistics.policy_probabilities),
-            # Core observations have no research learner surface.  For an
-            # ordinary runtime observation, the assembled policy is the
-            # learner input; legacy research observations still provide their
-            # specialized learning probabilities.
+            # The assembled core policy is the learner input.
             learning_probabilities=np.asarray(
                 getattr(statistics, "learning_probabilities", statistics.policy_probabilities)
             ),
