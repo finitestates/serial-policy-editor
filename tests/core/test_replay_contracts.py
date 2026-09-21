@@ -9,7 +9,13 @@ from trajectory_editor.core.results import ReplayExpectation
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_replay_source import replay_tape
-from trajectory_editor.episode_runner import EpisodeRunner, LiveSessionRunner, ReplayPlan, TapeStep
+from trajectory_editor.episode_runner import (
+    EpisodeRunner,
+    LiveSessionRunner,
+    ReplayContext,
+    ReplayPlan,
+    TapeStep,
+)
 from trajectory_editor.episode_session import LiveSession
 from trajectory_editor.episode_store import EpisodeStore
 from tests.core.test_lifecycle_contracts import PhraseBackend
@@ -107,6 +113,38 @@ def test_r00_ephemeral_runner_uses_the_same_execution_path_without_a_store():
 
     assert result.replayed_actions == 0
     assert len(result.outcomes) == 1
+    assert session.history_visible_token_ids == (1,)
+
+
+def test_ephemeral_replay_plan_uses_source_sampling_on_an_inactive_branch():
+    session = LiveSession(runtime([1, 3, 5]), branch_id="root")
+    session.generate(Accept())
+    child = session.fork(boundary=1, branch_id="child")
+    session.activate("root")
+
+    first = SamplerConfig(temperature=0.0, seed=11)
+    second = SamplerConfig(temperature=0.0, seed=22)
+    final = SamplerConfig(temperature=0.0, seed=33)
+    plan = ReplayPlan(
+        steps=(TapeStep(Hold(1), None), TapeStep(Hold(1), None)),
+        context=ReplayContext(sampling=(first, second)),
+        final_sampling=final,
+    )
+
+    result = LiveSessionRunner(child).run(tape=plan, live_policy=NeverChoose())
+
+    assert result.episode_id == "child"
+    assert result.replayed_actions == 2
+    assert result.replay_exhausted
+    assert len(result.outcomes) == 2
+    assert child.history_visible_token_ids == (1, 3, 5)
+    assert [(boundary, sampling) for boundary, sampling, _, _ in child.sampler_states] == [
+        (0, SamplerConfig(temperature=0.0)),
+        (1, first),
+        (2, second),
+        (3, final),
+    ]
+    session.activate("root")
     assert session.history_visible_token_ids == (1,)
 
 

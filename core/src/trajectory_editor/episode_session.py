@@ -8,7 +8,7 @@ identity and always suffice for reconstruction.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, Protocol
@@ -702,27 +702,6 @@ class LiveSession:
         })
         return outcome
 
-    def replay(
-        self,
-        tape: Sequence[TapeStep],
-        *,
-        divergence_policy: str = "handoff",
-        _branch_id: str | None = None,
-    ) -> tuple[ActionOutcome, ...]:
-        results: list[ActionOutcome] = []
-        for step in tape:
-            result = self.generate(
-                step.action,
-                expectation=step.expectation,
-                divergence_policy=divergence_policy,
-                replay=True,
-                _branch_id=_branch_id,
-            )
-            results.append(result)
-            if result.status == "handed-off" or self.engine.ended or self.engine.checkpointed:
-                break
-        return tuple(results)
-
     def rewind(self, boundary: int, *, _branch_id: str | None = None) -> RewindState:
         branch_id = self._active_id if _branch_id is None else _branch_id
         self._require_live_branch(branch_id)
@@ -1005,9 +984,6 @@ class LiveBranch:
 
     def generate(self, action: PolicyAction | None = None, **kwargs: Any) -> ActionOutcome:
         return self._session.generate(action, _branch_id=self._identity.branch_id, **kwargs)
-
-    def replay(self, tape: Sequence[TapeStep], **kwargs: Any) -> tuple[ActionOutcome, ...]:
-        return self._session.replay(tape, _branch_id=self._identity.branch_id, **kwargs)
 
     def rewind(self, boundary: int) -> RewindState:
         return self._session.rewind(boundary, _branch_id=self._identity.branch_id)
