@@ -220,4 +220,4 @@ are not collected by these commands.
 - [Core contract matrix](tests/CORE_CONTRACTS.md) — the reduced test budget;
 - [Test inventory](tests/TEST_INVENTORY.md) — active and archived test buckets.
 
-The version currently represented by the active package manifests is `0.6.0`.
+The version currently represented by the active package manifests is `0.6.5`.
