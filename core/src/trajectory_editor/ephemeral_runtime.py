@@ -269,7 +269,9 @@ def run_ephemeral(
         activation_artifact.validate_against_backend(backend, provenance)
         sampling = apply_activation_artifact(sampling, activation_artifact, args)
     guidance_backend = None
-    if sampling.cfg_unconditional_prompt is not None:
+    if episode_backend_loader.cfg_required(
+        sampling, plan=teacher_tape.plan if teacher_tape is not None else None
+    ):
         io.write("Loading second model copy for CFG prefix guidance...")
         guidance_backend = episode_backend_loader.load_cfg_guidance_backend(
             args,

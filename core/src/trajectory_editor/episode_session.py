@@ -130,9 +130,6 @@ class BranchState:
     terminal_token_id: int | None = None
     terminal_reason: str | None = None
     status: str = "open"
-    guidance_initial_token_ids: tuple[int, ...] = ()
-    guidance_generated_prefix: tuple[int, ...] = ()
-    guidance_tokens_consumed: int = 0
     backend_cache_snapshot: _BackendCacheSnapshot | None = field(
         default=None, repr=False, compare=False
     )
@@ -160,8 +157,6 @@ class BranchState:
             previous_boundary = outcome.boundary_after
         if previous_boundary != len(self.visible_token_ids):
             raise EditorError("branch outcomes do not describe the visible prefix")
-        if type(self.guidance_tokens_consumed) is not int or self.guidance_tokens_consumed < 0:
-            raise EditorError("guidance tokens consumed must be nonnegative")
 
     @property
     def prefix_token_ids(self) -> tuple[int, ...]:
@@ -281,9 +276,6 @@ class LiveSession:
             tape=(),
             outcomes=(),
             control_points=(replace(_engine_control(engine), boundary=0),),
-            guidance_initial_token_ids=tuple(engine.guidance_initial_token_ids),
-            guidance_generated_prefix=tuple(engine.guidance_generated_prefix),
-            guidance_tokens_consumed=engine.guidance_tokens_consumed,
         )
         self._branches: dict[str, BranchState] = {identity.branch_id: root}
         self._tree = BranchTree(BranchNode(identity))
@@ -377,9 +369,6 @@ class LiveSession:
             terminal_token_id=self._engine.terminal_token_id,
             terminal_reason=self._engine.terminal_reason,
             status=status,
-            guidance_initial_token_ids=tuple(self._engine.guidance_initial_token_ids),
-            guidance_generated_prefix=tuple(self._engine.guidance_generated_prefix),
-            guidance_tokens_consumed=self._engine.guidance_tokens_consumed,
             backend_cache_snapshot=snapshot,
         )
         self._branches[self._active_id] = captured
@@ -406,6 +395,7 @@ class LiveSession:
             return self._engine
         if not self._detached:
             self._capture_active(capture_cache=True)
+            self._engine._invalidate_guidance()
         state = self._state(branch_id)
         prefix = state.prefix_token_ids
         if not self._restore_cache(state.backend_cache_snapshot, prefix):
@@ -428,20 +418,11 @@ class LiveSession:
             coordinate_offset=point.coordinate_offset,
             backend_positioned=True,
             guidance_backend=self._guidance_backend,
-            guidance_initial_token_ids=state.guidance_initial_token_ids or None,
-            guidance_generated_prefix=state.guidance_generated_prefix,
-            guidance_tokens_consumed=state.guidance_tokens_consumed,
         )
         engine.visible_token_ids = list(state.visible_token_ids)
         engine.terminal_token_id = state.terminal_token_id
         engine.terminal_reason = state.terminal_reason
         engine.trajectory.set_budget(point.max_tokens, point.checkpoint_boundary)
-        if self._guidance_backend is not None and engine.sampling.cfg_unconditional_prompt is not None:
-            self._guidance_backend.reset([
-                *engine.guidance_initial_token_ids,
-                *state.guidance_generated_prefix,
-                *state.visible_token_ids,
-            ])
         self._engine = engine
         self._active_id = branch_id
         self._active_identity = state.identity
@@ -487,6 +468,7 @@ class LiveSession:
         self._require_session()
         if not self._detached:
             state = self._capture_active(capture_cache=True)
+            self._engine._invalidate_guidance()
             self._detached = True
         else:
             state = self._branches[self._active_id]

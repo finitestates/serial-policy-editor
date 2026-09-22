@@ -10,6 +10,15 @@ are moved to `vectors` or the archive, deleted as obsolete, or added here only
 after deliberately changing the contract budget.
 
 Core tests assert observable state, persisted records, and replay results.
+CFG evaluation-work assertions also enforce S03: with caching enabled, evaluate
+the guidance root once and submit only newly required continuation IDs on normal
+forward generation. Unchanged observations and sampler-only invalidation must
+not resubmit that prefix. Backend cache-off behavior remains adapter-owned (S08).
+`test_cfg_contracts.py` maps save/resume to L01, rewind to L02/L06,
+forks/switching to L04, cutoff/budget renewal to L07, destination tokenizers to
+L08, and source-sampling replay/provisioning to R01/R08. Its full-prefix oracle
+checks contexts, complete guided logits, and distributions independently of the
+production guidance positioning helper.
 
 ## Sampler and action contracts — 8
 
@@ -17,7 +26,7 @@ Core tests assert observable state, persisted records, and replay results.
 | --- | --- | --- |
 | S01 | `SamplerConfig` accepts, rejects, and round-trips core fields | `test_sampler_contracts.py` |
 | S02 | deterministic categorical and Gumbel draws obey seed/tie rules | `test_sampler_contracts.py` |
-| S03 | CFG applies only to its configured prefix and records core state | `test_sampler_contracts.py`, `test_llama_release_smoke.py` |
+| S03 | CFG evaluates `P + V[:n]` and `U + V[:n]` with exact shared continuation IDs; standalone guidance uses `add_bos=True, special=True` independently of primary representation. Only retained visible tokens count toward the cutoff; new/resumed/replayed/forked/switched states are equivalent. Guidance reuses evaluation on forward append and unchanged decisions, catches up lazily, and rebuilds once on divergence, prompt change, or ownership loss. No warming past cutoff. | `test_cfg_contracts.py`, `test_sampler_contracts.py` |
 | S04 | history penalties change policy selection without changing raw rank | `test_sampler_contracts.py` |
 | S05 | naive multi-token bias credits only the final entered edge | `test_sampler_contracts.py` |
 | S06 | conditional bias activates after its trigger and stops at its terminator | `test_sampler_contracts.py` |

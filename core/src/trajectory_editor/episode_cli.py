@@ -755,19 +755,26 @@ def main(
                 episode_backend_loader.load_episode_backend(args, source, io)
             )
             cfg_guidance_backend = None
+            cfg_primary_backend = None
 
-            def cfg_backend_for(sampling):
-                nonlocal cfg_guidance_backend
-                if sampling.cfg_unconditional_prompt is None:
-                    return None
-                if cfg_guidance_backend is None:
+            def cfg_backend_for(sampling, *, plan=None, historical_sampling=(),
+                                primary=None, model_provenance=None):
+                nonlocal cfg_guidance_backend, cfg_primary_backend
+                primary = backend if primary is None else primary
+                model_provenance = provenance if model_provenance is None else model_provenance
+                if not episode_backend_loader.cfg_required(
+                    sampling, plan=plan, historical_sampling=historical_sampling
+                ):
+                    return cfg_guidance_backend if cfg_primary_backend is primary else None
+                if cfg_guidance_backend is None or cfg_primary_backend is not primary:
                     io.write("Loading second model copy for CFG prefix guidance...")
                     cfg_guidance_backend = (
                         episode_backend_loader.load_cfg_guidance_backend(
                             args,
-                            provenance,
+                            model_provenance,
                         )
                     )
+                    cfg_primary_backend = primary
                 return cfg_guidance_backend
 
             args._model_changed = model_changed
@@ -974,6 +981,14 @@ def main(
             store.visit(episode_id)
             enter_edge = False
             while True:
+                if engine.guidance_backend is None:
+                    engine.guidance_backend = cfg_backend_for(
+                        engine.sampling, plan=pending_tape,
+                        historical_sampling=(
+                            sampling_factory(segment["sampling"])
+                            for segment in store.sampler_segments(episode_id)
+                        ),
+                    )
                 runner_options = {
                     "divergence_policy": args.divergence_policy,
                 }
@@ -1103,8 +1118,11 @@ def main(
                                 store, destination, new_backend, new_provenance,
                                 guidance_backend=cfg_backend_for(
                                     sampling_factory(
-                                        store.sampling_segment(destination, 0)["sampling"]
-                                    )
+                                        store.sampling_segment(
+                                            destination, len(_visible_tokens(store, destination))
+                                        )["sampling"]
+                                    ),
+                                    primary=new_backend, model_provenance=new_provenance,
                                 ),
                                 sampling_factory=sampling_factory,
                             )

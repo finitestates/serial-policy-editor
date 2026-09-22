@@ -186,8 +186,6 @@ class SamplerConfig:
         object.__setattr__(self, "cfg_scale", float(self.cfg_scale))
         if type(self.cfg_prefix_tokens) is not int or self.cfg_prefix_tokens < 0:
             raise EditorError("cfg_prefix_tokens must be a nonnegative integer")
-        if self.cfg_unconditional_prompt is not None and self.cfg_prefix_tokens == 0:
-            raise EditorError("cfg_prefix_tokens must be positive when a CFG unconditional prompt is set")
         if (
             type(self.repeat_penalty) not in {int, float}
             or not math.isfinite(float(self.repeat_penalty))

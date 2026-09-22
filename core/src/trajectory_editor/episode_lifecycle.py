@@ -158,8 +158,6 @@ def _restore_engine(
     max_tokens: int | None,
     sampling_override: SamplerConfig | None,
     guidance_backend: Any | None = None,
-    guidance_generated_prefix: list[int] | None = None,
-    guidance_tokens_consumed: int = 0,
     sampling_factory: Callable = SamplerConfig.from_record,
     notice=print,
 ) -> EpisodeEngine:
@@ -182,8 +180,6 @@ def _restore_engine(
         stream_fingerprint=segment["stream_fingerprint"],
         coordinate_offset=segment["coordinate_offset"],
         guidance_backend=guidance_backend,
-        guidance_generated_prefix=guidance_generated_prefix,
-        guidance_tokens_consumed=guidance_tokens_consumed,
     )
     # These tokens are already known; only the final-position logits are needed.
     # Let the backend batch reconstruction without replaying individual moves.

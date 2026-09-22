@@ -21,6 +21,7 @@ def fresh_root_from(engine: EpisodeEngine, prompt: str) -> EpisodeEngine:
         raise TypeError("engine must be an EpisodeEngine")
     if not isinstance(prompt, str) or not prompt:
         raise EditorError("prompt must be a nonempty string")
+    engine._invalidate_guidance()
     return EpisodeEngine(
         engine.backend,
         sampling=replace(engine.sampling),
@@ -28,9 +29,6 @@ def fresh_root_from(engine: EpisodeEngine, prompt: str) -> EpisodeEngine:
         initial_text=prompt,
         coordinate_offset=0,
         guidance_backend=engine.guidance_backend,
-        guidance_initial_token_ids=(
-            engine.guidance_initial_token_ids or None
-        ),
     )
 
 

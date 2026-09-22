@@ -85,16 +85,11 @@ class EpisodeEngine:
         coordinate_offset: int = 0,
         backend_positioned: bool = False,
         guidance_backend: InferenceBackend | None = None,
-        guidance_initial_token_ids: Sequence[int] | None = None,
-        guidance_generated_prefix: Sequence[int] | None = None,
-        guidance_tokens_consumed: int = 0,
     ) -> None:
         if max_tokens is not None and (type(max_tokens) is not int or max_tokens < 1):
             raise EditorError("max_tokens must be a positive integer")
         if type(coordinate_offset) is not int or coordinate_offset < 0:
             raise EditorError("coordinate_offset must be a nonnegative integer")
-        if type(guidance_tokens_consumed) is not int or guidance_tokens_consumed < 0:
-            raise EditorError("guidance_tokens_consumed must be a nonnegative integer")
         require_inference_backend(backend)
         if guidance_backend is not None:
             require_inference_backend(guidance_backend)
@@ -132,38 +127,12 @@ class EpisodeEngine:
             stream_fingerprint=fingerprint,
         )
         self.guidance_backend = guidance_backend
-        self.guidance_initial_token_ids: tuple[int, ...] = ()
-        self.guidance_generated_prefix = tuple(
-            int(value) for value in (guidance_generated_prefix or ())
-        )
-        if guidance_backend is not None and any(
-            value < 0 or value >= guidance_backend.vocabulary_size()
-            for value in self.guidance_generated_prefix
-        ):
-            raise EditorError("CFG generated prefix contains an invalid token id")
-        self.guidance_tokens_consumed = guidance_tokens_consumed
-        if self.sampling.cfg_unconditional_prompt is not None:
-            if guidance_backend is None:
-                raise EditorError(
-                    "CFG is configured but no unconditional guidance backend was provided"
-                )
-            if guidance_initial_token_ids is None:
-                guidance_tokens = guidance_backend.tokenize(
-                    self.sampling.cfg_unconditional_prompt,
-                    add_bos=initial_token_ids is None and add_bos,
-                    special=special,
-                )
-            else:
-                guidance_tokens = [int(value) for value in guidance_initial_token_ids]
-            if not guidance_tokens:
-                raise EditorError("CFG unconditional prompt produced no tokens")
-            if any(
-                value < 0 or value >= guidance_backend.vocabulary_size()
-                for value in guidance_tokens
-            ):
-                raise EditorError("CFG unconditional prompt contains an invalid token id")
-            guidance_backend.reset(list(guidance_tokens))
-            self.guidance_initial_token_ids = tuple(guidance_tokens)
+        self._guidance_owner = object()
+        self._guidance_prompt_key: tuple | None = None
+        self._guidance_prompt_ids: tuple[int, ...] = ()
+        self._guidance_evaluated_prefix: tuple[int, ...] | None = None
+        if sampling.cfg_unconditional_prompt is not None:
+            self._guidance_prompt_tokens()
         self._observation: Observation | None = None
         self._observation_key: tuple | None = None
         self._ephemeral_logit_biases: dict[int, float] = {}
@@ -465,6 +434,10 @@ class EpisodeEngine:
     def observe(self) -> Observation:
         if self.ended or self.checkpointed:
             raise EditorError("the episode has no live decision boundary")
+        if self._cfg_active() and self.guidance_backend is not None and (
+            getattr(self.guidance_backend, "_spe_cfg_owner", None) is not self._guidance_owner
+        ):
+            self._invalidate_guidance()
         key = self._decision_key()
         if self._observation is not None and self._observation_key == key:
             return self._observation
@@ -474,14 +447,7 @@ class EpisodeEngine:
             raise RuntimeError("backend logits do not match its vocabulary")
         model_phase_diagnostics = None
         if self._cfg_active():
-            if self.guidance_backend is None:
-                raise EditorError("CFG prefix guidance requires an unconditional guidance backend")
-            guidance_prefix = [
-                *self.guidance_initial_token_ids,
-                *self.guidance_generated_prefix,
-                *self.visible_token_ids,
-            ]
-            self.guidance_backend.reset(guidance_prefix)
+            self._position_guidance()
             unconditional = np.asarray(self.guidance_backend.last_logits(), dtype=np.float64)
             if unconditional.shape != logits.shape or not np.all(np.isfinite(unconditional)):
                 raise RuntimeError("CFG unconditional logits do not match the primary backend")
@@ -493,7 +459,7 @@ class EpisodeEngine:
                 "scale": float(self.sampling.cfg_scale),
                 "prefix_tokens": int(self.sampling.cfg_prefix_tokens),
                 "tokens_consumed": int(
-                    self.guidance_tokens_consumed + len(self.visible_token_ids)
+                    len(self.visible_token_ids)
                 ),
                 "branch_scope": "conditional-only hidden-state controls",
                 "unconditional_logit_rms": float(np.sqrt(np.mean(unconditional ** 2))),
@@ -595,12 +561,59 @@ class EpisodeEngine:
         self._observation_key = key
         return observation
 
+    def _invalidate_guidance(self) -> None:
+        """Release knowledge of shared guidance state before backend reuse."""
+        self._guidance_evaluated_prefix = None
+        self._invalidate_observation()
+
+    def _guidance_prompt_tokens(self) -> tuple[int, ...]:
+        backend = self.guidance_backend
+        if backend is None:
+            raise EditorError("CFG is configured but no unconditional guidance backend was provided")
+        if backend is self.backend or backend.vocabulary_size() != self.backend.vocabulary_size():
+            raise EditorError("CFG requires a separate matching guidance backend")
+        prompt = self.sampling.cfg_unconditional_prompt
+        key = (backend, prompt)
+        if self._guidance_prompt_key != key:
+            # Guidance always enters as a standalone prompt. Primary text/IDs
+            # and primary-only tokenization options cannot change this policy.
+            tokens = tuple(backend.tokenize(prompt, add_bos=True, special=True))
+            if not tokens:
+                raise EditorError("CFG unconditional prompt produced no tokens")
+            if any(value < 0 or value >= backend.vocabulary_size() for value in tokens):
+                raise EditorError("CFG unconditional prompt contains an invalid token id")
+            self._guidance_prompt_key = key
+            self._guidance_prompt_ids = tokens
+            self._guidance_evaluated_prefix = None
+        return self._guidance_prompt_ids
+
+    def _position_guidance(self) -> None:
+        """Synchronize U + V lazily; append-only decisions reuse evaluation."""
+        desired = (*self._guidance_prompt_tokens(), *self.visible_token_ids)
+        evaluated = self._guidance_evaluated_prefix
+        if getattr(self.guidance_backend, "_spe_cfg_owner", None) is not self._guidance_owner:
+            evaluated = None
+        # Clear our claim before calling the backend: failed evaluation must
+        # not leave a prefix marked as successfully positioned.
+        self._guidance_evaluated_prefix = None
+        self.guidance_backend._spe_cfg_owner = None
+        if evaluated is None or desired[:len(evaluated)] != evaluated:
+            self.guidance_backend.reset(list(desired))
+        elif len(desired) > len(evaluated):
+            self.guidance_backend.eval(list(desired[len(evaluated):]))
+        self._guidance_evaluated_prefix = desired
+        # A token, not an engine reference: shared adapters do not keep old
+        # sessions alive. Every guidance evaluation is owned by this helper.
+        self.guidance_backend._spe_cfg_owner = self._guidance_owner
+
     def _cfg_active(self) -> bool:
+        prefix_tokens = self.sampling.cfg_prefix_tokens
         return bool(
-            self.sampling.cfg_unconditional_prompt is not None
-            and self.sampling.cfg_prefix_tokens > 0
-            and self.guidance_tokens_consumed + len(self.visible_token_ids)
-            < self.sampling.cfg_prefix_tokens
+        self.sampling.cfg_unconditional_prompt is not None
+        and (
+            prefix_tokens == 0
+            or len(self.visible_token_ids) < prefix_tokens
+            )
         )
 
     def candidates(

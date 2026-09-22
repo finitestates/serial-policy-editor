@@ -72,7 +72,8 @@ def test_detached_root_rebuilds_primary_and_guidance_prefix():
 
     assert session.engine.backend.tokens == [7, 1]
     assert session.engine.guidance_backend is not None
-    assert session.engine.guidance_backend.tokens == [6, 1]
+    session.engine.observe()  # Guidance positioning is lazy.
+    assert session.engine.guidance_backend.tokens == [7, 1]
     # Roster inspection is semantic-only while the root is detached.
     session.suspend()
     assert session.branch_states[session.branch.branch_id].visible_token_ids == (1,)
