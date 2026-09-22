@@ -895,14 +895,7 @@ def _render_review(
     )
     fragments.extend(context_fragments)
     fragments.append(("", "\n"))
-    if position.get("kind") == "edge":
-        fragments.extend(
-            [
-                ("class:proposal-label", "LIVE EDGE"),
-                ("class:muted", " · Enter opens the live-edge menu\n"),
-            ]
-        )
-    elif position.get("kind") == "inside-span":
+    if position.get("kind") == "inside-span":
         label = str(position.get("span_type") or "span").replace("-", " ").upper()
         fragments.extend(
             [
@@ -916,7 +909,11 @@ def _render_review(
         )
     elif position.get("kind") == "action-boundary":
         label = str(position.get("action_kind") or "action").replace("-", " ").upper()
-        side = "start" if position.get("side") == "before" else "end"
+        side = {
+            "before": "start",
+            "inside": "inside",
+            "after": "end",
+        }.get(position.get("side"), "boundary")
         fragments.extend(
             [
                 ("class:proposal-label", f"{label} {side}"),
@@ -954,13 +951,8 @@ def _render_review(
             (
                 "class:prompt-label",
                 (
-                    (
-                        "Seamless review · Enter opens the edge menu\n"
-                        if position.get("kind") == "edge"
-                        else "History · Enter deletes the continuation and resumes here\n"
-                    )
-                    if seamless
-                    else "Review action · Enter submits bare f\n"
+                    "History · Enter deletes the continuation and resumes here\n"
+                    if seamless else "Review action · Enter submits bare f\n"
                 ),
             ),
         ]

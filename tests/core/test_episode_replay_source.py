@@ -7,7 +7,6 @@ from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_replay_source import (
     build_source_replay_recipe,
     final_sampling,
-    replay_tape,
 )
 from trajectory_editor.episode_store import EpisodeStore
 
@@ -131,14 +130,11 @@ def test_completed_holds_replay_across_source_checkpoints_with_unlimited_budget(
             store.record_action("source", ordinal, outcome)
 
         recipe = build_source_replay_recipe(store, "source")
-        tape = replay_tape(store, "source")
+        tape = recipe.procedure.steps
         assert [row["stop_reason"] for row in store.actions("source")] == [
             "checkpoint", "checkpoint"
         ]
         assert [step.expectation.stop_reason for step in recipe.procedure.steps] == [
-            "requested-length", "requested-length"
-        ]
-        assert [expectation.stop_reason for _, expectation in tape] == [
             "requested-length", "requested-length"
         ]
 
@@ -149,8 +145,8 @@ def test_completed_holds_replay_across_source_checkpoints_with_unlimited_budget(
         initial_token_ids=[7],
     )
     outcomes = [
-        replay.apply(action, expectation=expectation, replay=True)
-        for action, expectation in tape
+        replay.apply(step.action, expectation=step.expectation, replay=True)
+        for step in tape
     ]
     assert [outcome.status for outcome in outcomes] == ["completed", "completed"]
     assert replay.visible_token_ids == [1, 2]

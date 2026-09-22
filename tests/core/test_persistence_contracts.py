@@ -8,13 +8,13 @@ from tests.fakes import ConformingFakeBackend
 from trajectory_editor.core.actions import Accept, Hold, Write
 from trajectory_editor.core.errors import EditorError
 from trajectory_editor.core.sampler_config import SamplerConfig
+from trajectory_editor.episode_replay_source import replay_procedure
 from trajectory_editor.projector import (
     project_episode,
     project_fork_map,
     project_lineage,
     project_procedure,
 )
-from trajectory_editor.episode_replay_source import replay_tape
 from trajectory_editor.episode_store import EpisodeStore
 
 
@@ -87,13 +87,13 @@ def test_p02_persisted_tape_excludes_editorial_interactions(tmp_path):
             "SELECT kind, arguments_json, mismatch_json FROM actions WHERE episode_id = ?",
             (identifier,),
         ).fetchall()
-        tape = replay_tape(store, identifier)
+        tape = replay_procedure(store, identifier)
 
     assert len(rows) == 1
     assert rows[0]["kind"] == "hold"
     assert rows[0]["mismatch_json"] is None
     assert len(tape) == 1
-    assert tape[0][0] == Hold(1)
+    assert tape[0]["action"] == Hold(1)
 
 
 def test_p03_fork_maps_preserve_exact_visible_boundaries_including_zero(tmp_path):

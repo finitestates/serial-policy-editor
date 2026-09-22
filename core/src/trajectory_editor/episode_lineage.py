@@ -116,10 +116,6 @@ class LineageView:
     replay_derived_forks: tuple[EpisodeRelation, ...]
 
     @property
-    def selected_episode_id(self) -> str:
-        return self.selected_record.episode_id
-
-    @property
     def ordinary_family_root_id(self) -> str | None:
         if self.ordinary_family_root is None:
             return None

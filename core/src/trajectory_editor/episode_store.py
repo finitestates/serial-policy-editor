@@ -329,6 +329,16 @@ class EpisodeStore:
             return None
         return dict(row)
 
+    @staticmethod
+    def _require_unsealed(db: sqlite3.Connection, episode_id: str) -> None:
+        row = db.execute(
+            "SELECT status FROM episodes WHERE episode_id = ?", (episode_id,)
+        ).fetchone()
+        if row is None:
+            raise EditorError(f"unknown episode {episode_id!r}")
+        if row["status"] in {"completed", "failed"}:
+            raise EditorError(f"episode {episode_id!r} is sealed")
+
     def record_budget(self, episode_id: str, boundary: int, max_tokens: int | None,
                       checkpoint_boundary: int | None) -> None:
         """Record edits and renewals, not ordinary consumption of an allowance."""
@@ -337,6 +347,7 @@ class EpisodeStore:
 
     def _record_budget(self, db: sqlite3.Connection, episode_id: str, boundary: int,
                        max_tokens: int | None, checkpoint_boundary: int | None) -> None:
+        self._require_unsealed(db, episode_id)
         if (max_tokens is None) != (checkpoint_boundary is None):
             raise EditorError("budget allowance and checkpoint must both be set or unlimited")
         if max_tokens is not None and (type(max_tokens) is not int or max_tokens <= 0
@@ -467,11 +478,11 @@ class EpisodeStore:
         coordinate_offset: int,
     ) -> None:
         """Record a sampler-policy transition at a live token boundary."""
-        self.get_episode(episode_id)
         validate_coordinate(start_boundary, "start_boundary")
         validate_coordinate(coordinate_offset, "coordinate_offset")
         validate_fingerprint(stream_fingerprint)
         with self.transaction() as db:
+            self._require_unsealed(db, episode_id)
             db.execute(
                 """
                 INSERT INTO sampler_segments(
@@ -687,6 +698,7 @@ class EpisodeStore:
         if replay_origin is not None:
             arguments["replay_origin"] = dict(replay_origin)
         with self.transaction() as db:
+            self._require_unsealed(db, episode_id)
             db.execute(
                 """
                 INSERT INTO actions(
@@ -747,6 +759,7 @@ class EpisodeStore:
         payload: Mapping[str, Any],
     ) -> None:
         with self.transaction() as db:
+            self._require_unsealed(db, episode_id)
             db.execute(
                 """
                 INSERT INTO interactions(
@@ -799,18 +812,6 @@ class EpisodeStore:
         result["backend"] = _loads(result.pop("backend_json"), {})
         result["metadata"] = _loads(result.pop("metadata_json"), {})
         return result
-
-    def list_episodes(self, *, limit: int = 100) -> list[dict[str, Any]]:
-        rows = self.connection.execute(
-            """
-            SELECT episode_id, parent_episode_id, fork_boundary, status,
-                   created_at, finished_at, terminal_reason,
-                   length(visible_text) AS visible_characters
-            FROM episodes ORDER BY created_at DESC LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-        return [dict(row) for row in rows]
 
     def episode_relation_rows(self) -> list[dict[str, Any]]:
         """Return the flat persistence facts required for lineage projection."""

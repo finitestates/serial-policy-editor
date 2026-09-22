@@ -30,7 +30,6 @@ from .episode_engine import EpisodeEngine, Observation
 from .episode_runner import (
     EdgeRequested,
     ForkRequested,
-    SeamlessEdgeRequested,
     SeamlessRewindRequested,
 )
 from .episode_store import EpisodeStore
@@ -348,15 +347,9 @@ class InteractivePolicy:
         """Return every visible token boundary, including the interior of writes."""
         return tuple(range(active_boundary + 1))
 
-    def _seamless_edge_boundary(self, active_boundary: int) -> int | None:
-        # Checkpoints are pauses, not barriers in the editable history.
-        return None
-
     def _seamless_position(self, boundary: int) -> dict[str, Any]:
         if self.store is None or self.episode_id is None:
             return {"kind": "token-boundary"}
-        if self._seamless_edge_boundary(boundary + 1) == boundary:
-            return {"kind": "edge"}
         rows = self.store.actions(self.episode_id)
         for row in rows:
             if int(row["boundary_before"]) == boundary:
@@ -489,8 +482,6 @@ class InteractivePolicy:
                 and review_boundary is not None
                 and raw == SEAMLESS_REACTIVATE
             ):
-                if self._seamless_edge_boundary(observation.boundary + 1) == review_boundary:
-                    raise SeamlessEdgeRequested(review_boundary)
                 raise SeamlessRewindRequested(review_boundary)
             if raw == "" and review_boundary is None:
                 raw = str(observation.proposal_raw_rank)

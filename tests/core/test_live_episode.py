@@ -113,7 +113,7 @@ def test_fork_creates_an_independent_child_with_lineage_and_inherited_history():
     parent = session.branch_handle("root")
     parent.generate(Accept())
 
-    child = parent.fork(backend=ConformingFakeBackend(), boundary=1, branch_id="child")
+    child = parent.fork(boundary=1, branch_id="child")
 
     assert child.branch.parent_id == "root"
     assert child.branch.fork_boundary == 1
@@ -122,7 +122,6 @@ def test_fork_creates_an_independent_child_with_lineage_and_inherited_history():
     assert child.engine.initial_token_ids == (7,)
     assert child.engine.visible_token_ids == [1]
     assert child.history_tape == parent.tape
-    assert parent.branch_tree.children_of("root") == (child.branch,)
     assert parent.fork_state is not None
     assert parent.fork_state.child == child.branch
 

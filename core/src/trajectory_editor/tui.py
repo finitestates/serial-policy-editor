@@ -285,7 +285,6 @@ class CommandKind(str, Enum):
     LOGIT_VIEW = "logit-view"
     REVIEW_BACK = "review-back"
     REVIEW_FORWARD = "review-forward"
-    REVIEW_EXIT = "review-exit"
     FORK = "fork"
     HELP = "help"
 
@@ -321,7 +320,6 @@ class TeacherCommand:
     context_characters: int | str | None = None
     force: bool = False
     fork_address: ForkAddress | None = None
-    warning: str | None = None
     bias_operator: str | None = None
     bias_status: bool = False
     bias_amount: float | None = None
@@ -409,7 +407,7 @@ commands /, t, x, n, and p keep their whitespace exactly as entered.
 
 
 _COMPACT_HOLD_BOUNDARY = re.compile(
-    r"^h\s*([.|/])(?:\s*(\d+))?$",
+    r"^h\s*([.|])(?:\s*(\d+))?$",
     re.IGNORECASE,
 )
 _COMPACT_HOLD_COUNT = re.compile(r"^h\s*(\d+)$", re.IGNORECASE)
@@ -444,7 +442,6 @@ def normalize_command_syntax(raw: str) -> str:
     match = _COMPACT_HOLD_BOUNDARY.fullmatch(command)
     if match is not None:
         boundary, count = match.groups()
-        boundary = "|" if boundary == "/" else boundary
         return f"h {boundary}" + (f" {count}" if count is not None else "")
 
     match = _COMPACT_HOLD_COUNT.fullmatch(command)
@@ -805,7 +802,7 @@ def parse_command(
             raise EditorError("use h, h N, h . [N], h | [N], or finish")
         if len(parts) == 1:
             return TeacherCommand(CommandKind.HOLD, hold_tokens=default_hold_tokens)
-        if parts[1] in {".", "|", "/"}:
+        if parts[1] in {".", "|"}:
             boundary = "sentence" if parts[1] == "." else "newline"
             if len(parts) == 2:
                 tokens = default_hold_tokens
@@ -820,15 +817,6 @@ def parse_command(
                 CommandKind.HOLD,
                 hold_tokens=tokens,
                 hold_boundary=boundary,
-                warning=(
-                    "newline holds now use h | [N]; h / [N] is deprecated"
-                    if re.fullmatch(
-                        r"(?:h|hold)\s*/.*",
-                        original_command,
-                        re.IGNORECASE,
-                    )
-                    else None
-                ),
             )
         if len(parts) != 2:
             raise EditorError("use h, h N, h . [N], h | [N], or finish")
@@ -1017,7 +1005,7 @@ def display_candidates(
 def display_actions(io: IO) -> None:
     io.write(
         "\nActions: accept | rank | t TEXT | x TEXT | h [N] | h . [N] | h | [N] | "
-        "[ / ] review | f [N|+N|-N] | m [N] | /TERM | "
+        "[ / ] review | f [N|-N] | m [N] | /TERM | "
         "ms [+|- [N]] | c [N|all] | v order | V policy columns | l logits / L both | "
         "n [note-before] | p [note-after] | e | e! | q | ?"
     )

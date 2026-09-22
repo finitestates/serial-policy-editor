@@ -15,11 +15,6 @@ from typing import Any
 
 from .core.actions import Hold, Phrase, PolicyAction, Write, action_from_dict
 from .core.results import ActionOutcome, ReplayExpectation, TokenEvidence
-from .surviving_procedure import (
-    ProcedureRecord,
-    SurvivingProcedure,
-    project_surviving_procedure,
-)
 
 
 def _visible_evidence(outcome: ActionOutcome) -> tuple[TokenEvidence, ...]:
@@ -329,52 +324,6 @@ class EpisodeHistory:
         """Return only the root-relative history retained through ``boundary``."""
 
         return self.truncate(boundary).retained
-
-    def rewind(self, boundary: int) -> HistoryTruncation:
-        """Alias for :meth:`truncate` using episode terminology."""
-
-        return self.truncate(boundary)
-
-    def rewind_to(self, boundary: int) -> "EpisodeHistory":
-        return self.retain_through(boundary)
-
-    def to_procedure_records(self) -> tuple[ProcedureRecord, ...]:
-        """Translate attempts for the shared surviving-procedure projector."""
-
-        return tuple(
-            ProcedureRecord(
-                action=attempt.action,
-                expectation=(
-                    attempt.expectation
-                    if attempt.expectation is not None
-                    else attempt.outcome.expectation()
-                ),
-                status=attempt.outcome.status,
-                visible_token_ids=tuple(attempt.outcome.visible_token_ids),
-                visible_text="".join(
-                    item.text for item in _visible_evidence(attempt.outcome)
-                ),
-                boundary_before=attempt.outcome.boundary_before,
-            )
-            for attempt in self.attempts
-        )
-
-    def project_surviving_procedure(
-        self, *, normalize_for_replay: bool = True
-    ) -> SurvivingProcedure:
-        """Delegate semantic replay filtering to the canonical projector."""
-
-        return project_surviving_procedure(
-            self.to_procedure_records(),
-            normalize_for_replay=normalize_for_replay,
-        )
-
-    def surviving_procedure(
-        self, *, normalize_for_replay: bool = True
-    ) -> SurvivingProcedure:
-        return self.project_surviving_procedure(
-            normalize_for_replay=normalize_for_replay
-        )
 
 
 def visible_text_prefix(

@@ -37,14 +37,6 @@ class SeamlessRewindRequested(Exception):
         self.boundary = int(boundary)
 
 
-class SeamlessEdgeRequested(Exception):
-    """UI control-flow request to reopen the latest live-edge menu."""
-
-    def __init__(self, boundary: int) -> None:
-        super().__init__(boundary)
-        self.boundary = int(boundary)
-
-
 class LivePolicy(Protocol):
     def choose(self, engine, observation: Observation) -> PolicyAction: ...
 
@@ -273,7 +265,6 @@ def run_plan(
         EdgeRequested,
         ForkRequested,
         SeamlessRewindRequested,
-        SeamlessEdgeRequested,
     ):
         target.record_control_flow()
         raise
@@ -297,7 +288,6 @@ __all__ = [
     "ReplayPlan",
     "RunResult",
     "RunTarget",
-    "SeamlessEdgeRequested",
     "SeamlessRewindRequested",
     "TapeStep",
     "run_plan",

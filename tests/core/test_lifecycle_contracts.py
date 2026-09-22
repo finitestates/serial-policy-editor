@@ -7,6 +7,7 @@ import pytest
 
 from tests.fakes import ConformingFakeBackend
 from trajectory_editor.core.actions import Accept, Hold, Phrase, Write
+from trajectory_editor.core.errors import EditorError
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_lifecycle import (
     _create_episode,
@@ -16,7 +17,7 @@ from trajectory_editor.episode_lifecycle import (
     _rewind_episode,
 )
 from trajectory_editor.episode_engine import EpisodeEngine
-from trajectory_editor.episode_replay_source import replay_tape
+from trajectory_editor.episode_replay_source import replay_procedure
 from trajectory_editor.projector import project_fork_map, project_lineage
 from trajectory_editor.episode_store import EpisodeStore
 
@@ -99,7 +100,8 @@ def test_l03_rewind_can_cut_inside_a_checked_multitoken_write(tmp_path):
         store.update_episode(identifier, visible_text=episode.text, max_tokens=None)
 
         _rewind_episode(store, identifier, episode, 1)
-        action, expectation = replay_tape(store, identifier)[0]
+        step = replay_procedure(store, identifier)[0]
+        action, expectation = step["action"], step["expectation"]
 
     assert action == Write(" C", mode="exact")
     assert expectation.token_ids == (3,)
@@ -373,3 +375,54 @@ def test_l08_model_continuation_preserves_visible_text_and_sampler_state(tmp_pat
     assert continued.visible_token_ids == [7, 4]
     assert continued.sampling == source.sampling
     assert child_id != identifier
+
+
+@pytest.mark.parametrize("sealed_status", ["completed", "failed"])
+def test_sealed_episodes_reject_all_record_writes(tmp_path, sealed_status):
+    with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
+        episode = runtime()
+        identifier = create(store, "sealed", episode)
+        outcome = episode.apply(Accept())
+        store.finish_episode(
+            identifier,
+            visible_text=episode.text,
+            terminal_token_id=None,
+            terminal_reason="teacher-end",
+        )
+        if sealed_status == "failed":
+            store.connection.execute(
+                "UPDATE episodes SET status = 'failed' WHERE episode_id = ?",
+                (identifier,),
+            )
+            store.connection.commit()
+
+        before = (
+            store.get_episode(identifier),
+            store.budget_segments(identifier),
+            store.sampler_segments(identifier),
+            store.actions(identifier),
+            store.interactions(identifier),
+        )
+        writes = (
+            lambda: store.record_budget(identifier, 0, 1, 1),
+            lambda: store.record_sampling_segment(
+                identifier,
+                start_boundary=0,
+                sampling=episode.sampling,
+                stream_fingerprint=episode.stream_fingerprint,
+                coordinate_offset=0,
+            ),
+            lambda: store.record_action(identifier, 0, outcome),
+            lambda: store.record_interaction(identifier, 0, "search", {"query": "word"}),
+        )
+        for write in writes:
+            with pytest.raises(EditorError, match="sealed"):
+                write()
+
+        assert before == (
+            store.get_episode(identifier),
+            store.budget_segments(identifier),
+            store.sampler_segments(identifier),
+            store.actions(identifier),
+            store.interactions(identifier),
+        )

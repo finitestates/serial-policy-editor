@@ -5,11 +5,13 @@ from unittest.mock import patch
 import pytest
 
 from tests.fakes import ConformingFakeBackend, ScriptedIO
+from trajectory_editor.core.errors import EditorError
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_ui import InteractivePolicy
 from trajectory_editor.episode_cli import build_parser, main
-from trajectory_editor.tui import CommandKind, parse_command
+from trajectory_editor.live_tui import _render_review
+from trajectory_editor.tui import BoundaryReview, CommandKind, parse_command
 from trajectory_editor.tui import display_candidates
 
 
@@ -36,6 +38,19 @@ def test_m01_full_vocabulary_search_is_nonmutating():
     assert action.kind == "select-raw-rank"
     assert episode.backend.tokens == before
     assert "absolute raw rank=8" in "".join(policy.io.output)
+
+
+def test_review_labels_an_interior_action_boundary_as_inside():
+    review = BoundaryReview(
+        active_aligned_step=2,
+        aligned_step=1,
+        context_text_tail="P",
+        context_token_sha256="0" * 64,
+        position={"kind": "action-boundary", "action_kind": "write", "side": "inside"},
+    )
+    rendered = "".join(text for _, text in _render_review(review, terminal_size=(80, 24)))
+
+    assert "WRITE inside" in rendered
 
 
 @pytest.mark.parametrize(
@@ -79,6 +94,12 @@ def test_m03_menu_commands_distinguish_editorial_moves_from_token_actions(
     assert command.kind == kind
     if action_kind is not None:
         assert command.action.kind.value == action_kind
+
+
+@pytest.mark.parametrize("raw", ["h /", "h / 2", "h/", "h/2"])
+def test_legacy_newline_hold_spellings_are_rejected(raw):
+    with pytest.raises(EditorError):
+        parse(raw)
 
 
 def test_m04_logit_views_are_sticky_and_cycle_raw_model_gap_modes():

@@ -240,9 +240,9 @@ with EpisodeStore(workspace) as store:
     outcome = source_engine.apply(Accept())
     store.record_action(source, 0, outcome)
     store.update_episode(source, visible_text=source_engine.text, max_tokens=None, status="open")
-    from trajectory_editor.episode_replay_source import replay_tape
-
-    action, expectation = replay_tape(store, source)[0]
+    from trajectory_editor.episode_replay_source import replay_procedure
+    step = replay_procedure(store, source)[0]
+    action, expectation = step["action"], step["expectation"]
 
     handoff_backend = DivergingBackend()
     handoff_engine = EpisodeEngine(handoff_backend, sampling=SamplerConfig(), initial_token_ids=[1])

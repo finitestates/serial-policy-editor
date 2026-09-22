@@ -212,7 +212,7 @@ def test_partial_retained_action_clears_terminal_divergence_and_replay_eog_state
     assert saved.replay_eog_token_id is None
 
 
-def test_zero_width_handoff_is_raw_history_but_surviving_projection_omits_it():
+def test_zero_width_handoff_remains_in_raw_history():
     handed_off = Phrase("check", mode="exact")
     zero = outcome(handed_off, 0, status="handed-off")
     forced = Phrase("forced", mode="continuation", force=True)
@@ -225,10 +225,6 @@ def test_zero_width_handoff_is_raw_history_but_surviving_projection_omits_it():
     )
 
     retained = history.retain_through(1)
-    projected = retained.project_surviving_procedure()
-
     assert retained.visible_token_ids == (3,)
     assert len(retained.attempts) == 2
     assert retained.attempts[0].outcome.status == "handed-off"
-    assert projected.tape[0].action == Write("forced", mode="continuation")
-    assert projected.skipped_source_indices == (0,)

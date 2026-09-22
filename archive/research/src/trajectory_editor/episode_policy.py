@@ -24,7 +24,6 @@ from .episode_runner import (
     ReplayContext,
     ReplayOrigin,
     RunResult,
-    SeamlessEdgeRequested,
     SeamlessRewindRequested,
     TapeStep,
 )
@@ -420,7 +419,6 @@ __all__ = [
     "ReplayOrigin",
     "ReplayPlan",
     "RunResult",
-    "SeamlessEdgeRequested",
     "SeamlessRewindRequested",
     "TapeStep",
     "WriteLearningResult",

@@ -46,7 +46,6 @@ from .episode_runner import (
     EdgeRequested,
     EpisodeRunner as CoreEpisodeRunner,
     ForkRequested,
-    SeamlessEdgeRequested,
     SeamlessRewindRequested,
     ReplayPlan,
 )
@@ -1019,28 +1018,6 @@ def main(
                     )
                     pending_tape = None
                     continue
-                except SeamlessEdgeRequested as request:
-                    from_boundary = engine.boundary
-                    io.write(f"Restoring context at boundary {request.boundary}...")
-                    details = _rewind_episode(
-                        store, episode_id, engine, request.boundary,
-                        sampling_factory=sampling_factory,
-                    )
-                    store.record_interaction(
-                        episode_id,
-                        request.boundary,
-                        "seamless-edge-open",
-                        {
-                            "from_boundary": from_boundary,
-                            "to_boundary": request.boundary,
-                            "trimmed_action": details["trimmed_action"],
-                        },
-                    )
-                    pending_tape = None
-                    action, value = _live_edge_menu(
-                        io, store, episode_id, engine,
-                        sampling_factory=sampling_factory,
-                    )
                 except ForkRequested as request:
                     action, value = "fork", request.boundary
                 else:

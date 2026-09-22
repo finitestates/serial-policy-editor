@@ -13,7 +13,7 @@ from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_cli import main
 from trajectory_editor.episode_lifecycle import _restore_engine
 from trajectory_editor.episode_materializer import materialize_live_branch
-from trajectory_editor.episode_replay_source import build_source_replay_recipe, replay_tape
+from trajectory_editor.episode_replay_source import build_source_replay_recipe, replay_procedure
 from trajectory_editor.episode_runner import (
     EpisodeRunner,
     LiveSessionRunner,
@@ -101,8 +101,8 @@ def create_legacy(store, episode, identifier="test"):
 
 def tape(store, episode_id):
     return [
-        TapeStep(action, expectation)
-        for action, expectation in replay_tape(store, episode_id)
+        TapeStep(step["action"], step["expectation"])
+        for step in replay_procedure(store, episode_id)
     ]
 
 
@@ -382,21 +382,6 @@ def test_r01_exact_replay_reproduces_the_recorded_visible_prefix(tmp_path):
     assert result.outcomes[0].expectation() == source_outcome.expectation()
 
 
-def test_r02_replay_tape_contains_only_action_and_optional_result(tmp_path):
-    with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
-        source = runtime([1, 3, 5])
-        source_id = create(store, "source", source)
-        outcome = source.apply(Hold(1))
-        store.record_action(source_id, 0, outcome)
-        store.record_interaction(source_id, 1, "search", {"query": "word"})
-        store.record_interaction(source_id, 1, "rewind-requested", {"boundary": 0})
-        tape = replay_tape(store, source_id)
-
-    assert len(tape) == 1
-    assert isinstance(tape[0][0], Hold)
-    assert tape[0][1] == outcome.expectation()
-
-
 def test_r05_check_and_force_replay_as_recorded_writes(tmp_path):
     with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
         source = EpisodeEngine(
@@ -445,10 +430,10 @@ def test_r07_editorial_moves_never_become_replay_steps(tmp_path):
         store.record_interaction(source_id, 1, "fork-requested", {"boundary": 0})
         store.record_interaction(source_id, 1, "rewind-requested", {"boundary": 0})
 
-        tape = replay_tape(store, source_id)
+        tape = replay_procedure(store, source_id)
 
     assert len(tape) == 1
-    assert tape[0][0] == Accept()
+    assert tape[0]["action"] == Accept()
 
 
 @pytest.mark.parametrize("as_plan", [False, True])

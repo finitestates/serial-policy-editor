@@ -130,13 +130,6 @@ def load_teacher_tape_jsonl(
     return TeacherTape(load_teacher_plan(records, require_observations=require_observations), envelope)
 
 
-def load_teacher_plan_jsonl(
-    path: Path, *, require_observations: bool = False,
-) -> ReplayPlan:
-    """Backward-compatible plan-only JSONL loader."""
-    return load_teacher_tape_jsonl(path, require_observations=require_observations).plan
-
-
 def _write_teacher_tape(
     path: Path,
     envelope: dict[str, Any],
@@ -268,4 +261,4 @@ def export_live_teacher_tape(
     )
 
 
-__all__ = ["TAPE_FORMAT", "TAPE_VERSION", "TeacherTape", "export_live_teacher_tape", "export_teacher_tape", "load_teacher_plan", "load_teacher_plan_jsonl", "load_teacher_tape_jsonl"]
+__all__ = ["TAPE_FORMAT", "TAPE_VERSION", "TeacherTape", "export_live_teacher_tape", "export_teacher_tape", "load_teacher_plan", "load_teacher_tape_jsonl"]

@@ -294,38 +294,6 @@ def replay_procedure(
     ]
 
 
-def replay_tape(
-    reader: EpisodeReplayReader,
-    episode_id: str,
-    *,
-    sampling_factory: Callable[[Mapping[str, Any]], SamplerConfig] = SamplerConfig.from_record,
-) -> list[tuple[PolicyAction, ReplayExpectation | None]]:
-    """Return the executable action/expectation pairs for a source episode."""
-
-    return [
-        (step["action"], step["expectation"])
-        for step in replay_procedure(
-            reader, episode_id, sampling_factory=sampling_factory
-        )
-    ]
-
-
-def replay_tape_with_sampling(
-    reader: EpisodeReplayReader,
-    episode_id: str,
-    *,
-    sampling_factory: Callable[[Mapping[str, Any]], SamplerConfig] = SamplerConfig.from_record,
-) -> list[tuple[PolicyAction, ReplayExpectation | None, SamplerConfig]]:
-    """Return executable steps with the sampler effective at each source step."""
-
-    return [
-        (step["action"], step["expectation"], step["sampling"])
-        for step in replay_procedure(
-            reader, episode_id, sampling_factory=sampling_factory
-        )
-    ]
-
-
 def final_sampling(
     reader: EpisodeReplayReader,
     episode_id: str,
@@ -343,6 +311,4 @@ __all__ = [
     "build_source_replay_recipe",
     "final_sampling",
     "replay_procedure",
-    "replay_tape",
-    "replay_tape_with_sampling",
 ]

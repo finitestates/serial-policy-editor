@@ -191,7 +191,7 @@ def test_durable_new_is_parentless_and_bare_number_returns_to_prior_episode(tmp_
         ) == 0
 
     with EpisodeStore(workspace) as store:
-        episodes = store.list_episodes()
+        episodes = store.episode_relation_rows()
         assert len(episodes) == 2
         original = store.resolve_id("#1")
         fresh = store.resolve_id("#2")
@@ -233,5 +233,5 @@ def test_save_family_only_materializes_the_selected_root_family(tmp_path):
                 if state.identity.parent_id == new_session.branch.branch_id
             ),
         }
-        assert len(store.list_episodes()) == 2
+        assert len(store.episode_relation_rows()) == 2
         assert store.get_episode("new-root")["initial_text"] == "Q"

@@ -17,7 +17,6 @@ from .run_loop import (
     ReplayOrigin,
     ReplayPlan,
     RunResult,
-    SeamlessEdgeRequested,
     SeamlessRewindRequested,
     TapeStep,
     run_plan,
@@ -270,7 +269,6 @@ __all__ = [
     "ReplayOrigin",
     "ReplayPlan",
     "RunResult",
-    "SeamlessEdgeRequested",
     "SeamlessRewindRequested",
     "TapeStep",
 ]

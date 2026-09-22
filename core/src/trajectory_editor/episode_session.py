@@ -59,7 +59,6 @@ class BranchTree:
 
     def __init__(self, root: BranchNode) -> None:
         self._nodes: dict[str, BranchNode] = {root.identity.branch_id: root}
-        self._children: dict[str, list[str]] = {root.identity.branch_id: []}
 
     @property
     def nodes(self) -> Mapping[str, BranchNode]:
@@ -71,10 +70,6 @@ class BranchTree:
         except KeyError as exc:
             raise EditorError(f"unknown branch {branch_id!r}") from exc
 
-    def children_of(self, branch_id: str) -> tuple[BranchIdentity, ...]:
-        self.node(branch_id)
-        return tuple(self._nodes[key].identity for key in self._children[branch_id])
-
     def add(self, node: BranchNode) -> None:
         identity = node.identity
         if identity.branch_id in self._nodes:
@@ -82,8 +77,6 @@ class BranchTree:
         if identity.parent_id is None or identity.parent_id not in self._nodes:
             raise EditorError("a fork branch must name an existing parent")
         self._nodes[identity.branch_id] = node
-        self._children[identity.branch_id] = []
-        self._children[identity.parent_id].append(identity.branch_id)
 
 
 @dataclass(frozen=True)
@@ -225,9 +218,6 @@ class ForkState:
     boundary: int
 
 
-BackendFactory = Callable[["LiveSession", int], Any]
-
-
 def _engine_control(engine: EpisodeEngine) -> ControlPoint:
     return ControlPoint(
         engine.boundary,
@@ -268,7 +258,6 @@ class LiveSession:
         branch_id: str | None = None,
         recorder: SessionRecorder | Callable[[SessionEvent], Any] | None = None,
         export_targets: Mapping[str, SessionExportTarget | Callable[["LiveBranch"], Any]] | None = None,
-        backend_factory: BackendFactory | None = None,
     ) -> None:
         if not isinstance(engine, EpisodeEngine):
             raise TypeError("engine must be an EpisodeEngine")
@@ -283,9 +272,6 @@ class LiveSession:
         self.environment_stamp = MappingProxyType(dict(environment_stamp or {}))
         self.recorder = recorder
         self.export_targets = dict(export_targets or {})
-        # Compatibility only: ordinary live forks intentionally do not invoke
-        # this factory, because one model load per branch defeats session forks.
-        self.backend_factory = backend_factory
         self.session_id = f"live-session-{uuid4().hex}"
         identity = BranchIdentity(branch_id or self._new_branch_id())
         root = BranchState(
@@ -513,14 +499,6 @@ class LiveSession:
         return self._active_identity if self._discarded else self._state().identity
 
     @property
-    def branch_identity(self) -> BranchIdentity:
-        return self.branch
-
-    @property
-    def current_branch(self) -> BranchIdentity:
-        return self.branch
-
-    @property
     def branch_tree(self) -> BranchTree:
         return self._tree
 
@@ -602,16 +580,8 @@ class LiveSession:
         return None if self._discarded else self._rewinds.get(self._active_id)
 
     @property
-    def pending_rewind(self) -> RewindState | None:
-        return self.rewind_state
-
-    @property
     def fork_state(self) -> ForkState | None:
         return None if self._discarded else self._forks.get(self._active_id)
-
-    @property
-    def pending_fork(self) -> ForkState | None:
-        return self.fork_state
 
     def _record_control(self, branch_id: str) -> None:
         engine = self._activate(branch_id)
@@ -748,20 +718,12 @@ class LiveSession:
 
     def fork(
         self,
-        backend: Any | None = None,
         *,
         boundary: int | None = None,
         branch_id: str | None = None,
-        guidance_backend: Any | None = None,
         _branch_id: str | None = None,
     ) -> "LiveBranch":
-        """Create a state record for a child; no second model is loaded.
-
-        ``backend``/``guidance_backend`` remain accepted for callers of the
-        original facade, but are deliberately ignored.  The child is resumed
-        on this session's active backend via cache restore or prefix rebuild.
-        """
-        del backend, guidance_backend
+        """Create a child state record on this session's active backend."""
         source_id = self._active_id if _branch_id is None else _branch_id
         self._require_live_branch(source_id)
         engine = self._activate(source_id)
@@ -870,14 +832,6 @@ class LiveBranch:
         return self._identity
 
     @property
-    def branch_identity(self) -> BranchIdentity:
-        return self.branch
-
-    @property
-    def current_branch(self) -> BranchIdentity:
-        return self.branch
-
-    @property
     def branch_tree(self) -> BranchTree:
         return self._session.branch_tree
 
@@ -963,16 +917,8 @@ class LiveBranch:
         return None if self._session.is_discarded else self._session._rewinds.get(self._identity.branch_id)
 
     @property
-    def pending_rewind(self) -> RewindState | None:
-        return self.rewind_state
-
-    @property
     def fork_state(self) -> ForkState | None:
         return None if self._session.is_discarded else self._session._forks.get(self._identity.branch_id)
-
-    @property
-    def pending_fork(self) -> ForkState | None:
-        return self.fork_state
 
     def activate(self) -> EpisodeEngine:
         return self._session.activate(self._identity.branch_id)
@@ -989,8 +935,8 @@ class LiveBranch:
     def rewind(self, boundary: int) -> RewindState:
         return self._session.rewind(boundary, _branch_id=self._identity.branch_id)
 
-    def fork(self, backend: Any | None = None, **kwargs: Any) -> "LiveBranch":
-        return self._session.fork(backend, _branch_id=self._identity.branch_id, **kwargs)
+    def fork(self, **kwargs: Any) -> "LiveBranch":
+        return self._session.fork(_branch_id=self._identity.branch_id, **kwargs)
 
     def quit(self, reason: str = "menu-end") -> None:
         self._session.quit(reason, _branch_id=self._identity.branch_id)
@@ -1122,7 +1068,6 @@ class LiveSessionRoster:
 
 
 __all__ = [
-    "BackendFactory",
     "BranchIdentity",
     "BranchNode",
     "BranchState",

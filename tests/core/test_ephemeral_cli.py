@@ -166,7 +166,7 @@ def test_ephemeral_save_family_materializes_live_lineage(tmp_path):
 
     with EpisodeStore(workspace) as store:
         root = store.get_episode("root-save")
-        children = [row for row in store.list_episodes() if row["parent_episode_id"] == "root-save"]
+        children = [row for row in store.episode_relation_rows() if row["parent_episode_id"] == "root-save"]
         assert root["parent_episode_id"] is None
         assert len(children) == 1
         assert children[0]["fork_boundary"] == 1

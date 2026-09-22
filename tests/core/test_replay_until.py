@@ -140,7 +140,7 @@ def test_cli_edge_replay_appends_live_text_without_mutating_the_source(source_wo
 
     with EpisodeStore(source_workspace) as store:
         destination = store.get_episode("destination")
-        assert len(store.list_episodes()) == 2
+        assert len(store.episode_relation_rows()) == 2
         assert destination["initial_text"] == "P"
         assert destination["parent_episode_id"] is None
         assert destination["visible_text"] == " helloP A B!!"

@@ -20,7 +20,6 @@ from .episode_runner import (
     ForkRequested,
     LiveSessionRunner,
     ReplayPlan,
-    SeamlessEdgeRequested,
     SeamlessRewindRequested,
 )
 from .episode_session import LiveSession, LiveSessionRoster
@@ -308,8 +307,6 @@ def run_ephemeral(
             action, value = "fork", request.boundary
         except SeamlessRewindRequested as request:
             action, value = "rewind", request.boundary
-        except SeamlessEdgeRequested:
-            action, value = ephemeral_edge_menu(io, roster)
         else:
             pending_tape = None
             if result.handed_off and result.handoff_reason:
