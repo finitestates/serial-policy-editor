@@ -340,71 +340,6 @@ ControlSegment = ControlTransition
 EpisodeControlState = ControlState
 
 
-def effective_state(timeline: ControlTimeline, boundary: int) -> ControlState:
-    """Functional form of :meth:`ControlTimeline.effective_at`."""
-
-    if not isinstance(timeline, ControlTimeline):
-        raise EditorError("effective state requires a ControlTimeline")
-    return timeline.effective_at(boundary)
-
-
-def append_transition(
-    timeline: ControlTimeline,
-    start_boundary: int,
-    state: ControlState,
-) -> ControlTimeline:
-    """Functional form of :meth:`ControlTimeline.append_transition`."""
-
-    if not isinstance(timeline, ControlTimeline):
-        raise EditorError("append transition requires a ControlTimeline")
-    return timeline.append_transition(start_boundary, state)
-
-
-def truncate_after(
-    timeline: ControlTimeline,
-    retained_boundary: int,
-) -> ControlTimeline:
-    """Functional form of :meth:`ControlTimeline.truncate_after`."""
-
-    if not isinstance(timeline, ControlTimeline):
-        raise EditorError("truncate requires a ControlTimeline")
-    return timeline.truncate_after(retained_boundary)
-
-
-def append_sampler_transition(
-    timeline: ControlTimeline,
-    start_boundary: int,
-    sampler: SamplerState,
-) -> ControlTimeline:
-    """Functional form of ``ControlTimeline.append_sampler_transition``."""
-
-    if not isinstance(timeline, ControlTimeline):
-        raise EditorError("append sampler transition requires a ControlTimeline")
-    return timeline.append_sampler_transition(start_boundary, sampler)
-
-
-def append_budget_transition(
-    timeline: ControlTimeline,
-    start_boundary: int,
-    budget: BudgetState,
-) -> ControlTimeline:
-    """Functional form of ``ControlTimeline.append_budget_transition``."""
-
-    if not isinstance(timeline, ControlTimeline):
-        raise EditorError("append budget transition requires a ControlTimeline")
-    return timeline.append_budget_transition(start_boundary, budget)
-
-
-def validate_budget_pair(
-    boundary: int,
-    allowance: int | None,
-    checkpoint_boundary: int | None,
-) -> BudgetState:
-    """Validate and return a budget pair at a transition boundary."""
-
-    return BudgetState(allowance, checkpoint_boundary).valid_at(boundary)
-
-
 __all__ = [
     "BudgetState",
     "ControlSegment",
@@ -414,10 +349,4 @@ __all__ = [
     "EpisodeControlState",
     "SamplerCoordinateState",
     "SamplerState",
-    "append_budget_transition",
-    "append_sampler_transition",
-    "append_transition",
-    "effective_state",
-    "truncate_after",
-    "validate_budget_pair",
 ]

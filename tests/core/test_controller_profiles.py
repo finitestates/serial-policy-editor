@@ -5,7 +5,6 @@ import pytest
 from trajectory_editor.core.errors import EditorError
 from trajectory_editor.controller_profiles import (
     controller_profile_fingerprint,
-    controller_profile_yaml,
     explicit_option_dests,
     load_controller_profile,
     profile_arguments,
@@ -111,7 +110,13 @@ def test_profile_fingerprint_can_be_embedded_and_is_checked(tmp_path):
     parser = build_parser(include_vector=False)
     values = {"model": Path("model.gguf"), "temperature": 0.8}
     path = tmp_path / "profile.yaml"
-    path.write_text(controller_profile_yaml(values), encoding="utf-8")
+    profile = (
+        "format: spe-controller-profile-v2\n"
+        "model: model.gguf\n"
+        "temperature: 0.8\n"
+        f"fingerprint: {controller_profile_fingerprint(values)}\n"
+    )
+    path.write_text(profile, encoding="utf-8")
 
     loaded, fingerprint = load_controller_profile(path, parser)
 
@@ -119,7 +124,7 @@ def test_profile_fingerprint_can_be_embedded_and_is_checked(tmp_path):
     assert fingerprint == controller_profile_fingerprint(values)
 
     path.write_text(
-        controller_profile_yaml(values).replace("temperature: 0.8", "temperature: 0.7"),
+        profile.replace("temperature: 0.8", "temperature: 0.7"),
         encoding="utf-8",
     )
     with pytest.raises(EditorError, match="fingerprint mismatch"):

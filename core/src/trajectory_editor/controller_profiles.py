@@ -318,15 +318,6 @@ def load_controller_profile(
     return parse_controller_profile(payload, parser)
 
 
-def controller_profile_yaml(values: Mapping[str, Any]) -> str:
-    """Render validated values as a portable, human-editable YAML profile."""
-
-    serialized = _canonical_values(values)
-    payload: dict[str, Any] = {"format": PROFILE_FORMAT, **serialized}
-    payload["fingerprint"] = controller_profile_fingerprint(values)
-    return yaml.safe_dump(payload, sort_keys=False)
-
-
 def explicit_option_dests(
     parser: argparse.ArgumentParser,
     argv: list[str],
@@ -377,7 +368,6 @@ def profile_arguments(
 __all__ = [
     "PROFILE_FORMAT",
     "controller_profile_fingerprint",
-    "controller_profile_yaml",
     "explicit_option_dests",
     "load_controller_profile",
     "parse_controller_profile",

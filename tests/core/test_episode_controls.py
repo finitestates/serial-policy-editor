@@ -12,10 +12,6 @@ from trajectory_editor.episode_controls import (
     ControlTimeline,
     ControlTransition,
     SamplerState,
-    append_transition,
-    effective_state,
-    truncate_after,
-    validate_budget_pair,
 )
 
 
@@ -46,7 +42,7 @@ def test_transition_is_effective_at_its_own_boundary():
 
     assert timeline.effective_at(2) == initial
     assert timeline.effective_at(3) == changed
-    assert effective_state(timeline, 100) == changed
+    assert timeline.effective_at(100) == changed
 
 
 def test_identical_adjacent_state_is_not_recorded():
@@ -54,7 +50,6 @@ def test_identical_adjacent_state_is_not_recorded():
     timeline = ControlTimeline.from_state(initial)
 
     assert timeline.append_transition(2, initial) is timeline
-    assert append_transition(timeline, 4, initial) is timeline
     assert len(timeline.transitions) == 1
 
 
@@ -100,7 +95,6 @@ def test_truncation_keeps_retained_boundary_and_root_relative_coordinate():
 
     truncated = timeline.truncate_after(3)
 
-    assert truncate_after(timeline, 3) == truncated
     assert [item.start_boundary for item in truncated.transitions] == [0, 3]
     assert truncated.effective_at(3).coordinate_offset == 47
     assert truncated.effective_at(100).coordinate_offset == 47
@@ -111,7 +105,6 @@ def test_unlimited_budget_is_an_explicit_valid_state():
     assert unlimited.unlimited
     assert unlimited.allowance is None
     assert unlimited.checkpoint_boundary is None
-    assert validate_budget_pair(12, None, None) == unlimited
 
 
 def test_timeline_requires_a_root_control_state():
@@ -147,8 +140,6 @@ def test_checkpoint_must_not_precede_the_transition_boundary():
         ControlTimeline.from_state(_state()).append_transition(
             9, _state(allowance=2, checkpoint_boundary=8)
         )
-    with pytest.raises(EditorError):
-        validate_budget_pair(9, 2, 8)
 
 
 def test_fingerprint_coordinate_and_boundary_inputs_are_validated():

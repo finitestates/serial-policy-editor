@@ -177,13 +177,6 @@ class EpisodeEngine:
     def initial_token_ids(self) -> tuple[int, ...]:
         return self.trajectory.initial_token_ids
 
-    @initial_token_ids.setter
-    def initial_token_ids(self, value: Sequence[int]) -> None:
-        values = tuple(value)
-        if not values or any(type(item) is not int or item < 0 for item in values):
-            raise EditorError("initial token IDs must be nonnegative integers")
-        self.trajectory.initial_token_ids = values
-
     @property
     def initial_text(self) -> str:
         return self.trajectory.initial_text
@@ -779,7 +772,6 @@ class EpisodeEngine:
         *,
         expectation: ReplayExpectation | None,
         divergence_policy: str,
-        replay: bool,
     ) -> ActionOutcome:
         """Apply a phrase as sequential teacher selections."""
         before = self.boundary
@@ -940,7 +932,6 @@ class EpisodeEngine:
                 action,
                 expectation=expectation,
                 divergence_policy=divergence_policy,
-                replay=replay,
             )
         before = self.boundary
         evidence: list[TokenEvidence] = []
