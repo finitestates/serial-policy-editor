@@ -158,10 +158,21 @@ def _projected_source(
             ),
             None,
         )
+        action = action_from_dict(dict(arguments))
+        stop_reason = str(row["stop_reason"])
+        if (
+            isinstance(action, Hold)
+            and stop_reason == "checkpoint"
+            and len(visible) == action.limit
+            and terminal is None
+        ):
+            # The budget also expired, but the finite hold completed. Replay
+            # may use a different budget, so use the hold's completion reason.
+            stop_reason = "requested-length"
         records.append(
             ProcedureRecord(
-                action=action_from_dict(dict(arguments)),
-                expectation=ReplayExpectation(visible, terminal, str(row["stop_reason"])),
+                action=action,
+                expectation=ReplayExpectation(visible, terminal, stop_reason),
                 status=str(row["status"]),
                 visible_token_ids=visible,
                 visible_text="",

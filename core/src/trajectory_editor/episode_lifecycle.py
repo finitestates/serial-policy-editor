@@ -317,8 +317,6 @@ def _fork_engine(
         coordinate_offset=segment["coordinate_offset"],
         backend_positioned=True,
         guidance_backend=guidance_backend,
-        guidance_generated_prefix=parent_engine.trajectory.visible_token_ids[:target],
-        guidance_tokens_consumed=target,
     )
     engine.visible_token_ids = list(parent_engine.trajectory.visible_token_ids[:target])
     if max_tokens is None:

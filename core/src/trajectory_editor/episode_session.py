@@ -672,13 +672,14 @@ class LiveSession:
         self._require_live_branch(branch_id)
         engine = self._activate(branch_id)
         resolved_action = Accept() if action is None else action
+        state = self._branches[branch_id]
+        control_points = self._points_with_current_engine(state)
         outcome = engine.apply(
             resolved_action,
             expectation=expectation,
             divergence_policy=divergence_policy,
             replay=replay,
         )
-        state = self._branches[branch_id]
         expectation_to_record = (
             expectation if replay and expectation is not None else outcome.expectation()
         )
@@ -690,7 +691,7 @@ class LiveSession:
             visible_token_ids=tuple(engine.visible_token_ids),
             tape=(*state.tape, TapeStep(resolved_action, expectation_to_record)),
             outcomes=(*state.outcomes, outcome),
-            control_points=self._points_with_current_engine(state),
+            control_points=control_points,
             terminal_token_id=engine.terminal_token_id,
             terminal_reason=engine.terminal_reason,
             status=status,

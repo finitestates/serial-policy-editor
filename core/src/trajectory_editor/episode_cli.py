@@ -945,8 +945,6 @@ def main(
                         coordinate_offset=segment["coordinate_offset"],
                         backend_positioned=True,
                         guidance_backend=cfg_backend_for(sampling),
-                        guidance_generated_prefix=visible[:target],
-                        guidance_tokens_consumed=target,
                     )
                     engine.visible_token_ids = list(visible[:target])
                     if args.max_tokens is None:
@@ -1153,8 +1151,6 @@ def main(
                                 max_tokens=target_episode["max_tokens"],
                                 backend_positioned=True,
                                 guidance_backend=cfg_backend_for(new_sampling),
-                                guidance_generated_prefix=visible,
-                                guidance_tokens_consumed=len(visible),
                             )
                             new_engine.visible_token_ids = list(visible)
                             _inherit_budget(store, destination, new_engine, len(visible))

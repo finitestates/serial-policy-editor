@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-from trajectory_editor.core.actions import Write
+from tests.core.runtime_helpers import NoEogBackend
+from trajectory_editor.core.actions import Hold, Write
 from trajectory_editor.core.sampler_config import SamplerConfig
+from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_replay_source import (
     build_source_replay_recipe,
     final_sampling,
+    replay_tape,
 )
+from trajectory_editor.episode_store import EpisodeStore
 
 
 class MemoryReader:
@@ -97,3 +101,56 @@ def test_reader_adapter_builds_a_root_relative_recipe_without_a_store():
 
 def test_reader_adapter_preserves_trailing_source_sampler_state():
     assert final_sampling(MemoryReader(), "source").seed == 5
+
+
+def test_completed_holds_replay_across_source_checkpoints_with_unlimited_budget(tmp_path):
+    with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
+        source = EpisodeEngine(
+            NoEogBackend(),
+            sampling=SamplerConfig(temperature=0.0),
+            initial_text="P",
+            initial_token_ids=[7],
+            max_tokens=1,
+        )
+        store.create_episode(
+            episode_id="source",
+            initial_text=source.initial_text,
+            initial_token_ids=source.initial_token_ids,
+            sampling=source.sampling,
+            stream_fingerprint=source.stream_fingerprint,
+            coordinate_offset=source.coordinate_offset,
+            max_tokens=1,
+            backend={},
+        )
+        for ordinal in range(2):
+            if ordinal:
+                source.resume()
+                store.record_budget("source", source.boundary, 1, source.checkpoint_boundary)
+            outcome = source.apply(Hold(1))
+            assert outcome.stop_reason == "checkpoint"
+            store.record_action("source", ordinal, outcome)
+
+        recipe = build_source_replay_recipe(store, "source")
+        tape = replay_tape(store, "source")
+        assert [row["stop_reason"] for row in store.actions("source")] == [
+            "checkpoint", "checkpoint"
+        ]
+        assert [step.expectation.stop_reason for step in recipe.procedure.steps] == [
+            "requested-length", "requested-length"
+        ]
+        assert [expectation.stop_reason for _, expectation in tape] == [
+            "requested-length", "requested-length"
+        ]
+
+    replay = EpisodeEngine(
+        NoEogBackend(),
+        sampling=source.sampling,
+        initial_text="P",
+        initial_token_ids=[7],
+    )
+    outcomes = [
+        replay.apply(action, expectation=expectation, replay=True)
+        for action, expectation in tape
+    ]
+    assert [outcome.status for outcome in outcomes] == ["completed", "completed"]
+    assert replay.visible_token_ids == [1, 2]

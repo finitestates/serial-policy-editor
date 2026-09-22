@@ -123,6 +123,43 @@ def test_l04_fork_preserves_exactly_the_requested_visible_prefix(tmp_path):
     assert child.text == "P A"
 
 
+@pytest.mark.parametrize("cfg_prefix_tokens", [3, 5])
+def test_l04_cfg_fork_counts_inherited_tokens_once(tmp_path, cfg_prefix_tokens):
+    sampling = SamplerConfig(
+        temperature=0.0,
+        cfg_unconditional_prompt="P",
+        cfg_scale=2.0,
+        cfg_prefix_tokens=cfg_prefix_tokens,
+    )
+    with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
+        parent = EpisodeEngine(
+            NoEogBackend(),
+            initial_text="P",
+            initial_token_ids=[7],
+            sampling=sampling,
+            guidance_backend=NoEogBackend(),
+        )
+        parent_id = create(store, "parent", parent)
+        outcome = parent.apply(Write(" A B", mode="exact"))
+        store.record_action(parent_id, 0, outcome)
+
+        parent_observation = parent.observe()
+        child = _fork_engine(
+            store,
+            parent_id,
+            parent,
+            2,
+            backend=NoEogBackend(),
+            max_tokens=None,
+            guidance_backend=NoEogBackend(),
+        )
+        child_observation = child.observe()
+
+    assert child_observation.proposal_token_id == parent_observation.proposal_token_id
+    np.testing.assert_array_equal(child_observation.logits, parent_observation.logits)
+    assert child.guidance_backend.tokens == [7, 1, 2]
+
+
 def test_l04a_persisted_fork_keeps_root_relative_history_and_can_rewind_to_zero(tmp_path):
     with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
         parent = runtime()

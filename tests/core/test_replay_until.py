@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -169,6 +170,61 @@ def test_cli_fork_from_persists_inherited_history_in_root_coordinates(source_wor
     with EpisodeStore(source_workspace) as store:
         assert store.actions("child") == []
         assert project_fork_map(store, "child") == "P|0|"
+
+
+@pytest.mark.parametrize("cfg_prefix_tokens", [3, 5])
+@pytest.mark.parametrize("route", ["launch", "sealed-switch"])
+def test_cli_cfg_fork_uses_inherited_tokens_once(tmp_path, cfg_prefix_tokens, route):
+    path = tmp_path / "episodes.sqlite3"
+    sampling = SamplerConfig(
+        temperature=0.0,
+        cfg_unconditional_prompt="P",
+        cfg_scale=2.0,
+        cfg_prefix_tokens=cfg_prefix_tokens,
+    )
+    with EpisodeStore(path) as store:
+        source = EpisodeEngine(
+            NoEogBackend(),
+            sampling=sampling,
+            initial_text="P",
+            initial_token_ids=[7],
+            guidance_backend=NoEogBackend(),
+        )
+        store.create_episode(
+            episode_id="source",
+            initial_text="P",
+            initial_token_ids=[7],
+            sampling=sampling,
+            stream_fingerprint=source.stream_fingerprint,
+            coordinate_offset=0,
+            max_tokens=None,
+            backend={"backend": "llama.cpp", "model_path": str(Path("fake").resolve())},
+        )
+        store.record_action("source", 0, source.apply(Write(" A B", mode="exact")))
+        store.update_episode("source", visible_text=" A B", max_tokens=None)
+        if route == "sealed-switch":
+            store.finish_episode(
+                "source", visible_text=" A B", terminal_token_id=None,
+                terminal_reason="menu-end",
+            )
+
+    guidance_backend = NoEogBackend()
+    with patch(
+        "trajectory_editor.episode_backend_loader.load_cfg_guidance_backend",
+        return_value=guidance_backend,
+    ):
+        if route == "launch":
+            io = run_cli(
+                path, ["q", "quit"], "--fork-from", "source",
+                "--at", "2", "--episode-id", "child",
+            )
+        else:
+            io = run_cli(
+                path, ["q", "#1", "y", "c", "q", "quit"],
+                "--new-prompt", "P", "--episode-id", "current",
+            )
+
+    assert guidance_backend.tokens == [7, 1, 2], io.output
 
 
 def test_cli_prompt_replay_uses_the_destination_tokenizer_and_remains_rewindable(tmp_path):

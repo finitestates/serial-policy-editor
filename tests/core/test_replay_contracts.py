@@ -12,7 +12,8 @@ from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_cli import main
 from trajectory_editor.episode_lifecycle import _restore_engine
-from trajectory_editor.episode_replay_source import replay_tape
+from trajectory_editor.episode_materializer import materialize_live_branch
+from trajectory_editor.episode_replay_source import build_source_replay_recipe, replay_tape
 from trajectory_editor.episode_runner import (
     EpisodeRunner,
     LiveSessionRunner,
@@ -24,6 +25,11 @@ from trajectory_editor.episode_session import LiveSession
 from trajectory_editor.episode_store import EpisodeStore
 from trajectory_editor.episode_ui import InteractivePolicy
 from trajectory_editor.run_loop import EdgeRequested
+from trajectory_editor.spr_recipe import (
+    ReplayControlPolicy,
+    ReplayPlacement,
+    compose_replay_plan,
+)
 from tests.core.test_lifecycle_contracts import PhraseBackend
 
 
@@ -120,6 +126,36 @@ def test_r00_ephemeral_runner_uses_the_same_execution_path_without_a_store():
     assert result.replayed_actions == 0
     assert len(result.outcomes) == 1
     assert session.history_visible_token_ids == (1,)
+
+
+def test_interactive_bias_before_first_action_survives_save_and_replay(tmp_path):
+    session = LiveSession(engine())
+    result = LiveSessionRunner(session).run(
+        live_policy=InteractivePolicy(io=ScriptedIO(["2+100", "h 1"]), menu_size=3),
+        max_live_actions=1,
+    )
+
+    assert result.outcomes[0].visible_token_ids == (2,)
+    assert [(boundary, sampling.bias_rules) for boundary, sampling, _, _ in session.sampler_states] == [
+        (0, session.sampler.bias_rules),
+    ]
+
+    with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
+        source_id = materialize_live_branch(
+            store, session, session.branch_state(), {}, episode_id="biased"
+        )
+        segments = store.sampler_segments(source_id)
+        assert [segment["start_boundary"] for segment in segments] == [0]
+        recipe = build_source_replay_recipe(store, source_id)
+
+    plan = compose_replay_plan(
+        recipe, ReplayPlacement.SOURCE_ROOT, ReplayControlPolicy.FOLLOW_SOURCE
+    )
+    replay = LiveSessionRunner(LiveSession(engine())).run(tape=plan)
+
+    assert replay.replayed_actions == 1
+    assert replay.outcomes[0].visible_token_ids == (2,)
+    assert not replay.handed_off
 
 
 @pytest.mark.parametrize("error_type", [KeyboardInterrupt, RuntimeError, EOFError])
