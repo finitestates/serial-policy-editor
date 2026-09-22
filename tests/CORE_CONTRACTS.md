@@ -10,10 +10,6 @@ are moved to `vectors` or the archive, deleted as obsolete, or added here only
 after deliberately changing the contract budget.
 
 Core tests assert observable state, persisted records, and replay results.
-Caching is deliberately outside this contract: tests do not assert cache hits,
-cache misses, `eval()`/`reset()` counts, SQL query counts, or any other
-recomputation strategy. If performance work needs measurement, it belongs in
-an optional benchmark or profiler check rather than a behavioral test.
 
 ## Sampler and action contracts — 8
 
