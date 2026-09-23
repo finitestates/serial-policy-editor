@@ -118,10 +118,80 @@ def test_chord_shows_bounded_shared_context_above_stable_paths():
     chord = Chord(original, (1, 2))
     heading = chord.display(width=20).split("\n\n", 1)[0]
     assert heading == "Shared context (last 4 lines):\nP A"
-    assert "a (1)" in chord.display(width=20)
+    assert "Paths:\na  rank 1  LIVE\n    B\nb  rank 2  LIVE" in chord.display(width=20)
     chord.advance()
     assert chord.display(width=20).split("\n\n", 1)[0] == heading
     chord.discard()
+
+
+def test_chord_display_tracks_live_locked_and_rewound_paths():
+    chord = Chord(engine(budget=2), (1, 2, 4))
+    initial = chord.display(width=40)
+    assert "a  rank 1  LIVE\n    A" in initial
+    assert "b  rank 2  LIVE\n    B" in initial
+    assert "c  rank 4  EOG\n   (no visible continuation)" in initial
+
+    assert chord.advance()
+    advanced = chord.display(width=40)
+    assert "a  rank 1  BUDGET REACHED\n    A B" in advanced
+    assert "b  rank 2  EOG\n    B" in advanced
+    assert "c  rank 4  EOG\n   (no visible continuation)" in advanced
+    assert not chord.advance()
+    assert chord.display(width=40) == advanced
+
+    assert chord.rewind()
+    assert chord.display(width=40) == initial
+    chord.discard()
+
+    chord = Chord(engine(), (1, 2))
+    assert chord.advance()
+    ended = "b  rank 2  EOG\n    B"
+    assert ended in chord.display(width=40)
+    assert chord.advance()
+    assert ended in chord.display(width=40)
+    assert "a  rank 1  EOG\n    A B" in chord.display(width=40)
+    assert chord.rewind()
+    assert ended in chord.display(width=40)
+    assert "a  rank 1  LIVE\n    A B" in chord.display(width=40)
+    assert chord.rewind()
+    assert "a  rank 1  LIVE\n    A" in chord.display(width=40)
+    assert "b  rank 2  LIVE\n    B" in chord.display(width=40)
+    chord.discard()
+
+
+def test_chord_display_wraps_full_continuation_at_narrow_width():
+    class LongBackend(ConformingFakeBackend):
+        pieces = {**ConformingFakeBackend.pieces,
+                  1: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"}
+
+    chord = Chord(engine(backend=LongBackend()), (1, 2, 4))
+    body = chord.display(width=24).split("Paths:\n", 1)[1]
+    first = body.split("\nb  rank", 1)[0].splitlines()
+    assert first[0] == "a  rank 1  LIVE"
+    assert "".join(line[3:] for line in first[1:]) == LongBackend.pieces[1]
+    assert all(len(line) <= 24 for line in body.splitlines())
+
+    narrow = chord.display(width=8).split("Paths:\n", 1)[1]
+    assert all(len(line) <= 8 for line in narrow.splitlines())
+    assert "LIVE" in narrow and "EOG" in narrow
+    assert narrow.startswith("a ") and "\nb " in narrow and "\nc " in narrow
+    chord.discard()
+
+
+def test_chord_prompts_distinguish_options_and_help_explains_commit():
+    io = ScriptedIO(["?", "q", "?", "c", "a"])
+    result, actions = chord_menu(io, Chord(engine(), (1, 2)))
+    assert result == "select" and actions == (SelectRawRank(1),)
+    output = "".join(io.output)
+    assert "Enter: advance live paths | rewind: undo one round" in output
+    assert "a–z or starting rank: choose and commit | q: options" in output
+    assert "c: resume chord | discard: restore episode | q: quit editor" in output
+    assert "commit that path's actions and drop the other previews" in output
+
+    locked = ScriptedIO(["", "a"])
+    result, actions = chord_menu(locked, Chord(engine(budget=1), (1, 2, 4)))
+    assert result == "select" and actions == (SelectRawRank(1),)
+    assert "All chord paths are locked." in "".join(locked.output)
 
 
 def test_live_choice_preview_recognizes_chord_and_validates_ranks():
@@ -251,7 +321,8 @@ def test_chord_cli_records_only_survivor_and_export(tmp_path, live, ephemeral):
         "trajectory_editor.episode_cli.TerminalIO", return_value=io
     ):
         assert main(["--model", "fake", "--new-prompt", "P", *flags]) == 0
-    assert any("a (1)" in item and "b (2)" in item and "c (4)" in item for item in io.output)
+    assert any("a  rank 1" in item and "b  rank 2" in item and "c  rank 4" in item
+               for item in io.output)
     assert any("Resolve the chord before changing the episode" in item for item in io.output)
     if ephemeral:
         tape = load_teacher_tape_jsonl(export)
@@ -307,7 +378,7 @@ def test_chord_budget_selection_stops_at_checkpoint(tmp_path, ephemeral):
     ):
         assert main(["--model", "fake", "--plain-ui", "--new-prompt", "P",
                      "--max-tokens", "1", *flags]) == 0
-    assert any("budget reached" in item for item in io.output)
+    assert any("BUDGET REACHED" in item for item in io.output)
     if not ephemeral:
         with EpisodeStore(workspace) as store:
             episode_id = store.resolve_id("#1")

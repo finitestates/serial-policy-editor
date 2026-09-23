@@ -197,15 +197,30 @@ class Chord:
             self.original.guidance_backend._spe_cfg_owner = self.original._guidance_owner
 
     def display(self, *, width: int = 100) -> str:
-        columns = []
+        width = max(1, width)
+        indent = " " * min(3, width - 1)
+        rows = []
         for path in self.paths:
             visible = path.engine.visible_token_ids[len(self.base_visible):]
             latest = path.engine.backend.render(visible)
-            columns.append(
-                f"{path.label} ({path.starting_rank})  {latest!r}  {path.state}"
+            safe = "".join(
+                char if char == "\n" or char.isprintable()
+                else "    " if char == "\t"
+                else f"\\x{ord(char):02x}"
+                for char in latest
             )
+            heading = f"{path.label}  rank {path.starting_rank}  {path.state.upper()}"
+            rows.extend(textwrap.wrap(heading, width=width, subsequent_indent=indent,
+                                      break_long_words=True, break_on_hyphens=False))
+            for line in (safe.split("\n") if safe else ["(no visible continuation)"]):
+                wrapped = textwrap.wrap(
+                    line, width=width - len(indent), break_long_words=True,
+                    break_on_hyphens=False, replace_whitespace=False,
+                    drop_whitespace=False,
+                ) or [""]
+                rows.extend(indent + part for part in wrapped)
         context = _recent_context(self.shared_context, width=width)
-        return f"Shared context (last 4 lines):\n{context}\n\n" + " | ".join(columns)
+        return f"Shared context (last 4 lines):\n{context}\n\nPaths:\n" + "\n".join(rows)
 
 
 class ActionSequencePolicy:
@@ -226,9 +241,10 @@ def chord_menu(io, chord: Chord, *, at_edge: bool = False) -> tuple[str, tuple[P
             body += "\n\n" + notice
             notice = ""
         prompt = (
-            "Chord EDGE: [c] resume  [discard]  [?] help  [q] quit > "
+            "Chord EDGE: c: resume chord | discard: restore episode | q: quit editor | ?: help > "
             if at_edge else
-            "Chord: [Enter] advance  [rewind]  [a/b/... or rank] select  [?] help  [q] EDGE > "
+            "Chord: Enter: advance live paths | rewind: undo one round | "
+            "a–z or starting rank: choose and commit | q: options | ?: help > "
         )
         read_chord = getattr(io, "read_chord_command", None)
         if callable(read_chord):
@@ -268,8 +284,10 @@ def chord_menu(io, chord: Chord, *, at_edge: bool = False) -> tuple[str, tuple[P
                 notice = str(exc)
                 continue
         if command in {"?", "help"}:
-            notice = ("Enter advances every live path; rewind removes one round. "
-                      "Choose a letter or starting rank to commit; q opens Chord EDGE. "
-                      "At Chord EDGE, c resumes and discard restores the episode.")
+            notice = ("Enter advances live paths; rewind undoes one round. "
+                      "Choose a letter or starting rank to commit that path's actions "
+                      "and drop the other previews. q opens Chord EDGE options: "
+                      "c resumes the chord, discard restores the episode, "
+                      "and q quits the editor.")
         else:
             notice = "Resolve the chord before changing the episode."

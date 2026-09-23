@@ -374,7 +374,8 @@ HELP_TEXT = """Commands:
   N+ / N-           adjust token bias by the default step without advancing
   N+0.5 / N-0.5     adjust by an explicit amount; N= clears that token bias
   1..N              commit a candidate; the proposal rank records acceptance
-  chord RANK RANK... preview temporary continuations; select one by letter or starting rank
+  chord RANK RANK... preview temporary continuations; choose a letter or starting rank
+                    to commit its actions and drop the other previews
   t TEXT            insert continuation text (adds a joining space if needed)
   x TEXT            insert exact text
                     after `t ` or `x `, Tab inserts a literal tab character
