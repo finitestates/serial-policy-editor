@@ -36,8 +36,7 @@ from .terminal_contracts import (
     ChoiceViewState,
     SEAMLESS_REACTIVATE,
 )
-from .ui_themes import DEFAULT_LIVE_THEME
-from .tui_views import ViewLifecycle, run_standalone_view
+from .tui_views import ViewLifecycle
 
 
 InsertionResolver = Callable[[str, InsertMode], str]
@@ -176,7 +175,13 @@ def action_preview(
             )
         candidate = by_rank.get(requested_rank)
         if candidate is None and resolve_candidate is not None:
-            candidate = resolve_candidate(requested_rank)
+            try:
+                candidate = resolve_candidate(requested_rank)
+            except EditorError as exc:
+                return ActionPreview(
+                    kind="invalid", label="candidate cannot be previewed",
+                    detail=str(exc), valid=False,
+                )
         if candidate is not None:
             return _candidate_preview(candidate, label="selected candidate")
         return ActionPreview(
@@ -1102,7 +1107,7 @@ def _live_style(theme: str) -> Style:
 class LiveChoiceView(ViewLifecycle):
     """Reusable layout, bindings and buffer for live choices and history review."""
 
-    def __init__(self, state: ChoiceViewState, *, submit=None, enabled=lambda: True,
+    def __init__(self, state: ChoiceViewState, *, submit, enabled=lambda: True,
                  terminal_size=None):
         super().__init__(submit=submit)
         self.terminal_size = terminal_size or _terminal_size
@@ -1449,20 +1454,3 @@ class LiveChoiceView(ViewLifecycle):
             self.expanded_editor and _is_writing(self.command_buffer.text),
             terminal_size=self.terminal_size(),
         )
-
-
-def read_live_choice(
-    state: ChoiceViewState,
-    *,
-    input_device: object | None = None,
-    output_device: object | None = None,
-    theme: str = DEFAULT_LIVE_THEME,
-) -> str | None:
-    """Standalone adapter; interactive episodes use a persistent LiveChoiceView."""
-    view = LiveChoiceView(state)
-    return run_standalone_view(
-        view,
-        theme=theme,
-        input_device=input_device,
-        output_device=output_device,
-    )

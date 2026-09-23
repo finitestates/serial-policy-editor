@@ -4,7 +4,7 @@
 per interactive run and enter `with io.session():` around that run. A live
 terminal keeps one `PersistentTerminalSession` and one prompt-toolkit
 application until the context exits. A plain or piped terminal uses the same
-context with no live application. Live choice and EDGE reads require the
+context with no live application. Live choice, EDGE, and prompt reads require the
 context to be active. `live_session()` remains an alias for older
 callers; it enters the same context.
 
@@ -20,9 +20,12 @@ an isolated `PromptRequest` directly.
 The `TerminalProtocol` describes the shared API; `io.capabilities` and
 `io.terminal_size()` expose whether live views are available and the usable
 size. A missing size means the caller should use its normal width fallback.
+Adding presentation fields changes the relevant request type; readers pass the
+same request object through to the selected implementation.
 
-Live views are selected only when enabled, both standard streams are TTYs,
-and prompt-toolkit is installed. Both backends accept the same teacher and
+Live views are selected at construction only when enabled, both standard
+streams are usable TTYs with file descriptors, and prompt-toolkit is installed.
+Both backends accept the same teacher and
 EDGE command grammar. Presentation may differ in these ways:
 
 | Request | Live | Plain or piped |
@@ -37,7 +40,8 @@ EDGE command grammar. Presentation may differ in these ways:
 
 The live application owns widgets, key bindings, surface transitions, input
 gating, and preview scheduling. Preview callbacks execute on the episode-owning
-thread. Its terminal restoration runs when the session exits, including after
-an exception. The active model-free checks in
-`tests/core/test_terminal_lifecycle.py` cover those boundaries; archived UI and
-PTY tests remain historical integration evidence.
+thread. Expected preview validation errors remain editable feedback; unexpected
+preview failures propagate, stop the live application, and restore the terminal.
+EOF and interrupts also release the waiting episode thread. A live failure never
+restarts input in plain mode. The active model-free checks in
+`tests/core/test_terminal_lifecycle.py` cover those boundaries. 

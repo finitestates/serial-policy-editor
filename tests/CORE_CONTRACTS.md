@@ -15,10 +15,10 @@ no model or external terminal is required.
 
 | ID | Terminal contract | Active evidence |
 | --- | --- | --- |
-| T01 | one application accepts prompt, EDGE, choice, and isolated chord requests across surface transitions | `test_terminal_lifecycle.py` |
-| T02 | preview callbacks run only on the episode-owning thread | `test_terminal_lifecycle.py` |
-| T03 | submitted and not-yet-rendered requests reject stale input | `test_terminal_lifecycle.py` |
-| T04 | exit restores the terminal, including after an episode exception; plain mode consumes the same request types | `test_terminal_lifecycle.py` |
+| T01 | one application accepts choice, review, EDGE, page, prompt, and another choice across surface transitions | `test_terminal_lifecycle.py` |
+| T02 | preview callbacks run only on the episode-owning thread; unexpected failures wake the owner while expected validation remains editable | `test_terminal_lifecycle.py` |
+| T03 | submitted and not-yet-rendered requests reject stale input; obsolete and abandoned previews are cancelled | `test_terminal_lifecycle.py` |
+| T04 | exit restores the terminal after ordinary completion, an exception, EOF, or interrupt; plain mode consumes the same request types | `test_terminal_lifecycle.py` |
 
 Core tests assert observable state, persisted records, and replay results.
 CFG evaluation-work assertions also enforce S03: with caching enabled, evaluate

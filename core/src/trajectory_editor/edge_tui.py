@@ -19,9 +19,8 @@ from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.layout import Layout
 
-from .ui_themes import DEFAULT_LIVE_THEME
 from .terminal_contracts import EdgeViewState
-from .tui_views import ViewLifecycle, run_standalone_view
+from .tui_views import ViewLifecycle
 
 
 def _command_row(command: str, description: str) -> StyleAndTextTuples:
@@ -101,7 +100,7 @@ def _edge_header(
 class LiveEdgeView(ViewLifecycle):
     """Reusable edge layout; commands remain interpreted by the episode CLI."""
 
-    def __init__(self, state: EdgeViewState, *, submit=None, enabled=lambda: True):
+    def __init__(self, state: EdgeViewState, *, submit, enabled=lambda: True):
         self.state = state
         super().__init__(submit=submit)
         self.command_buffer = command_buffer = Buffer(multiline=False, read_only=Condition(lambda: not enabled()))
@@ -156,20 +155,3 @@ class LiveEdgeView(ViewLifecycle):
     def update(self, state: EdgeViewState) -> None:
         self.state = state
         self.command_buffer.reset()
-
-
-def read_live_edge_command(
-    state: EdgeViewState,
-    *,
-    input_device: object | None = None,
-    output_device: object | None = None,
-    theme: str = DEFAULT_LIVE_THEME,
-) -> str | None:
-    """Standalone edge adapter for callers without an interactive session."""
-    view = LiveEdgeView(state)
-    return run_standalone_view(
-        view,
-        theme=theme,
-        input_device=input_device,
-        output_device=output_device,
-    )

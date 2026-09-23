@@ -17,7 +17,8 @@ from trajectory_editor.episode_replay_source import replay_procedure
 from trajectory_editor.episode_store import EpisodeStore
 from trajectory_editor.episode_ui import _choice_from_observation
 from trajectory_editor.live_tui import action_preview
-from trajectory_editor.persistent_tui import PersistentTerminalSession, PromptState, _Request
+from trajectory_editor.persistent_tui import PersistentTerminalSession, _Request
+from trajectory_editor.terminal_contracts import PromptRequest
 from trajectory_editor.teacher_plan import load_teacher_tape_jsonl
 
 
@@ -217,7 +218,7 @@ def test_live_chord_prompt_uses_only_current_preview_body():
     terminal.application = SimpleNamespace(
         layout=SimpleNamespace(focus=lambda control: None), invalidate=lambda: None,
     )
-    terminal._show(_Request(PromptState(
+    terminal._show(_Request(PromptRequest(
         "Chord > ", body="a (1) | b (2)", isolated=True,
     )))
     assert terminal._prompt_view.body.text == "a (1) | b (2)"

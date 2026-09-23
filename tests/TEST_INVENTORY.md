@@ -67,28 +67,6 @@ slice that should be rewritten into the reduced suite.
 | `test_persistence_contracts.py` | retain | four SQLite/export contract slots |
 | `test_vector_contracts.py` | retain | five vector/backend contract slots |
 
-## Archived backend and UI integration
-
-These tests remain as historical evidence but are not part of the active test
-suite. They may require heavy backend imports, a real model, a terminal, or a
-platform-specific runtime. `test_terminal_lifecycle.py` now protects the
-essential persistent-session behavior in the active core suite with a pipe
-input and in-memory terminal output.
-
-| Existing module | Disposition | Destination |
-| --- | --- | --- |
-| `test_fullscreen_layout.py` | archived | responsive live-menu integration |
-| `test_context_input.py` | archived | editor and context rendering integration |
-| `test_edge_tui.py` | archived | live-edge presentation integration |
-| `test_kv_quantization.py` | archived | llama loading-option configuration |
-| `test_menu_expansion.py` | archived | large-menu rendering and expansion integration |
-| `test_llama_sampler_smoke.py` | archived | opt-in llama sampler/backend smoke |
-| `test_persistent_tui.py` | archived | persistent terminal UI integration |
-| `test_persistent_tui_smoke.py` | archived | opt-in real-model UI smoke |
-| `test_terminal_pty.py` | archived | PTY ownership/restoration integration |
-| `test_transformers_sampler_smoke.py` | archived | opt-in Transformers sampler/backend smoke |
-| `test_llama_release_smoke.py` | archived | opt-in llama worker/release smoke |
-
 ## Optional vectors
 
 The user-facing vector package is optional and is not part of the core test
@@ -106,36 +84,6 @@ safe for its production/analysis workflows.
 | `test_llama_worker.py` | move/rewrite | `vectors` worker/production tests |
 | `test_transformers_worker_interop.py` | move/rewrite | `vectors` opt-in conformance tests |
 | `test_vector_command_boundary.py` | move/rewrite | core/vector command boundary, with vector-only strictness |
-
-## Archived experimental tests
-
-These tests are retained as historical experimental material under
-`archive/tests/research`. They are not required by the core build and are not
-collected by default.
-
-| Existing module | Disposition | Destination |
-| --- | --- | --- |
-| `test_activation_episode_pairs.py` | archived | research-derived vector analysis |
-| `test_bias_catalog.py` | archived | research catalog/compiler tests |
-| `test_bias_rules.py` | archived | research catalog/route compiler |
-| `test_controller_stack_regressions.py` | archived | research control traces |
-| `test_group_control.py` | archived | research group-control tests |
-| `test_observation_statistics.py` | archived | research controls and priors |
-| `test_online_learning.py` | archived | research learner tests |
-| `test_research_command_parsing.py` | archived | research CLI parsing |
-| `test_research_setup.py` | archived | research setup/configuration |
-| `test_token_preference.py` | archived | research token-preference tests |
-| `test_trajectory_compare.py` | archived | research comparison/analysis |
-| `test_vector_impact.py` | archived | research vector-impact analysis |
-| `test_write_learning.py` | archived | research write-learning tests |
-| `test_research_adapter.py` | archived | historical wide-record adapter check |
-| `test_vector_cli.py` | archived | token-preference vector workbench |
-
-The removed compatibility modules were not protecting the replay contract:
-they asserted retired CLI overrides, sampler-record repair prompts, SQL/cache
-access patterns, and extension-wide sampler transitions. Old records remain
-loadable through the core record projection where their replayable fields are
-understood; unsupported extensions terminate at the live edge.
 
 ## Duplicate or obsolete material
 
@@ -200,18 +148,3 @@ recording-backend assertion, which makes an off-by-one or reordered layer
 interpretation fail directly. The real Transformers/Accelerate test remains a
 slow, opt-in cross-backend conformance test rather than a prerequisite for
 ordinary vector-package correctness.
-
-## Measurement gate
-
-Before and after the purge, record:
-
-1. core branch coverage for the core-only install;
-2. mutation score for core sampler, engine, replay, lifecycle, persistence,
-   and vector-loading modules;
-3. the same focused measurements for the vectors package and any future
-   optional package where its contracts remain supported;
-4. collection/import failures in each isolated installation.
-
-Coverage and mutation dependencies are not currently installed, so adding the
-measurement command/configuration is part of the next test-harness step rather
-than silently treating the current 970-test collection as a quality baseline.

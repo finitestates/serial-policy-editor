@@ -17,6 +17,13 @@ from .ui_themes import resolve_live_theme
 __all__ = ["TerminalIO"]
 
 
+def _live_stream_ready(stream) -> bool:
+    try:
+        return bool(stream.isatty()) and stream.fileno() >= 0
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
 class _SessionOutput(StringIO):
     """Hold incidental print output until fullscreen exits, showing live status."""
 
@@ -48,8 +55,8 @@ class TerminalIO:
         requested = True if live_choices is None else live_choices
         self._live_choices = bool(
             requested
-            and sys.stdin.isatty()
-            and sys.stdout.isatty()
+            and _live_stream_ready(sys.stdin)
+            and _live_stream_ready(sys.stdout)
             and importlib.util.find_spec("prompt_toolkit") is not None
         )
         self._live_session: object | None = None
@@ -132,6 +139,8 @@ class TerminalIO:
     def prompt(self, request: PromptRequest) -> str | None:
         if self._live_session is not None:
             return self._live_session.prompt(request)
+        if self._live_choices:
+            raise RuntimeError("enter TerminalIO.session() before live requests")
         from .plain_tui import prompt
         return prompt(self, request)
 

@@ -32,18 +32,15 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.widgets import TextArea
 
 from .edge_tui import LiveEdgeView
+from .core.errors import EditorError
 from .live_tui import LiveChoiceView, PreviewPending, _live_style, _safe_context_text
 from .terminal_contracts import ChoiceViewState, EdgeViewState, PromptRequest
 from .ui_themes import DEFAULT_LIVE_THEME
 
 
-# Kept for older direct session tests; PromptRequest is the shared contract.
-PromptState = PromptRequest
-
-
 @dataclass(eq=False)
 class _Request:
-    state: ChoiceViewState | EdgeViewState | PromptState
+    state: ChoiceViewState | EdgeViewState | PromptRequest
     response: Future = field(default_factory=Future)
     previews: OrderedDict = field(default_factory=OrderedDict)
     latest: dict[str, tuple] = field(default_factory=dict)
@@ -61,7 +58,7 @@ class _PromptView:
     """In-application prompts, confirmations and scrollable documents."""
 
     def __init__(self, submit, enabled):
-        self.state = PromptState("")
+        self.state = PromptRequest("")
         self.submit = submit
         self.command_buffer = Buffer(multiline=True, read_only=Condition(lambda: not enabled()))
         self.body = TextArea(read_only=True, scrollbar=True, wrap_lines=True)
@@ -123,7 +120,7 @@ class _PromptView:
         def backspace(event):
             self.submit(result="\x7f")
 
-    def update(self, state: PromptState) -> None:
+    def update(self, state: PromptRequest) -> None:
         self.state = state
         self.command_buffer.reset()
         self.body.buffer.set_document(Document(_safe_context_text(state.body)), bypass_readonly=True)
@@ -303,9 +300,19 @@ class PersistentTerminalSession(AbstractContextManager):
                         continue
                     try:
                         value = event.callback()
-                    except Exception as exc:
+                    except EditorError as exc:
                         if not event.result.cancelled():
                             event.result.set_exception(exc)
+                    except Exception as exc:
+                        # Command validation can be previewed as feedback, but
+                        # an unexpected backend failure must wake the owner and
+                        # end this live application. Re-entering plain input
+                        # here could repeat a command against changed state.
+                        if not event.result.cancelled():
+                            event.result.set_exception(exc)
+                        self._failure = exc
+                        self._call(self._stop)
+                        raise
                     else:
                         if not event.result.cancelled():
                             event.result.set_result(value)
@@ -318,6 +325,9 @@ class PersistentTerminalSession(AbstractContextManager):
             # caller is applying an action or repositioning the backend.
             if not request.response.done():
                 request.response.cancel()
+            for preview in request.previews.values():
+                if not preview.done():
+                    preview.cancel()
 
     def read_choice(self, state: ChoiceViewState):
         return self._read(state)
