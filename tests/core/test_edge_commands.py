@@ -47,6 +47,7 @@ from trajectory_editor.edge_commands import (
         ("f 0", ForkCommand(0)),
         ("FORK -2", ForkCommand(-2)),
         ("switch branch-abc", SwitchCommand("branch-abc")),
+        ("switch 7", SwitchCommand("7")),
         ("#7", SwitchCommand("#7")),
         ("new", NewCommand(None)),
         ("new   prompt with  spaces", NewCommand("prompt with  spaces")),

@@ -8,7 +8,7 @@ episode-side effects continue to use the existing code path.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import asdict
 
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.filters import Condition
@@ -20,6 +20,7 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.layout import Layout
 
 from .ui_themes import DEFAULT_LIVE_THEME
+from .terminal_contracts import EdgeViewState
 from .tui_views import ViewLifecycle, run_standalone_view
 
 
@@ -97,16 +98,6 @@ def _edge_header(
     return fragments
 
 
-@dataclass(frozen=True)
-class EdgeViewState:
-    episode_id: str
-    boundary: int
-    current_budget: int | None
-    remaining_tokens: int | None
-    sampler_summary: str
-    mode: str = "episode"
-
-
 class LiveEdgeView(ViewLifecycle):
     """Reusable edge layout; commands remain interpreted by the episode CLI."""
 
@@ -168,21 +159,14 @@ class LiveEdgeView(ViewLifecycle):
 
 
 def read_live_edge_command(
+    state: EdgeViewState,
     *,
-    episode_id: str,
-    boundary: int,
-    current_budget: int | None,
-    remaining_tokens: int | None,
-    sampler_summary: str,
-    mode: str = "episode",
     input_device: object | None = None,
     output_device: object | None = None,
     theme: str = DEFAULT_LIVE_THEME,
 ) -> str | None:
     """Standalone edge adapter for callers without an interactive session."""
-    view = LiveEdgeView(EdgeViewState(
-        episode_id, boundary, current_budget, remaining_tokens, sampler_summary, mode,
-    ))
+    view = LiveEdgeView(state)
     return run_standalone_view(
         view,
         theme=theme,

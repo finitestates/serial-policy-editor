@@ -184,12 +184,12 @@ class _LiveContextIO(ScriptedIO):
     def supports_live_choices(self):
         return self._supports_live_choices
 
-    def read_choice(self, choice, **kwargs):
-        del choice, kwargs
+    def read_choice(self, state):
+        del state
         return self.read("live choice> ")
 
-    def read_live_edge_command(self, **kwargs):
-        self.edge_modes.append(kwargs["mode"])
+    def read_edge(self, state):
+        self.edge_modes.append(state.mode)
         return self.read("live edge> ")
 
     @contextmanager

@@ -368,7 +368,7 @@ def test_s04e_column_focus_persists_in_view_preferences():
     """c cycles / C clears column_focus on PolicyViewPreferences across chooses."""
     from tests.fakes import ScriptedIO
     from trajectory_editor.episode_ui import InteractivePolicy
-    from trajectory_editor.tui import CommandKind, parse_command
+    from trajectory_editor.teacher_commands import CommandKind, parse_command
 
     def parse(raw: str):
         return parse_command(

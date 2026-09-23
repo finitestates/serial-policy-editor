@@ -15,10 +15,9 @@ class LiveScriptedIO(ScriptedIO):
     def supports_live_choices(self) -> bool:
         return True
 
-    def read_choice(self, choice, **kwargs):
-        del choice
-        self.initial_commands.append(kwargs["initial_command"])
-        self.remaining_tokens.append(kwargs["remaining_tokens"])
+    def read_choice(self, state):
+        self.initial_commands.append(state.initial_command)
+        self.remaining_tokens.append(state.remaining_tokens)
         if not self.responses:
             raise AssertionError("unexpected live input request")
         return self.responses.pop(0)

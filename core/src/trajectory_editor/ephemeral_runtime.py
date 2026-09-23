@@ -93,20 +93,19 @@ def ephemeral_edge_menu(
                 continue
             return "fork", target
 
-    live_surface = bool(
-        getattr(io, "supports_live_choices", False)
-        and callable(getattr(io, "read_live_edge_command", None))
-    )
+    from .terminal_contracts import EdgeViewState
+
+    read_edge = getattr(io, "read_edge", None)
     while True:
-        if live_surface:
-            raw = io.read_live_edge_command(  # type: ignore[attr-defined]
+        if callable(read_edge):
+            raw = read_edge(EdgeViewState(
                 episode_id=branch_number(session.branch.branch_id),
                 boundary=session.engine.boundary,
                 current_budget=session.engine.max_tokens,
                 remaining_tokens=session.engine.remaining,
                 sampler_summary=sampler_summary(session.sampler),
                 mode="session",
-            )
+            ))
         else:
             io.write(
                 f"Live branch {branch_number(session.branch.branch_id)}"

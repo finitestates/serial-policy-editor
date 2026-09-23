@@ -5,9 +5,10 @@ file-oriented so the old suite can be sorted before individual tests are
 deleted. Files marked `split` must receive a function-level disposition before
 the old module is removed.
 
-Before the bucket split, the checkout had 74 test modules, 970 tests collected,
-and 8 collection errors. The active split has 18 test modules: 128 core tests
-and 32 vector tests. The 11-module backend/UI integration bucket and the
+At the original bucket split, the checkout had 74 test modules, 970 tests collected,
+and 8 collection errors. The first active split had 18 test modules: 128 core tests
+and 32 vector tests. Those counts are historical; the active suite has grown.
+The 11-module backend/UI integration bucket and the
 15-module experimental bucket are archived under `archive/tests/` and no
 longer collected by default. All active test buckets collect without errors;
 coverage and mutation tooling are not yet configured in the test environment.
@@ -22,8 +23,8 @@ replay-plan, and sampler-segment implementation details. Current
 rewind/sampler state is covered by the core lifecycle bucket.
 
 The executable core reduction is governed by
-[`CORE_CONTRACTS.md`](CORE_CONTRACTS.md), which defines exactly 55 contract
-slots and the allowed scope of each one.
+[`CORE_CONTRACTS.md`](CORE_CONTRACTS.md), which defines the original 55
+engine/storage slots plus four terminal lifecycle slots.
 
 Cache/recompute policy: core tests assert observable state and results only.
 They must not require a particular `eval`, `reset`, branch, cache-hit, cache
@@ -60,6 +61,7 @@ slice that should be rewritten into the reduced suite.
 | `test_sampler_contracts.py` | retain | eight sampler/action contract slots |
 | `test_unexposed_ranks.py` | deleted | its meaningful rank cases are now M02/E02 |
 | `test_menu_contracts.py` | retain | five vocabulary/menu contract slots |
+| `test_terminal_lifecycle.py` | active | model-free terminal request, transition, preview ownership, input gating, and restoration gates |
 | `test_lifecycle_contracts.py` | retain | eight persistence/lifecycle contract slots |
 | `test_property_contracts.py` | retain | five generated/property contract slots |
 | `test_persistence_contracts.py` | retain | four SQLite/export contract slots |
@@ -69,7 +71,9 @@ slice that should be rewritten into the reduced suite.
 
 These tests remain as historical evidence but are not part of the active test
 suite. They may require heavy backend imports, a real model, a terminal, or a
-platform-specific runtime.
+platform-specific runtime. `test_terminal_lifecycle.py` now protects the
+essential persistent-session behavior in the active core suite with a pipe
+input and in-memory terminal output.
 
 | Existing module | Disposition | Destination |
 | --- | --- | --- |

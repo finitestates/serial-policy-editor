@@ -11,8 +11,12 @@ from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_ui import InteractivePolicy
 from trajectory_editor.episode_cli import build_parser, main
 from trajectory_editor.live_tui import _render_review
-from trajectory_editor.tui import BoundaryReview, CommandKind, parse_command
-from trajectory_editor.tui import display_candidates
+from trajectory_editor.plain_tui import display_candidates
+from trajectory_editor.teacher_commands import (
+    CommandKind, ForkAddress, ForkAddressKind, parse_command, parse_fork_address,
+)
+from trajectory_editor.terminal_contracts import BoundaryReview
+from trajectory_editor.core.ui import InsertMode
 
 
 def runtime():
@@ -98,6 +102,80 @@ def test_m03_menu_commands_distinguish_editorial_moves_from_token_actions(
 
 @pytest.mark.parametrize("raw", ["h /", "h / 2", "h/", "h/2"])
 def test_legacy_newline_hold_spellings_are_rejected(raw):
+    with pytest.raises(EditorError):
+        parse(raw)
+
+
+@pytest.mark.parametrize(
+    "raw, tokens, boundary",
+    [
+        ("h", 24, None),
+        ("hold", 24, None),
+        ("h5", 5, None),
+        ("hold 5", 5, None),
+        ("h.5", 5, "sentence"),
+        ("hold . 5", 5, "sentence"),
+        ("h|5", 5, "newline"),
+        ("hold | 5", 5, "newline"),
+    ],
+)
+def test_m03_hold_aliases_and_compact_forms(raw, tokens, boundary):
+    command = parse(raw)
+    assert command.kind == CommandKind.HOLD
+    assert (command.hold_tokens, command.hold_boundary) == (tokens, boundary)
+
+
+def test_m03_text_commands_keep_exact_payload_whitespace():
+    exact = parse("x  leading  ")
+    continuation = parse("t  leading  ")
+    phrase = parse("checkx  exact  ")
+    assert exact.action.supplied_text == " leading  "
+    assert exact.action.insert_mode == InsertMode.EXACT
+    assert continuation.action.supplied_text == " leading  "
+    assert continuation.action.insert_mode == InsertMode.CONTINUATION
+    assert (phrase.phrase_text, phrase.phrase_mode) == (" exact  ", "exact")
+
+
+def test_m03_bias_group_scope_and_rank_prefix_syntax():
+    scoped = parse('b {wings, " claws"} +0.5 after {dragon, " wyvern"} until "."')
+    assert scoped.kind == CommandKind.BIAS
+    assert (scoped.bias_targets, scoped.bias_target_bare) == (
+        (" wings", " claws"), (True, False),
+    )
+    assert (scoped.bias_triggers, scoped.bias_trigger_bare) == (
+        (" dragon", " wyvern"), (True, False),
+    )
+    assert (scoped.bias_operator, scoped.bias_amount, scoped.bias_stop_text) == (
+        "+", .5, ".",
+    )
+
+    group = parse('b nautical -> {anchor, " steamship"}')
+    assert (group.bias_group_name, group.bias_group_members) == (
+        "nautical", (" anchor", " steamship"),
+    )
+    ranked = parse('1+0.5 ... " P"')
+    assert (ranked.search_rank, ranked.bias_prefix, ranked.bias_amount) == (1, " P", .5)
+
+
+@pytest.mark.parametrize(
+    "raw, address",
+    [
+        ("f", ForkAddress(ForkAddressKind.CURRENT)),
+        ("fork", ForkAddress(ForkAddressKind.CURRENT)),
+        ("f 4", ForkAddress(ForkAddressKind.ABSOLUTE, 4)),
+        ("f - 2", ForkAddress(ForkAddressKind.RELATIVE_BACKWARD, 2)),
+        ("f-2", ForkAddress(ForkAddressKind.RELATIVE_BACKWARD, 2)),
+    ],
+)
+def test_m03_fork_addresses_keep_absolute_and_backward_meanings(raw, address):
+    assert parse_fork_address(raw) == address
+    command = parse(raw)
+    assert command.kind == CommandKind.FORK
+    assert command.fork_address == address
+
+
+@pytest.mark.parametrize("raw", ["f +2", "f - 0", "fork nope"])
+def test_m03_invalid_fork_addresses_remain_errors(raw):
     with pytest.raises(EditorError):
         parse(raw)
 

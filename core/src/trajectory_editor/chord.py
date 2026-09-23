@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from .core.actions import Accept, PolicyAction, SelectRawRank
 from .core.errors import EditorError
 from .episode_engine import EpisodeEngine
+from .terminal_contracts import PromptRequest
 
 
 class ChordRequested(Exception):
@@ -235,7 +236,13 @@ class ActionSequencePolicy:
 def chord_menu(io, chord: Chord, *, at_edge: bool = False) -> tuple[str, tuple[PolicyAction, ...] | None]:
     notice = ""
     while True:
-        width = max(1, shutil.get_terminal_size(fallback=(100, 30)).columns - 2)
+        terminal_size = getattr(io, "terminal_size", None)
+        size = terminal_size() if callable(terminal_size) else None
+        columns = (
+            size[0] if size is not None
+            else shutil.get_terminal_size(fallback=(100, 30)).columns
+        )
+        width = max(1, columns - 2)
         body = chord.display(width=width)
         if notice:
             body += "\n\n" + notice
@@ -246,9 +253,9 @@ def chord_menu(io, chord: Chord, *, at_edge: bool = False) -> tuple[str, tuple[P
             "Chord: Enter: advance live paths | rewind: undo one round | "
             "a–z or starting rank: choose and commit | q: options | ?: help > "
         )
-        read_chord = getattr(io, "read_chord_command", None)
-        if callable(read_chord):
-            raw = read_chord(prompt, body)
+        prompt_request = getattr(io, "prompt", None)
+        if callable(prompt_request):
+            raw = prompt_request(PromptRequest(prompt, body=body, isolated=True))
         else:
             io.write(body)
             raw = io.read(prompt)

@@ -228,9 +228,10 @@ def test_live_chord_prompt_uses_only_current_preview_body():
             super().__init__(["", "q", "c", "a"])
             self.bodies = []
 
-        def read_chord_command(self, prompt, body):
-            self.bodies.append(body)
-            return self.read(prompt)
+        def prompt(self, request):
+            assert request.isolated
+            self.bodies.append(request.body)
+            return self.read(request.prompt)
 
     io = ChordIO()
     result, actions = chord_menu(io, Chord(engine(), (1, 2)))
@@ -291,10 +292,10 @@ class LiveIO(ScriptedIO):
     def supports_live_choices(self):
         return True
 
-    def read_choice(self, choice, **kwargs):
+    def read_choice(self, state):
         return self.read("live choice> ")
 
-    def read_live_edge_command(self, **kwargs):
+    def read_edge(self, state):
         return self.read("live edge> ")
 
     @contextmanager

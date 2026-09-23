@@ -31,19 +31,14 @@ from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.widgets import TextArea
 
-from .edge_tui import EdgeViewState, LiveEdgeView
-from .live_tui import ChoiceViewState, LiveChoiceView, PreviewPending, _live_style, _safe_context_text
+from .edge_tui import LiveEdgeView
+from .live_tui import LiveChoiceView, PreviewPending, _live_style, _safe_context_text
+from .terminal_contracts import ChoiceViewState, EdgeViewState, PromptRequest
 from .ui_themes import DEFAULT_LIVE_THEME
 
 
-@dataclass(frozen=True)
-class PromptState:
-    prompt: str
-    body: str = ""
-    single_key: bool = False
-    page: bool = False
-    multiline: bool = False
-    isolated: bool = False
+# Kept for older direct session tests; PromptRequest is the shared contract.
+PromptState = PromptRequest
 
 
 @dataclass(eq=False)
@@ -330,20 +325,20 @@ class PersistentTerminalSession(AbstractContextManager):
     def read_edge(self, state: EdgeViewState):
         return self._read(state)
 
-    def read(self, prompt: str, *, single_key=False):
-        return self._read(PromptState(prompt, single_key=single_key))
+    def prompt(self, request: PromptRequest):
+        return self._read(request)
 
-    def read_chord(self, prompt: str, body: str):
-        return self._read(PromptState(prompt, body=body, isolated=True))
+    def read(self, prompt: str, *, single_key=False):
+        return self.prompt(PromptRequest(prompt, single_key=single_key))
 
     def read_multiline_prompt(
         self,
         prompt: str = "Write at least one character. Press Escape then Enter to continue.\n\n",
     ):
-        return self._read(PromptState(prompt, multiline=True))
+        return self.prompt(PromptRequest(prompt, multiline=True))
 
     def page(self, text: str):
-        return self._read(PromptState("", body=text, page=True))
+        return self.prompt(PromptRequest("", body=text, page=True))
 
     def write(self, text: str, *, end="\n"):
         self._call(self._write, text + end)
@@ -390,8 +385,8 @@ class PersistentTerminalSession(AbstractContextManager):
             if state.page:
                 self._prompt_context = state.body
             elif state.isolated:
-                # Chord owns its whole preview. The generic prompt history
-                # includes model-loading output and previous chord rounds.
+                # Isolated prompts own their entire body; prior status and
+                # generic prompt history must not leak into them.
                 self._prompt_context = ""
                 self._notice = ""
             else:
@@ -406,6 +401,10 @@ class PersistentTerminalSession(AbstractContextManager):
     def _surface_size(self):
         size = self.output_device.get_size()
         return size.columns, max(1, size.rows - bool(self._notice))
+
+    def terminal_size(self) -> tuple[int, int]:
+        """Available content area after the session's status row."""
+        return self._surface_size()
 
     def _submit(self, *, result=None, exception=None):
         if isinstance(exception, KeyboardInterrupt):

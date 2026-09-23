@@ -21,18 +21,19 @@ from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.styles import Style
 
-from .tui import parse_bias_command
+from .teacher_commands import (
+    ForkAddressKind, normalize_command_syntax, parse_bias_command,
+    parse_fork_address,
+)
 from .candidate_columns import CandidateColumns
 from .chord import parse_chord
 from .core.candidates import Candidate
 from .core.errors import EditorError
 from .core.ui import ChoiceSet, InsertMode
-from .tui import (
+from .terminal_contracts import (
     BoundaryReview,
     ChoiceFeedback,
-    ForkAddressKind,
-    normalize_command_syntax,
-    parse_fork_address,
+    ChoiceViewState,
     SEAMLESS_REACTIVATE,
 )
 from .ui_themes import DEFAULT_LIVE_THEME
@@ -1098,32 +1099,6 @@ def _live_style(theme: str) -> Style:
         raise ValueError(f"unknown live UI theme: {theme!r}") from exc
 
 
-@dataclass(frozen=True)
-class ChoiceViewState:
-    """One prepared decision view; the engine remains outside the renderer."""
-
-    choice: ChoiceSet
-    remaining_tokens: int | None
-    candidates: tuple[Candidate, ...]
-    resolve_insertion: InsertionResolver
-    display_candidates: tuple[Candidate, ...] | None = None
-    resolve_candidate: Callable[[int], Candidate] | None = None
-    target_token_id: int | None = None
-    feedback: ChoiceFeedback | None = None
-    initial_command: str | None = None
-    review: BoundaryReview | None = None
-    seamless: bool = False
-    reactivate_on_review_enter: bool = False
-    search_lens_active: bool = False
-    policy_active: bool = False
-    show_policy_rank: bool = False
-    sort_by_policy: bool = False
-    logit_view: str = "none"
-    show_model_probabilities: bool = False
-    column_focus: str | None = None
-    overlays: frozenset[str] = frozenset()
-
-
 class LiveChoiceView(ViewLifecycle):
     """Reusable layout, bindings and buffer for live choices and history review."""
 
@@ -1477,45 +1452,13 @@ class LiveChoiceView(ViewLifecycle):
 
 
 def read_live_choice(
-    choice: ChoiceSet,
+    state: ChoiceViewState,
     *,
-    remaining_tokens: int | None,
-    candidates: tuple[Candidate, ...],
-    display_candidates: tuple[Candidate, ...] | None = None,
-    resolve_insertion: InsertionResolver,
-    resolve_candidate: Callable[[int], Candidate] | None = None,
-    target_token_id: int | None = None,
     input_device: object | None = None,
     output_device: object | None = None,
     theme: str = DEFAULT_LIVE_THEME,
-    feedback: ChoiceFeedback | None = None,
-    initial_command: str | None = None,
-    review: BoundaryReview | None = None,
-    seamless: bool = False,
-    reactivate_on_review_enter: bool = False,
-    search_lens_active: bool = False,
-    policy_active: bool = False,
-    show_policy_rank: bool = False,
-    sort_by_policy: bool = False,
-    logit_view: str = "none",
-    show_model_probabilities: bool = False,
-    column_focus: str | None = None,
-    overlays: frozenset[str] = frozenset(),
 ) -> str | None:
     """Standalone adapter; interactive episodes use a persistent LiveChoiceView."""
-    state = ChoiceViewState(
-        choice=choice, remaining_tokens=remaining_tokens, candidates=candidates,
-        resolve_insertion=resolve_insertion, display_candidates=display_candidates,
-        resolve_candidate=resolve_candidate, target_token_id=target_token_id,
-        feedback=feedback, initial_command=initial_command, review=review,
-        seamless=seamless, reactivate_on_review_enter=reactivate_on_review_enter,
-        search_lens_active=search_lens_active, policy_active=policy_active,
-        show_policy_rank=show_policy_rank, sort_by_policy=sort_by_policy,
-        logit_view=logit_view,
-        show_model_probabilities=show_model_probabilities,
-        column_focus=column_focus,
-        overlays=overlays,
-    )
     view = LiveChoiceView(state)
     return run_standalone_view(
         view,

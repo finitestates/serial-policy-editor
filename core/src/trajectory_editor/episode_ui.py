@@ -37,19 +37,12 @@ from .episode_runner import (
 from .episode_store import EpisodeStore
 from .episode_hash import token_prefix_sha256
 from .core.sampling import raw_rank
-from .tui import (
-    HELP_TEXT,
-    IO,
-    BoundaryReview,
-    ChoiceFeedback,
-    CommandKind,
-    ForkAddressKind,
-    SEAMLESS_REACTIVATE,
-    TerminalIO,
-    display_candidates,
-    display_choice,
-    parse_command,
+from .plain_tui import display_candidates, display_choice
+from .teacher_commands import HELP_TEXT, CommandKind, ForkAddressKind, parse_command
+from .terminal_contracts import (
+    BoundaryReview, ChoiceFeedback, ChoiceViewState, IO, SEAMLESS_REACTIVATE,
 )
+from .tui import TerminalIO
 
 
 @dataclass
@@ -166,13 +159,10 @@ class InteractivePolicy:
     def _view_plan(self, engine: EpisodeEngine) -> CandidateViewPlan:
         """Resolve the visible columns once for lookup and rendering."""
         width = None
-        if getattr(self.io, "supports_live_choices", False):
-            try:
-                from .live_tui import _terminal_size
-
-                width, _ = _terminal_size()
-            except Exception:
-                width = None
+        terminal_size = getattr(self.io, "terminal_size", None)
+        if callable(terminal_size):
+            size = terminal_size()
+            width = size[0] if size is not None else None
         plan = CandidateColumns(
             policy=self._show_policy_diagnostics(engine),
             logit_view=self.view_preferences.logit_view,
@@ -254,7 +244,7 @@ class InteractivePolicy:
                 ),
                 completion_commands=suggestions,
             )
-            if not getattr(self.io, "supports_live_choices", False):
+            if not callable(getattr(self.io, "read_choice", None)):
                 self.io.write(feedback.title)
                 for line in feedback.lines:
                     self.io.write(line)
@@ -334,7 +324,7 @@ class InteractivePolicy:
                 "candidates": [candidate.to_dict() for candidate in candidates],
             },
         )
-        if not getattr(self.io, "supports_live_choices", False):
+        if not callable(getattr(self.io, "read_choice", None)):
             self.io.write(
                 f"\nExact token search {lens.query!r}: id={lens.token_id}, "
                 f"absolute raw rank={lens.target_rank}"
@@ -468,10 +458,6 @@ class InteractivePolicy:
             else ()
         )
         proposal_prefill_available = not self.manual_acceptance
-        live = bool(
-            getattr(self.io, "supports_live_choices", False)
-            and callable(getattr(self.io, "read_choice", None))
-        )
         plain_redraw = True
         while True:
             policy_columns = self._show_policy_diagnostics(engine)
@@ -520,7 +506,8 @@ class InteractivePolicy:
             )
             if policy_sort and not search_lens_active:
                 exposed.update((candidate.rank, candidate) for candidate in displayed)
-            if not live and plain_redraw:
+            structured_choice = callable(getattr(self.io, "read_choice", None))
+            if not structured_choice and plain_redraw:
                 display_choice(
                     self.io, replace(choice, candidates=displayed), remaining_tokens=engine.remaining,
                     policy_active=engine.sampling.policy_active,
@@ -532,8 +519,8 @@ class InteractivePolicy:
                     overlays=self.view_preferences.overlays,
                 )
                 plain_redraw = False
-            if live:
-                raw = self.io.read_choice(  # type: ignore[attr-defined]
+            if structured_choice:
+                raw = self.io.read_choice(ChoiceViewState(  # type: ignore[attr-defined]
                     choice,
                     remaining_tokens=engine.remaining,
                     candidates=tuple(exposed[rank] for rank in sorted(exposed)),
@@ -566,7 +553,7 @@ class InteractivePolicy:
                     show_model_probabilities=self.view_preferences.show_model_probabilities,
                     column_focus=self.view_preferences.column_focus,
                     overlays=self.view_preferences.overlays,
-                )
+                ))
             else:
                 raw = self.io.read("\nTeacher action> ")
             if raw is None:
@@ -595,7 +582,7 @@ class InteractivePolicy:
                 )
             except EditorError as exc:
                 feedback = ChoiceFeedback("error", "INVALID COMMAND", (str(exc),))
-                if not live:
+                if not structured_choice:
                     self.io.write(f"[invalid command] {exc}")
                 continue
             if review_boundary is not None:
@@ -631,7 +618,7 @@ class InteractivePolicy:
                     )
                     raise ForkRequested(review_boundary)
                 review_boundary = None
-                if not live:
+                if not structured_choice:
                     plain_redraw = True
                 continue
             if command.kind == CommandKind.BIAS:
@@ -649,7 +636,7 @@ class InteractivePolicy:
                     )
                 except EditorError as exc:
                     feedback = ChoiceFeedback("error", "INVALID BIAS", (str(exc),))
-                    if not live:
+                    if not structured_choice:
                         self.io.write(str(exc))
                     continue
                 if self.store is not None and self.episode_id is not None:
@@ -681,7 +668,7 @@ class InteractivePolicy:
                 choice_view = self._view_plan(engine)
                 lines = tuple(f"{label}: {value:+g}" for _kind, _payload, label, value in updates)
                 feedback = ChoiceFeedback("status", "STEERING UPDATED", lines)
-                if not live:
+                if not structured_choice:
                     for line in lines:
                         self.io.write(line)
                     plain_redraw = True
@@ -753,7 +740,7 @@ class InteractivePolicy:
                     "menu-expanded",
                     {"visible_rows": len(candidates)},
                 )
-                if not live:
+                if not structured_choice:
                     plain_redraw = True
                 continue
             if command.kind == CommandKind.MAIN_MENU:
@@ -772,7 +759,7 @@ class InteractivePolicy:
                     )
                 except EditorError as exc:
                     feedback = ChoiceFeedback("error", "SEARCH FAILED", (str(exc),))
-                    if not live:
+                    if not structured_choice:
                         self.io.write(f"[search failed] {exc}")
                     continue
                 if found is not None:

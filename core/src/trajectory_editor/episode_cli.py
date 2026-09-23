@@ -70,6 +70,7 @@ from .controller_profiles import (
     profile_arguments,
 )
 from .tui import TerminalIO
+from .terminal_contracts import EdgeViewState
 from .ui_themes import LIVE_THEME_NAMES
 from .version import VERSION
 from .teacher_plan import TeacherTape, export_teacher_tape, load_teacher_tape_jsonl
@@ -427,19 +428,16 @@ def _live_edge_menu(
     *,
     sampling_factory=SamplerConfig.from_record,
 ) -> tuple[str, Any]:
-    live_surface = bool(
-        getattr(io, "supports_live_choices", False)
-        and callable(getattr(io, "read_live_edge_command", None))
-    )
+    read_edge = getattr(io, "read_edge", None)
     while True:
-        if live_surface:
-            raw = io.read_live_edge_command(  # type: ignore[attr-defined]
+        if callable(read_edge):
+            raw = read_edge(EdgeViewState(
                 episode_id=store.label(episode_id),
                 boundary=engine.boundary,
                 current_budget=engine.max_tokens,
                 remaining_tokens=engine.remaining,
                 sampler_summary=sampler_summary(engine.sampling),
-            )
+            ))
         else:
             io.write(store.label(episode_id))
             io.write("[ls / ls all] episodes  [#N] switch  [name TITLE] rename  [rewind N] delete back to N")
@@ -706,9 +704,9 @@ def main(
                 args.seed = random_seed()
                 print(f"Random seed: {args.seed}", flush=True)
             io = TerminalIO(live_choices=not args.plain_ui, live_theme=args.theme)
-            open_live_session = getattr(io, "live_session", None)
-            if callable(open_live_session):
-                with open_live_session():
+            open_session = getattr(io, "session", None) or getattr(io, "live_session", None)
+            if callable(open_session):
+                with open_session():
                     return ephemeral_runtime.run_ephemeral(
                         args,
                         io=io,
@@ -987,9 +985,9 @@ def main(
                     )
                     _record_fork_edge_state(store, episode_id, engine)
 
-            open_live_session = getattr(io, "live_session", None)
-            if callable(open_live_session):
-                ui_stack.enter_context(open_live_session())
+            open_session = getattr(io, "session", None) or getattr(io, "live_session", None)
+            if callable(open_session):
+                ui_stack.enter_context(open_session())
             store.visit(episode_id)
             enter_edge = False
             while True:
