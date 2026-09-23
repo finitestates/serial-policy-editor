@@ -1,13 +1,17 @@
 # Core runtime scope
 
-This project is an interactive episode projector: a menu-driven environment
-for selecting tokens sequentially. This environment also has the capacity for rewinding, forking, and replaying episodes.
+This project is an interactive episode runtime: a menu-driven environment
+for selecting tokens sequentially. This environment also has the capacity for rewinding, forking, speculative decoding, as well as replaying episodes.
 
 **The core test of program correctness is that replay must always terminate at a live edge:**
-- What this means: a sequence of teacher actions represented as a replay tape can be executed automatically and deterministically by the program itself without program failure, leaving the running program at an operational runtime menu (called `the EDGE menu`) within an active episode.
-- What this does not mean: a given replay tape will emit the exact same sequence of tokens as the episode from which the tape was derived (although it often does mean that). Whether divergence from the original token sequence is desirable or undesirable depends on what a particular replay episode is attempting to demonstrate or accomplish.
+- *What this means*: a sequence of teacher actions represented as a replay tape can be executed automatically by the program itself without program failure, leaving the running program at an operational runtime menu (called `the EDGE menu`) within an active episode.
+- *What this does not mean*: a given replay tape will emit the exact same sequence of tokens as the episode from which the tape was derived (although it often does mean that). Whether divergence from the original token sequence is desirable or undesirable depends on what a particular replay episode is attempting to demonstrate or accomplish.
 
-A replay tape is not a 1-to-1 reconstruction of every action taken during an episode by design. The tapes themselves are storage-agnostic, transient runtime artifacts. In theory, they can be constructed from basically any data storage medium that exists.
+Replay has two supported divergence modes:
+- `handoff`: At the first sign that the replay is about to commit a token that diverges from what is observed in the source, the replay terminates and yields control.
+- `ballistic`: The replay continues regardless of divergence and only yields when the tape is exhausted.
+
+By design, a replay tape is not a 1-to-1 reconstruction of every action taken during an episode. The tapes themselves are storage-agnostic, transient runtime artifacts. In theory, they can be constructed from basically any data storage medium that exists.
 
 ## Main-program capabilities
 
@@ -17,58 +21,62 @@ The regular installation should support:
 - full-vocabulary search and token inspection;
 - llama.cpp and Transformers backends;
 - sampler filtering and draw methods, including CFG and Gumbel draws;
-- naive and conditional bias rules, including phrase/sequence credit rules;
-- history penalties and check/force actions;
+- naive and conditional bias rules;
+- history penalties;
+- speculative decoding via check/force actions & chording;
+- default menu view and the ability to cycle through displayed columns;
 - raw/model-logit display, including the raw-rank-1 model-gap view;
 - optional loading and application of externally produced vectors;
 - episode export through `projector`.
 
-SQLite is part of the workspace implementation, but it is not the definition
+A database or other storage medium can be part of the workspace implementation, but it is not the definition
 of an episode. The runtime owns episode/action meaning; persistence adapts that
 meaning to the workspace.
 
-## Archived extension capabilities
-
-These do not determine the dependency graph or setup surface of the active
-program:
-
-- post-output vector creation/analysis and experimental vector work;
-- online/group learning and token-preference learning;
-- reference priors and YAML reference weights;
-- bias catalogs and catalog-generation tools;
-- experimental observers, diagnostics, and comparison/reporting paths.
-
-Vector loading is different from vector production. Core accepts externally
-produced steering artifacts and records their available metadata. The
-optional vectors package adds conventional hidden-state vector production and
-inspection; post-output and experimental vector work stays archived.
-Producer metadata is useful but not required, and core does not infer layer
-alignment from it.
-
 ## Replay contract
 
-Core replay identity is deliberately small: a step number, the teacher action,
-and an optional recorded result used to detect divergence. Divergence policy is
-runner behavior, not a per-step record field; ballistic replay therefore has no
-extra mode/result slot. Evidence, learner diagnostics, source provenance, and
-sampler-transition metadata may support persistence or inspection, but they are
-not part of the core action contract. If a historical feature cannot reconstruct
-the result needed for replay, execution yields to the edge menu.
-Replay plans may inherit the source sampler schedule by default, but fixed and
-counterfactual replay can provide a different schedule or no source schedule
-at all.
+An executable replay plan is an ordered sequence of teacher actions. Each step contains an action and, optionally, an expected result: visible token IDs, an optional terminal token ID, and a stop reason. The step number is its position in the plan; it is not a separate in-memory identity field.
+The runner receives the divergence policy for the replay run (handoff or ballistic); the policy is not stored on each step. Ballistic replay needs no extra per-step field. When a step has no expected result, replay can still execute it, but cannot compare its outcome with the recorded one.
 
-## Migration rules
+Replay executes supported teacher actions in order. At the first action it cannot interpret, it stops before applying that action, leaves later actions unexecuted, and yields to the EDGE menu with a warning that identifies the step and reason. It does not skip or reinterpret the action. A step with no recorded expectation may still execute, but its result cannot be checked against the source.
 
-1. New episode concepts belong under `trajectory_editor.core`.
-2. Persistence, UI, concrete backends, and optional extensions depend on core;
-   core does not import them.
-3. Old module names remain as small compatibility shims during migration.
-4. A rename is complete only when ownership and dependency direction change;
-   a re-export alone is an intermediate step.
-5. Existing behavior is the oracle while the architecture moves. Tests for
-   removed extension capabilities are retired when those capabilities leave
-   the active program.
+Source-derived plans follow the source sampler schedule by default. A caller can instead preserve the destination sampler or supply a different schedule; fixed or counterfactual plans can omit the source schedule.
+
+### Serial policy replay
+`spr SOURCE [until]` appends the source episode's surviving teacher procedure to the currently selected episode, leaving the destination root intact. The source prompt, if present, is replayed as an exact write, followed by the selected source actions and their recorded expectations. until is measured in the source's root-relative visible-token coordinates; the resulting history is recorded at the destination's coordinates. SPR preserves the destination's sampler context instead of applying the source sampler schedule, while the selected divergence policy controls whether replay hands off on divergence or continues.
+
+## Rewind contract
+
+A rewind boundary is a count of visible tokens after the episode's initial
+text. Boundary `0` is between the initial text and the first teacher-produced
+token. The valid range is `0` through the current visible boundary; non-visible
+evidence such as EOG does not advance it.
+
+Rewind truncates the selected open episode or branch in place through that
+boundary. It removes later history, repositions the runtime to the retained
+prefix, clears terminal state, and restores the sampler, stream coordinates,
+and budget state for the selected boundary. Rewind does not create a child
+branch; fork first when both paths should be kept.
+
+Completed or failed durable
+episodes stay sealed and must be forked to continue. If the boundary cuts through an action, retain only its visible prefix. Represent a partial text or phrase write as an exact write of the retained
+text; represent partial token generation as a finite hold for the retained
+token count. The unretained remainder of the original action does not become part of a replay plan derived from an episode.
+
+## Forking contract
+
+An ordinary fork creates a new open episode from the source's history through a
+root-relative visible-token boundary. The source remains unchanged. The new episode
+inherits the initial text, retained visible prefix, and the control state needed
+to continue from that boundary. Its next local action begins there.
+
+Nested ordinary forks keep the same root-relative history frame. Parent identity and `fork_boundary` record provenance; they do not restrict where the
+child may rewind or fork. A child may rewind before its original fork boundary. If the fork boundary cuts through an action, materialize the retained prefix
+using the same partial-action rules as rewind. 
+
+A model-change fork is a separate case: select the prefix in the source's coordinates, then materialize its text under the destination tokenizer. The
+child's runtime boundaries follow that destination representation, while
+`fork_boundary` remains provenance for the source boundary. Forking actions do not become part of a replay plan derived from an episode.
 
 ## Core-only acceptance gate
 
