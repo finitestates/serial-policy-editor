@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import ctypes
 import hashlib
 import platform
@@ -179,6 +181,15 @@ class LlamaCppDecoder:
         self._activation_model: Any | None = None
         self._activation_logit_cache: dict[tuple[str, str, str], np.ndarray] = {}
         self._model_sha256_cache: str | None = None
+        # Set only by the optional real-model harness. Normal inference has no
+        # measurement object or extra synchronization.
+        self._real_model_probe = None
+
+    def _measured_eval(self, values: list[int], kind: str, context_length: int) -> None:
+        probe = getattr(self, "_real_model_probe", None)
+        interval = probe.model_call(kind, len(values), context_length) if probe is not None else nullcontext()
+        with interval:
+            self._model.eval(values)
 
     def vocabulary_size(self) -> int:
         return self._vocabulary_size
@@ -188,7 +199,7 @@ class LlamaCppDecoder:
             raise RuntimeError("decoder prefix cannot be empty")
         values = [int(value) for value in prefix_token_ids]
         self._model.reset()
-        self._model.eval(values)
+        self._measured_eval(values, "prefill", len(values))
         self._tokens = values
 
     def eval(self, token_ids: list[int]) -> None:
@@ -197,10 +208,10 @@ class LlamaCppDecoder:
         values = [int(value) for value in token_ids]
         self._tokens.extend(values)
         if self._cache_enabled:
-            self._model.eval(values)
+            self._measured_eval(values, "incremental", len(self._tokens))
         else:
             self._model.reset()
-            self._model.eval(self._tokens)
+            self._measured_eval(self._tokens, "rebuild", len(self._tokens))
 
     def branch_to_prefix(self, prefix_token_ids: list[int]) -> None:
         """Move to an existing prefix, reusing the current cache when possible."""
@@ -223,15 +234,21 @@ class LlamaCppDecoder:
                 -1, retained_before_last, -1
             )
             if not removed:
+                probe = getattr(self, "_real_model_probe", None)
+                if probe is not None:
+                    probe.cache_fallback("branch-cache-remove-rejected")
                 self.reset(values)
                 return
             self._model.n_tokens = retained_before_last
             self._model._requires_eval = True
-            self._model.eval([values[-1]])
+            self._measured_eval([values[-1]], "branch", len(values))
             self._tokens = values
         except (AttributeError, RuntimeError, TypeError):
             # Cache positioning is an optimization. If the installed binding
             # cannot safely truncate its sequence, preserve semantics via reset.
+            probe = getattr(self, "_real_model_probe", None)
+            if probe is not None:
+                probe.cache_fallback("branch-cache-unavailable")
             self.reset(values)
 
     def last_logits(self) -> np.ndarray:

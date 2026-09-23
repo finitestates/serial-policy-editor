@@ -1,0 +1,23 @@
+name: gpt2-transformers-cpu-benchmark
+model: gpt2
+backend: transformers
+launch:
+  transformers-device: cpu
+  transformers-dtype: float32
+  transformers-torch-threads: 4
+  cache: auto
+  temperature: 0.0
+  seed: 17
+  max-tokens: 64
+rtol: 0.0001
+atol: 0.001
+scenarios:
+  - continuation
+  - controlled-write
+  - candidate-refresh
+  - long-context
+  - rewind-replace
+  - action-jsonl
+repeats: 3
+warmup: 1
+timeout_s: 90
