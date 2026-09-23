@@ -5,10 +5,11 @@ from __future__ import annotations
 import pydoc
 import sys
 import termios
-from dataclasses import replace
 
 from .candidate_columns import CandidateColumns
+from .core.candidates import Candidate
 from .core.ui import ChoiceSet
+from .edge_help import edge_help
 from .terminal_contracts import ChoiceViewState, EdgeViewState, IO, PromptRequest
 from .teacher_commands import ACTION_TEXT
 
@@ -32,6 +33,8 @@ def display_choice(
     show_model_probabilities: bool = False,
     column_focus: str | None = None,
     overlays: frozenset[str] = frozenset(),
+    display_rows: tuple[Candidate, ...] | None = None,
+    target_token_id: int | None = None,
 ) -> None:
     io.write("\n" + "=" * 72)
     remaining = (
@@ -61,8 +64,9 @@ def display_choice(
     )
     display_candidates(
         io,
-        choice.candidates,
+        choice.candidates if display_rows is None else display_rows,
         heading=True,
+        target_token_id=target_token_id,
         show_policy_rank=show_policy_rank,
         sort_by_policy=sort_by_policy,
         logit_view=logit_view,
@@ -138,10 +142,24 @@ def read_choice(io: IO, state: ChoiceViewState) -> str | None:
             io.write(line)
     if state.review is not None:
         review = state.review
-        io.write(f"Review boundary {review.aligned_step}: {review.context_text_tail!r}")
+        io.write(f"Review boundary {review.aligned_step} of {review.active_aligned_step}: {review.context_text_tail!r}")
+        position = review.position
+        if position.get("kind") == "inside-span":
+            io.write(
+                f"Position: inside {position.get('span_type', 'span')} "
+                f"({position.get('offset_visible_tokens')} of "
+                f"{position.get('total_visible_tokens')} tokens)"
+            )
+        elif position.get("kind") == "action-boundary":
+            io.write(
+                f"Position: {position.get('action_kind', 'action')} "
+                f"{position.get('side', '')}"
+            )
+        if review.next_token is not None:
+            io.write(f"Next token: {review.next_token['text']!r}")
     else:
         display_choice(
-            io, replace(state.choice, candidates=state.display_candidates or state.choice.candidates),
+            io, state.choice,
             remaining_tokens=state.remaining_tokens,
             policy_active=state.policy_active,
             show_policy_rank=state.show_policy_rank,
@@ -150,6 +168,8 @@ def read_choice(io: IO, state: ChoiceViewState) -> str | None:
             show_model_probabilities=state.show_model_probabilities,
             column_focus=state.column_focus,
             overlays=state.overlays,
+            display_rows=state.display_candidates,
+            target_token_id=state.target_token_id if state.search_lens_active else None,
         )
     return io.read("\nTeacher action> ")
 
@@ -160,21 +180,21 @@ def read_edge(io: IO, state: EdgeViewState) -> str | None:
             f"Live branch {state.episode_id} @ boundary {state.boundary}"
             f" · {state.sampler_summary}"
         )
-        return io.read(
-            "[c]ontinue  [n N/off] budget  [s key=value] sampler  [rewind N] "
-            "[f N] fork  [fm] fork map  [branches]  [#N] switch  [switch N] alias  "
-            "[new TEXT] new prompt root  [export FILE] "
-            "[save WORKSPACE [ID]]  [save-family WORKSPACE [ROOT_ID]]  [e]nd  [q]uit > "
-        )
-    io.write(state.episode_id)
-    io.write("[ls / ls all] episodes  [#N] switch  [name TITLE] rename  [rewind N] delete back to N")
-    io.write(f"\nLive edge @ boundary {state.boundary} · {state.sampler_summary}")
-    return io.read(
-        "[c]ontinue  [n N/off] budget  [s key=value] sampler  "
-        "([s random-seed] randomize)  [f N] fork  [fm] fork map  "
-        "[new TEXT] unrelated episode  [spr ID [--until Y | m]] replay  "
-        "[p]roject  [e]nd  [q]uit > "
+    else:
+        io.write(state.episode_id)
+        io.write(f"\nLive edge @ boundary {state.boundary} · {state.sampler_summary}")
+    allowance = (
+        f"default next allowance: {state.current_budget} tokens"
+        if state.current_budget is not None else "no automatic checkpoint"
     )
+    remaining = (
+        f"{state.remaining_tokens} tokens remaining"
+        if state.remaining_tokens is not None else "unlimited"
+    )
+    io.write(f"Budget: {remaining} · {allowance}")
+    for item in edge_help(state.mode):
+        io.write(f"[{item.command}] {item.description}")
+    return io.read("EDGE> ")
 
 
 def prompt(io: IO, request: PromptRequest) -> str | None:

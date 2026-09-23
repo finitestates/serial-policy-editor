@@ -26,10 +26,11 @@ from .episode_runner import (
 from .episode_session import LiveSession, LiveSessionRoster
 from .projector import project_live_fork_map
 from .teacher_plan import export_live_teacher_tape
+from .terminal_contracts import EdgeViewState, TerminalProtocol
 
 
 def ephemeral_edge_menu(
-    io: Any,
+    io: TerminalProtocol,
     session_or_roster: LiveSession | LiveSessionRoster,
 ) -> tuple[str, Any]:
     """Turn ephemeral EDGE input into the next live-session operation."""
@@ -93,31 +94,15 @@ def ephemeral_edge_menu(
                 continue
             return "fork", target
 
-    from .terminal_contracts import EdgeViewState
-
-    read_edge = getattr(io, "read_edge", None)
     while True:
-        if callable(read_edge):
-            raw = read_edge(EdgeViewState(
-                episode_id=branch_number(session.branch.branch_id),
-                boundary=session.engine.boundary,
-                current_budget=session.engine.max_tokens,
-                remaining_tokens=session.engine.remaining,
-                sampler_summary=sampler_summary(session.sampler),
-                mode="session",
-            ))
-        else:
-            io.write(
-                f"Live branch {branch_number(session.branch.branch_id)}"
-                f" @ boundary {session.engine.boundary}"
-                f" · {sampler_summary(session.sampler)}"
-            )
-            raw = io.read(
-                "[c]ontinue  [n N/off] budget  [s key=value] sampler  [rewind N] "
-                "[f N] fork  [fm] fork map  [branches]  [#N] switch  [switch N] alias  "
-                "[new TEXT] new prompt root  [export FILE] "
-                "[save WORKSPACE [ID]]  [save-family WORKSPACE [ROOT_ID]]  [e]nd  [q]uit > "
-            )
+        raw = io.read_edge(EdgeViewState(
+            episode_id=branch_number(session.branch.branch_id),
+            boundary=session.engine.boundary,
+            current_budget=session.engine.max_tokens,
+            remaining_tokens=session.engine.remaining,
+            sampler_summary=sampler_summary(session.sampler),
+            mode="session",
+        ))
         if raw is None:
             return "quit", None
         try:

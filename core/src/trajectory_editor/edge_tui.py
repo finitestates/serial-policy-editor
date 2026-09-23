@@ -19,6 +19,7 @@ from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.layout import Layout
 
+from .edge_help import edge_help
 from .terminal_contracts import EdgeViewState
 from .tui_views import ViewLifecycle
 
@@ -59,41 +60,8 @@ def _edge_header(
         ("class:muted", f"  {sampler_summary}\n"),
         ("class:section", "Commands\n"),
     ]
-    if mode == "session":
-        fragments.extend(_command_row("branches", "show retained live branches\n"))
-        fragments.extend(_command_row("#N", "switch to any retained root or branch\n"))
-        fragments.extend(_command_row("switch N", "compatible branch-switch alias\n"))
-        fragments.extend(_command_row("new TEXT", "start an unrelated prompt root\n"))
-        fragments.extend(_command_row("rewind N", "trim this branch back to token N\n"))
-    else:
-        fragments.extend(_command_row("ls / ls all", "list open / all episodes\n"))
-        fragments.extend(_command_row("#N", "switch episode\n"))
-        fragments.extend(_command_row("new TEXT", "start an unrelated episode\n"))
-        fragments.extend(_command_row("name TITLE", "rename this episode\n"))
-        fragments.extend(_command_row("rewind N", "delete continuation from token N\n"))
-    fragments.extend(_command_row("c / continue", "resume the current tranche\n"))
-    fragments.extend(_command_row("n N / n off", "set an allowance or remove the budget\n"))
-    fragments.extend(_command_row("s key=value", "change sampler settings\n"))
-    if mode != "session":
-        fragments.extend(
-            _command_row("s random-seed", "choose and record a new random seed\n")
-        )
-    fragments.extend(
-        _command_row("f N", "fork at boundary N\n")
-    )
-    if mode == "session":
-        fragments.extend(_command_row("fm", "show the fork map and choose a boundary\n"))
-    if mode == "session":
-        fragments.extend(_command_row("export FILE", "write the selected portable tape\n"))
-        fragments.extend(_command_row("save WORKSPACE", "materialize this branch\n"))
-        fragments.extend(_command_row("save-family WORKSPACE", "materialize this live family\n"))
-        fragments.extend(_command_row("e / end", "end this branch and show its text\n"))
-        fragments.extend(_command_row("q / quit", "discard the whole live session\n"))
-    else:
-        fragments.extend(_command_row("spr ID", "replay from another episode\n"))
-        fragments.extend(_command_row("p / project", "view the episode record\n"))
-        fragments.extend(_command_row("e / end", "end and seal the episode\n"))
-        fragments.extend(_command_row("q / quit", "leave without sealing\n"))
+    for item in edge_help(mode):
+        fragments.extend(_command_row(item.command, item.description + "\n"))
     return fragments
 
 

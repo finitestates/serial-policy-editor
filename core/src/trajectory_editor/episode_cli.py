@@ -428,28 +428,14 @@ def _live_edge_menu(
     *,
     sampling_factory=SamplerConfig.from_record,
 ) -> tuple[str, Any]:
-    read_edge = getattr(io, "read_edge", None)
     while True:
-        if callable(read_edge):
-            raw = read_edge(EdgeViewState(
-                episode_id=store.label(episode_id),
-                boundary=engine.boundary,
-                current_budget=engine.max_tokens,
-                remaining_tokens=engine.remaining,
-                sampler_summary=sampler_summary(engine.sampling),
-            ))
-        else:
-            io.write(store.label(episode_id))
-            io.write("[ls / ls all] episodes  [#N] switch  [name TITLE] rename  [rewind N] delete back to N")
-            io.write(
-                f"\nLive edge @ boundary {engine.boundary} · {sampler_summary(engine.sampling)}"
-            )
-            raw = io.read(
-                "[c]ontinue  [n N/off] budget  [s key=value] sampler  "
-                "([s random-seed] randomize)  [f N] fork  [fm] fork map  "
-                "[new TEXT] unrelated episode  [spr ID [--until Y | m]] replay  "
-                "[p]roject  [e]nd  [q]uit > "
-            )
+        raw = io.read_edge(EdgeViewState(
+            episode_id=store.label(episode_id),
+            boundary=engine.boundary,
+            current_budget=engine.max_tokens,
+            remaining_tokens=engine.remaining,
+            sampler_summary=sampler_summary(engine.sampling),
+        ))
         if raw is None:
             return "quit", None
         try:
@@ -704,19 +690,12 @@ def main(
                 args.seed = random_seed()
                 print(f"Random seed: {args.seed}", flush=True)
             io = TerminalIO(live_choices=not args.plain_ui, live_theme=args.theme)
-            open_session = getattr(io, "session", None) or getattr(io, "live_session", None)
-            if callable(open_session):
-                with open_session():
-                    return ephemeral_runtime.run_ephemeral(
-                        args,
-                        io=io,
-                        teacher_tape=teacher_tape,
-                    )
-            return ephemeral_runtime.run_ephemeral(
-                args,
-                io=io,
-                teacher_tape=teacher_tape,
-            )
+            with io.session():
+                return ephemeral_runtime.run_ephemeral(
+                    args,
+                    io=io,
+                    teacher_tape=teacher_tape,
+                )
         with EpisodeStore(args.workspace) as store, ExitStack() as ui_stack:
             selection = _resolve_launch_source(args, store, selection)
             if args.lineage is not None:
@@ -985,9 +964,7 @@ def main(
                     )
                     _record_fork_edge_state(store, episode_id, engine)
 
-            open_session = getattr(io, "session", None) or getattr(io, "live_session", None)
-            if callable(open_session):
-                ui_stack.enter_context(open_session())
+            ui_stack.enter_context(io.session())
             store.visit(episode_id)
             enter_edge = False
             while True:

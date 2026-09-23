@@ -62,10 +62,6 @@ class TerminalIO:
         self._live_session: object | None = None
 
     @property
-    def supports_live_choices(self) -> bool:
-        return self._live_choices
-
-    @property
     def live_theme(self) -> str:
         return self._live_theme
 
@@ -77,6 +73,7 @@ class TerminalIO:
             columns=size[0] if size else None,
             rows=size[1] if size else None,
             single_key=sys.stdin.isatty(),
+            seamless_review=self._live_choices,
         )
 
     def terminal_size(self) -> tuple[int, int] | None:
@@ -116,9 +113,6 @@ class TerminalIO:
             stderr.write(captured_err.getvalue())
             stdout.flush()
             stderr.flush()
-
-    # Existing integrations may still use this spelling; both enter one context.
-    live_session = session
 
     def read_choice(self, state: ChoiceViewState) -> str | None:
         if not self._live_choices:

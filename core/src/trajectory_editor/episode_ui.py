@@ -1,6 +1,6 @@
 """Terminal policy adapter for the unified episode engine.
 
-The adapter owns presentation and navigation.  In particular, full-vocabulary
+The adapter owns command interpretation and navigation. Full-vocabulary
 ``/`` search remains a non-mutating lens over the current observation; it is
 never compiled into a replay tape.
 """
@@ -37,10 +37,10 @@ from .episode_runner import (
 from .episode_store import EpisodeStore
 from .episode_hash import token_prefix_sha256
 from .core.sampling import raw_rank
-from .plain_tui import display_candidates, display_choice
 from .teacher_commands import HELP_TEXT, CommandKind, ForkAddressKind, parse_command
 from .terminal_contracts import (
-    BoundaryReview, ChoiceFeedback, ChoiceViewState, IO, SEAMLESS_REACTIVATE,
+    BoundaryReview, ChoiceFeedback, ChoiceViewState, SEAMLESS_REACTIVATE,
+    TerminalProtocol,
 )
 from .tui import TerminalIO
 
@@ -107,7 +107,7 @@ class InteractivePolicy:
     def __init__(
         self,
         *,
-        io: IO | None = None,
+        io: TerminalProtocol | None = None,
         menu_size: int = 12,
         search_radius: int = 3,
         default_hold_tokens: int = 100,
@@ -158,11 +158,8 @@ class InteractivePolicy:
 
     def _view_plan(self, engine: EpisodeEngine) -> CandidateViewPlan:
         """Resolve the visible columns once for lookup and rendering."""
-        width = None
-        terminal_size = getattr(self.io, "terminal_size", None)
-        if callable(terminal_size):
-            size = terminal_size()
-            width = size[0] if size is not None else None
+        size = self.io.terminal_size()
+        width = size[0] if size is not None else None
         plan = CandidateColumns(
             policy=self._show_policy_diagnostics(engine),
             logit_view=self.view_preferences.logit_view,
@@ -244,10 +241,6 @@ class InteractivePolicy:
                 ),
                 completion_commands=suggestions,
             )
-            if not callable(getattr(self.io, "read_choice", None)):
-                self.io.write(feedback.title)
-                for line in feedback.lines:
-                    self.io.write(line)
             return None, feedback
         token_id = int(token_ids[0])
         if not 0 <= token_id < len(observation.logits):
@@ -279,7 +272,7 @@ class InteractivePolicy:
             title=f"SEARCH · {lens.query!r} matched rank {lens.target_rank}",
             lines=(
                 (
-                    f"token {lens.token_id} · neighborhood ranks "
+                    f"token {lens.token_id} · absolute raw rank={lens.target_rank} · neighborhood ranks "
                     f"{lens.lower_rank}–{lens.upper_rank}"
                 ),
             ),
@@ -324,27 +317,6 @@ class InteractivePolicy:
                 "candidates": [candidate.to_dict() for candidate in candidates],
             },
         )
-        if not callable(getattr(self.io, "read_choice", None)):
-            self.io.write(
-                f"\nExact token search {lens.query!r}: id={lens.token_id}, "
-                f"absolute raw rank={lens.target_rank}"
-            )
-            self.io.write(
-                f"Neighborhood ranks {lens.lower_rank}–{lens.upper_rank} of "
-                f"{len(observation.logits)} (absolute raw-model ordering)."
-            )
-            display_candidates(
-                self.io, candidates, heading=True, target_token_id=lens.token_id,
-                show_policy_rank=self._show_policy_diagnostics(engine),
-                logit_view=self.view_preferences.logit_view,
-                show_model_probabilities=self.view_preferences.show_model_probabilities,
-                column_focus=self.view_preferences.column_focus,
-                overlays=self.view_preferences.overlays,
-                raw_k1_logit=(
-                    float(observation.statistics.maximum)
-                    if self._view_plan(engine).needs("top_raw_logit") else None
-                ),
-            )
 
     def _review(
         self, engine: EpisodeEngine, boundary: int, active: int
@@ -458,7 +430,6 @@ class InteractivePolicy:
             else ()
         )
         proposal_prefill_available = not self.manual_acceptance
-        plain_redraw = True
         while True:
             policy_columns = self._show_policy_diagnostics(engine)
             view = self._view_plan(engine)
@@ -506,56 +477,40 @@ class InteractivePolicy:
             )
             if policy_sort and not search_lens_active:
                 exposed.update((candidate.rank, candidate) for candidate in displayed)
-            structured_choice = callable(getattr(self.io, "read_choice", None))
-            if not structured_choice and plain_redraw:
-                display_choice(
-                    self.io, replace(choice, candidates=displayed), remaining_tokens=engine.remaining,
-                    policy_active=engine.sampling.policy_active,
-                    show_policy_rank=policy_columns,
-                    sort_by_policy=policy_sort and not search_lens_active,
-                    logit_view=self.view_preferences.logit_view,
-                    show_model_probabilities=self.view_preferences.show_model_probabilities,
-                    column_focus=self.view_preferences.column_focus,
-                    overlays=self.view_preferences.overlays,
-                )
-                plain_redraw = False
-            if structured_choice:
-                raw = self.io.read_choice(ChoiceViewState(  # type: ignore[attr-defined]
-                    choice,
-                    remaining_tokens=engine.remaining,
-                    candidates=tuple(exposed[rank] for rank in sorted(exposed)),
-                    display_candidates=displayed,
-                    resolve_candidate=resolve_candidate,
-                    resolve_insertion=lambda text, mode: self._resolve_write(
-                        engine, text, mode
-                    ),
-                    target_token_id=search.token_id if search is not None else None,
-                    feedback=feedback,
-                    initial_command=(
-                        str(observation.proposal_raw_rank)
-                        if proposal_prefill_available and review_boundary is None
-                        else None
-                    ),
-                    review=(
-                        self._review(engine, review_boundary, observation.boundary)
-                        if review_boundary is not None
-                        else None
-                    ),
-                    seamless=self.seamless,
-                    reactivate_on_review_enter=(
-                        self.seamless and review_boundary is not None
-                    ),
-                    search_lens_active=search_lens_active,
-                    policy_active=engine.sampling.policy_active,
-                    show_policy_rank=policy_columns,
-                    sort_by_policy=policy_sort and not search_lens_active,
-                    logit_view=self.view_preferences.logit_view,
-                    show_model_probabilities=self.view_preferences.show_model_probabilities,
-                    column_focus=self.view_preferences.column_focus,
-                    overlays=self.view_preferences.overlays,
-                ))
-            else:
-                raw = self.io.read("\nTeacher action> ")
+            raw = self.io.read_choice(ChoiceViewState(
+                choice,
+                remaining_tokens=engine.remaining,
+                candidates=tuple(exposed[rank] for rank in sorted(exposed)),
+                display_candidates=displayed,
+                resolve_candidate=resolve_candidate,
+                resolve_insertion=lambda text, mode: self._resolve_write(
+                    engine, text, mode
+                ),
+                target_token_id=search.token_id if search is not None else None,
+                feedback=feedback,
+                initial_command=(
+                    str(observation.proposal_raw_rank)
+                    if proposal_prefill_available and review_boundary is None
+                    else None
+                ),
+                review=(
+                    self._review(engine, review_boundary, observation.boundary)
+                    if review_boundary is not None
+                    else None
+                ),
+                seamless=self.seamless,
+                reactivate_on_review_enter=(
+                    self.seamless and review_boundary is not None
+                ),
+                search_lens_active=search_lens_active,
+                policy_active=engine.sampling.policy_active,
+                show_policy_rank=policy_columns,
+                sort_by_policy=policy_sort and not search_lens_active,
+                logit_view=self.view_preferences.logit_view,
+                show_model_probabilities=self.view_preferences.show_model_probabilities,
+                column_focus=self.view_preferences.column_focus,
+                overlays=self.view_preferences.overlays,
+            ))
             if raw is None:
                 raise EdgeRequested()
             if (
@@ -582,8 +537,6 @@ class InteractivePolicy:
                 )
             except EditorError as exc:
                 feedback = ChoiceFeedback("error", "INVALID COMMAND", (str(exc),))
-                if not structured_choice:
-                    self.io.write(f"[invalid command] {exc}")
                 continue
             if review_boundary is not None:
                 if command.kind == CommandKind.REVIEW_BACK:
@@ -618,8 +571,6 @@ class InteractivePolicy:
                     )
                     raise ForkRequested(review_boundary)
                 review_boundary = None
-                if not structured_choice:
-                    plain_redraw = True
                 continue
             if command.kind == CommandKind.BIAS:
                 from .bias_commands import apply_bias_command
@@ -636,8 +587,6 @@ class InteractivePolicy:
                     )
                 except EditorError as exc:
                     feedback = ChoiceFeedback("error", "INVALID BIAS", (str(exc),))
-                    if not structured_choice:
-                        self.io.write(str(exc))
                     continue
                 if self.store is not None and self.episode_id is not None:
                     with self.store.transaction():
@@ -668,10 +617,6 @@ class InteractivePolicy:
                 choice_view = self._view_plan(engine)
                 lines = tuple(f"{label}: {value:+g}" for _kind, _payload, label, value in updates)
                 feedback = ChoiceFeedback("status", "STEERING UPDATED", lines)
-                if not structured_choice:
-                    for line in lines:
-                        self.io.write(line)
-                    plain_redraw = True
                 continue
             if command.kind == CommandKind.HELP:
                 self.io.write(HELP_TEXT, end="")
@@ -740,13 +685,10 @@ class InteractivePolicy:
                     "menu-expanded",
                     {"visible_rows": len(candidates)},
                 )
-                if not structured_choice:
-                    plain_redraw = True
                 continue
             if command.kind == CommandKind.MAIN_MENU:
                 search_lens_active = False
                 feedback = None
-                plain_redraw = True
                 continue
             if command.kind == CommandKind.TOKEN_SEARCH:
                 assert command.search_query is not None
@@ -759,8 +701,6 @@ class InteractivePolicy:
                     )
                 except EditorError as exc:
                     feedback = ChoiceFeedback("error", "SEARCH FAILED", (str(exc),))
-                    if not structured_choice:
-                        self.io.write(f"[search failed] {exc}")
                     continue
                 if found is not None:
                     search = found
@@ -836,11 +776,9 @@ class InteractivePolicy:
             if command.kind == CommandKind.POLICY_VIEW:
                 policy_sort = not policy_sort
                 self.view_preferences.sort_by_policy = policy_sort
-                plain_redraw = True
                 continue
             if command.kind == CommandKind.POLICY_COLUMN:
                 self.view_preferences.show = not policy_columns
-                plain_redraw = True
                 continue
             if command.kind == CommandKind.LOGIT_VIEW:
                 if command.invoked_as == "L":
@@ -862,7 +800,6 @@ class InteractivePolicy:
                     "LOGIT VIEW",
                     (f"columns: {next_view}",),
                 )
-                plain_redraw = True
                 continue
             if command.kind == CommandKind.PROBABILITY_VIEW:
                 self.view_preferences.show_model_probabilities = (
@@ -878,7 +815,6 @@ class InteractivePolicy:
                     "PROBABILITY VIEW",
                     (f"model % overlays: {state}",),
                 )
-                plain_redraw = True
                 continue
             if command.kind == CommandKind.COLUMN_FOCUS:
                 if command.invoked_as == "C":
@@ -901,7 +837,6 @@ class InteractivePolicy:
                         "COLUMN FOCUS",
                         (f"middle column: {focus}",),
                     )
-                plain_redraw = True
                 continue
             if command.kind == CommandKind.OVERLAY_TOGGLE:
                 assert command.overlay is not None
@@ -912,7 +847,6 @@ class InteractivePolicy:
                     enabled.add(command.overlay)
                 self.view_preferences.overlays = frozenset(enabled)
                 feedback = ChoiceFeedback("status", "OVERLAYS", (", ".join(sorted(enabled)) or "identity",))
-                plain_redraw = True
                 continue
             if command.kind == CommandKind.REVIEW_BACK:
                 if self.seamless:

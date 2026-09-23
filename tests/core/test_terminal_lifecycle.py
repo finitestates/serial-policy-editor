@@ -351,18 +351,19 @@ def test_terminal_backend_fallback_is_selected_at_construction(monkeypatch):
         patcher.setattr(tui.sys, "stdin", SimpleNamespace(isatty=lambda: True, fileno=lambda: 0))
         patcher.setattr(tui.sys, "stdout", SimpleNamespace(isatty=lambda: True, fileno=lambda: 1))
         patcher.setattr(tui.importlib.util, "find_spec", lambda name: object())
-        assert not TerminalIO(live_choices=False).supports_live_choices
-        assert TerminalIO().supports_live_choices
+        assert not TerminalIO(live_choices=False).capabilities.live_views
+        assert TerminalIO().capabilities.live_views
+        assert TerminalIO().capabilities.seamless_review
 
         patcher.setattr(tui.sys, "stdout", SimpleNamespace(isatty=lambda: False, fileno=lambda: 1))
-        assert not TerminalIO().supports_live_choices
+        assert not TerminalIO().capabilities.live_views
 
         patcher.setattr(tui.sys, "stdout", SimpleNamespace(isatty=lambda: True))
-        assert not TerminalIO().supports_live_choices
+        assert not TerminalIO().capabilities.live_views
 
         patcher.setattr(tui.sys, "stdout", SimpleNamespace(isatty=lambda: True, fileno=lambda: 1))
         patcher.setattr(tui.importlib.util, "find_spec", lambda name: None)
-        assert not TerminalIO().supports_live_choices
+        assert not TerminalIO().capabilities.live_views
 
 
 def test_live_requests_require_the_session_context():

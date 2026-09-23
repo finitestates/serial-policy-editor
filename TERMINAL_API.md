@@ -5,8 +5,7 @@ per interactive run and enter `with io.session():` around that run. A live
 terminal keeps one `PersistentTerminalSession` and one prompt-toolkit
 application until the context exits. A plain or piped terminal uses the same
 context with no live application. Live choice, EDGE, and prompt reads require the
-context to be active. `live_session()` remains an alias for older
-callers; it enters the same context.
+context to be active; plain requests use that same context.
 
 The episode-owning thread prepares `ChoiceViewState` and `EdgeViewState` from
 `terminal_contracts.py`, then calls `io.read_choice(state)` or
@@ -17,10 +16,12 @@ multiline prompt composition, pages, and isolated chord displays through
 `io.prompt(request)`. Existing `read`, `read_key`, `read_multiline_prompt`,
 and `page` methods are small adapters to this request. The chord flow submits
 an isolated `PromptRequest` directly.
-The `TerminalProtocol` describes the shared API; `io.capabilities` and
-`io.terminal_size()` expose whether live views are available and the usable
-size. A missing size means the caller should use its normal width fallback.
-Adding presentation fields changes the relevant request type; readers pass the
+
+The `TerminalProtocol` describes the shared API. `io.terminal_size()` supplies
+the usable width and height; a missing size calls for a normal width fallback.
+`io.capabilities.seamless_review` explicitly enables Enter to rewind from a
+review boundary. Policy and EDGE callers do not choose a renderer. Adding
+presentation fields changes the relevant request type; readers pass the
 same request object through to the selected implementation.
 
 Live views are selected at construction only when enabled, both standard
@@ -31,12 +32,17 @@ EDGE command grammar. Presentation may differ in these ways:
 | Request | Live | Plain or piped |
 | --- | --- | --- |
 | Choice | Fullscreen layout, editable command buffer, non-mutating previews and optional initial command | Text table followed by ordinary input; no prefill or previews |
-| Review and feedback | Dedicated review and status areas | Text lines and existing policy feedback messages |
+| Review and feedback | Dedicated review and status areas | Text lines prepared in the same choice request |
 | EDGE | Fullscreen menu | Text menu with the same command meanings |
 | Page | Scrollable in-application page | System text pager |
 | Single key or confirmation | In-application key binding | Unbuffered key on a TTY; first character of an input line when piped |
 | Multiline composition | In-application editor | Existing line composer |
 | Isolated chord | Dedicated prompt body, without prior status history | Body printed before input |
+
+The choice request carries search results, errors, bias feedback, review
+position, and column preferences. Both EDGE renderers use the same command
+labels, with distinct durable episode and ephemeral session actions. Plain
+input preserves command meanings but has no cursor navigation or previews.
 
 The live application owns widgets, key bindings, surface transitions, input
 gating, and preview scheduling. Preview callbacks execute on the episode-owning

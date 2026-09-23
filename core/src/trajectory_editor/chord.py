@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 import textwrap
 from dataclasses import dataclass, field
 
@@ -236,12 +235,8 @@ class ActionSequencePolicy:
 def chord_menu(io, chord: Chord, *, at_edge: bool = False) -> tuple[str, tuple[PolicyAction, ...] | None]:
     notice = ""
     while True:
-        terminal_size = getattr(io, "terminal_size", None)
-        size = terminal_size() if callable(terminal_size) else None
-        columns = (
-            size[0] if size is not None
-            else shutil.get_terminal_size(fallback=(100, 30)).columns
-        )
+        size = io.terminal_size()
+        columns = size[0] if size is not None else 100
         width = max(1, columns - 2)
         body = chord.display(width=width)
         if notice:
@@ -253,12 +248,7 @@ def chord_menu(io, chord: Chord, *, at_edge: bool = False) -> tuple[str, tuple[P
             "Chord: Enter: advance live paths | rewind: undo one round | "
             "a–z or starting rank: choose and commit | q: options | ?: help > "
         )
-        prompt_request = getattr(io, "prompt", None)
-        if callable(prompt_request):
-            raw = prompt_request(PromptRequest(prompt, body=body, isolated=True))
-        else:
-            io.write(body)
-            raw = io.read(prompt)
+        raw = io.prompt(PromptRequest(prompt, body=body, isolated=True))
         if raw is None:
             return "edge", None
         command = raw.strip().lower()

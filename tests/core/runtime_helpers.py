@@ -3,6 +3,7 @@ from __future__ import annotations
 from tests.fakes import ConformingFakeBackend, ScriptedIO
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine
+from trajectory_editor.terminal_contracts import TerminalCapabilities
 
 
 class LiveScriptedIO(ScriptedIO):
@@ -12,8 +13,8 @@ class LiveScriptedIO(ScriptedIO):
         self.remaining_tokens: list[int] = []
 
     @property
-    def supports_live_choices(self) -> bool:
-        return True
+    def capabilities(self) -> TerminalCapabilities:
+        return TerminalCapabilities(live_views=True, seamless_review=True)
 
     def read_choice(self, state):
         self.initial_commands.append(state.initial_command)

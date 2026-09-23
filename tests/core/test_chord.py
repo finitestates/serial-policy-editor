@@ -290,8 +290,9 @@ class DurableFakeBackend(ConformingFakeBackend):
 
 class LiveIO(ScriptedIO):
     @property
-    def supports_live_choices(self):
-        return True
+    def capabilities(self):
+        from trajectory_editor.terminal_contracts import TerminalCapabilities
+        return TerminalCapabilities(live_views=True, seamless_review=True)
 
     def read_choice(self, state):
         return self.read("live choice> ")
@@ -300,7 +301,7 @@ class LiveIO(ScriptedIO):
         return self.read("live edge> ")
 
     @contextmanager
-    def live_session(self):
+    def session(self):
         yield self
 
 

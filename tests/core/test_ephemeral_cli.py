@@ -174,15 +174,16 @@ def test_ephemeral_save_family_materializes_live_lineage(tmp_path):
 
 
 class _LiveContextIO(ScriptedIO):
-    def __init__(self, responses, *, supports_live_choices=True):
+    def __init__(self, responses, *, seamless_review=True):
         super().__init__(responses)
         self.entered = 0
-        self._supports_live_choices = supports_live_choices
+        self._seamless_review = seamless_review
         self.edge_modes: list[str] = []
 
     @property
-    def supports_live_choices(self):
-        return self._supports_live_choices
+    def capabilities(self):
+        from trajectory_editor.terminal_contracts import TerminalCapabilities
+        return TerminalCapabilities(live_views=self._seamless_review, seamless_review=self._seamless_review)
 
     def read_choice(self, state):
         del state
@@ -193,7 +194,7 @@ class _LiveContextIO(ScriptedIO):
         return self.read("live edge> ")
 
     @contextmanager
-    def live_session(self):
+    def session(self):
         self.entered += 1
         yield self
 
@@ -218,7 +219,7 @@ def test_ephemeral_uses_live_ui_by_default_and_plain_ui_is_an_opt_out(tmp_path):
     assert io.edge_modes == ["session"]
 
     captured.clear()
-    plain = _LiveContextIO(["q", "q"], supports_live_choices=False)
+    plain = _LiveContextIO(["q", "q"], seamless_review=False)
     with patch(
         "trajectory_editor.episode_backend_loader.load_backend",
         side_effect=lambda _args: ConformingFakeBackend(),

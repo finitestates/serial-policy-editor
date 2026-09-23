@@ -91,6 +91,7 @@ class TerminalCapabilities:
     columns: int | None = None
     rows: int | None = None
     single_key: bool = False
+    seamless_review: bool = False
 
 
 class TerminalProtocol(Protocol):
@@ -106,6 +107,10 @@ class TerminalProtocol(Protocol):
     def read_edge(self, state: EdgeViewState) -> str | None: ...
 
     def prompt(self, request: PromptRequest) -> str | None: ...
+
+    def read(self, prompt: str) -> str | None: ...
+
+    def read_key(self, prompt: str) -> str | None: ...
 
     def write(self, text: str = "", *, end: str = "\n") -> None: ...
 

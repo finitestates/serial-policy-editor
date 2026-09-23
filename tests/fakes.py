@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from contextlib import contextmanager
 
 import numpy as np
 
@@ -114,8 +115,32 @@ class ScriptedIO:
         self.output: list[str] = []
 
     @property
-    def supports_live_choices(self) -> bool:
-        return False
+    def capabilities(self):
+        from trajectory_editor.terminal_contracts import TerminalCapabilities
+        return TerminalCapabilities(live_views=False)
+
+    def terminal_size(self) -> tuple[int, int] | None:
+        return None
+
+    @contextmanager
+    def session(self):
+        yield None
+
+    def read_choice(self, state):
+        from trajectory_editor.plain_tui import read_choice
+        return read_choice(self, state)
+
+    def read_edge(self, state):
+        from trajectory_editor.plain_tui import read_edge
+        return read_edge(self, state)
+
+    def prompt(self, request):
+        if request.page:
+            self.page(request.body)
+            return ""
+        if request.body:
+            self.write(request.body)
+        return self.read_key(request.prompt) if request.single_key else self.read(request.prompt)
 
     def read(self, prompt: str) -> str | None:
         self.output.append(prompt)

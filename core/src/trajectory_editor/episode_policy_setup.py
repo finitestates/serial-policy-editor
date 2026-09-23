@@ -59,7 +59,7 @@ def durable_policy(
         io,
         store=store,
         episode_id=episode_id,
-        seamless=io.supports_live_choices,
+        seamless=io.capabilities.seamless_review,
     )
 
 
@@ -69,9 +69,8 @@ def ephemeral_policy(args: argparse.Namespace, io: Any) -> InteractivePolicy:
     return _policy(
         args,
         io,
-        # LiveSession owns the same root-relative interaction semantics without
-        # a durable recorder; live choices therefore remain seamless.
-        seamless=bool(getattr(io, "supports_live_choices", False)),
+        # LiveSession owns root-relative review semantics without a recorder.
+        seamless=io.capabilities.seamless_review,
     )
 
 
