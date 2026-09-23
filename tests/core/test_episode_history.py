@@ -144,6 +144,16 @@ def test_cutting_at_zero_discards_even_zero_width_attempts_at_the_root():
     assert tuple(item.ordinal for item in result.discarded) == (0, 1)
 
 
+@pytest.mark.parametrize("boundary", [True, 1.5])
+def test_truncate_rejects_boolean_and_fractional_boundaries(boundary):
+    history = EpisodeHistory(
+        (attempt(0, Hold(2), outcome(Hold(2), 0, (1, 2), ("A", "B"))),)
+    )
+
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        history.truncate(boundary)
+
+
 def test_cutting_at_an_action_boundary_discards_the_future_without_rebasing():
     first = outcome(Hold(2), 0, (1, 2), ("A", "B"))
     second = outcome(Write(" C", mode="exact"), 2, (3,), (" C",))

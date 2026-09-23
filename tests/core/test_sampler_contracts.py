@@ -64,6 +64,14 @@ def test_s01_sampler_config_accepts_rejects_and_round_trips_core_state():
         ObservationStatistics(np.asarray([0.0, math.nan]), SamplerConfig(), [])
 
 
+@pytest.mark.parametrize(
+    "bias_step", [0, -0.5, math.nan, math.inf, -math.inf, True]
+)
+def test_s01b_bias_step_must_be_finite_positive_and_non_boolean(bias_step):
+    with pytest.raises(EditorError, match="bias_step must be a finite positive number"):
+        SamplerConfig(bias_step=bias_step)
+
+
 def test_s02_sampler_draws_and_candidate_filters_are_deterministic():
     logits = np.asarray([4.0, 3.0, 2.0, 1.0, 0.0])
     baseline = ObservationStatistics(

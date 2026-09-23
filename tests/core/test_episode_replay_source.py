@@ -24,7 +24,7 @@ class MemoryReader:
                 "boundary_before": 0,
                 "status": "completed",
                 "stop_reason": "completed",
-                "arguments": Write(" A B", mode="exact").to_dict(),
+                "arguments": Write(" A B C", mode="exact").to_dict(),
             }
         ]
         self._tokens = [
@@ -39,6 +39,13 @@ class MemoryReader:
                 "action_ordinal": 0,
                 "token_id": 2,
                 "text": " B",
+                "realized_visible": True,
+                "is_eog": False,
+            },
+            {
+                "action_ordinal": 0,
+                "token_id": 3,
+                "text": " C",
                 "realized_visible": True,
                 "is_eog": False,
             },
@@ -90,12 +97,19 @@ def test_reader_adapter_builds_a_root_relative_recipe_without_a_store():
     recipe = build_source_replay_recipe(MemoryReader(), "source", until=1)
 
     assert recipe.source_prompt == "P"
-    assert recipe.source_visible_boundary == 2
+    assert recipe.source_visible_boundary == 3
     assert recipe.source_end_boundary == 1
     assert recipe.procedure.steps[0].action == Write(" A", mode="exact")
     assert recipe.procedure.steps[0].expectation.token_ids == (1,)
     assert recipe.controls.effective_at(0).coordinate_offset == 11
     assert recipe.controls.effective_at(0).sampling.seed == 3
+
+
+def test_reader_adapter_joins_all_text_pieces_for_a_partial_prefix():
+    recipe = build_source_replay_recipe(MemoryReader(), "source", until=2)
+
+    assert recipe.procedure.steps[0].action == Write(" A B", mode="exact")
+    assert recipe.procedure.steps[0].expectation.token_ids == (1, 2)
 
 
 def test_reader_adapter_preserves_trailing_source_sampler_state():

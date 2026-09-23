@@ -14,6 +14,7 @@ from trajectory_editor.core.actions import (
     SelectRawRank,
     Write,
 )
+from trajectory_editor.core.errors import EditorError
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine, InstructionRejected
 
@@ -228,6 +229,48 @@ def test_e09_budget_is_a_checkpoint_that_can_be_explicitly_resumed():
     runtime.resume(max_tokens=2)
     assert not runtime.checkpointed
     assert runtime.remaining == 2
+
+
+def test_observe_rejects_after_a_terminal_event():
+    runtime = engine()
+
+    runtime.apply(EndGeneration())
+
+    with pytest.raises(EditorError, match="no live decision boundary"):
+        runtime.observe()
+
+
+def test_observe_rejects_at_a_budget_checkpoint():
+    runtime = engine(max_tokens=1)
+    runtime.apply(Accept())
+
+    assert runtime.checkpointed
+    with pytest.raises(EditorError, match="no live decision boundary"):
+        runtime.observe()
+
+
+def test_phrase_accepts_a_token_count_equal_to_its_limit():
+    runtime = engine(PhraseBackend())
+
+    outcome = runtime.apply(
+        Phrase("C!", mode="exact", max_tokens=2, max_shift=100.0)
+    )
+
+    assert outcome.resolved_token_ids == (3, 5)
+    assert runtime.visible_token_ids == [3, 5]
+    assert runtime.boundary == 2
+
+
+def test_phrase_rejects_over_its_token_limit_without_changing_token_state():
+    runtime = engine(PhraseBackend())
+    original = (list(runtime.token_ids), runtime.boundary)
+
+    with pytest.raises(InstructionRejected, match="has 2 tokens; max is 1"):
+        runtime.apply(
+            Phrase("C!", mode="exact", max_tokens=1, max_shift=100.0)
+        )
+
+    assert (runtime.token_ids, runtime.boundary) == original
 
 
 @pytest.mark.parametrize(

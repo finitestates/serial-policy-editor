@@ -8,7 +8,6 @@ __pycache__/
 .ruff_cache/
 build/
 dist/
-mutation/
 
 # Local virtual environments and installed runtime dependencies
 .venv/
@@ -22,4 +21,3 @@ pyvenv.cfg
 
 # Separate local checkouts for experimental branches
 .worktrees/
-scripts/mutation_pipeline.sh

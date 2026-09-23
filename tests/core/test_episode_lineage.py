@@ -143,6 +143,70 @@ def test_siblings_and_related_records_are_sorted_by_creation_then_id():
     ]
 
 
+def test_children_sort_by_creation_key_before_episode_id():
+    records = [
+        relation("a-created-later", parent_id="root", created=3),
+        relation("root", created=1),
+        relation("z-created-earlier", parent_id="root", created=2),
+    ]
+
+    view = build_lineage(records, "root")
+
+    assert [child.episode_id for child in view.ordinary_fork_tree.children] == [
+        "z-created-earlier",
+        "a-created-later",
+    ]
+
+
+def test_replay_derived_forks_sort_by_creation_key_then_id():
+    records = [
+        relation("root", created=1),
+        relation(
+            "replay",
+            parent_id="root",
+            mode="serial-policy-replay",
+            source_id="root",
+            created=2,
+        ),
+        relation("a-created-later", parent_id="replay", created=4),
+        relation("z-created-earlier", parent_id="replay", created=3),
+    ]
+
+    view = build_lineage(records, "root")
+
+    assert [record.episode_id for record in view.replay_derived_forks] == [
+        "z-created-earlier",
+        "a-created-later",
+    ]
+
+
+def test_related_replays_with_mixed_creation_keys_remain_sortable():
+    records = [
+        relation("root", created=1),
+        EpisodeRelation(
+            episode_id="replay-bool-key",
+            parent_id="root",
+            mode="serial-policy-replay",
+            spr_source_id="root",
+            creation_key=False,
+        ),
+        EpisodeRelation(
+            episode_id="replay-missing-key",
+            parent_id="root",
+            mode="serial-policy-replay",
+            spr_source_id="root",
+            creation_key=None,
+        ),
+    ]
+
+    view = build_lineage(records, "root")
+
+    assert [record.episode_id for record in view.related_replays] == [
+        "replay-missing-key",
+        "replay-bool-key",
+    ]
+
+
 def test_missing_references_produce_partial_inspectable_results():
     records = [
         relation("orphan", parent_id="missing-parent", created=1),
