@@ -30,6 +30,7 @@ def engine(*, budget=None, backend=None, guidance=None, sampling=None):
     )
 
 
+@pytest.mark.invariant
 def test_chord_discard_and_survivor_match_ordinary_actions():
     original = engine()
     before = (original.boundary, tuple(original.token_ids), original.sampling)
@@ -65,6 +66,7 @@ def test_chord_discard_and_survivor_match_ordinary_actions():
     assert zero.boundary == 0
 
 
+@pytest.mark.current_workflow
 def test_chord_eog_and_budget_paths_and_stable_rank_selection():
     original = engine(budget=2)
     chord = Chord(original, (1, 2, 4))
@@ -81,6 +83,7 @@ def test_chord_eog_and_budget_paths_and_stable_rank_selection():
     assert outcome.stop_reason == "eog"
 
 
+@pytest.mark.current_workflow
 def test_chord_selects_eog_after_other_paths_keep_advancing():
     original = engine()
     chord = Chord(original, (1, 2, 4))
@@ -101,6 +104,7 @@ def test_chord_selects_eog_after_other_paths_keep_advancing():
     assert original.token_ids == manual.token_ids
 
 
+@pytest.mark.current_workflow
 def test_chord_parser_rejects_invalid_ranks():
     assert parse_chord("chord 3 5 15", 20) == (3, 5, 15)
     for command in ("chord 1", "chord 1 1", "chord 0 2", "chord 2 20", "chord a 2"):
@@ -108,6 +112,7 @@ def test_chord_parser_rejects_invalid_ranks():
             parse_chord(command, 8)
 
 
+@pytest.mark.current_workflow
 def test_chord_shows_bounded_shared_context_above_stable_paths():
     assert _recent_context(
         "first\nsecond\nthird\nfourth\nfifth", width=20, lines=3,
@@ -125,6 +130,7 @@ def test_chord_shows_bounded_shared_context_above_stable_paths():
     chord.discard()
 
 
+@pytest.mark.current_workflow
 def test_chord_display_tracks_live_locked_and_rewound_paths():
     chord = Chord(engine(budget=2), (1, 2, 4))
     initial = chord.display(width=40)
@@ -160,6 +166,7 @@ def test_chord_display_tracks_live_locked_and_rewound_paths():
     chord.discard()
 
 
+@pytest.mark.current_workflow
 def test_chord_display_wraps_full_continuation_at_narrow_width():
     class LongBackend(ConformingFakeBackend):
         pieces = {**ConformingFakeBackend.pieces,
@@ -179,6 +186,7 @@ def test_chord_display_wraps_full_continuation_at_narrow_width():
     chord.discard()
 
 
+@pytest.mark.current_workflow
 def test_chord_prompts_distinguish_options_and_help_explains_commit():
     io = ScriptedIO(["?", "q", "?", "c", "a"])
     result, actions = chord_menu(io, Chord(engine(), (1, 2)))
@@ -195,6 +203,7 @@ def test_chord_prompts_distinguish_options_and_help_explains_commit():
     assert "All chord paths are locked." in "".join(locked.output)
 
 
+@pytest.mark.current_workflow
 def test_live_choice_preview_recognizes_chord_and_validates_ranks():
     runtime = engine()
     observation = runtime.observe()
@@ -211,6 +220,7 @@ def test_live_choice_preview_recognizes_chord_and_validates_ranks():
     assert tuple(runtime.token_ids) == before
 
 
+@pytest.mark.current_workflow
 def test_live_chord_prompt_uses_only_current_preview_body():
     terminal = PersistentTerminalSession()
     terminal._notice = "Model loaded."
@@ -264,6 +274,7 @@ class BranchBackend(ConformingFakeBackend):
             self.reset(prefix)
 
 
+@pytest.mark.current_workflow
 def test_chord_switches_primary_and_cfg_by_shared_prefix():
     primary, guidance = BranchBackend(), BranchBackend()
     sampling = SamplerConfig(cfg_unconditional_prompt="P", cfg_scale=1.4, cfg_prefix_tokens=5)
@@ -308,6 +319,7 @@ class LiveIO(ScriptedIO):
 
 @pytest.mark.parametrize("live", [False, True])
 @pytest.mark.parametrize("ephemeral", [False, True])
+@pytest.mark.invariant
 def test_chord_cli_records_only_survivor_and_export(tmp_path, live, ephemeral):
     workspace = tmp_path / "episode.sqlite3"
     export = tmp_path / "selected.jsonl"
@@ -337,6 +349,7 @@ def test_chord_cli_records_only_survivor_and_export(tmp_path, live, ephemeral):
             assert [step["action"] for step in replay_procedure(store, episode_id)] == [SelectRawRank(1), Accept()]
 
 
+@pytest.mark.invariant
 def test_chord_discard_cli_keeps_durable_actions_empty(tmp_path):
     workspace = tmp_path / "episode.sqlite3"
     io = ScriptedIO(["chord 1 2", "", "q", "discard", "q", "q"])
@@ -353,6 +366,7 @@ def test_chord_discard_cli_keeps_durable_actions_empty(tmp_path):
 
 @pytest.mark.parametrize("choice, expected", [("4", ["select-raw-rank"]),
                                             ("b", ["select-raw-rank", "accept"])])
+@pytest.mark.invariant
 def test_durable_chord_eog_selection_uses_ordinary_terminal_action(tmp_path, choice, expected):
     workspace = tmp_path / "episode.sqlite3"
     responses = ["chord 1 2 4"]
@@ -372,6 +386,7 @@ def test_durable_chord_eog_selection_uses_ordinary_terminal_action(tmp_path, cho
 
 
 @pytest.mark.parametrize("ephemeral", [False, True])
+@pytest.mark.invariant
 def test_chord_budget_selection_stops_at_checkpoint(tmp_path, ephemeral):
     workspace = tmp_path / "episode.sqlite3"
     io = ScriptedIO(["chord 1 2", "", "a", "q"])

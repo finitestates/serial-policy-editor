@@ -5,6 +5,7 @@ import pytest
 from trajectory_editor.core.errors import EditorError
 from trajectory_editor.episode_lineage_source import build_lineage_view
 
+pytestmark = pytest.mark.invariant
 
 class MemoryReader:
     """Primitive relation reader; deliberately not an EpisodeStore."""

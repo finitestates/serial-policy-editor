@@ -24,6 +24,7 @@ def engine() -> EpisodeEngine:
     )
 
 
+@pytest.mark.current_workflow
 def test_live_session_owns_records_metadata_and_adapter_hooks():
     events = []
     exports = []
@@ -49,6 +50,7 @@ def test_live_session_owns_records_metadata_and_adapter_hooks():
     assert [event.kind for event in events] == ["created", "generated", "exported"]
 
 
+@pytest.mark.invariant
 def test_rewind_trims_records_restores_live_engine_and_retains_tail_for_review():
     session = LiveSession(engine())
     episode = session.branch_handle(session.branch.branch_id)
@@ -63,6 +65,7 @@ def test_rewind_trims_records_restores_live_engine_and_retains_tail_for_review()
     assert len(rewind.discarded_tape) == 1
 
 
+@pytest.mark.invariant
 def test_rewind_inside_a_conditional_hold_clears_the_discarded_stop_condition():
     session = LiveSession(
         EpisodeEngine(
@@ -80,6 +83,7 @@ def test_rewind_inside_a_conditional_hold_clears_the_discarded_stop_condition():
     assert episode.tape[0].expectation.stop_reason == "requested-length"
 
 
+@pytest.mark.invariant
 def test_rewind_removes_a_zero_width_replay_handoff_at_the_target_boundary():
     session = LiveSession(engine())
     episode = session.branch_handle(session.branch.branch_id)
@@ -95,6 +99,7 @@ def test_rewind_removes_a_zero_width_replay_handoff_at_the_target_boundary():
     assert episode.rewind_state.discarded_tape[0].action == Accept()
 
 
+@pytest.mark.invariant
 def test_forked_branch_can_rewind_before_its_fork_point_and_continue_locally():
     session = LiveSession(engine(), branch_id="root")
     session.generate(Accept())
@@ -108,6 +113,7 @@ def test_forked_branch_can_rewind_before_its_fork_point_and_continue_locally():
     assert child.tape[0].action == Write("C", mode="exact")
 
 
+@pytest.mark.invariant
 def test_fork_creates_an_independent_child_with_lineage_and_inherited_history():
     session = LiveSession(engine(), branch_id="root")
     parent = session.branch_handle("root")
@@ -126,6 +132,7 @@ def test_fork_creates_an_independent_child_with_lineage_and_inherited_history():
     assert parent.fork_state.child == child.branch
 
 
+@pytest.mark.current_workflow
 def test_live_session_reactivates_branch_records_on_one_backend():
     backend = ConformingFakeBackend()
     session = LiveSession(
@@ -147,6 +154,7 @@ def test_live_session_reactivates_branch_records_on_one_backend():
     assert [outcome.boundary_after for outcome in session.history_outcomes] == [1, 2]
 
 
+@pytest.mark.invariant
 def test_nested_fork_truncates_a_partial_action_in_root_coordinates():
     session = LiveSession(engine(), branch_id="root")
     session.generate(Accept())
@@ -159,6 +167,7 @@ def test_nested_fork_truncates_a_partial_action_in_root_coordinates():
     assert grandchild.history_tape[-1].action == Write(" A", mode="exact")
 
 
+@pytest.mark.invariant
 def test_branch_reactivation_restores_sampler_and_budget_at_the_fork_point():
     session = LiveSession(
         EpisodeEngine(
@@ -186,6 +195,7 @@ def test_branch_reactivation_restores_sampler_and_budget_at_the_fork_point():
     assert session.engine.remaining == 3
 
 
+@pytest.mark.invariant
 def test_optional_cache_snapshots_do_not_change_branch_semantics():
     class SnapshotBackend(ConformingFakeBackend):
         def snapshot_cache(self):
@@ -209,6 +219,7 @@ def test_optional_cache_snapshots_do_not_change_branch_semantics():
     assert session.history_visible_token_ids == (1, 2)
 
 
+@pytest.mark.invariant
 def test_quit_and_discard_need_no_persistence_and_prevent_further_generation():
     session = LiveSession(engine())
     episode = session.branch_handle(session.branch.branch_id)
@@ -230,6 +241,7 @@ def test_quit_and_discard_need_no_persistence_and_prevent_further_generation():
         discarded.generate()
 
 
+@pytest.mark.current_workflow
 def test_live_session_import_does_not_load_episode_store():
     # Check the actual package import graph in a clean interpreter; other test
     # modules are allowed to use persistence in the main test process.

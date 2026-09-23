@@ -13,7 +13,6 @@ from trajectory_editor.activation_vectors import (
 )
 from trajectory_editor.model_hash import sha256_path
 
-
 def _write_cvector(path):
     def string(value):
         encoded = value.encode("utf-8")
@@ -43,6 +42,7 @@ from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.steering_vector_cli import main as vector_main
 
+pytestmark = pytest.mark.optional
 
 class ControlBackend(ConformingFakeBackend):
     def __init__(self):

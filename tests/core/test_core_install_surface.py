@@ -11,7 +11,9 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 import numpy as np
+import pytest
 
+pytestmark = pytest.mark.current_workflow
 
 def test_core_install_surface_without_research_modules(tmp_path):
     """Exercise the reduced install surface in a fresh interpreter import graph."""

@@ -5,9 +5,12 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 from tests.fakes import ScriptedIO, ScriptedTextIO
 from trajectory_editor.terminal_contracts import TerminalProtocol
 
+pytestmark = pytest.mark.current_workflow
 
 SOURCE = Path(__file__).resolve().parents[2] / "core" / "src" / "trajectory_editor"
 RENDERERS = {"plain_tui", "persistent_tui", "live_tui", "edge_tui"}

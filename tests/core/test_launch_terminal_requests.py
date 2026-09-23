@@ -15,6 +15,7 @@ from trajectory_editor.episode_cli import _live_edge_menu, main
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_store import EpisodeStore
 
+pytestmark = pytest.mark.current_workflow
 
 class StartupIO(ScriptedIO):
     def __init__(self, responses, events):

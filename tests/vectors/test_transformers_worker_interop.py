@@ -19,8 +19,7 @@ from trajectory_editor.activation_vectors import SteeringVectorArtifact
 from trajectory_editor.decoder import LlamaCppDecoder, LlamaCppSettings
 from trajectory_editor.llama_worker import capture_hidden_state_pair
 
-
-pytestmark = pytest.mark.transformers_gguf_smoke
+pytestmark = pytest.mark.optional
 
 PROMPT_A = "A calm cat watches the rain today"
 PROMPT_B = "An angry dog chases the storm tonight"

@@ -3,8 +3,11 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
+import pytest
+
 import trajectory_editor
 
+pytestmark = pytest.mark.optional
 
 def steering_cli():
     vectors_src = Path(__file__).resolve().parents[2] / "vector" / "src"

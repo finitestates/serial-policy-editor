@@ -13,6 +13,7 @@ from trajectory_editor.episode_replay_source import replay_procedure
 from trajectory_editor.episode_store import EpisodeStore
 from trajectory_editor.teacher_plan import load_teacher_tape_jsonl
 
+pytestmark = pytest.mark.current_workflow
 
 @pytest.mark.parametrize("ephemeral", [False, True])
 def test_shared_command_scenario_through_live_and_plain_adapters(tmp_path, ephemeral):

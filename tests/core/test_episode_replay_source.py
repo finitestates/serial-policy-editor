@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from tests.core.runtime_helpers import NoEogBackend
 from trajectory_editor.core.actions import Hold, Write
 from trajectory_editor.core.sampler_config import SamplerConfig
@@ -10,6 +12,7 @@ from trajectory_editor.episode_replay_source import (
 )
 from trajectory_editor.episode_store import EpisodeStore
 
+pytestmark = pytest.mark.invariant
 
 class MemoryReader:
     """Minimal durable-record reader; deliberately not an EpisodeStore."""

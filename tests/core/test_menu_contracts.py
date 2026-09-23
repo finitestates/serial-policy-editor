@@ -18,6 +18,7 @@ from trajectory_editor.teacher_commands import (
 from trajectory_editor.terminal_contracts import BoundaryReview
 from trajectory_editor.core.ui import InsertMode
 
+pytestmark = pytest.mark.current_workflow
 
 def runtime():
     return EpisodeEngine(

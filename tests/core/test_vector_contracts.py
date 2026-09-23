@@ -21,6 +21,7 @@ from trajectory_editor.transformers_backend import (
     _supports_logits_to_keep,
 )
 
+pytestmark = pytest.mark.current_workflow
 
 def _artifact(**overrides):
     value = {

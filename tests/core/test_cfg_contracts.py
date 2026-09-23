@@ -132,6 +132,7 @@ def save(store, runtime, name='source'):
 
 @pytest.mark.parametrize('prompt,expected', [('U', (1, 5)), ('', (1,)), ('<BOS>U', (1, 1, 5))])
 @pytest.mark.parametrize('boundary', [0, 1])
+@pytest.mark.invariant
 def test_s03_l01_prompt_entrances_and_real_resume(tmp_path, prompt, expected, boundary):
     sampling = config(cfg_unconditional_prompt=prompt)
     text = engine(sampling=sampling)
@@ -153,6 +154,7 @@ def test_s03_l01_prompt_entrances_and_real_resume(tmp_path, prompt, expected, bo
         assert restored.guidance_backend.work == [('reset', (*expected, *text.visible_token_ids))]
 
 
+@pytest.mark.invariant
 def test_s03_tokenless_guidance_and_missing_backend_fail_clearly(tmp_path):
     sampling = config(cfg_unconditional_prompt='')
     with EpisodeStore(tmp_path / 'episodes.db') as store:
@@ -172,6 +174,7 @@ def test_s03_tokenless_guidance_and_missing_backend_fail_clearly(tmp_path):
 
 
 @pytest.mark.parametrize('boundary', [0, 1, 2])
+@pytest.mark.invariant
 def test_l04_live_and_durable_forks_keep_identical_cfg_window(tmp_path, boundary):
     live = LiveSession(engine(sampling=config(cfg_prefix_tokens=2)), prompt='conditional')
     with EpisodeStore(tmp_path / 'episodes.db') as store:
@@ -191,6 +194,7 @@ def test_l04_live_and_durable_forks_keep_identical_cfg_window(tmp_path, boundary
         assert durable._cfg_active() == (boundary < 2)
 
 
+@pytest.mark.current_workflow
 def test_s03_l02_l07_cutoff_rewind_and_lazy_catchup():
     runtime = engine(sampling=config(cfg_prefix_tokens=2), max_tokens=2)
     guidance = runtime.guidance_backend
@@ -215,6 +219,7 @@ def test_s03_l02_l07_cutoff_rewind_and_lazy_catchup():
     assert guidance.work[-2:] == [('reset', (1, 5, 7)), ('eval', (8,))]
 
 
+@pytest.mark.current_workflow
 def test_s03_append_only_evaluation_and_sampler_changes():
     runtime = engine()
     guidance = runtime.guidance_backend
@@ -243,6 +248,7 @@ def test_s03_append_only_evaluation_and_sampler_changes():
     assert guidance.work[-1] == ('reset', (1, 6, 5, 7, 8, 9, 10))
 
 
+@pytest.mark.current_workflow
 def test_s03_shared_guidance_invalidates_cached_observation():
     # Independent primary backends isolate guidance ownership itself. A's
     # ledger and cached observation are unchanged while B uses shared guidance.
@@ -256,6 +262,7 @@ def test_s03_shared_guidance_invalidates_cached_observation():
     assert shared.work == [('reset', (1, 5)), ('reset', (1, 6, 5)), ('reset', (1, 5))]
 
 
+@pytest.mark.invariant
 def test_l04_l06_root_and_sibling_switches():
     session = LiveSession(engine(), prompt='conditional')
     session.generate(Write('x', mode='exact'))
@@ -281,6 +288,7 @@ def test_l04_l06_root_and_sibling_switches():
 
 
 @pytest.mark.parametrize('resumed', [False, True])
+@pytest.mark.invariant
 def test_l01_fresh_root_never_inherits_guidance_continuation(tmp_path, resumed):
     source = engine()
     with EpisodeStore(tmp_path / 'episodes.db') as store:
@@ -297,6 +305,7 @@ def test_l01_fresh_root_never_inherits_guidance_continuation(tmp_path, resumed):
         assert_context(fresh)
 
 
+@pytest.mark.invariant
 def test_r01_r08_l06_source_controls_and_historical_restoration(tmp_path):
     unguided = config(cfg_unconditional_prompt=None)
     session = LiveSession(engine(sampling=unguided), prompt='conditional')
@@ -327,6 +336,7 @@ def test_r01_r08_l06_source_controls_and_historical_restoration(tmp_path):
         assert_context(runtime)
 
 
+@pytest.mark.invariant
 def test_l08_destination_tokenizer_owns_both_contexts(tmp_path):
     with EpisodeStore(tmp_path / 'episodes.db') as store:
         source = engine()
@@ -347,6 +357,7 @@ def test_l08_destination_tokenizer_owns_both_contexts(tmp_path):
 
 
 @pytest.mark.parametrize('scale', [0, 1, 1.7])
+@pytest.mark.invariant
 def test_s03_formula_and_conditional_only_hidden_controls(scale):
     runtime = engine(sampling=config(cfg_scale=scale, activation_vector=(.25,),
                                     activation_vector_strength=1,
@@ -361,6 +372,7 @@ def test_s03_formula_and_conditional_only_hidden_controls(scale):
 
 
 @pytest.mark.parametrize('final_only', [False, True])
+@pytest.mark.invariant
 def test_r08_ephemeral_setup_provisions_future_cfg(final_only):
     from trajectory_editor.episode_cli import build_parser
     from trajectory_editor.ephemeral_runtime import run_ephemeral
@@ -381,6 +393,7 @@ def test_r08_ephemeral_setup_provisions_future_cfg(final_only):
 
 
 @pytest.mark.parametrize('fixed', [False, True])
+@pytest.mark.invariant
 def test_r01_cli_replay_provisions_cfg_after_unguided_root(tmp_path, fixed):
     from trajectory_editor.episode_cli import main
     path = tmp_path / 'episodes.db'
@@ -407,6 +420,7 @@ def test_r01_cli_replay_provisions_cfg_after_unguided_root(tmp_path, fixed):
         assert [row['token_id'] for row in store.tokens('replayed')] == [8, 9]
 
 
+@pytest.mark.current_workflow
 @pytest.mark.parametrize('kind', ['llama', 'transformers'])
 @pytest.mark.parametrize('cache', [True, False])
 def test_s08_adapter_cfg_evaluation_preserves_cache_mode(kind, cache):

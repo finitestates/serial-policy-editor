@@ -57,6 +57,7 @@ def _wait_until_ready(session, pipe, state):
     raise AssertionError(f"terminal never accepted {type(state).__name__}")
 
 
+@pytest.mark.invariant
 def test_one_application_transitions_across_choice_review_edge_page_prompt_choice():
     stream, output = _terminal()
     prompt = PromptRequest("Name> ")
@@ -94,6 +95,7 @@ def test_one_application_transitions_across_choice_review_edge_page_prompt_choic
     assert rendered.count("\x1b[?1049l") == 1
 
 
+@pytest.mark.current_workflow
 @pytest.mark.parametrize("theme", LIVE_THEME_NAMES)
 def test_live_terminal_redraws_after_resize_and_handles_narrow_multiline_surfaces(theme):
     dimensions = [10, 28]
@@ -152,6 +154,7 @@ def test_live_terminal_redraws_after_resize_and_handles_narrow_multiline_surface
     assert rendered.count("\x1b[?1049l") == 1
 
 
+@pytest.mark.current_workflow
 def test_live_application_startup_failure_releases_its_thread():
     class FailedStartup(PersistentTerminalSession):
         async def _run_application(self):
@@ -166,6 +169,7 @@ def test_live_application_startup_failure_releases_its_thread():
     assert session._thread is not None and not session._thread.is_alive()
 
 
+@pytest.mark.current_workflow
 def test_live_composer_rejects_empty_then_returns_to_edge_after_cancel():
     stream, output = _terminal()
     prompt = PromptRequest("New prompt > ", multiline=True, isolated=True)
@@ -195,6 +199,7 @@ def test_live_composer_rejects_empty_then_returns_to_edge_after_cancel():
     assert "\x1b[?1049l" in stream.getvalue()
 
 
+@pytest.mark.current_workflow
 def test_live_composer_preserves_multiline_text_on_submit():
     stream, output = _terminal()
     prompt = PromptRequest("New prompt > ", multiline=True, isolated=True)
@@ -210,6 +215,7 @@ def test_live_composer_preserves_multiline_text_on_submit():
     assert "\x1b[?1049l" in stream.getvalue()
 
 
+@pytest.mark.current_workflow
 def test_captured_output_replays_once_after_live_terminal_restoration(monkeypatch, capsys):
     stream, output = _terminal()
 
@@ -231,6 +237,7 @@ def test_captured_output_replays_once_after_live_terminal_restoration(monkeypatc
     assert captured.err == "diagnostic message\n"
 
 
+@pytest.mark.invariant
 def test_preview_callback_runs_on_episode_owner_thread():
     stream, output = _terminal()
     resolved = Event()
@@ -260,6 +267,7 @@ def test_preview_callback_runs_on_episode_owner_thread():
     assert callback_threads == [owner]
 
 
+@pytest.mark.invariant
 def test_unexpected_preview_failure_wakes_owner_and_restores_terminal():
     stream, output = _terminal()
     called = Event()
@@ -283,6 +291,7 @@ def test_unexpected_preview_failure_wakes_owner_and_restores_terminal():
     assert "\x1b[?1049l" in stream.getvalue()
 
 
+@pytest.mark.invariant
 def test_expected_preview_rejection_remains_an_editable_choice():
     stream, output = _terminal()
     rejected = Event()
@@ -308,6 +317,7 @@ def test_expected_preview_rejection_remains_an_editable_choice():
     assert "\x1b[?1049l" in stream.getvalue()
 
 
+@pytest.mark.current_workflow
 def test_candidate_preview_validation_is_rendered_as_feedback():
     state = _choice_state()
 
@@ -322,6 +332,7 @@ def test_candidate_preview_validation_is_rendered_as_feedback():
     assert "rank 2 is unavailable" in preview.detail
 
 
+@pytest.mark.invariant
 def test_superseded_and_abandoned_previews_are_cancelled():
     session = PersistentTerminalSession()
     request = _Request(_choice_state())
@@ -347,6 +358,7 @@ def test_superseded_and_abandoned_previews_are_cancelled():
     assert captured[0].cancelled()
 
 
+@pytest.mark.invariant
 def test_submitted_or_unrendered_request_suppresses_stale_input():
     session = PersistentTerminalSession()
     old = _Request(PromptRequest("Old> "))
@@ -371,6 +383,7 @@ def test_submitted_or_unrendered_request_suppresses_stale_input():
     assert request.response.result() == "fresh"
 
 
+@pytest.mark.invariant
 def test_typeahead_from_old_choice_does_not_submit_new_choice():
     stream, output = _terminal()
     old = _choice_state()
@@ -391,6 +404,7 @@ def test_typeahead_from_old_choice_does_not_submit_new_choice():
     assert "\x1b[?1049l" in stream.getvalue()
 
 
+@pytest.mark.invariant
 def test_terminal_restores_screen_when_episode_raises():
     stream, output = _terminal()
     try:
@@ -405,6 +419,7 @@ def test_terminal_restores_screen_when_episode_raises():
     assert rendered.index("\x1b[?1049h") < rendered.index("\x1b[?1049l")
 
 
+@pytest.mark.invariant
 def test_input_eof_releases_waiting_owner_and_restores_terminal():
     stream, output = _terminal()
     state = PromptRequest("Input> ")
@@ -425,6 +440,7 @@ def test_input_eof_releases_waiting_owner_and_restores_terminal():
     assert "\x1b[?1049l" in stream.getvalue()
 
 
+@pytest.mark.invariant
 def test_interrupt_releases_waiting_owner_and_restores_terminal(monkeypatch):
     stream, output = _terminal()
     state = PromptRequest("Input> ")
@@ -442,6 +458,7 @@ def test_interrupt_releases_waiting_owner_and_restores_terminal(monkeypatch):
     assert "\x1b[?1049l" in stream.getvalue()
 
 
+@pytest.mark.invariant
 def test_plain_terminal_consumes_the_same_choice_edge_and_prompt_requests(monkeypatch, capsys):
     replies = iter(("1", "c", "yes", "a"))
     monkeypatch.setattr("builtins.input", lambda prompt: next(replies))
@@ -459,6 +476,7 @@ def test_plain_terminal_consumes_the_same_choice_edge_and_prompt_requests(monkey
     assert "a (1)" in output
 
 
+@pytest.mark.current_workflow
 def test_terminal_io_creates_one_live_application_for_its_session(monkeypatch):
     stream, output = _terminal()
     created = []
@@ -486,6 +504,7 @@ def test_terminal_io_creates_one_live_application_for_its_session(monkeypatch):
     assert "\x1b[?1049l" in stream.getvalue()
 
 
+@pytest.mark.current_workflow
 def test_terminal_backend_fallback_is_selected_at_construction(monkeypatch):
     with monkeypatch.context() as patcher:
         patcher.setattr(tui.sys, "stdin", SimpleNamespace(isatty=lambda: True, fileno=lambda: 0))
@@ -506,6 +525,7 @@ def test_terminal_backend_fallback_is_selected_at_construction(monkeypatch):
         assert not TerminalIO().capabilities.live_views
 
 
+@pytest.mark.current_workflow
 def test_live_requests_require_the_session_context():
     terminal = TerminalIO(live_choices=False)
     terminal._live_choices = True
@@ -517,6 +537,7 @@ def test_live_requests_require_the_session_context():
         terminal.prompt(PromptRequest("Input> "))
 
 
+@pytest.mark.current_workflow
 def test_text_helpers_share_the_prompt_request(monkeypatch):
     terminal = TerminalIO(live_choices=False)
     requests = []
@@ -536,6 +557,7 @@ def test_text_helpers_share_the_prompt_request(monkeypatch):
     assert requests[3].page and requests[3].body == "details"
 
 
+@pytest.mark.current_workflow
 def test_long_status_is_not_inferred_to_be_a_page():
     class LiveSink:
         def __init__(self):

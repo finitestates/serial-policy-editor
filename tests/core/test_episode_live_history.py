@@ -14,6 +14,7 @@ from trajectory_editor.episode_live_history import (
 )
 from trajectory_editor.episode_runner import TapeStep
 
+pytestmark = pytest.mark.invariant
 
 def engine() -> EpisodeEngine:
     return EpisodeEngine(

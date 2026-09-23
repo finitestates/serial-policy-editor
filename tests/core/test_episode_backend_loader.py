@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from tests.fakes import ScriptedIO
 from trajectory_editor.episode_backend_loader import (
     load_backend,
@@ -10,6 +12,7 @@ from trajectory_editor.episode_backend_loader import (
 )
 from trajectory_editor.episode_cli import build_parser
 
+pytestmark = pytest.mark.current_workflow
 
 class _LoadedBackend:
     def provenance(self, *, include_model_sha256: bool):

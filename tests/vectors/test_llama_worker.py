@@ -20,6 +20,7 @@ from trajectory_editor.llama_worker import (
     capture_hidden_state_pair,
 )
 
+pytestmark = pytest.mark.optional
 
 def worker_response(filename: str = "model.gguf") -> dict:
     return {

@@ -75,6 +75,7 @@ def start(path, commands, *flags):
     "until, expected",
     [(0, ""), (1, " A"), (2, " A B"), (3, " A B!"), (4, " A B!!")],
 )
+@pytest.mark.invariant
 def test_cli_replay_until_returns_to_the_selected_live_edge(
     source_workspace, until, expected
 ):
@@ -98,6 +99,7 @@ def test_cli_replay_until_returns_to_the_selected_live_edge(
     "commands",
     [["spr #1 m", "", "quit"], ["spr #1 --until 5", "quit"], ["spr #1 --until -1", "quit"], ["spr #1 --until nope", "quit"]],
 )
+@pytest.mark.invariant
 def test_cli_replay_until_invalid_or_cancelled_selection_does_not_insert(
     source_workspace, commands
 ):
@@ -107,6 +109,7 @@ def test_cli_replay_until_invalid_or_cancelled_selection_does_not_insert(
 
 
 @pytest.mark.parametrize("until, seed", [(0, 999), (1, 999), (2, 123), (3, 123)])
+@pytest.mark.invariant
 def test_cli_replay_until_uses_sampler_state_at_the_selected_boundary(
     source_workspace, until, seed
 ):
@@ -132,6 +135,7 @@ def test_cli_replay_until_uses_sampler_state_at_the_selected_boundary(
         assert final_sampling(store, "destination").seed == seed
 
 
+@pytest.mark.invariant
 def test_cli_edge_replay_appends_live_text_without_mutating_the_source(source_workspace):
     with EpisodeStore(source_workspace) as store:
         source_tokens = store.tokens("source")
@@ -148,6 +152,7 @@ def test_cli_edge_replay_appends_live_text_without_mutating_the_source(source_wo
         assert project_fork_map(store, "destination") == "P|0| hello|1|P|2| A|3| B|4|!|5|!|6|"
 
 
+@pytest.mark.invariant
 def test_cli_fork_from_persists_inherited_history_in_root_coordinates(source_workspace):
     run_cli(
         source_workspace,
@@ -174,6 +179,7 @@ def test_cli_fork_from_persists_inherited_history_in_root_coordinates(source_wor
 
 @pytest.mark.parametrize("cfg_prefix_tokens", [3, 5])
 @pytest.mark.parametrize("route", ["launch", "sealed-switch"])
+@pytest.mark.invariant
 def test_cli_cfg_fork_uses_inherited_tokens_once(tmp_path, cfg_prefix_tokens, route):
     path = tmp_path / "episodes.sqlite3"
     sampling = SamplerConfig(
@@ -227,6 +233,7 @@ def test_cli_cfg_fork_uses_inherited_tokens_once(tmp_path, cfg_prefix_tokens, ro
     assert guidance_backend.tokens == [7, 1, 2], io.output
 
 
+@pytest.mark.invariant
 def test_cli_prompt_replay_uses_the_destination_tokenizer_and_remains_rewindable(tmp_path):
     path = tmp_path / "episodes.sqlite3"
     with EpisodeStore(path) as store:
@@ -259,6 +266,7 @@ def test_cli_prompt_replay_uses_the_destination_tokenizer_and_remains_rewindable
         assert store.actions("destination")[1]["arguments"]["mode"] == "exact"
 
 
+@pytest.mark.current_workflow
 def test_durable_edge_bare_sampler_opens_the_existing_override_prompt(source_workspace):
     with EpisodeStore(source_workspace) as store:
         engine = EpisodeEngine(

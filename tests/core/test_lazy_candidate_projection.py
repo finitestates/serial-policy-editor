@@ -17,6 +17,7 @@ from trajectory_editor.episode_store import EpisodeStore
 from trajectory_editor.episode_ui import InteractivePolicy
 from trajectory_editor.projector import project_episode
 
+pytestmark = pytest.mark.current_workflow
 
 def test_candidate_view_computes_only_visible_metrics_and_reuses_normalizer(monkeypatch):
     engine = EpisodeEngine(

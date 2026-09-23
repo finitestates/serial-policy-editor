@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from trajectory_editor.core.actions import Accept, Hold
 from trajectory_editor.core.results import ReplayExpectation
 from trajectory_editor.core.sampler_config import SamplerConfig
@@ -16,6 +18,7 @@ from trajectory_editor.teacher_plan import (
 )
 from tests.fakes import ConformingFakeBackend
 
+pytestmark = pytest.mark.invariant
 
 def _episode() -> EpisodeEngine:
     return EpisodeEngine(ConformingFakeBackend(), initial_text="Prompt", initial_token_ids=[7], sampling=SamplerConfig(temperature=0.0))

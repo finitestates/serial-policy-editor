@@ -33,6 +33,7 @@ from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.teacher_plan import load_teacher_plan
 
 
+@pytest.mark.invariant
 def test_s01_sampler_config_accepts_rejects_and_round_trips_core_state():
     config = SamplerConfig(
         temperature=0.7,
@@ -67,11 +68,13 @@ def test_s01_sampler_config_accepts_rejects_and_round_trips_core_state():
 @pytest.mark.parametrize(
     "bias_step", [0, -0.5, math.nan, math.inf, -math.inf, True]
 )
+@pytest.mark.invariant
 def test_s01b_bias_step_must_be_finite_positive_and_non_boolean(bias_step):
     with pytest.raises(EditorError, match="bias_step must be a finite positive number"):
         SamplerConfig(bias_step=bias_step)
 
 
+@pytest.mark.invariant
 def test_s02_sampler_draws_and_candidate_filters_are_deterministic():
     logits = np.asarray([4.0, 3.0, 2.0, 1.0, 0.0])
     baseline = ObservationStatistics(
@@ -110,6 +113,7 @@ def test_s02_sampler_draws_and_candidate_filters_are_deterministic():
     assert 0.0 < position_uniform_token(17, "a" * 64, 3, 4) < 1.0
 
 
+@pytest.mark.invariant
 def test_s03_cfg_is_scoped_to_its_configured_prefix():
     sampling = SamplerConfig(
         temperature=0.0,
@@ -131,6 +135,7 @@ def test_s03_cfg_is_scoped_to_its_configured_prefix():
     assert not runtime._cfg_active()
 
 
+@pytest.mark.invariant
 def test_s04_history_penalties_change_policy_order_not_raw_rank():
     logits = np.asarray([2.0, 1.0, 0.0, -1.0])
     config = SamplerConfig(
@@ -153,6 +158,7 @@ def test_s04_history_penalties_change_policy_order_not_raw_rank():
         ObservationStatistics(np.asarray([1.0, 0.0]), SamplerConfig(repeat_penalty=1.1), None)
 
 
+@pytest.mark.current_workflow
 def test_s04b_observation_probabilities_are_on_demand_not_dense():
     """Dense vocabulary soft-max is not stored; on-demand probs match logsumexp."""
 
@@ -213,6 +219,7 @@ def test_s04b_observation_probabilities_are_on_demand_not_dense():
     )
 
 
+@pytest.mark.current_workflow
 def test_s04c_logsumexp_deferred_until_nll_or_probabilities():
     """Draw / ranks / top-ids work without dense V exp+sum; NLL triggers once."""
 
@@ -259,6 +266,7 @@ def test_s04c_logsumexp_deferred_until_nll_or_probabilities():
 
 
 
+@pytest.mark.current_workflow
 def test_s04d_candidates_skip_probabilities_until_requested():
     """Menu/search rows can ship ranks+logits without waking dense logsumexp."""
     from trajectory_editor.candidate_columns import (
@@ -372,6 +380,7 @@ def test_s04d_candidates_skip_probabilities_until_requested():
     assert observed.statistics._raw_logsumexp_ready is False
 
 
+@pytest.mark.current_workflow
 def test_s04e_column_focus_persists_in_view_preferences():
     """c cycles / C clears column_focus on PolicyViewPreferences across chooses."""
     from tests.fakes import ScriptedIO
@@ -425,6 +434,7 @@ def test_s04e_column_focus_persists_in_view_preferences():
     assert policy2.view_preferences.show_model_probabilities is False
 
 
+@pytest.mark.current_workflow
 def test_s04f_neighbor_margin_matches_consecutive_logit_gaps():
     """Consecutive margin is logit[i]-logit[i+1] on the ordered menu; last is None."""
     from trajectory_editor.candidate_columns import CandidateColumns
@@ -458,6 +468,7 @@ def test_s04f_neighbor_margin_matches_consecutive_logit_gaps():
 
 
 
+@pytest.mark.current_workflow
 def test_s04g_logit_z_score_uses_full_vocab_mean_std_without_softmax_wake():
     """z = (logit - mean) / std over full-vocab raw logits (population ddof=0)."""
     from trajectory_editor.candidate_columns import CandidateColumns
@@ -521,6 +532,7 @@ def test_s04g_logit_z_score_uses_full_vocab_mean_std_without_softmax_wake():
     rendered = CandidateColumns(column_focus="z").values(rows[0])
     assert f"{rows[0].logit_z:+.2f}" in rendered
 
+@pytest.mark.invariant
 def test_s05_tail_bias_assigns_multi_token_credit_only_to_final_token():
     matcher = BiasMatcher((BiasRule(routes=((10, 11),), bias=2.0, mode="tail"),))
     assert matcher.active_biases([]) == {}
@@ -531,6 +543,7 @@ def test_s05_tail_bias_assigns_multi_token_credit_only_to_final_token():
     assert tail.active_biases([10, 11]) == {12: 3.0}
 
 
+@pytest.mark.invariant
 def test_s06_conditional_bias_waits_for_trigger_and_stops_at_terminator():
     matcher = BiasMatcher((BiasRule(
         routes=((20,),),
@@ -555,6 +568,7 @@ def test_s06_conditional_bias_waits_for_trigger_and_stops_at_terminator():
         EndGeneration(),
     ],
 )
+@pytest.mark.invariant
 def test_s07_core_actions_and_replay_expectations_round_trip(action):
     assert action_from_dict(action.to_dict()) == action
     expectation = ReplayExpectation((1, 2), terminal_token_id=0, stop_reason="eog")
@@ -565,6 +579,7 @@ def test_s07_core_actions_and_replay_expectations_round_trip(action):
     }) == expectation
 
 
+@pytest.mark.invariant
 def test_replay_plan_rejects_finish_as_unrecognized_action():
     with pytest.raises(
         EditorError,
@@ -575,6 +590,7 @@ def test_replay_plan_rejects_finish_as_unrecognized_action():
         SelectRawRank(0)
 
 
+@pytest.mark.current_workflow
 def test_s08_engine_uses_core_sampler_without_research_fields():
     assert "token_preference_vector" not in SamplerConfig.__dataclass_fields__
     assert "reference_prior_routes" not in SamplerConfig.__dataclass_fields__

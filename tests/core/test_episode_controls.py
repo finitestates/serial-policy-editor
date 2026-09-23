@@ -14,6 +14,7 @@ from trajectory_editor.episode_controls import (
     SamplerState,
 )
 
+pytestmark = pytest.mark.invariant
 
 FINGERPRINT = "a" * 64
 

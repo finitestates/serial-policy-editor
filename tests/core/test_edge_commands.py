@@ -28,6 +28,7 @@ from trajectory_editor.edge_commands import (
     parse_edge_command,
 )
 
+pytestmark = pytest.mark.current_workflow
 
 @pytest.mark.parametrize(
     "raw, expected",

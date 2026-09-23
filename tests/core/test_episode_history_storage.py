@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from trajectory_editor.episode_history import materialize_stored_prefix
 
+pytestmark = pytest.mark.invariant
 
 def test_stored_prefix_keeps_absolute_boundaries_when_cutting_a_hold():
     actions = [

@@ -13,6 +13,7 @@ from trajectory_editor.core.results import (
 )
 from trajectory_editor.episode_history import EpisodeHistory, RecordedAttempt
 
+pytestmark = pytest.mark.invariant
 
 def evidence(boundary: int, token_id: int, text: str) -> TokenEvidence:
     return TokenEvidence(
