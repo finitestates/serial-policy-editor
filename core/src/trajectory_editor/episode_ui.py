@@ -39,7 +39,7 @@ from .episode_hash import token_prefix_sha256
 from .core.sampling import raw_rank
 from .teacher_commands import HELP_TEXT, CommandKind, ForkAddressKind, parse_command
 from .terminal_contracts import (
-    BoundaryReview, ChoiceFeedback, ChoiceViewState, SEAMLESS_REACTIVATE,
+    BoundaryReview, ChoiceFeedback, ChoiceViewState, PromptRequest, SEAMLESS_REACTIVATE,
     TerminalProtocol,
 )
 from .tui import TerminalIO
@@ -619,7 +619,7 @@ class InteractivePolicy:
                 feedback = ChoiceFeedback("status", "STEERING UPDATED", lines)
                 continue
             if command.kind == CommandKind.HELP:
-                self.io.write(HELP_TEXT, end="")
+                self.io.page(HELP_TEXT)
                 continue
             if command.kind == CommandKind.EDIT:
                 assert command.action is not None
@@ -648,9 +648,10 @@ class InteractivePolicy:
                 raise EdgeRequested()
             if command.kind == CommandKind.TEACHER_EOG:
                 if not command.force:
-                    key = self.io.read_key(
-                        "[e/Enter] confirm EOG  [Backspace/Esc] cancel > "
-                    )
+                    key = self.io.prompt(PromptRequest(
+                        "[e/Enter] confirm EOG  [Backspace/Esc] cancel > ",
+                        single_key=True,
+                    ))
                     if key not in {"e", "E", "\n", "\r", ""}:
                         feedback = ChoiceFeedback(
                             "status", "EOG CANCELLED", ("Generation remains live.",)
@@ -763,7 +764,7 @@ class InteractivePolicy:
             if command.kind in {CommandKind.NOTE_BEFORE, CommandKind.NOTE_AFTER}:
                 note = command.note
                 if note is None:
-                    note = self.io.read("Note> ")
+                    note = self.io.prompt(PromptRequest("Note> "))
                 if note:
                     self._interaction(
                         observation.boundary,

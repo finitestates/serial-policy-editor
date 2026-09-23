@@ -11,6 +11,7 @@ from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_ui import InteractivePolicy
 from trajectory_editor.plain_tui import read_edge
 from trajectory_editor.terminal_contracts import EdgeViewState
+from trajectory_editor.teacher_commands import HELP_TEXT
 
 
 class CountingBackend(ConformingFakeBackend):
@@ -45,6 +46,37 @@ class LiveCapture(LiveScriptedIO):
     def read_choice(self, state):
         self.states.append(state)
         return super().read_choice(state)
+
+
+def test_help_note_and_eog_confirmation_return_to_the_choice():
+    class RequestCapture(PlainCapture):
+        def __init__(self):
+            super().__init__(["?", "n", "memo", "e", "x", "1"])
+            self.pages = []
+            self.prompts = []
+
+        def page(self, text):
+            self.pages.append(text)
+
+        def prompt(self, request):
+            self.prompts.append(request)
+            return super().prompt(request)
+
+    terminal = RequestCapture()
+    engine = EpisodeEngine(
+        CountingBackend(), initial_text="P", initial_token_ids=[7],
+        sampling=SamplerConfig(temperature=0.0),
+    )
+    action = InteractivePolicy(io=terminal, menu_size=1).choose(
+        engine, engine.observe(),
+    )
+    assert action.rank == 1
+    assert terminal.pages == [HELP_TEXT]
+    assert [request.prompt for request in terminal.prompts] == [
+        "Note> ", "[e/Enter] confirm EOG  [Backspace/Esc] cancel > ",
+    ]
+    assert terminal.prompts[1].single_key
+    assert len(terminal.states) == 4
 
 
 def test_choice_requests_preserve_actions_feedback_and_lazy_statistics():

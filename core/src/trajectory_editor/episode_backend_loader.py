@@ -12,12 +12,13 @@ from .backend_factory import BACKEND_NAMES, create_backend
 from .core.errors import EditorError
 from .decoder import LlamaCppSettings
 from .transformers_backend import TransformersSettings
+from .terminal_contracts import PromptRequest
 
 
 class BackendLoadIO(Protocol):
     """The small interactive surface used when saved model loading needs help."""
 
-    def read(self, message: str) -> str | None: ...
+    def prompt(self, request: PromptRequest) -> str | None: ...
 
     def write(self, message: str) -> None: ...
 
@@ -107,7 +108,7 @@ def load_episode_backend(
             setattr(selected, key, value)
     while True:
         if selected.model is None:
-            path = io.read("Saved model location unavailable. Model path (Enter cancels)> ")
+            path = io.prompt(PromptRequest("Saved model location unavailable. Model path (Enter cancels)> "))
             if not path:
                 raise EditorError("model loading cancelled")
             selected.model = Path(path).expanduser()
@@ -119,10 +120,10 @@ def load_episode_backend(
             )
         ))
         if changed:
-            answer = io.read(
+            answer = io.prompt(PromptRequest(
                 f"Previously used {old_path} ({saved.get('backend')}). Continue with "
                 f"{selected.model} ({selected.backend}) in a new linked episode? [y/N]> "
-            )
+            ))
             if not answer or answer.strip().lower() not in {"y", "yes"}:
                 raise EditorError("model change cancelled")
         try:
@@ -166,10 +167,10 @@ def load_episode_backend(
             if not source:
                 raise
             io.write(f"Could not load {selected.model}: {exc}")
-            path = io.read("Replacement model path (Enter cancels)> ")
+            path = io.prompt(PromptRequest("Replacement model path (Enter cancels)> "))
             if not path:
                 raise EditorError("model loading cancelled") from exc
-            kind = io.read("Backend: llama.cpp or transformers (Enter keeps current)> ")
+            kind = io.prompt(PromptRequest("Backend: llama.cpp or transformers (Enter keeps current)> "))
             if kind:
                 if kind.strip() not in BACKEND_NAMES:
                     io.write("Unknown backend.")

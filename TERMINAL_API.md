@@ -36,13 +36,24 @@ EDGE command grammar. Presentation may differ in these ways:
 | EDGE | Fullscreen menu | Text menu with the same command meanings |
 | Page | Scrollable in-application page | System text pager |
 | Single key or confirmation | In-application key binding | Unbuffered key on a TTY; first character of an input line when piped |
-| Multiline composition | In-application editor | Existing line composer |
+| Multiline composition | In-application editor; Escape then Enter submits, Ctrl-D cancels, empty prompts remain editable | Line-oriented prompt; Enter submits one nonempty line, Ctrl-D cancels |
 | Isolated chord | Dedicated prompt body, without prior status history | Body printed before input |
 
 The choice request carries search results, errors, bias feedback, review
 position, and column preferences. Both EDGE renderers use the same command
 labels, with distinct durable episode and ephemeral session actions. Plain
 input preserves command meanings but has no cursor navigation or previews.
+Initial prompts and bare `new` use the same composition request. For exact
+multiline startup text in plain mode, use `--new-prompt-file FILE` (or
+`new TEXT` for a single-line root at EDGE). An interactive new launch enters
+the terminal session before collecting its prompt or loading the model. A
+piped launch without a source fails validation and does not read stdin.
+
+Callers request pages explicitly with `io.page(text)` and give prompts their
+own `PromptRequest.body` when they need accompanying context. Ordinary
+`io.write(text)` remains status output regardless of line count. This keeps
+help, fork-map selection, confirmations, and chord previews from carrying
+the previous prompt's body into the next workflow.
 
 The live application owns widgets, key bindings, surface transitions, input
 gating, and preview scheduling. Preview callbacks execute on the episode-owning

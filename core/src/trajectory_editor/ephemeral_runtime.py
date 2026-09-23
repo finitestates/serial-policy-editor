@@ -15,7 +15,7 @@ from .core.errors import EditorError
 from .chord import ActionSequencePolicy, Chord, ChordRequested, chord_menu
 from .edge_status import sampler_summary
 from .episode_engine import EpisodeEngine
-from .episode_prompts import read_new_prompt
+from .episode_prompts import read_new_prompt, read_prompt_file
 from .episode_runner import (
     EdgeRequested,
     ForkRequested,
@@ -26,7 +26,7 @@ from .episode_runner import (
 from .episode_session import LiveSession, LiveSessionRoster
 from .projector import project_live_fork_map
 from .teacher_plan import export_live_teacher_tape
-from .terminal_contracts import EdgeViewState, TerminalProtocol
+from .terminal_contracts import EdgeViewState, PromptRequest, TerminalProtocol
 
 
 def ephemeral_edge_menu(
@@ -68,17 +68,16 @@ def ephemeral_edge_menu(
 
     def show_fork_map() -> tuple[str, Any] | None:
         state = session.branch_state()
-        io.page(
-            project_live_fork_map(
-                session.prompt,
-                state.visible_token_ids,
-                session.engine.backend,
-            )
+        fork_map = project_live_fork_map(
+            session.prompt,
+            state.visible_token_ids,
+            session.engine.backend,
         )
         while True:
-            entered = io.read(
-                f"Fork boundary (0..{state.boundary}; blank cancels) > "
-            )
+            entered = io.prompt(PromptRequest(
+                f"Fork boundary (0..{state.boundary}; blank cancels) > ",
+                body=fork_map,
+            ))
             if entered is None:
                 return "quit", None
             value = entered.strip()
@@ -117,9 +116,9 @@ def ephemeral_edge_menu(
         if isinstance(command, edge_commands.ContinueCommand):
             return "continue", "keep"
         if isinstance(command, edge_commands.NewCommand):
-            prompt_text = command.prompt or ""
-            if not prompt_text:
-                prompt_text = read_new_prompt(io) or ""
+            prompt_text = command.prompt if command.prompt else read_new_prompt(io)
+            if prompt_text is None:
+                continue
             if not prompt_text:
                 io.write("New prompt must not be empty.")
                 continue
@@ -239,7 +238,7 @@ def run_ephemeral(
     initial_text = (
         args.new_prompt
         if args.new_prompt is not None
-        else args.new_prompt_file.read_text(encoding="utf-8")
+        else read_prompt_file(args.new_prompt_file)
     )
     backend = episode_backend_loader.load_backend(args)
     provenance = backend.provenance()

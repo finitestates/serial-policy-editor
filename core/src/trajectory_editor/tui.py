@@ -143,10 +143,8 @@ class TerminalIO:
 
     def read_multiline_prompt(self) -> str | None:
         """Read a new root with the same composer used for initial prompts."""
-        return self.prompt(PromptRequest(
-            "Write at least one character. Press Escape then Enter to continue.\n\n",
-            multiline=True,
-        ))
+        from .episode_prompts import read_new_prompt
+        return read_new_prompt(self)
 
     def read_key(self, prompt: str) -> str | None:
         """Read one unbuffered key without echoing it on an interactive TTY."""
@@ -154,10 +152,7 @@ class TerminalIO:
 
     def write(self, text: str = "", *, end: str = "\n") -> None:
         if self._live_session is not None:
-            if len(text.splitlines()) > 6:
-                self._live_session.page(text)
-            else:
-                self._live_session.write(text, end=end)
+            self._live_session.write(text, end=end)
             return
         print(text, end=end, flush=True)
 

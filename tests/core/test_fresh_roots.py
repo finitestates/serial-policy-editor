@@ -98,17 +98,42 @@ def test_ephemeral_help_and_bare_new_expose_the_polished_commands():
 
     class PromptIO(ScriptedIO):
         def __init__(self):
-            super().__init__(["new"])
-            self.multiline_calls = 0
+            super().__init__(["new", "Q"])
+            self.requests = []
 
-        def read_multiline_prompt(self):
-            self.multiline_calls += 1
-            return "Q"
+        def prompt(self, request):
+            self.requests.append(request)
+            return super().prompt(request)
 
     io = PromptIO()
     action, value = ephemeral_edge_menu(io, _session())
     assert (action, value) == ("new", "Q")
-    assert io.multiline_calls == 1
+    assert len(io.requests) == 1 and io.requests[0].multiline
+
+
+def test_plain_bare_new_uses_line_prompt_without_cli_or_live_application(monkeypatch):
+    import builtins
+
+    from trajectory_editor.tui import TerminalIO
+
+    replies = iter(("new", "", "Q"))
+    monkeypatch.setattr("builtins.input", lambda prompt: next(replies))
+    original_import = builtins.__import__
+
+    def no_cli_import(name, *args, **kwargs):
+        if name == "episode_cli" or name.endswith(".episode_cli"):
+            raise AssertionError("plain composer imported the CLI")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", no_cli_import)
+    terminal = TerminalIO(live_choices=False)
+    with terminal.session():
+        assert ephemeral_edge_menu(terminal, _session()) == ("new", "Q")
+
+
+def test_bare_new_cancellation_returns_to_ephemeral_edge():
+    io = ScriptedIO(["new", None, "q"])
+    assert ephemeral_edge_menu(io, _session()) == ("quit", None)
 
 
 def test_ephemeral_new_has_one_model_load_and_global_stable_addresses(tmp_path):

@@ -201,12 +201,18 @@ def prompt(io: IO, request: PromptRequest) -> str | None:
     if request.page:
         pydoc.pager(request.body)
         return ""
-    if request.multiline:
-        from .episode_cli import _read_initial_prompt
-
-        return _read_initial_prompt()
-    if request.isolated:
+    if request.body:
         io.write(request.body)
+    if request.multiline:
+        io.write(
+            "Enter submits one line; Ctrl-D cancels. "
+            "Use --new-prompt-file for exact multiline input."
+        )
+        while True:
+            value = _read_line(request.prompt)
+            if value is None or value:
+                return value
+            io.write("Write at least one character.")
     if not request.single_key:
         return _read_line(request.prompt)
     if not sys.stdin.isatty():

@@ -70,7 +70,7 @@ from .controller_profiles import (
     profile_arguments,
 )
 from .tui import TerminalIO
-from .terminal_contracts import EdgeViewState
+from .terminal_contracts import EdgeViewState, PromptRequest
 from .ui_themes import LIVE_THEME_NAMES
 from .version import VERSION
 from .teacher_plan import TeacherTape, export_teacher_tape, load_teacher_tape_jsonl
@@ -149,7 +149,7 @@ def _select_launch_source(args: argparse.Namespace) -> LaunchSource:
 def _resolve_launch_source(
     args: argparse.Namespace, store: EpisodeStore, selection: LaunchSource,
 ) -> LaunchSource:
-    """Resolve stored IDs and obtain a prompt for an interactive new launch."""
+    """Resolve stored IDs without opening any terminal input."""
 
     for field in ("resume", "fork_from", "replay", "projector", "lineage"):
         value = getattr(args, field)
@@ -159,23 +159,39 @@ def _resolve_launch_source(
         raise EditorError("--at is only valid with --fork-from")
     if args.procedure and not args.projector:
         raise EditorError("--procedure requires --projector EPISODE_ID")
-    if selection.kind == "new" and not any((
-        args.new_prompt is not None, args.new_prompt_file is not None,
-        args.teacher_plan is not None, args.list_episodes,
-        args.lineage is not None, args.export_teacher_plan is not None,
-        args.projector is not None,
-    )):
-        if not sys.stdin.isatty() or not sys.stdout.isatty():
-            raise EditorError(
-                "no episode source supplied; use --new-prompt, "
-                "--new-prompt-file, --replay, --resume, or --fork-from"
-            )
-        args.new_prompt = episode_prompts.read_initial_prompt()
     # Backend provenance historically prefers resume, then fork, then replay
     # even when a prompt is also supplied. Keep that lookup independent of the
     # execution branch chosen below.
     source_id = args.resume or args.fork_from or args.replay
     return LaunchSource(selection.kind, source_id, selection.teacher_tape)
+
+
+def _needs_launch_prompt(args: argparse.Namespace, selection: LaunchSource) -> bool:
+    return selection.kind == "new" and not any((
+        args.new_prompt is not None, args.new_prompt_file is not None,
+        args.teacher_plan is not None, args.list_episodes,
+        args.lineage is not None, args.export_teacher_plan is not None,
+        args.projector is not None,
+    ))
+
+
+def _validate_prompt_source(args: argparse.Namespace, selection: LaunchSource) -> None:
+    if _needs_launch_prompt(args, selection) and (
+        not sys.stdin.isatty() or not sys.stdout.isatty()
+    ):
+        raise EditorError(
+            "no episode source supplied; use --new-prompt, "
+            "--new-prompt-file, --replay, --resume, or --fork-from"
+        )
+
+
+def _collect_launch_prompt(args: argparse.Namespace, selection: LaunchSource,
+                           io: TerminalIO) -> None:
+    if _needs_launch_prompt(args, selection):
+        prompt = episode_prompts.read_new_prompt(io)
+        if prompt is None:
+            raise EditorError("prompt entry cancelled")
+        args.new_prompt = prompt
 
 
 def _positive_int(value: str) -> int:
@@ -444,13 +460,13 @@ def _live_edge_menu(
             io.write(str(exc))
             continue
         if isinstance(command, edge_commands.ListCommand):
-            io.page(
-                store.workspace_list(
+            selected = io.prompt(PromptRequest(
+                "Episode #number (Enter returns)> ",
+                body=store.workspace_list(
                     include_finished=command.include_finished,
                     current=episode_id,
-                )
-            )
-            selected = io.read("Episode #number (Enter returns)> ")
+                ),
+            ))
             if selected and selected.strip():
                 try:
                     return "switch", store.resolve_id(selected.strip())
@@ -484,9 +500,9 @@ def _live_edge_menu(
         if isinstance(command, edge_commands.ContinueCommand):
             return "continue", "keep"
         if isinstance(command, edge_commands.NewCommand):
-            prompt_text = command.prompt or ""
-            if not prompt_text:
-                prompt_text = episode_prompts.read_new_prompt(io) or ""
+            prompt_text = command.prompt if command.prompt else episode_prompts.read_new_prompt(io)
+            if prompt_text is None:
+                continue
             if not prompt_text:
                 io.write("New prompt must not be empty.")
                 continue
@@ -502,11 +518,12 @@ def _live_edge_menu(
             )
             continue
         if isinstance(command, edge_commands.ForkMapCommand):
-            io.page(project_fork_map(store, episode_id))
+            fork_map = project_fork_map(store, episode_id)
             while True:
-                entered = io.read(
-                    f"Fork boundary (0..{engine.boundary}; blank cancels) > "
-                )
+                entered = io.prompt(PromptRequest(
+                    f"Fork boundary (0..{engine.boundary}; blank cancels) > ",
+                    body=fork_map,
+                ))
                 if entered is None:
                     return "quit", None
                 value = entered.strip()
@@ -563,11 +580,16 @@ def _live_edge_menu(
             try:
                 source_id = store.resolve_id(command.source)
                 until = None
-                io.page("Source replay map (recorded output; replay may differ).\n"
-                        "Source 0 inserts only the prompt; destination tokens remain individually indexed.\n"
-                        + project_fork_map(store, source_id))
+                replay_map = (
+                    "Source replay map (recorded output; replay may differ).\n"
+                    "Source 0 inserts only the prompt; destination tokens remain individually indexed.\n"
+                    + project_fork_map(store, source_id)
+                )
                 while True:
-                    entered = io.read("Replay through source boundary (blank cancels) > ")
+                    entered = io.prompt(PromptRequest(
+                        "Replay through source boundary (blank cancels) > ",
+                        body=replay_map,
+                    ))
                     if entered is None or not entered.strip():
                         break
                     try:
@@ -684,6 +706,7 @@ def main(
         args._explicit_options = cli_explicit | profile_applied
         sampling_factory = SamplerConfig.from_record
         selection = _select_launch_source(args)
+        _validate_prompt_source(args, selection)
         teacher_tape = selection.teacher_tape
         if args.ephemeral:
             if args.random_seed:
@@ -691,6 +714,7 @@ def main(
                 print(f"Random seed: {args.seed}", flush=True)
             io = TerminalIO(live_choices=not args.plain_ui, live_theme=args.theme)
             with io.session():
+                _collect_launch_prompt(args, selection, io)
                 return ephemeral_runtime.run_ephemeral(
                     args,
                     io=io,
@@ -738,6 +762,8 @@ def main(
                 print(f"Random seed: {args.seed}", flush=True)
 
             io = TerminalIO(live_choices=not args.plain_ui, live_theme=args.theme)
+            ui_stack.enter_context(io.session())
+            _collect_launch_prompt(args, selection, io)
             source_id = selection.episode_id
             source = store.get_episode(source_id) if source_id else None
             backend, provenance, model_changed = (
@@ -824,7 +850,7 @@ def main(
                 initial_text = (
                     args.new_prompt
                     if args.new_prompt is not None
-                    else args.new_prompt_file.read_text(encoding="utf-8")
+                    else episode_prompts.read_prompt_file(args.new_prompt_file)
                 )
                 sampling = sampler_from_args(args)
                 sampling = apply_activation_artifact(sampling, activation_artifact, args)
@@ -964,7 +990,6 @@ def main(
                     )
                     _record_fork_edge_state(store, episode_id, engine)
 
-            ui_stack.enter_context(io.session())
             store.visit(episode_id)
             enter_edge = False
             while True:
@@ -1108,7 +1133,9 @@ def main(
                     sealed = target_episode["status"] in {"completed", "failed"}
                     if sealed:
                         io.page(project_episode(store, destination).text)
-                        reply = io.read("Finished episode. Fork from end? [y/N]> ")
+                        reply = io.prompt(PromptRequest(
+                            "Finished episode. Fork from end? [y/N]> "
+                        ))
                         if not reply or reply.strip().lower() not in {"y", "yes"}:
                             enter_edge = True
                             continue

@@ -128,7 +128,7 @@ def test_ephemeral_fork_map_uses_root_relative_boundaries():
     action, value = ephemeral_edge_menu(io, session)
 
     assert (action, value) == ("quit", None)
-    assert any(item == "P|0| A|1|" for item in io.output)
+    assert any("P|0| A|1|" in item for item in io.output)
 
 
 def test_ephemeral_branches_use_numeric_aliases_for_switching():

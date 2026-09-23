@@ -12,7 +12,7 @@ import asyncio
 import sys
 import threading
 from _thread import interrupt_main
-from collections import OrderedDict, deque
+from collections import OrderedDict
 from concurrent.futures import Future
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field, replace
@@ -59,12 +59,13 @@ class _PromptView:
 
     def __init__(self, submit, enabled):
         self.state = PromptRequest("")
+        self._error = ""
         self.submit = submit
         self.command_buffer = Buffer(multiline=True, read_only=Condition(lambda: not enabled()))
         self.body = TextArea(read_only=True, scrollbar=True, wrap_lines=True)
         self.input_control = BufferControl(buffer=self.command_buffer)
         self.layout = Layout(HSplit([
-            self.body,
+            ConditionalContainer(self.body, Condition(lambda: bool(self.state.body))),
             ConditionalContainer(Window(FormattedTextControl(lambda: self.state.prompt),
                                         dont_extend_height=True),
                                  Condition(lambda: not self.state.page)),
@@ -79,10 +80,11 @@ class _PromptView:
                 wrap_lines=True,
             ),
                                  Condition(lambda: not self.state.page)),
-            Window(FormattedTextControl(lambda: (
+            Window(FormattedTextControl(lambda: self._error or (
                 "↑/↓ · PgUp/PgDn scroll · Enter/Esc returns" if self.state.page else
                 "Press a key" if self.state.single_key else
                 "Escape then Enter submits · Ctrl-D cancels" if self.state.multiline else
+                "PgUp/PgDn scroll · Enter submits · Ctrl-D cancels" if self.state.body else
                 "Enter submits · Ctrl-D cancels"
             )), height=1, style="class:hint"),
         ]))
@@ -98,7 +100,21 @@ class _PromptView:
             filter=Condition(lambda: self.state.multiline),
         )
         def submit_multiline(event):
+            if not self.command_buffer.text:
+                self._error = "Write at least one character."
+                event.app.invalidate()
+                return
             self.submit(result=self.command_buffer.text)
+
+        @self.bindings.add("pageup", filter=Condition(lambda: bool(self.state.body) and not self.state.page))
+        def scroll_up(event):
+            self.body.window.vertical_scroll = max(0, self.body.window.vertical_scroll - 10)
+            event.app.invalidate()
+
+        @self.bindings.add("pagedown", filter=Condition(lambda: bool(self.state.body) and not self.state.page))
+        def scroll_down(event):
+            self.body.window.vertical_scroll += 10
+            event.app.invalidate()
 
         @self.bindings.add("escape", eager=True, filter=Condition(lambda: not self.state.multiline))
         def escape(event):
@@ -122,6 +138,7 @@ class _PromptView:
 
     def update(self, state: PromptRequest) -> None:
         self.state = state
+        self._error = ""
         self.command_buffer.reset()
         self.body.buffer.set_document(Document(_safe_context_text(state.body)), bypass_readonly=True)
         self.layout.focus(self.body if state.page else self.input_control)
@@ -158,8 +175,6 @@ class PersistentTerminalSession(AbstractContextManager):
         self._interrupted = threading.Event()
         self._closing = False
         self._notice = ""
-        self._messages = deque(maxlen=80)
-        self._prompt_context = ""
 
     @property
     def accepting_input(self) -> bool:
@@ -355,7 +370,6 @@ class PersistentTerminalSession(AbstractContextManager):
 
     def _write(self, text):
         lines = _safe_context_text(text).splitlines()
-        self._messages.extend(line for line in lines if line)
         if lines:
             self._notice = next((line for line in reversed(lines) if line), self._notice)
         self.application.invalidate()
@@ -367,7 +381,6 @@ class PersistentTerminalSession(AbstractContextManager):
         self._current = request
         state = request.state
         if isinstance(state, ChoiceViewState):
-            self._prompt_context = ""
             resolver = state.resolve_candidate
             state = replace(state,
                 resolve_insertion=lambda text, mode: self._preview(
@@ -384,7 +397,6 @@ class PersistentTerminalSession(AbstractContextManager):
                 self.choice_view.update(state)
             self._surface = self.choice_view
         elif isinstance(state, EdgeViewState):
-            self._prompt_context = ""
             if self.edge_view is None:
                 self.edge_view = LiveEdgeView(state, submit=self._submit,
                                               enabled=lambda: self.accepting_input)
@@ -392,15 +404,8 @@ class PersistentTerminalSession(AbstractContextManager):
                 self.edge_view.update(state)
             self._surface = self.edge_view
         else:
-            if state.page:
-                self._prompt_context = state.body
-            elif state.isolated:
-                # Isolated prompts own their entire body; prior status and
-                # generic prompt history must not leak into them.
-                self._prompt_context = ""
+            if state.isolated:
                 self._notice = ""
-            else:
-                state = replace(state, body=self._prompt_context or "\n".join(self._messages))
             if self._prompt_view is None:
                 self._prompt_view = _PromptView(self._submit, lambda: self.accepting_input)
             self._prompt_view.update(state)

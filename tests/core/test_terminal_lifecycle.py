@@ -83,12 +83,78 @@ def test_one_application_transitions_across_choice_review_edge_page_prompt_choic
             assert complete(session.read_edge, edge, "c\r") == "c"
             assert complete(session.prompt, page, "\r") == ""
             assert complete(session.prompt, prompt, "name\r") == "name"
+            assert session._prompt_view.body.text == ""
             assert complete(session.read_choice, next_choice, "1\r") == "1"
             assert session.application is application
             assert session.choice_view is choice_view
             assert session.choice_view is not None and session.edge_view is not None
     assert "\x1b[?1049h" in stream.getvalue()
     assert "\x1b[?1049l" in stream.getvalue()
+
+
+def test_live_composer_rejects_empty_then_returns_to_edge_after_cancel():
+    stream, output = _terminal()
+    prompt = PromptRequest("New prompt > ", multiline=True, isolated=True)
+    edge = EdgeViewState("episode", 0, 3, 3, "sampler")
+    with create_pipe_input() as pipe:
+        with PersistentTerminalSession(input_device=pipe, output_device=output) as session:
+            def feed_prompt():
+                _wait_until_ready(session, pipe, prompt)
+                pipe.send_text("\x1b\r")
+                deadline = monotonic() + 3
+                while monotonic() < deadline and session._prompt_view._error == "":
+                    sleep(.005)
+                assert session._prompt_view._error == "Write at least one character."
+                assert not session._current.response.done()
+                pipe.send_text("\x04")
+
+            feeder = Thread(target=feed_prompt)
+            feeder.start()
+            assert session.prompt(prompt) is None
+            feeder.join(timeout=3)
+            assert not feeder.is_alive()
+            edge_feeder = Thread(target=_send_when_ready, args=(session, pipe, edge, "q\r"))
+            edge_feeder.start()
+            assert session.read_edge(edge) == "q"
+            edge_feeder.join(timeout=3)
+            assert not edge_feeder.is_alive()
+    assert "\x1b[?1049l" in stream.getvalue()
+
+
+def test_live_composer_preserves_multiline_text_on_submit():
+    stream, output = _terminal()
+    prompt = PromptRequest("New prompt > ", multiline=True, isolated=True)
+    with create_pipe_input() as pipe:
+        with PersistentTerminalSession(input_device=pipe, output_device=output) as session:
+            feeder = Thread(target=_send_when_ready, args=(
+                session, pipe, prompt, "first\rsecond\x1b\r",
+            ))
+            feeder.start()
+            assert session.prompt(prompt) == "first\nsecond"
+            feeder.join(timeout=3)
+            assert not feeder.is_alive()
+    assert "\x1b[?1049l" in stream.getvalue()
+
+
+def test_captured_output_replays_once_after_live_terminal_restoration(monkeypatch, capsys):
+    stream, output = _terminal()
+
+    def create_session(*, theme):
+        return PersistentTerminalSession(input_device=pipe, output_device=output, theme=theme)
+
+    terminal = TerminalIO(live_choices=False)
+    terminal._live_choices = True
+    monkeypatch.setattr(persistent_tui, "PersistentTerminalSession", create_session)
+    with create_pipe_input() as pipe:
+        with pytest.raises(EditorError, match="startup failed"):
+            with terminal.session():
+                print("loading message")
+                print("diagnostic message", file=tui.sys.stderr)
+                raise EditorError("startup failed")
+    assert "\x1b[?1049l" in stream.getvalue()
+    captured = capsys.readouterr()
+    assert captured.out == "loading message\n"
+    assert captured.err == "diagnostic message\n"
 
 
 def test_preview_callback_runs_on_episode_owner_thread():
@@ -394,3 +460,27 @@ def test_text_helpers_share_the_prompt_request(monkeypatch):
     assert requests[1].single_key
     assert requests[2].multiline
     assert requests[3].page and requests[3].body == "details"
+
+
+def test_long_status_is_not_inferred_to_be_a_page():
+    class LiveSink:
+        def __init__(self):
+            self.writes = []
+            self.prompts = []
+
+        def write(self, text, *, end):
+            self.writes.append((text, end))
+
+        def prompt(self, request):
+            self.prompts.append(request)
+            return ""
+
+    terminal = TerminalIO(live_choices=False)
+    sink = LiveSink()
+    terminal._live_session = sink
+    text = "\n".join(str(index) for index in range(10))
+    terminal.write(text)
+    assert sink.writes == [(text, "\n")]
+    assert sink.prompts == []
+    terminal.page(text)
+    assert sink.prompts == [PromptRequest("", body=text, page=True)]

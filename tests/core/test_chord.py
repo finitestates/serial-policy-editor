@@ -213,7 +213,6 @@ def test_live_choice_preview_recognizes_chord_and_validates_ranks():
 
 def test_live_chord_prompt_uses_only_current_preview_body():
     terminal = PersistentTerminalSession()
-    terminal._messages.append("Model loaded.")
     terminal._notice = "Model loaded."
     terminal.application = SimpleNamespace(
         layout=SimpleNamespace(focus=lambda control: None), invalidate=lambda: None,
@@ -223,6 +222,8 @@ def test_live_chord_prompt_uses_only_current_preview_body():
     )))
     assert terminal._prompt_view.body.text == "a (1) | b (2)"
     assert terminal._notice == ""
+    terminal._show(_Request(PromptRequest("Next > ")))
+    assert terminal._prompt_view.body.text == ""
 
     class ChordIO(ScriptedIO):
         def __init__(self):
