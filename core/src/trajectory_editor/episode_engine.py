@@ -21,6 +21,7 @@ from .core.actions import (
 )
 from .core.backend import InferenceBackend, require_inference_backend
 from .core.candidates import Candidate
+from .candidate_columns import CandidateViewPlan
 from .core.errors import EditorError
 from .core.results import ActionOutcome, Divergence, ReplayExpectation, TokenEvidence
 from .core.sampler_config import SamplerConfig
@@ -52,15 +53,22 @@ class Observation:
     proposal_token_id: int
     proposal_text: str
     proposal_raw_rank: int
-    proposal_raw_probability: float
     proposal_decoder_probability: float
-    proposal_policy_rank: int
     statistics: ObservationStatistics = field(repr=False, compare=False)
 
     @cached_property
     def context_text(self) -> str:
         """Render this captured boundary once, only when display needs it."""
         return self._render_context(list(self.prefix_token_ids), special=True)
+
+    @cached_property
+    def proposal_raw_probability(self) -> float:
+        """Model soft-max mass for the proposal; computed on first read."""
+        return float(self.statistics.raw_probabilities([self.proposal_token_id])[0])
+
+    @cached_property
+    def proposal_policy_rank(self) -> int:
+        return self.statistics.policy_rank(self.proposal_token_id)
 
 
 class EpisodeEngine:
@@ -141,6 +149,7 @@ class EpisodeEngine:
         # This engine owns one backend/tokenizer. Sampler changes and rewinds
         # do not change token spellings, so their classifications remain valid.
         self._token_boundaries: dict[int, frozenset[str]] = {}
+        self._metric_sink: Callable[[Observation, int], None] | None = None
 
     @property
     def initial_token_ids(self) -> tuple[int, ...]:
@@ -552,9 +561,7 @@ class EpisodeEngine:
             proposal_token_id=proposal,
             proposal_text=self.backend.token_text(proposal),
             proposal_raw_rank=statistics.raw_rank(proposal),
-            proposal_raw_probability=float(statistics.raw_probabilities([proposal])[0]),
             proposal_decoder_probability=distribution.probability(proposal),
-            proposal_policy_rank=statistics.policy_rank(proposal),
             statistics=statistics,
         )
         self._observation = observation
@@ -617,7 +624,12 @@ class EpisodeEngine:
         )
 
     def candidates(
-        self, observation: Observation, *, start_rank: int = 1, count: int = 12
+        self,
+        observation: Observation,
+        *,
+        start_rank: int = 1,
+        count: int = 12,
+        view: CandidateViewPlan | None = None,
     ) -> tuple[Candidate, ...]:
         if start_rank < 1 or count < 1:
             raise EditorError("candidate rank and count must be positive")
@@ -627,37 +639,85 @@ class EpisodeEngine:
             return ()
         statistics = observation.statistics
         ordered = statistics.top_raw_ids(end)[start_rank - 1 : end]
-        return self._candidates_for_tokens(observation, ordered)
+        return self._candidates_for_tokens(observation, ordered, view=view)
 
     def policy_candidates(
-        self, observation: Observation, *, count: int = 12
+        self,
+        observation: Observation,
+        *,
+        count: int = 12,
+        view: CandidateViewPlan | None = None,
     ) -> tuple[Candidate, ...]:
         """Full-vocabulary policy top-N; selections still use absolute raw rank."""
         if count < 1:
             raise EditorError("candidate count must be positive")
         self._validate_observation(observation)
         ordered = observation.statistics.top_policy_ids(min(count, len(observation.logits)))
-        return self._candidates_for_tokens(observation, ordered)
+        return self._candidates_for_tokens(
+            observation, ordered,
+            view=(view or CandidateViewPlan((), frozenset())).policy_ordered(),
+        )
 
     def _candidates_for_tokens(
-        self, observation: Observation, ordered: list[int]
+        self,
+        observation: Observation,
+        ordered: list[int],
+        *,
+        view: CandidateViewPlan | None = None,
     ) -> tuple[Candidate, ...]:
         statistics = observation.statistics
-        probabilities = statistics.raw_probabilities(ordered)
+        metrics = view.metrics if view is not None else frozenset()
+        probabilities = (
+            statistics.raw_probabilities(ordered)
+            if "raw_probability" in metrics else [None] * len(ordered)
+        )
+        policy_probabilities = (
+            statistics.policy_probabilities_at(ordered)
+            if "policy_probability" in metrics else [None] * len(ordered)
+        )
+        logits = [float(statistics.logits[token_id]) for token_id in ordered]
+        if "neighbor_margin" in metrics and ordered:
+            # Uniform consecutive margin over the ordered menu list:
+            # logit[i] - logit[i+1] (advantage over next-worse). Last row: None.
+            margins: list[float | None] = [
+                logits[i] - logits[i + 1] for i in range(len(logits) - 1)
+            ] + [None]
+        else:
+            margins = [None] * len(ordered)
+        if "logit_z" in metrics and ordered:
+            # Full-vocab logit z-score: (logit - mean) / std (population ddof=0).
+            # O(V) mean/std once; does not wake soft-max / logsumexp.
+            zs = statistics.logit_z_scores(ordered)
+        else:
+            zs = [None] * len(ordered)
         return tuple(
             Candidate(
                 rank=statistics.raw_rank(int(token_id)),
                 token_id=int(token_id),
                 text=self.backend.token_text(int(token_id)),
-                raw_probability=float(probability),
-                decoder_probability=observation.distribution.probability(int(token_id)),
+                raw_probability=(
+                    None if probability is None else float(probability)
+                ),
+                decoder_probability=(
+                    observation.distribution.probability(int(token_id))
+                    if "decoder_probability" in metrics else None
+                ),
                 is_eog=self.backend.is_eog(int(token_id)),
                 bias=statistics.active_biases.get(int(token_id), 0.0),
-                policy_rank=statistics.policy_rank(int(token_id)),
-                policy_probability=float(statistics.policy_probabilities[token_id]),
-                raw_logit=float(statistics.logits[token_id]),
+                policy_rank=(statistics.policy_rank(int(token_id))
+                             if "policy_rank" in metrics else None),
+                policy_probability=(
+                    None
+                    if policy_probability is None
+                    else float(policy_probability)
+                ),
+                raw_logit=(logit if metrics.intersection({"raw_logit", "top_raw_logit"}) else None),
+                neighbor_margin=margin,
+                logit_z=z_val,
             )
-            for token_id, probability in zip(ordered, probabilities)
+            for token_id, probability, policy_probability, logit, margin, z_val in zip(
+                ordered, probabilities, policy_probabilities, logits, margins, zs
+            )
         )
 
     def _write_tokens(self, action: Write) -> tuple[list[int], str]:
@@ -718,17 +778,18 @@ class EpisodeEngine:
         )
 
     def _evidence(self, observation: Observation, token_id: int) -> TokenEvidence:
-        statistics = observation.statistics
         is_eog = self.backend.is_eog(token_id)
+        if self._metric_sink is not None:
+            self._metric_sink(observation, token_id)
         return TokenEvidence(
             boundary=self.boundary,
             sampling_coordinate=observation.sampling_coordinate,
             token_id=token_id,
             text=self.backend.token_text(token_id),
             proposal_token_id=observation.proposal_token_id,
-            raw_model_nll=statistics.raw_nll(token_id),
-            raw_rank=statistics.raw_rank(token_id),
-            policy_rank=statistics.policy_rank(token_id),
+            raw_model_nll=None,
+            raw_rank=None,
+            policy_rank=None,
             decoder_probability=observation.distribution.probability(token_id),
             proposal_agreement=token_id == observation.proposal_token_id,
             is_eog=is_eog,
@@ -771,7 +832,7 @@ class EpisodeEngine:
             "model_rank": int(statistics.model_rank(token_id)),
             "policy_rank": int(statistics.policy_rank(token_id)),
             "model_probability": float(statistics.model_probabilities([token_id])[0]),
-            "policy_probability": float(statistics.policy_probabilities[token_id]),
+            "policy_probability": float(statistics.policy_probabilities_at([token_id])[0]),
             "sampler_eligible": bool(np.any(observation.distribution.ids == int(token_id))),
             "sampler_probability": float(observation.distribution.probability(token_id)),
             "required_policy_shift": float(required_shift),

@@ -11,7 +11,7 @@ from .core.actions import Accept, EndGeneration, Hold, Phrase, SelectRawRank, Wr
 from .core.errors import EditorError
 from .episode_lineage import EpisodeRelation, LineageNode, LineageView
 from .episode_lineage_source import EpisodeLineageReader, build_lineage_view
-from .episode_replay_source import final_sampling, replay_procedure
+from .episode_replay_source import build_source_replay_recipe, final_sampling, replay_procedure
 from .episode_store import EpisodeStore
 
 
@@ -25,6 +25,183 @@ class EpisodeProjection:
 
 
 _TEACHER_ACTION_KINDS = {"accept", "select-raw-rank", "write", "check-phrase", "force-phrase"}
+
+
+def _recompute_missing_metrics(
+    store: EpisodeStore,
+    episode_id: str,
+    episode: dict[str, Any],
+    tokens: list[dict[str, Any]],
+    required_by_boundary: dict[int, frozenset[str]],
+    *,
+    backend: Any | None,
+    guidance_backend: Any | None,
+) -> None:
+    """Replay recorded controls/actions to fill requested report values in memory."""
+    missing = {
+        (int(token["boundary"]), int(token["token_id"])): token
+        for token in tokens
+        if token["realized_visible"] and any(
+            token.get(field) is None
+            for field in required_by_boundary.get(int(token["boundary"]), ())
+        )
+    }
+    if not missing:
+        return
+
+    from .core.sampler_config import SamplerConfig
+    from .episode_backend_loader import load_cfg_guidance_backend, load_episode_backend
+    from .episode_engine import EpisodeEngine
+    from .run_loop import ReplayContext, ReplayPlan, run_plan
+    from .spr_recipe import ReplayControlPolicy, ReplayPlacement, compose_replay_plan
+
+    owned_backend = backend is None
+    owned_guidance = False
+    if backend is None:
+        if not episode["backend"].get("model_path"):
+            raise EditorError("recorded model location is unavailable for metric replay")
+        # The parser supplies backend load defaults; saved load options take priority.
+        from .episode_cli import build_parser
+
+        class NoPrompt:
+            def read(self, _message: str) -> None:
+                return None
+
+            def write(self, _message: str) -> None:
+                return None
+
+        args = build_parser().parse_args([])
+        backend, provenance, _ = load_episode_backend(
+            args, episode, NoPrompt(), use_saved=True
+        )
+
+    try:
+        saved = episode["backend"]
+        actual = backend.provenance(include_model_sha256=True)
+        keys = ("backend", "model_sha256", "vocabulary_size", "model_type")
+        if saved.get("backend") in {"llama.cpp", "transformers"} and not saved.get("model_sha256"):
+            raise EditorError("saved episode has no model checksum for metric replay")
+        matched = [key for key in keys if saved.get(key) is not None]
+        if not matched or any(saved[key] != actual.get(key) for key in matched):
+            raise EditorError("recorded model identity differs from the loaded model")
+        if guidance_backend is None and any(
+            SamplerConfig.from_record(row["sampling"]).cfg_unconditional_prompt is not None
+            for row in store.sampler_segments(episode_id)
+        ):
+            if not owned_backend:
+                raise EditorError("guidance backend is required to replay CFG report metrics")
+            guidance_backend = load_cfg_guidance_backend(args, provenance)
+            owned_guidance = True
+        if guidance_backend is not None:
+            guidance = guidance_backend.provenance(include_model_sha256=True)
+            if any(saved[key] != guidance.get(key) for key in matched):
+                raise EditorError("recorded model identity differs from the guidance model")
+
+        initial = store.sampling_segment(episode_id, 0)
+        budgets = store.budget_segments(episode_id)
+        first_budget = budgets[0]
+        engine = EpisodeEngine(
+            backend,
+            sampling=SamplerConfig.from_record(initial["sampling"]),
+            initial_text=episode["initial_text"],
+            initial_token_ids=episode["initial_token_ids"],
+            max_tokens=first_budget["max_tokens"],
+            stream_fingerprint=initial["stream_fingerprint"],
+            coordinate_offset=int(initial["coordinate_offset"]),
+            guidance_backend=guidance_backend,
+        )
+        engine.checkpoint_boundary = first_budget["checkpoint_boundary"]
+
+        def capture(observation: Any, token_id: int) -> None:
+            token = missing.get((observation.boundary, token_id))
+            if token is None:
+                return
+            stats = observation.statistics
+            fields = required_by_boundary[observation.boundary]
+            if "raw_model_nll" in fields and token.get("raw_model_nll") is None:
+                token["raw_model_nll"] = stats.raw_nll(token_id)
+            if "raw_rank" in fields and token.get("raw_rank") is None:
+                token["raw_rank"] = stats.raw_rank(token_id)
+            if "policy_rank" in fields and token.get("policy_rank") is None:
+                token["policy_rank"] = stats.policy_rank(token_id)
+
+        engine._metric_sink = capture
+
+        class ProjectionTarget:
+            identifier = episode_id
+
+            def __init__(self) -> None:
+                self.engine = engine
+
+            def begin(self) -> int:
+                return 0
+
+            def set_sampler(self, sampling: SamplerConfig) -> None:
+                engine.sampling = sampling
+
+            def apply(self, action: Any, *, expectation: Any, divergence_policy: str, replay: bool) -> Any:
+                boundary = engine.boundary
+                budget = next(row for row in reversed(budgets) if int(row["start_boundary"]) <= boundary)
+                engine.max_tokens = budget["max_tokens"]
+                engine.checkpoint_boundary = budget["checkpoint_boundary"]
+                return engine.apply(action, expectation=expectation, divergence_policy=divergence_policy, replay=replay)
+
+            def record_replay(self, *_args: Any) -> None:
+                return None
+
+            def record_instruction_rejected(self, *_args: Any) -> None:
+                return None
+
+            def complete(self, _had_tape: bool) -> None:
+                return None
+
+        recipe = build_source_replay_recipe(store, episode_id)
+        plan = compose_replay_plan(
+            recipe, ReplayPlacement.SOURCE_ROOT, ReplayControlPolicy.FOLLOW_SOURCE
+        )
+        target = ProjectionTarget()
+        replayed = 0
+        while replayed < len(plan.steps):
+            if engine.checkpointed:
+                budget = next(
+                    row for row in reversed(budgets)
+                    if int(row["start_boundary"]) <= engine.boundary
+                )
+                if (
+                    budget["checkpoint_boundary"] is not None
+                    and int(budget["checkpoint_boundary"]) <= engine.boundary
+                ):
+                    raise EditorError("recorded budget cannot resume metric replay")
+                engine.resume(max_tokens=budget["max_tokens"])
+                engine.checkpoint_boundary = budget["checkpoint_boundary"]
+            chunk = ReplayPlan(
+                steps=plan.steps[replayed:],
+                follow_source_sampling=plan.follow_source_sampling,
+                final_sampling=plan.final_sampling,
+                context=ReplayContext(
+                    sampling=plan.context.sampling[replayed:],
+                    origins=plan.context.origins[replayed:],
+                ),
+            )
+            result = run_plan(target, divergence_policy="handoff", tape=chunk)
+            if result.handed_off or result.replayed_actions == 0:
+                raise EditorError("recorded episode could not be replayed exactly for report metrics")
+            replayed += result.replayed_actions
+        if any(
+            token.get(field) is None
+            for token in missing.values()
+            for field in required_by_boundary[int(token["boundary"])]
+        ):
+            raise EditorError("recorded episode could not be replayed exactly for report metrics")
+    finally:
+        if owned_guidance and guidance_backend is not None:
+            close_guidance = getattr(guidance_backend, "close", None)
+            if callable(close_guidance):
+                close_guidance()
+        if owned_backend and backend is not None:
+            close_backend = getattr(backend, "close", None)
+            if callable(close_backend):
+                close_backend()
 
 
 def _probability(value: float) -> str:
@@ -230,6 +407,8 @@ def project_episode(
     full_evidence: bool = False,
     with_model_probs: bool = False,
     with_lineage: bool = False,
+    backend: Any | None = None,
+    guidance_backend: Any | None = None,
 ) -> EpisodeProjection:
     if annotations not in {"none", "inline", "footnotes"}:
         raise EditorError("annotations must be none, inline, or footnotes")
@@ -258,6 +437,28 @@ def project_episode(
     actions = store.actions(episode_id)
     interactions = store.interactions(episode_id)
     actions_by_ordinal = {int(action["ordinal"]): action for action in actions}
+    required_by_boundary: dict[int, frozenset[str]] = {}
+    for token in tokens:
+        if not token["realized_visible"]:
+            continue
+        fields: set[str] = set()
+        teacher = (
+            (action := actions_by_ordinal.get(int(token["action_ordinal"]))) is not None
+            and action["kind"] in _TEACHER_ACTION_KINDS
+        )
+        if (with_loss and not full_evidence) or (teacher and (full_evidence or with_model_probs)):
+            fields.add("raw_model_nll")
+        if (with_rank and not full_evidence) or (teacher and full_evidence):
+            fields.add("raw_rank")
+        if (with_policy_rank and not full_evidence) or (teacher and full_evidence):
+            fields.add("policy_rank")
+        if fields:
+            required_by_boundary[int(token["boundary"])] = frozenset(fields)
+    if required_by_boundary:
+        _recompute_missing_metrics(
+            store, episode_id, episode, tokens, required_by_boundary,
+            backend=backend, guidance_backend=guidance_backend,
+        )
     visible = [token for token in tokens if bool(token["realized_visible"])]
     notes_by_boundary: dict[int, list[str]] = {}
     for interaction in interactions:
@@ -393,7 +594,11 @@ def project_procedure(store: EpisodeStore, episode_id: str) -> str:
             command = str(action.rank)
         elif isinstance(action, Accept):
             # Legacy acceptance can only be printed as its recorded source rank.
-            command = str(tokens[0]["raw_rank"]) if tokens else "accept"
+            command = (
+                str(tokens[0]["raw_rank"])
+                if tokens and tokens[0].get("raw_rank") is not None
+                else "accept"
+            )
         elif isinstance(action, Write):
             command = ("t " if action.mode == "continuation" else "x ") + action.text
             if any(ord(char) < 32 or ord(char) == 127 for char in action.text):

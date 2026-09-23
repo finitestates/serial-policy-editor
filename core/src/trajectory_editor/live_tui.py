@@ -282,8 +282,11 @@ def action_preview(
         "policy-columns": "Policy diagnostics toggle on Enter without reordering.",
         "policy-rank-column": "Policy diagnostics toggle on Enter without reordering.",
         "ms": "The active token-search neighborhood redraws on Enter.",
-        "c": "The requested context view opens on Enter.",
         "context": "The requested context view opens on Enter.",
+        "column-focus": "Middle-column focus cycles on Enter.",
+        "column-cycle": "Middle-column focus cycles on Enter.",
+        "column-clear": "Column focus clears to identity on Enter.",
+        "column-focus-clear": "Column focus clears to identity on Enter.",
         "n": "The note-before action begins on Enter.",
         "p": "The note-after action begins on Enter.",
         "?": "Full command help opens on Enter.",
@@ -303,6 +306,18 @@ def action_preview(
         detail = "The main candidate table returns and expands on Enter."
     elif normalized == "V":
         detail = "Policy diagnostics toggle on Enter without reordering."
+    elif normalized == "L":
+        detail = "Logit view toggles both ↔ none on Enter."
+    elif normalized_lower in {"l", "logit", "logits", "logit-view"}:
+        detail = "Logit view cycles none → raw → gap on Enter."
+    elif normalized == "%" or normalized_lower in {"pct", "probs", "probabilities", "probability-view"}:
+        detail = "Model soft-max % overlays toggle on Enter."
+    elif normalized == "C":
+        detail = "Column focus clears to identity on Enter (also resets l / %)."
+    elif normalized_lower == "c":
+        detail = "Middle-column focus cycles on Enter (logit → gap → margin → z → pct → decode-p)."
+    elif normalized_lower.startswith(("c ", "context")):
+        detail = "The requested context view opens on Enter."
     elif head in effects:
         detail = effects[head]
     else:
@@ -557,7 +572,10 @@ def _render_writing(choice: ChoiceSet, candidates: tuple[Candidate, ...],
                     preview: ActionPreview, width: int, height: int,
                     offset: int, sort_by_policy: bool,
                     show_policy_rank: bool = False,
-                    logit_view: str = "none") -> StyleAndTextTuples:
+                    logit_view: str = "none",
+                    show_model_probabilities: bool = False,
+                    column_focus: str | None = None,
+                    overlays: frozenset[str] = frozenset()) -> StyleAndTextTuples:
     _, budget = _writing_sizes(height)
     rows = _context_rows(_safe_context_text(choice.context_text_tail),
                          _safe_rendered_text(preview.appended_text or ""), width - 1)
@@ -579,21 +597,26 @@ def _render_writing(choice: ChoiceSet, candidates: tuple[Candidate, ...],
         effect = f"{preview.label} · {preview.detail}"
     fragments.append(("class:effect" if preview.valid else "class:hint", _one_line(effect, width) + "\n"))
     fragments.append(("class:rule", "─" * (width - 1) + "\n"))
-    heading = ("Candidates · Δrank / logits / text" if show_policy_rank
-               else "Candidates · rank / logits / text")
-    fragments.append(("class:table-header", _one_line(heading, width) + "\n"))
     columns = CandidateColumns(
         policy=show_policy_rank,
         logit_view=logit_view,
+        show_model_probabilities=show_model_probabilities,
+        column_focus=column_focus,
+        overlays=overlays,
         width=36,
         raw_k1_logit=choice.raw_k1_logit,
     )
+    heading = (
+        "Candidates · rank / token ID / text"
+        if columns.columns == (("token-id", 8),)
+        else "Candidates · rank / token ID / overlays / text"
+    )
+    fragments.append(("class:table-header", _one_line(heading, width) + "\n"))
     shown = _ordered_candidates(candidates, sort_by_policy=sort_by_policy)[:3]
     for candidate in shown:
         fragments.append(("class:table-row", _one_line(
             f"{candidate.rank:>5}"
-            + (columns.values(candidate) if show_policy_rank or logit_view != "none"
-               else f"  {_probability(candidate.raw_probability)}")
+            + columns.values(candidate)
             + f"  {candidate.text!r}"
             + (f" [bias {candidate.bias:+g}]" if candidate.bias else ""), width) + "\n"))
     fragments.append(("", "\n" * (3 - len(shown))))
@@ -613,6 +636,9 @@ def _render_choice(
     show_policy_rank: bool = False,
     sort_by_policy: bool = False,
     logit_view: str = "none",
+    show_model_probabilities: bool = False,
+    column_focus: str | None = None,
+    overlays: frozenset[str] = frozenset(),
     display_candidates: tuple[Candidate, ...] | None = None,
     search_lens_active: bool = False,
     resolve_candidate: Callable[[int], Candidate] | None = None,
@@ -633,7 +659,8 @@ def _render_choice(
     if expanded_editor and _is_writing(command_text):
         return _render_writing(choice, tuple(candidates if display_candidates is None else display_candidates),
                                preview, width, height, context_offset, sort_by_policy,
-                               show_policy_rank, logit_view)
+                               show_policy_rank, logit_view, show_model_probabilities,
+                               column_focus, overlays)
     context = _safe_context_text(choice.context_text_tail)
     proposal = (
         _safe_rendered_text(preview.appended_text)
@@ -731,11 +758,17 @@ def _render_choice(
                 ("class:muted", rank),
                 ("class:muted", f" · exact {repr(preview.appended_text or '')}"),
                 ("class:muted", f" · token {preview.token_id}"),
-                ("class:muted", f" · raw {_probability(preview.raw_probability)}"),
+                ("class:muted", (
+                    f" · raw {_probability(preview.raw_probability)}"
+                    if preview.raw_probability is not None else ""
+                )),
                 (
                     "class:muted",
-                    " · decoder "
-                    f"{_probability(preview.decoder_probability)}{terminal}",
+                    (
+                        " · decoder "
+                        f"{_probability(preview.decoder_probability)}"
+                        if preview.decoder_probability is not None else ""
+                    ) + terminal,
                 ),
                 (
                     "class:muted",
@@ -768,6 +801,9 @@ def _render_choice(
     columns = CandidateColumns(
         policy=show_policy_rank,
         logit_view=logit_view,
+        show_model_probabilities=show_model_probabilities,
+        column_focus=column_focus,
+        overlays=overlays,
         width=width,
         raw_k1_logit=choice.raw_k1_logit,
     )
@@ -1064,6 +1100,9 @@ class ChoiceViewState:
     show_policy_rank: bool = False
     sort_by_policy: bool = False
     logit_view: str = "none"
+    show_model_probabilities: bool = False
+    column_focus: str | None = None
+    overlays: frozenset[str] = frozenset()
 
 
 class LiveChoiceView(ViewLifecycle):
@@ -1407,7 +1446,10 @@ class LiveChoiceView(ViewLifecycle):
             state.choice, state.candidates, self.command_buffer.text,
             state.remaining_tokens, state.resolve_insertion, state.target_token_id,
             state.feedback, state.policy_active, state.show_policy_rank,
-            state.sort_by_policy, state.logit_view, state.display_candidates,
+            state.sort_by_policy, state.logit_view, state.show_model_probabilities,
+            state.column_focus,
+            state.overlays,
+            state.display_candidates,
             state.search_lens_active,
             state.resolve_candidate, self.context_offset,
             self.expanded_editor and _is_writing(self.command_buffer.text),
@@ -1437,6 +1479,9 @@ def read_live_choice(
     show_policy_rank: bool = False,
     sort_by_policy: bool = False,
     logit_view: str = "none",
+    show_model_probabilities: bool = False,
+    column_focus: str | None = None,
+    overlays: frozenset[str] = frozenset(),
 ) -> str | None:
     """Standalone adapter; interactive episodes use a persistent LiveChoiceView."""
     state = ChoiceViewState(
@@ -1448,6 +1493,9 @@ def read_live_choice(
         search_lens_active=search_lens_active, policy_active=policy_active,
         show_policy_rank=show_policy_rank, sort_by_policy=sort_by_policy,
         logit_view=logit_view,
+        show_model_probabilities=show_model_probabilities,
+        column_focus=column_focus,
+        overlays=overlays,
     )
     view = LiveChoiceView(state)
     return run_standalone_view(

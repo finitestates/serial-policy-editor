@@ -73,9 +73,9 @@ class TokenEvidence:
     token_id: int
     text: str
     proposal_token_id: int
-    raw_model_nll: float
-    raw_rank: int
-    policy_rank: int
+    raw_model_nll: float | None
+    raw_rank: int | None
+    policy_rank: int | None
     decoder_probability: float
     proposal_agreement: bool
     is_eog: bool

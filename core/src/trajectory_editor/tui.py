@@ -156,6 +156,9 @@ class TerminalIO:
         show_policy_rank: bool = False,
         sort_by_policy: bool = False,
         logit_view: str = "none",
+        show_model_probabilities: bool = False,
+        column_focus: str | None = None,
+        overlays: frozenset[str] = frozenset(),
     ) -> str | None:
         if not self._live_choices:
             raise RuntimeError("live choice input is not available")
@@ -178,6 +181,9 @@ class TerminalIO:
             show_policy_rank=show_policy_rank,
             sort_by_policy=sort_by_policy,
             logit_view=logit_view,
+            show_model_probabilities=show_model_probabilities,
+            column_focus=column_focus,
+            overlays=overlays,
         )
         if self._live_session is not None:
             return self._live_session.read_choice(ChoiceViewState(choice, **options))
@@ -283,6 +289,9 @@ class CommandKind(str, Enum):
     POLICY_VIEW = "policy-view"
     POLICY_COLUMN = "policy-column"
     LOGIT_VIEW = "logit-view"
+    PROBABILITY_VIEW = "probability-view"
+    COLUMN_FOCUS = "column-focus"
+    OVERLAY_TOGGLE = "overlay-toggle"
     REVIEW_BACK = "review-back"
     REVIEW_FORWARD = "review-forward"
     FORK = "fork"
@@ -312,6 +321,7 @@ class TeacherCommand:
     hold_boundary: str | None = None
     note: str | None = None
     invoked_as: str | None = None
+    overlay: str | None = None
     additional_rows: int | None = None
     search_query: str | None = None
     search_direction: str | None = None
@@ -378,11 +388,18 @@ HELP_TEXT = """Commands:
   ms                 return to the active token-search neighborhood
   ms + [N]           expand toward larger ranks / lower backend probability
   ms - [N]           expand toward smaller ranks / higher backend probability
-  c [N|all]          page more of the current context (default: 2000 chars)
+  c                  cycle middle-column focus: logit → gap_k1 → margin → z → pct → decode_pct
+  C                  clear all overlays and shortcuts
+  overlay NAME       toggle any named overlay alongside the others
+  context [N|all]    page more of the current context (default: 2000 chars);
+                     c N / c all still work (bare c is column focus)
   v                  toggle raw top-N / full-vocabulary policy top-N
   V                  toggle policy diagnostics independently of ordering
   l                  cycle logits: none / model / gap@raw1
   L                  toggle model logits + gap@raw1 together
+  %                  toggle model soft-max % overlays (raw-p / decode-p [/ pol-p])
+                     default table is identity-only: rank | token-id | text
+                     overlays combine with l / % shortcuts and column focus
                      Δrank = backend rank - policy rank; positive means promoted.
                      model-gap = model logit minus the raw rank-1 model logit;
                      raw rank 1 is therefore always +0.000.
@@ -870,10 +887,22 @@ def parse_command(
             search_direction=parts[1],
             search_rows=rows,
         )
-    if lower in {"c", "context"} or lower.startswith(("c ", "context ")):
+    # Bare c / C reclaim column focus; context keeps `context`, `c N`, `c all`.
+    if command == "C" or lower in {"column-clear", "column-focus-clear"}:
+        return TeacherCommand(CommandKind.COLUMN_FOCUS, invoked_as="C")
+    if lower == "c" or lower in {"column-focus", "column-cycle"}:
+        return TeacherCommand(CommandKind.COLUMN_FOCUS, invoked_as=command)
+    if lower.startswith("overlay "):
+        from .candidate_columns import OVERLAYS
+
+        name = lower.split(maxsplit=1)[1].strip()
+        if name not in OVERLAYS or not OVERLAYS[name].wired:
+            raise EditorError("unknown overlay; use pct, decode_pct, logit, gap_k1, margin_neighbor, or z")
+        return TeacherCommand(CommandKind.OVERLAY_TOGGLE, overlay=name)
+    if lower == "context" or lower.startswith(("c ", "context ")):
         parts = command.split()
         if len(parts) > 2:
-            raise EditorError("use c, c N, or c all")
+            raise EditorError("use context, c N, or c all")
         if len(parts) == 1:
             return TeacherCommand(CommandKind.CONTEXT, context_characters=2000)
         if parts[1].lower() in {"all", "full"}:
@@ -891,6 +920,8 @@ def parse_command(
         return TeacherCommand(CommandKind.LOGIT_VIEW, invoked_as="L")
     if lower in {"l", "logit", "logits", "logit-view"}:
         return TeacherCommand(CommandKind.LOGIT_VIEW, invoked_as=command)
+    if command == "%" or lower in {"pct", "probs", "probabilities", "probability-view"}:
+        return TeacherCommand(CommandKind.PROBABILITY_VIEW, invoked_as=command)
     if lower in {"v", "policy-view", "policy-sort"}:
         return TeacherCommand(CommandKind.POLICY_VIEW, invoked_as=lower)
     if lower == "n" or lower.startswith("n "):
@@ -921,6 +952,9 @@ def display_choice(
     show_policy_rank: bool = False,
     sort_by_policy: bool = False,
     logit_view: str = "none",
+    show_model_probabilities: bool = False,
+    column_focus: str | None = None,
+    overlays: frozenset[str] = frozenset(),
 ) -> None:
     io.write("\n" + "=" * 72)
     remaining = (
@@ -932,9 +966,14 @@ def display_choice(
         f"Step {choice.aligned_step}{remaining} | "
         f"context tail: {choice.context_text_tail!r}"
     )
+    backend = (
+        f"{choice.proposal_raw_probability:.2%}"
+        if choice.proposal_raw_probability is not None
+        else "--"
+    )
     io.write(
         f"Sampled proposal: {choice.proposal_text!r} "
-        f"(id={choice.proposal_token_id}, backend={choice.proposal_raw_probability:.2%}, "
+        f"(id={choice.proposal_token_id}, backend={backend}, "
         f"decoder={choice.proposal_decoder_probability:.2%}"
         + (
             f", policy-rank={choice.proposal_policy_rank}"
@@ -950,6 +989,9 @@ def display_choice(
         show_policy_rank=show_policy_rank,
         sort_by_policy=sort_by_policy,
         logit_view=logit_view,
+        show_model_probabilities=show_model_probabilities,
+        column_focus=column_focus,
+        overlays=overlays,
         raw_k1_logit=choice.raw_k1_logit,
     )
     display_actions(io)
@@ -964,6 +1006,9 @@ def display_candidates(
     show_policy_rank: bool = False,
     sort_by_policy: bool = False,
     logit_view: str = "none",
+    show_model_probabilities: bool = False,
+    column_focus: str | None = None,
+    overlays: frozenset[str] = frozenset(),
     raw_k1_logit: float | None = None,
 ) -> None:
     ordered = tuple(candidates)
@@ -987,6 +1032,9 @@ def display_candidates(
     columns = CandidateColumns(
         policy=show_policy_rank,
         logit_view=logit_view,
+        show_model_probabilities=show_model_probabilities,
+        column_focus=column_focus,
+        overlays=overlays,
         raw_k1_logit=raw_k1_logit,
     )
     if heading:
@@ -1006,6 +1054,7 @@ def display_actions(io: IO) -> None:
     io.write(
         "\nActions: accept | rank | t TEXT | x TEXT | h [N] | h . [N] | h | [N] | "
         "[ / ] review | f [N|-N] | m [N] | /TERM | "
-        "ms [+|- [N]] | c [N|all] | v order | V policy columns | l logits / L both | "
-        "n [note-before] | p [note-after] | e | e! | q | ?"
+        "ms [+|- [N]] | c focus / C clear | overlay NAME | context [N|all] | v order | "
+        "V policy columns | l logits / L both | % probs | n [note-before] | "
+        "p [note-after] | e | e! | q | ?"
     )

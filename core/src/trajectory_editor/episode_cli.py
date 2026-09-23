@@ -323,11 +323,11 @@ def build_parser(
     policy_view = parser.add_mutually_exclusive_group()
     policy_view.add_argument(
         "--policy-view", "--show-policy-rank", dest="show_policy_rank", action="store_true",
-        default=None, help="show policy diagnostics without changing backend-rank ordering (default: automatic)",
+        default=None, help="show policy diagnostics without changing backend-rank ordering (default: off)",
     )
     policy_view.add_argument(
         "--no-policy-view", dest="show_policy_rank", action="store_false",
-        help="hide automatic policy diagnostics; V can toggle them during the session",
+        help="hide policy diagnostics; V can toggle them during the session",
     )
     parser.add_argument(
         "--logit-view",
@@ -336,6 +336,15 @@ def build_parser(
         help=(
             "show model logits, model gap from raw rank 1, or both "
             "(default: none; l cycles, L toggles both)"
+        ),
+    )
+    parser.add_argument(
+        "--show-model-probabilities",
+        action="store_true",
+        default=False,
+        help=(
+            "include soft-max %% overlays (raw-p / decode-p [/ pol-p]); "
+            "default identity-only table; %% toggles during the session"
         ),
     )
     parser.add_argument("--theme", choices=LIVE_THEME_NAMES)

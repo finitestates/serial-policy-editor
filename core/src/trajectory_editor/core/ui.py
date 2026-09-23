@@ -19,7 +19,7 @@ class ChoiceSet:
     context_text_tail: str
     proposal_token_id: int
     proposal_text: str
-    proposal_raw_probability: float
+    proposal_raw_probability: float | None
     proposal_decoder_probability: float
     proposal_is_eog: bool
     candidates: tuple[Candidate, ...]

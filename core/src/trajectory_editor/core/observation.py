@@ -278,15 +278,22 @@ class ObservationStatistics:
             trace_previous = self.adjusted
 
         penalties_active = config.policy_active or bool(self.ephemeral_logit_biases)
-        self.maximum = float(np.max(self.logits))
-        exponentials = np.exp(self.logits - self.maximum)
-        self.denominator = float(np.sum(exponentials))
-        self.log_z = self.maximum + float(np.log(self.denominator))
-        self.policy_probabilities = (
-            _softmax(self.adjusted)
-            if penalties_active
-            else exponentials / self.denominator
-        )
+        # Dense V soft-max (exp+sum) is deferred until NLL / percentages are
+        # requested. Ranking, top-ids, adjusted logits, and the sparse draw
+        # filter do not need it.
+        self._raw_maximum: float | None = None
+        self._denominator: float | None = None
+        self._log_z: float | None = None
+        self._policy_maximum: float | None = None
+        self._policy_denominator: float | None = None
+        self._policy_log_z: float | None = None
+        self._raw_logsumexp_ready = False
+        self._policy_logsumexp_ready = False
+        # Lazy full-vocab logit mean/std for z-score overlays (not soft-max).
+        self._logit_mean: float | None = None
+        self._logit_std: float | None = None
+        self._logit_mean_std_ready = False
+        self._policy_shares_raw = not (penalties_active and self.adjusted is not self.logits)
         result = apply_candidate_filter(self.adjusted, config)
         scaled = result.scaled_logits
         stages = result.stages
@@ -328,7 +335,6 @@ class ObservationStatistics:
         for array in (
             self.logits,
             self.adjusted,
-            self.policy_probabilities,
             self.activation_logit_adjustments,
             self.distribution.ids,
             self.distribution.probabilities,
@@ -341,10 +347,136 @@ class ObservationStatistics:
         self._ordered: list[int] = []
         self._policy_ordered: list[int] = []
 
+    def _ensure_raw_maximum(self) -> float:
+        if self._raw_maximum is None:
+            self._raw_maximum = float(np.max(self.logits))
+        return self._raw_maximum
+
+    # Population std floor: below this (or non-finite) z-scores are undefined.
+    _LOGIT_STD_EPS = 1e-12
+
+    def _ensure_logit_mean_std(self) -> tuple[float, float] | None:
+        """Lazy mean/std of raw/backend logits (population ddof=0).
+
+        Does not wake soft-max / logsumexp. Returns None when std is unusable.
+        """
+        if self._logit_mean_std_ready:
+            if self._logit_mean is None or self._logit_std is None:
+                return None
+            return self._logit_mean, self._logit_std
+        mean = float(np.mean(self.logits))
+        # Population standard deviation over the full vocabulary.
+        std = float(np.std(self.logits, ddof=0))
+        self._logit_mean_std_ready = True
+        if (
+            not np.isfinite(mean)
+            or not np.isfinite(std)
+            or std < self._LOGIT_STD_EPS
+        ):
+            self._logit_mean = mean if np.isfinite(mean) else None
+            self._logit_std = None
+            return None
+        self._logit_mean = mean
+        self._logit_std = std
+        return mean, std
+
+    def logit_z(self, token_id: int) -> float | None:
+        """z-score of one raw logit vs full-vocab mean/std, or None if undefined."""
+        token_id = int(token_id)
+        if token_id < 0 or token_id >= len(self.logits):
+            raise ValueError("token id is outside the decoder vocabulary")
+        stats = self._ensure_logit_mean_std()
+        if stats is None:
+            return None
+        mean, std = stats
+        return (float(self.logits[token_id]) - mean) / std
+
+    def logit_z_scores(self, token_ids) -> list[float | None]:
+        """z-scores for selected ids; None entries when mean/std is unusable."""
+        ids = [int(token_id) for token_id in token_ids]
+        if not ids:
+            return []
+        if any(token_id < 0 or token_id >= len(self.logits) for token_id in ids):
+            raise ValueError("token id is outside the decoder vocabulary")
+        stats = self._ensure_logit_mean_std()
+        if stats is None:
+            return [None] * len(ids)
+        mean, std = stats
+        return [(float(self.logits[token_id]) - mean) / std for token_id in ids]
+
+    def _ensure_raw_logsumexp(self) -> None:
+        if self._raw_logsumexp_ready:
+            return
+        maximum = self._ensure_raw_maximum()
+        exponentials = np.exp(self.logits - maximum)
+        denominator = float(np.sum(exponentials))
+        if denominator <= 0.0 or not np.isfinite(denominator):
+            raise ValueError("model soft-max normalization failed")
+        self._denominator = denominator
+        self._log_z = maximum + float(np.log(denominator))
+        self._raw_logsumexp_ready = True
+        if self._policy_shares_raw:
+            self._policy_maximum = maximum
+            self._policy_denominator = denominator
+            self._policy_log_z = self._log_z
+            self._policy_logsumexp_ready = True
+
+    def _ensure_policy_logsumexp(self) -> None:
+        if self._policy_logsumexp_ready:
+            return
+        if self._policy_shares_raw:
+            self._ensure_raw_logsumexp()
+            return
+        maximum = float(np.max(self.adjusted))
+        exponentials = np.exp(self.adjusted - maximum)
+        denominator = float(np.sum(exponentials))
+        if denominator <= 0.0 or not np.isfinite(denominator):
+            raise ValueError("policy soft-max normalization failed")
+        self._policy_maximum = maximum
+        self._policy_denominator = denominator
+        self._policy_log_z = maximum + float(np.log(denominator))
+        self._policy_logsumexp_ready = True
+
+    @property
+    def maximum(self) -> float:
+        """Top raw logit (cheap max). Does not force soft-max exp+sum."""
+        return self._ensure_raw_maximum()
+
+    @property
+    def denominator(self) -> float:
+        self._ensure_raw_logsumexp()
+        assert self._denominator is not None
+        return self._denominator
+
+    @property
+    def log_z(self) -> float:
+        self._ensure_raw_logsumexp()
+        assert self._log_z is not None
+        return self._log_z
+
     def raw_probabilities(self, token_ids):
-        if self.adjusted is self.logits:
-            return self.policy_probabilities[list(token_ids)]
-        return np.exp(self.logits[list(token_ids)] - self.maximum) / self.denominator
+        """Return model soft-max probabilities for ``token_ids`` only."""
+        ids = np.asarray(list(token_ids), dtype=np.int64)
+        if ids.size == 0:
+            return np.asarray([], dtype=np.float64)
+        if np.any(ids < 0) or np.any(ids >= len(self.logits)):
+            raise ValueError("token id is outside the decoder vocabulary")
+        self._ensure_raw_logsumexp()
+        assert self._denominator is not None
+        return np.exp(self.logits[ids] - self.maximum) / self._denominator
+
+    def policy_probabilities_at(self, token_ids):
+        """Return policy soft-max probabilities for ``token_ids`` only."""
+        ids = np.asarray(list(token_ids), dtype=np.int64)
+        if ids.size == 0:
+            return np.asarray([], dtype=np.float64)
+        if np.any(ids < 0) or np.any(ids >= len(self.adjusted)):
+            raise ValueError("token id is outside the decoder vocabulary")
+        if self._policy_shares_raw:
+            return self.raw_probabilities(ids)
+        self._ensure_policy_logsumexp()
+        assert self._policy_maximum is not None and self._policy_denominator is not None
+        return np.exp(self.adjusted[ids] - self._policy_maximum) / self._policy_denominator
 
     @property
     def backend_logits(self):

@@ -14,6 +14,9 @@ def _preferences(args: argparse.Namespace) -> PolicyViewPreferences:
         preferences = PolicyViewPreferences(
             show=args.show_policy_rank,
             logit_view=args.logit_view,
+            show_model_probabilities=bool(
+                getattr(args, "show_model_probabilities", False)
+            ),
         )
         args._policy_view_preferences = preferences
     return preferences

@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
+from .candidate_columns import CandidateColumns, CandidateViewPlan, next_column_focus
 from .core.candidates import Candidate
 from .core.errors import EditorError
 from .core.ui import ChoiceSet
@@ -66,6 +67,7 @@ def _choice_from_observation(
     *,
     context_characters: int,
     serial: int,
+    view: CandidateViewPlan | None = None,
 ) -> ChoiceSet:
     return ChoiceSet(
         choice_set_id=f"episode-choice-{serial:06d}",
@@ -76,15 +78,21 @@ def _choice_from_observation(
         context_text_tail=observation.context_text[-context_characters:],
         proposal_token_id=observation.proposal_token_id,
         proposal_text=observation.proposal_text,
-        proposal_raw_probability=observation.proposal_raw_probability,
+        proposal_raw_probability=(
+            observation.proposal_raw_probability if view and view.needs("raw_probability") else None
+        ),
         proposal_decoder_probability=observation.proposal_decoder_probability,
         proposal_is_eog=engine.backend.is_eog(observation.proposal_token_id),
         candidates=candidates,
         vocabulary_size=len(observation.logits),
         proposal_raw_rank=observation.proposal_raw_rank,
-        proposal_policy_rank=observation.proposal_policy_rank,
+        proposal_policy_rank=(
+            observation.proposal_policy_rank if view and view.needs("policy_rank") else None
+        ),
         proposal_policy_probability=None,
-        raw_k1_logit=float(observation.statistics.maximum),
+        raw_k1_logit=(
+            float(observation.statistics.maximum) if view and view.needs("top_raw_logit") else None
+        ),
     )
 
 
@@ -95,6 +103,10 @@ class PolicyViewPreferences:
     show: bool | None = None
     sort_by_policy: bool = False
     logit_view: str = "none"
+    show_model_probabilities: bool = False
+    # Single middle-column overlay focus; None = identity (or fall back to l/%).
+    column_focus: str | None = None
+    overlays: frozenset[str] = frozenset()
 
 
 class InteractivePolicy:
@@ -111,6 +123,7 @@ class InteractivePolicy:
         manual_acceptance: bool = False,
         show_policy_rank: bool | None = None,
         logit_view: str = "none",
+        show_model_probabilities: bool = False,
         view_preferences: PolicyViewPreferences | None = None,
         store: EpisodeStore | None = None,
         episode_id: str | None = None,
@@ -134,7 +147,11 @@ class InteractivePolicy:
         self.manual_acceptance = bool(manual_acceptance)
         self.view_preferences = (
             view_preferences if view_preferences is not None
-            else PolicyViewPreferences(show=show_policy_rank, logit_view=logit_view)
+            else PolicyViewPreferences(
+                show=show_policy_rank,
+                logit_view=logit_view,
+                show_model_probabilities=show_model_probabilities,
+            )
         )
         self.store = store
         self.episode_id = episode_id
@@ -142,10 +159,28 @@ class InteractivePolicy:
         self.choice_serial = 0
 
     def _show_policy_diagnostics(self, engine: EpisodeEngine) -> bool:
-        explicit = self.view_preferences.show
-        if explicit is not None:
-            return explicit
-        return bool(engine.sampling.policy_active or engine.sampling.bias_rules or engine.sampling.bias_groups)
+        del engine
+        return bool(self.view_preferences.show)
+
+    def _view_plan(self, engine: EpisodeEngine) -> CandidateViewPlan:
+        """Resolve the visible columns once for lookup and rendering."""
+        width = None
+        if getattr(self.io, "supports_live_choices", False):
+            try:
+                from .live_tui import _terminal_size
+
+                width, _ = _terminal_size()
+            except Exception:
+                width = None
+        plan = CandidateColumns(
+            policy=self._show_policy_diagnostics(engine),
+            logit_view=self.view_preferences.logit_view,
+            show_model_probabilities=self.view_preferences.show_model_probabilities,
+            column_focus=self.view_preferences.column_focus,
+            overlays=self.view_preferences.overlays,
+            width=width,
+        ).plan
+        return plan.policy_ordered() if self.view_preferences.sort_by_policy else plan
 
     def _interaction(
         self, boundary: int, kind: str, payload: Mapping[str, Any]
@@ -270,6 +305,7 @@ class InteractivePolicy:
             observation,
             start_rank=lens.lower_rank,
             count=lens.upper_rank - lens.lower_rank + 1,
+            view=self._view_plan(engine),
         )
 
     def _record_search_view(
@@ -310,7 +346,13 @@ class InteractivePolicy:
                 self.io, candidates, heading=True, target_token_id=lens.token_id,
                 show_policy_rank=self._show_policy_diagnostics(engine),
                 logit_view=self.view_preferences.logit_view,
-                raw_k1_logit=float(observation.statistics.maximum),
+                show_model_probabilities=self.view_preferences.show_model_probabilities,
+                column_focus=self.view_preferences.column_focus,
+                overlays=self.view_preferences.overlays,
+                raw_k1_logit=(
+                    float(observation.statistics.maximum)
+                    if self._view_plan(engine).needs("top_raw_logit") else None
+                ),
             )
 
     def _review(
@@ -386,8 +428,11 @@ class InteractivePolicy:
 
     def choose(self, engine: EpisodeEngine, observation: Observation) -> PolicyAction:
         self.choice_serial += 1
+        view = self._view_plan(engine)
         candidates = engine.candidates(
-            observation, count=min(self.menu_size, len(observation.logits))
+            observation,
+            count=min(self.menu_size, len(observation.logits)),
+            view=view,
         )
         choice = _choice_from_observation(
             engine,
@@ -395,14 +440,19 @@ class InteractivePolicy:
             candidates,
             context_characters=self.context_characters,
             serial=self.choice_serial,
+            view=view,
         )
         exposed = {candidate.rank: candidate for candidate in candidates}
         preview_candidates = dict(exposed)
+        choice_view = view
 
         def resolve_candidate(rank: int) -> Candidate:
             if rank not in preview_candidates:
                 preview_candidates[rank] = engine.candidates(
-                    observation, start_rank=rank, count=1
+                    observation,
+                    start_rank=rank,
+                    count=1,
+                    view=self._view_plan(engine),
                 )[0]
             return preview_candidates[rank]
 
@@ -424,11 +474,48 @@ class InteractivePolicy:
         plain_redraw = True
         while True:
             policy_columns = self._show_policy_diagnostics(engine)
+            view = self._view_plan(engine)
+            if view != choice_view:
+                refreshed = engine.candidates(
+                    observation,
+                    count=len(choice.candidates),
+                    view=view,
+                )
+                choice = replace(
+                    choice,
+                    candidates=refreshed,
+                    proposal_raw_probability=(
+                        observation.proposal_raw_probability
+                        if view.needs("raw_probability")
+                        else None
+                    ),
+                    proposal_policy_rank=(
+                        observation.proposal_policy_rank if view.needs("policy_rank") else None
+                    ),
+                    raw_k1_logit=(
+                        float(observation.statistics.maximum)
+                        if view.needs("top_raw_logit") else None
+                    ),
+                )
+                exposed = {
+                    rank: engine.candidates(observation, start_rank=rank, count=1, view=view)[0]
+                    for rank in exposed
+                }
+                exposed.update((candidate.rank, candidate) for candidate in refreshed)
+                preview_candidates = dict(exposed)
+                choice_view = view
             displayed = (
                 self._lens_candidates(engine, observation, search)
                 if search_lens_active and search is not None
-                else (engine.policy_candidates(observation, count=len(choice.candidates))
-                      if policy_sort else choice.candidates)
+                else (
+                    engine.policy_candidates(
+                        observation,
+                        count=len(choice.candidates),
+                        view=view,
+                    )
+                    if policy_sort
+                    else choice.candidates
+                )
             )
             if policy_sort and not search_lens_active:
                 exposed.update((candidate.rank, candidate) for candidate in displayed)
@@ -439,6 +526,9 @@ class InteractivePolicy:
                     show_policy_rank=policy_columns,
                     sort_by_policy=policy_sort and not search_lens_active,
                     logit_view=self.view_preferences.logit_view,
+                    show_model_probabilities=self.view_preferences.show_model_probabilities,
+                    column_focus=self.view_preferences.column_focus,
+                    overlays=self.view_preferences.overlays,
                 )
                 plain_redraw = False
             if live:
@@ -472,6 +562,9 @@ class InteractivePolicy:
                     show_policy_rank=policy_columns,
                     sort_by_policy=policy_sort and not search_lens_active,
                     logit_view=self.view_preferences.logit_view,
+                    show_model_probabilities=self.view_preferences.show_model_probabilities,
+                    column_focus=self.view_preferences.column_focus,
+                    overlays=self.view_preferences.overlays,
                 )
             else:
                 raw = self.io.read("\nTeacher action> ")
@@ -565,11 +658,21 @@ class InteractivePolicy:
                 engine.sampling = updated
                 observation = engine.observe()
                 ranks = tuple(exposed)
-                exposed = {rank: engine.candidates(observation, start_rank=rank, count=1)[0] for rank in ranks}
+                exposed = {
+                    rank: engine.candidates(
+                        observation,
+                        start_rank=rank,
+                        count=1,
+                        view=self._view_plan(engine),
+                    )[0]
+                    for rank in ranks
+                }
                 preview_candidates = dict(exposed)
                 candidates = tuple(resolve_candidate(c.rank) for c in choice.candidates)
                 choice = _choice_from_observation(engine, observation, candidates,
-                    context_characters=self.context_characters, serial=self.choice_serial)
+                    context_characters=self.context_characters, serial=self.choice_serial,
+                    view=self._view_plan(engine))
+                choice_view = self._view_plan(engine)
                 lines = tuple(f"{label}: {value:+g}" for _kind, _payload, label, value in updates)
                 feedback = ChoiceFeedback("status", "STEERING UPDATED", lines)
                 if not live:
@@ -623,14 +726,21 @@ class InteractivePolicy:
                 target = min(
                     len(observation.logits), len(choice.candidates) + additional
                 )
-                candidates = engine.candidates(observation, count=target)
+                view = self._view_plan(engine)
+                candidates = engine.candidates(
+                    observation,
+                    count=target,
+                    view=view,
+                )
                 choice = _choice_from_observation(
                     engine,
                     observation,
                     candidates,
                     context_characters=self.context_characters,
                     serial=self.choice_serial,
+                    view=view,
                 )
+                choice_view = view
                 exposed.update((candidate.rank, candidate) for candidate in candidates)
                 self._interaction(
                     observation.boundary,
@@ -759,6 +869,56 @@ class InteractivePolicy:
                     "LOGIT VIEW",
                     (f"columns: {next_view}",),
                 )
+                plain_redraw = True
+                continue
+            if command.kind == CommandKind.PROBABILITY_VIEW:
+                self.view_preferences.show_model_probabilities = (
+                    not self.view_preferences.show_model_probabilities
+                )
+                state = (
+                    "on"
+                    if self.view_preferences.show_model_probabilities
+                    else "off"
+                )
+                feedback = ChoiceFeedback(
+                    "status",
+                    "PROBABILITY VIEW",
+                    (f"model % overlays: {state}",),
+                )
+                plain_redraw = True
+                continue
+            if command.kind == CommandKind.COLUMN_FOCUS:
+                if command.invoked_as == "C":
+                    self.view_preferences.column_focus = None
+                    self.view_preferences.logit_view = "none"
+                    self.view_preferences.show_model_probabilities = False
+                    self.view_preferences.overlays = frozenset()
+                    feedback = ChoiceFeedback(
+                        "status",
+                        "COLUMN FOCUS",
+                        ("cleared → identity (rank | token-id | text)",),
+                    )
+                else:
+                    self.view_preferences.column_focus = next_column_focus(
+                        self.view_preferences.column_focus
+                    )
+                    focus = self.view_preferences.column_focus
+                    feedback = ChoiceFeedback(
+                        "status",
+                        "COLUMN FOCUS",
+                        (f"middle column: {focus}",),
+                    )
+                plain_redraw = True
+                continue
+            if command.kind == CommandKind.OVERLAY_TOGGLE:
+                assert command.overlay is not None
+                enabled = set(self.view_preferences.overlays)
+                if command.overlay in enabled:
+                    enabled.remove(command.overlay)
+                else:
+                    enabled.add(command.overlay)
+                self.view_preferences.overlays = frozenset(enabled)
+                feedback = ChoiceFeedback("status", "OVERLAYS", (", ".join(sorted(enabled)) or "identity",))
                 plain_redraw = True
                 continue
             if command.kind == CommandKind.REVIEW_BACK:
