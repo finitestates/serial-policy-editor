@@ -165,16 +165,6 @@ commands /, t, x, n, and p keep their whitespace exactly as entered.
 """
 
 
-ACTION_TEXT = (
-    "\nActions: accept | rank | chord RANK RANK... | t TEXT | x TEXT | "
-    "h [N] | h . [N] | h | [N] | "
-    "[ / ] review | f [N|-N] | m [N] | /TERM | "
-    "ms [+|- [N]] | c focus / C clear | overlay NAME | context [N|all] | v order | "
-    "V policy columns | l logits / L both | % probs | n [note-before] | "
-    "p [note-after] | e | e! | q | ?"
-)
-
-
 _COMPACT_HOLD_BOUNDARY = re.compile(
     r"^h\s*([.|])(?:\s*(\d+))?$",
     re.IGNORECASE,

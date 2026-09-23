@@ -109,38 +109,12 @@ class BranchingFakeBackend(ConformingFakeBackend):
         self.tokens = list(prefix_token_ids)
 
 
-class ScriptedIO:
+class ScriptedTextIO:
+    """Only text input/output; deliberately has no view-request methods."""
+
     def __init__(self, responses: list[str | None]) -> None:
         self.responses = list(responses)
         self.output: list[str] = []
-
-    @property
-    def capabilities(self):
-        from trajectory_editor.terminal_contracts import TerminalCapabilities
-        return TerminalCapabilities(live_views=False)
-
-    def terminal_size(self) -> tuple[int, int] | None:
-        return None
-
-    @contextmanager
-    def session(self):
-        yield None
-
-    def read_choice(self, state):
-        from trajectory_editor.plain_tui import read_choice
-        return read_choice(self, state)
-
-    def read_edge(self, state):
-        from trajectory_editor.plain_tui import read_edge
-        return read_edge(self, state)
-
-    def prompt(self, request):
-        if request.page:
-            self.page(request.body)
-            return ""
-        if request.body:
-            self.write(request.body)
-        return self.read_key(request.prompt) if request.single_key else self.read(request.prompt)
 
     def read(self, prompt: str) -> str | None:
         self.output.append(prompt)
@@ -162,3 +136,48 @@ class ScriptedIO:
 
     def progress(self, text: str, *, done: bool = False) -> None:
         self.output.append(text + ("\n" if done else ""))
+
+
+class ScriptedIO(ScriptedTextIO):
+    """Explicit plain request adapter around the text-only scripted fake.
+
+    CLI and policy tests supply this terminal, never the text-only base. It
+    records the prepared requests while exercising the actual plain renderer.
+    """
+
+    def __init__(self, responses: list[str | None]) -> None:
+        super().__init__(responses)
+        self.choice_requests = []
+        self.edge_requests = []
+        self.prompt_requests = []
+
+    @property
+    def capabilities(self):
+        from trajectory_editor.terminal_contracts import TerminalCapabilities
+        return TerminalCapabilities(live_views=False)
+
+    def terminal_size(self) -> tuple[int, int] | None:
+        return None
+
+    @contextmanager
+    def session(self):
+        yield None
+
+    def read_choice(self, state):
+        from trajectory_editor.plain_tui import read_choice
+        self.choice_requests.append(state)
+        return read_choice(self, state)
+
+    def read_edge(self, state):
+        from trajectory_editor.plain_tui import read_edge
+        self.edge_requests.append(state)
+        return read_edge(self, state)
+
+    def prompt(self, request):
+        self.prompt_requests.append(request)
+        if request.page:
+            self.page(request.body)
+            return ""
+        if request.body:
+            self.write(request.body)
+        return self.read_key(request.prompt) if request.single_key else self.read(request.prompt)

@@ -11,7 +11,16 @@ from .core.candidates import Candidate
 from .core.ui import ChoiceSet
 from .edge_help import edge_help
 from .terminal_contracts import ChoiceViewState, EdgeViewState, IO, PromptRequest
-from .teacher_commands import ACTION_TEXT
+
+
+ACTION_TEXT = (
+    "\nActions: accept | rank | chord RANK RANK... | t TEXT | x TEXT | "
+    "h [N] | h . [N] | h | [N] | "
+    "[ / ] review | f [N|-N] | m [N] | /TERM | "
+    "ms [+|- [N]] | c focus / C clear | overlay NAME | context [N|all] | v order | "
+    "V policy columns | l logits / L both | % probs | n [note-before] | "
+    "p [note-after] | e | e! | q | ?"
+)
 
 
 def _read_line(prompt: str) -> str | None:

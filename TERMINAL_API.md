@@ -24,6 +24,30 @@ review boundary. Policy and EDGE callers do not choose a renderer. Adding
 presentation fields changes the relevant request type; readers pass the
 same request object through to the selected implementation.
 
+## Where changes belong
+
+- Add teacher syntax and help in `teacher_commands.py`, then handle the parsed
+  command in `episode_ui.py`. Update the short plain action line in
+  `plain_tui.py` and any live key help in `live_tui.py`. Add EDGE syntax in
+  `edge_commands.py`, dispatch it
+  in `episode_cli.py` and/or `ephemeral_runtime.py` as appropriate, and update
+  `edge_help.py`. Keep episode, store, and backend effects in those callers.
+- Add a decision field to `ChoiceViewState`, an EDGE field to `EdgeViewState`, or
+  an input option to `PromptRequest` in `terminal_contracts.py`. Prepare its
+  value on the episode-owning thread. Render the same request in `plain_tui.py`
+  and the corresponding live view (`live_tui.py`, `edge_tui.py`, or the prompt
+  surface in `persistent_tui.py`).
+- Add an interactive surface to `PersistentTerminalSession` and route its
+  request through `TerminalIO` in `tui.py`. Keep one application and session
+  across surfaces. Its plain counterpart handles only text display and input.
+  Scripted CLI tests use the request-level `ScriptedIO` adapter in
+  `tests/fakes.py`; its `ScriptedTextIO` base is only for low-level text tests.
+
+`tests/core/test_terminal_architecture.py` checks that production code imports
+`plain_tui` only from terminal selection and does not branch on renderer mode in
+runtime code. `tests/core/test_terminal_scenarios.py` runs common commands
+through both scripted adapters and both episode workflows.
+
 Live views are selected at construction only when enabled, both standard
 streams are usable TTYs with file descriptors, and prompt-toolkit is installed.
 Both backends accept the same teacher and
@@ -61,4 +85,10 @@ thread. Expected preview validation errors remain editable feedback; unexpected
 preview failures propagate, stop the live application, and restore the terminal.
 EOF and interrupts also release the waiting episode thread. A live failure never
 restarts input in plain mode. The active model-free checks in
-`tests/core/test_terminal_lifecycle.py` cover those boundaries. 
+`tests/core/test_terminal_lifecycle.py` cover those boundaries, resizing, narrow
+layouts, multiline input, and every live theme. Use
+`benchmarks/tui_transitions.py --package-root CHECKOUT` from the same interpreter
+for each checkout. It loads `CHECKOUT/core/src` directly and reports application,
+fullscreen, redraw, and prepared-view transition measurements. Compare the
+same dimensions and iteration count; the benchmark excludes model, database,
+and terminal-emulator painting time.

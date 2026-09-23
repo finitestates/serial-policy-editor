@@ -24,6 +24,7 @@ from trajectory_editor.terminal_contracts import (
     BoundaryReview, ChoiceViewState, EdgeViewState, PromptRequest,
 )
 from trajectory_editor.tui import TerminalIO
+from trajectory_editor.ui_themes import LIVE_THEME_NAMES
 
 
 def _choice_state(resolve=lambda text, mode: text):
@@ -88,8 +89,81 @@ def test_one_application_transitions_across_choice_review_edge_page_prompt_choic
             assert session.application is application
             assert session.choice_view is choice_view
             assert session.choice_view is not None and session.edge_view is not None
-    assert "\x1b[?1049h" in stream.getvalue()
-    assert "\x1b[?1049l" in stream.getvalue()
+    rendered = stream.getvalue()
+    assert rendered.count("\x1b[?1049h") == 1
+    assert rendered.count("\x1b[?1049l") == 1
+
+
+@pytest.mark.parametrize("theme", LIVE_THEME_NAMES)
+def test_live_terminal_redraws_after_resize_and_handles_narrow_multiline_surfaces(theme):
+    dimensions = [10, 28]
+    stream = StringIO()
+    output = Vt100_Output(
+        stream, lambda: Size(rows=dimensions[0], columns=dimensions[1]), term="xterm",
+    )
+
+    class CountingSession(PersistentTerminalSession):
+        renders = 0
+
+        def _rendered(self, app):
+            self.renders += 1
+            super()._rendered(app)
+
+    choice = replace(_choice_state(), choice=replace(
+        _choice_state().choice, context_text_tail="A very long context line " * 12,
+    ))
+    edge = EdgeViewState("episode", 0, 3, 3, "temperature 1")
+    prompt = PromptRequest("New prompt > ", multiline=True, isolated=True)
+    with create_pipe_input() as pipe:
+        with CountingSession(input_device=pipe, output_device=output, theme=theme) as session:
+            application = session.application
+
+            def feed_choice():
+                _wait_until_ready(session, pipe, choice)
+                assert session.terminal_size()[0] == 28
+                previous = session.renders
+                dimensions[:] = [26, 88]
+                session._call(session.application.invalidate)
+                deadline = monotonic() + 3
+                while monotonic() < deadline and session.renders == previous:
+                    sleep(.005)
+                assert session.renders > previous
+                pipe.send_text("1\r")
+
+            feeder = Thread(target=feed_choice)
+            feeder.start()
+            assert session.read_choice(choice) == "1"
+            feeder.join(timeout=3)
+            assert not feeder.is_alive()
+            assert session.terminal_size()[0] == 88
+
+            for read, state, sent, expected in (
+                (session.read_edge, edge, "q\r", "q"),
+                (session.prompt, prompt, "first\rsecond\x1b\r", "first\nsecond"),
+            ):
+                feeder = Thread(target=_send_when_ready, args=(session, pipe, state, sent))
+                feeder.start()
+                assert read(state) == expected
+                feeder.join(timeout=3)
+                assert not feeder.is_alive()
+            assert session.application is application
+    rendered = stream.getvalue()
+    assert rendered.count("\x1b[?1049h") == 1
+    assert rendered.count("\x1b[?1049l") == 1
+
+
+def test_live_application_startup_failure_releases_its_thread():
+    class FailedStartup(PersistentTerminalSession):
+        async def _run_application(self):
+            raise RuntimeError("terminal startup failed")
+
+    stream, output = _terminal()
+    with create_pipe_input() as pipe:
+        session = FailedStartup(input_device=pipe, output_device=output)
+        with pytest.raises(RuntimeError, match="terminal startup failed"):
+            with session:
+                pass
+    assert session._thread is not None and not session._thread.is_alive()
 
 
 def test_live_composer_rejects_empty_then_returns_to_edge_after_cancel():
