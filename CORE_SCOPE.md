@@ -1,7 +1,13 @@
 # Core runtime scope
 
 This project is an interactive episode projector: a menu-driven environment
-for sequential token selection, replay, rewind, and branching.
+for selecting tokens sequentially. This environment also has the capacity for rewinding, forking, and replaying episodes.
+
+**The core test of program correctness is that replay must always terminate at a live edge:**
+- What this means: a sequence of teacher actions represented as a replay tape can be executed automatically and deterministically by the program itself without program failure, leaving the running program at an operational runtime menu (called `the EDGE menu`) within an active episode.
+- What this does not mean: a given replay tape will emit the exact same sequence of tokens as the episode from which the tape was derived (although it often does mean that). Whether divergence from the original token sequence is desirable or undesirable depends on what a particular replay episode is attempting to demonstrate or accomplish.
+
+A replay tape is not a 1-to-1 reconstruction of every action taken during an episode by design. The tapes themselves are storage-agnostic, transient runtime artifacts. In theory, they can be constructed from basically any data storage medium that exists.
 
 ## Main-program capabilities
 
@@ -50,7 +56,7 @@ not part of the core action contract. If a historical feature cannot reconstruct
 the result needed for replay, execution yields to the edge menu.
 Replay plans may inherit the source sampler schedule by default, but fixed and
 counterfactual replay can provide a different schedule or no source schedule
-at all; that choice belongs to the plan, not to each tape step.
+at all.
 
 ## Migration rules
 
@@ -72,29 +78,3 @@ able to import the package, run `policy-editor -h`, create and replay a minimal
 episode with a supported backend, and export that episode through `projector`.
 Optional entry points may be unavailable without their extensions; their
 absence must not prevent the core command or core package from starting.
-
-## First migration slice
-
-The canonical action language now lives in `trajectory_editor.core.actions`.
-The backend contract now lives in `trajectory_editor.core.backend`.
-The replay-stable sampler kernels (candidate filtering, raw ranks, and
-categorical/Gumbel draws) now live in `trajectory_editor.core.sampling`.
-The core sampler contract now lives in `trajectory_editor.core.sampler_config`;
-the old `SamplingConfig` is a wider compatibility record for historical episode
-fields and is not part of the core install surface.
-The authoritative replay/live runner now lives in
-`trajectory_editor.episode_runner`; `episode_policy` is retained only in the
-archive as historical extension code.
-The installed `policy-editor` command advertises and accepts the core runtime
-surface plus proper steering-vector loading. The core build contains the
-artifact loader, while `policy-editor-vector` belongs to the optional vectors
-build.
-`episode_cli` uses `SamplerConfig` and core replay factories directly.
-The live token ledger and branch cursor now begin their migration in
-`trajectory_editor.core.trajectory.TrajectoryState`; `EpisodeEngine` forwards
-its historical state attributes to this object for compatibility.
-`episode_actions` and `episode_backend` remain compatibility import paths.
-`projector` owns the typed episode projection implementation. The
-steering/activation-vector command is supplied by the optional vectors build.
-The package root and core `EpisodeRunner` do not eagerly import archived
-learning, token-preference, comparison, or experimental vector extensions.
