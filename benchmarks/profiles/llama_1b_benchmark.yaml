@@ -1,0 +1,24 @@
+name: llama-1b-q4km-cpu-benchmark
+model: Llama-3.2-1B-Instruct-GGUF/Llama-3.2-1B-Instruct-Q4_K_M.gguf
+backend: llama.cpp
+launch:
+  n-ctx: 256
+  n-batch: 64
+  n-threads: 4
+  n-gpu-layers: 0
+  cache: auto
+  temperature: 0.0
+  seed: 17
+  max-tokens: 64
+rtol: 0.001
+atol: 0.02
+scenarios:
+  - continuation
+  - controlled-write
+  - candidate-refresh
+  - long-context
+  - rewind-replace
+  - action-jsonl
+repeats: 3
+warmup: 1
+timeout_s: 90

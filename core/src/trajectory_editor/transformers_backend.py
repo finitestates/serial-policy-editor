@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import importlib.util
 import hashlib
 import inspect
@@ -270,6 +271,7 @@ class TransformersBackend:
         self._cache_enabled = self._cache_mode == "auto"
         self._cache_active = False
         self._past_key_values: Any | None = None
+        self._real_model_probe = None
         if not self.model_path.is_dir():
             raise RuntimeError(
                 "Transformers backend requires a local Hugging Face model directory: "
@@ -444,6 +446,9 @@ class TransformersBackend:
             except (AttributeError, TypeError, ValueError, _CacheUnavailable):
                 # Cache support is optional. Fall through to the canonical
                 # complete-prefix path when this model/configuration lacks it.
+                probe = getattr(self, "_real_model_probe", None)
+                if probe is not None:
+                    probe.cache_fallback("prefill-cache-unavailable")
                 self._past_key_values = None
                 self._cache_active = False
         self._evaluate_complete_prefix(use_cache=False)
@@ -457,6 +462,9 @@ class TransformersBackend:
                 self._evaluate_incremental(values)
                 return
             except (AttributeError, TypeError, ValueError, _CacheUnavailable):
+                probe = getattr(self, "_real_model_probe", None)
+                if probe is not None:
+                    probe.cache_fallback("incremental-cache-unavailable")
                 self._past_key_values = None
                 self._cache_active = False
         self._tokens.extend(values)
@@ -477,8 +485,9 @@ class TransformersBackend:
         }
         if self._supports_logits_to_keep:
             kwargs["logits_to_keep"] = 1
-        with torch.inference_mode():
-            outputs = self._model(**kwargs)
+        with self._model_interval("prefill" if use_cache else "rebuild", len(self._tokens), len(self._tokens)):
+            with torch.inference_mode():
+                outputs = self._model(**kwargs)
         if use_cache:
             past_key_values = getattr(outputs, "past_key_values", None)
             if past_key_values is None:
@@ -515,13 +524,15 @@ class TransformersBackend:
             old_length, new_length, dtype=torch.long, device=self._input_device
         )
         try:
-            with torch.inference_mode():
-                outputs = self._model(**kwargs, cache_position=cache_position)
+            with self._model_interval("incremental", len(values), new_length):
+                with torch.inference_mode():
+                    outputs = self._model(**kwargs, cache_position=cache_position)
         except TypeError:
             # Older Transformers versions still support past-key-values but do
             # not accept the cache_position keyword.
-            with torch.inference_mode():
-                outputs = self._model(**kwargs)
+            with self._model_interval("incremental-retry", len(values), new_length):
+                with torch.inference_mode():
+                    outputs = self._model(**kwargs)
         past_key_values = getattr(outputs, "past_key_values", None)
         if past_key_values is None:
             raise _CacheUnavailable(
@@ -530,6 +541,10 @@ class TransformersBackend:
         self._past_key_values = past_key_values
         self._set_last_logits(getattr(outputs, "logits", None))
         self._tokens = all_values
+
+    def _model_interval(self, kind: str, positions: int, context_length: int):
+        probe = getattr(self, "_real_model_probe", None)
+        return probe.model_call(kind, positions, context_length) if probe is not None else nullcontext()
 
     def branch_to_prefix(self, prefix_token_ids: list[int]) -> None:
         """Move to an existing prefix, reusing and cropping the current cache."""
@@ -554,6 +569,9 @@ class TransformersBackend:
         except (AttributeError, TypeError, ValueError, RuntimeError):
             # Cache state is an optimization. Rebuild the requested prefix if
             # the installed model/cache implementation cannot be repositioned.
+            probe = getattr(self, "_real_model_probe", None)
+            if probe is not None:
+                probe.cache_fallback("branch-cache-unavailable")
             self.reset(values)
 
     def _set_last_logits(self, logits: Any) -> None:
