@@ -15,6 +15,7 @@ from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_replay_source import replay_procedure
 from trajectory_editor.episode_store import EpisodeStore
 
+pytestmark = pytest.mark.invariant
 
 def test_q01_generated_core_sampler_records_round_trip_exactly():
     randomizer = random.Random(20260918)

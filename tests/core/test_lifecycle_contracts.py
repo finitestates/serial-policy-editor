@@ -21,6 +21,7 @@ from trajectory_editor.episode_replay_source import replay_procedure
 from trajectory_editor.projector import project_fork_map, project_lineage
 from trajectory_editor.episode_store import EpisodeStore
 
+pytestmark = pytest.mark.invariant
 
 class NoEogBackend(ConformingFakeBackend):
     def last_logits(self):

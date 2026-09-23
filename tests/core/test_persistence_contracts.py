@@ -17,6 +17,7 @@ from trajectory_editor.projector import (
 )
 from trajectory_editor.episode_store import EpisodeStore
 
+pytestmark = pytest.mark.invariant
 
 def runtime(*, sampling=None):
     from trajectory_editor.episode_engine import EpisodeEngine

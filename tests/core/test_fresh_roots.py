@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from tests.fakes import ConformingFakeBackend, ScriptedIO
 from trajectory_editor.core.actions import Write
 from trajectory_editor.core.sampler_config import SamplerConfig
@@ -44,6 +46,7 @@ def _session(*, guidance: bool = False, max_tokens: int = 3) -> LiveSession:
     return LiveSession(engine, prompt="P")
 
 
+@pytest.mark.invariant
 def test_fresh_root_factory_copies_runtime_settings_but_starts_a_new_ledger():
     source = _session(max_tokens=4)
     source.generate(Write(" A", mode="exact"))
@@ -62,6 +65,7 @@ def test_fresh_root_factory_copies_runtime_settings_but_starts_a_new_ledger():
     assert fresh.initial_text == "Q"
 
 
+@pytest.mark.invariant
 def test_detached_root_rebuilds_primary_and_guidance_prefix():
     session = _session(guidance=True)
     session.generate(Write(" A", mode="exact"))
@@ -79,6 +83,7 @@ def test_detached_root_rebuilds_primary_and_guidance_prefix():
     assert session.branch_states[session.branch.branch_id].visible_token_ids == (1,)
 
 
+@pytest.mark.current_workflow
 def test_ephemeral_help_and_bare_new_expose_the_polished_commands():
     from trajectory_editor.edge_tui import _edge_header
 
@@ -111,6 +116,7 @@ def test_ephemeral_help_and_bare_new_expose_the_polished_commands():
     assert len(io.requests) == 1 and io.requests[0].multiline
 
 
+@pytest.mark.current_workflow
 def test_plain_bare_new_uses_line_prompt_without_cli_or_live_application(monkeypatch):
     import builtins
 
@@ -131,11 +137,13 @@ def test_plain_bare_new_uses_line_prompt_without_cli_or_live_application(monkeyp
         assert ephemeral_edge_menu(terminal, _session()) == ("new", "Q")
 
 
+@pytest.mark.current_workflow
 def test_bare_new_cancellation_returns_to_ephemeral_edge():
     io = ScriptedIO(["new", None, "q"])
     assert ephemeral_edge_menu(io, _session()) == ("quit", None)
 
 
+@pytest.mark.current_workflow
 def test_ephemeral_new_has_one_model_load_and_global_stable_addresses(tmp_path):
     workspace = tmp_path / "must-not-exist.sqlite3"
     backend = ConformingFakeBackend()
@@ -194,6 +202,7 @@ def test_ephemeral_new_has_one_model_load_and_global_stable_addresses(tmp_path):
     assert "#3" in listing and "#4" in listing
 
 
+@pytest.mark.invariant
 def test_durable_new_is_parentless_and_bare_number_returns_to_prior_episode(tmp_path):
     workspace = tmp_path / "episodes.sqlite3"
     backend = DurableFakeBackend()
@@ -232,6 +241,7 @@ def test_durable_new_is_parentless_and_bare_number_returns_to_prior_episode(tmp_
         assert store.label(original).startswith("#1")
 
 
+@pytest.mark.invariant
 def test_save_family_only_materializes_the_selected_root_family(tmp_path):
     session = _session()
     roster = LiveSessionRoster(session)

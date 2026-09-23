@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from tests.fakes import ConformingFakeBackend, ScriptedIO
 from tests.core.runtime_helpers import LiveScriptedIO
 from trajectory_editor.core.sampler_config import SamplerConfig
@@ -13,6 +15,7 @@ from trajectory_editor.plain_tui import read_edge
 from trajectory_editor.terminal_contracts import EdgeViewState
 from trajectory_editor.teacher_commands import HELP_TEXT
 
+pytestmark = pytest.mark.current_workflow
 
 class CountingBackend(ConformingFakeBackend):
     def __init__(self):

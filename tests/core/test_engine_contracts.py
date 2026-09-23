@@ -18,6 +18,7 @@ from trajectory_editor.core.errors import EditorError
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine, InstructionRejected
 
+pytestmark = pytest.mark.invariant
 
 class PhraseBackend(ConformingFakeBackend):
     def tokenize(self, text, *, add_bos=False, special=False):

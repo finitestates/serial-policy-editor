@@ -11,6 +11,7 @@ from trajectory_editor.controller_profiles import (
 )
 from trajectory_editor.episode_cli import build_parser
 
+pytestmark = pytest.mark.current_workflow
 
 def test_profile_values_are_cli_typed_using_visible_option_names(tmp_path):
     parser = build_parser(include_vector=False)

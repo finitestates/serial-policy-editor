@@ -6,6 +6,7 @@ import pytest
 
 from trajectory_editor.episode_lineage import EpisodeRelation, build_lineage
 
+pytestmark = pytest.mark.invariant
 
 def relation(
     episode_id: str,

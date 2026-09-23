@@ -5,6 +5,8 @@ from __future__ import annotations
 from contextlib import contextmanager
 from unittest.mock import patch
 
+import pytest
+
 from tests.fakes import ConformingFakeBackend, ScriptedIO
 from trajectory_editor.core.actions import Write
 from trajectory_editor.core.sampler_config import SamplerConfig
@@ -33,6 +35,7 @@ def _run(
     return io
 
 
+@pytest.mark.current_workflow
 def test_ephemeral_quit_never_opens_the_default_or_selected_workspace(tmp_path):
     workspace = tmp_path / "should-not-exist.sqlite3"
 
@@ -41,6 +44,7 @@ def test_ephemeral_quit_never_opens_the_default_or_selected_workspace(tmp_path):
     assert not workspace.exists()
 
 
+@pytest.mark.invariant
 def test_ephemeral_export_and_save_materialize_only_the_selected_branch(tmp_path):
     exported = tmp_path / "branch.jsonl"
     workspace = tmp_path / "saved.sqlite3"
@@ -59,6 +63,7 @@ def test_ephemeral_export_and_save_materialize_only_the_selected_branch(tmp_path
         assert len(replay_procedure(store, "selected")) == 1
 
 
+@pytest.mark.invariant
 def test_ephemeral_fork_selects_a_new_live_branch_without_a_workspace(tmp_path):
     workspace = tmp_path / "should-not-exist.sqlite3"
 
@@ -73,6 +78,7 @@ def test_ephemeral_fork_selects_a_new_live_branch_without_a_workspace(tmp_path):
     assert any("Live branches:" in item for item in io.output)
 
 
+@pytest.mark.invariant
 def test_ephemeral_rewind_can_move_a_forked_branch_before_its_fork_point(tmp_path):
     workspace = tmp_path / "rewound-child.sqlite3"
 
@@ -91,6 +97,7 @@ def test_ephemeral_rewind_can_move_a_forked_branch_before_its_fork_point(tmp_pat
         assert len(store.actions("selected")) == 1
 
 
+@pytest.mark.invariant
 def test_ephemeral_nested_fork_save_keeps_only_the_selected_prefix(tmp_path):
     workspace = tmp_path / "selected.sqlite3"
 
@@ -112,6 +119,7 @@ def test_ephemeral_nested_fork_save_keeps_only_the_selected_prefix(tmp_path):
         ] == [(0, 1), (1, 2)]
 
 
+@pytest.mark.invariant
 def test_ephemeral_fork_map_uses_root_relative_boundaries():
     session = LiveSession(
         EpisodeEngine(
@@ -131,6 +139,7 @@ def test_ephemeral_fork_map_uses_root_relative_boundaries():
     assert any("P|0| A|1|" in item for item in io.output)
 
 
+@pytest.mark.current_workflow
 def test_ephemeral_branches_use_numeric_aliases_for_switching():
     session = LiveSession(
         EpisodeEngine(
@@ -155,6 +164,7 @@ def test_ephemeral_branches_use_numeric_aliases_for_switching():
     assert "live-" not in listing
 
 
+@pytest.mark.invariant
 def test_ephemeral_save_family_materializes_live_lineage(tmp_path):
     workspace = tmp_path / "family.sqlite3"
 
@@ -199,6 +209,7 @@ class _LiveContextIO(ScriptedIO):
         yield self
 
 
+@pytest.mark.current_workflow
 def test_ephemeral_uses_live_ui_by_default_and_plain_ui_is_an_opt_out(tmp_path):
     captured: list[bool] = []
     io = _LiveContextIO(["q", "q"])
@@ -236,6 +247,7 @@ def test_ephemeral_uses_live_ui_by_default_and_plain_ui_is_an_opt_out(tmp_path):
     assert captured == [False]
 
 
+@pytest.mark.current_workflow
 def test_ephemeral_live_policy_keeps_seamless_review_enabled():
     from trajectory_editor.episode_cli import build_parser
     from trajectory_editor.episode_policy_setup import ephemeral_policy

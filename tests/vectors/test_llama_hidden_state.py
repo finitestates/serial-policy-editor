@@ -7,6 +7,7 @@ import pytest
 
 from trajectory_editor.decoder import LlamaCppDecoder
 
+pytestmark = pytest.mark.optional
 
 class _FakeBatch:
     def __init__(self):

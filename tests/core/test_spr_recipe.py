@@ -30,6 +30,7 @@ from trajectory_editor.spr_recipe import (
     compose_replay_plan,
 )
 
+pytestmark = pytest.mark.invariant
 
 FINGERPRINT = "a" * 64
 

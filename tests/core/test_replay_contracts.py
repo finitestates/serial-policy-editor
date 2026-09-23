@@ -32,6 +32,7 @@ from trajectory_editor.spr_recipe import (
 )
 from tests.core.test_lifecycle_contracts import PhraseBackend
 
+pytestmark = pytest.mark.invariant
 
 class SequenceBackend(ConformingFakeBackend):
     pieces = {
