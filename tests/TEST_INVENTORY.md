@@ -100,7 +100,6 @@ safe for its production/analysis workflows.
 | `test_vector_loading.py` | deleted | its cvector loader case is now V02 |
 | `test_llama_hidden_state.py` | move/rewrite | `vectors` backend production tests |
 | `test_llama_worker.py` | move/rewrite | `vectors` worker/production tests |
-| `test_transformers_hidden_state.py` | split | core backend capability tests; `vectors` production tests |
 | `test_transformers_worker_interop.py` | move/rewrite | `vectors` opt-in conformance tests |
 | `test_vector_command_boundary.py` | move/rewrite | core/vector command boundary, with vector-only strictness |
 
