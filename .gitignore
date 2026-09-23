@@ -3,10 +3,12 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.mutmut-workspace/
 .mypy_cache/
 .ruff_cache/
 build/
 dist/
+mutation/
 
 # Local virtual environments and installed runtime dependencies
 .venv/
@@ -20,3 +22,4 @@ pyvenv.cfg
 
 # Separate local checkouts for experimental branches
 .worktrees/
+scripts/mutation_pipeline.sh
