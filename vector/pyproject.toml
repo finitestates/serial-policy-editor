@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "policy-editor-vector"
-version = "0.6.5"
+version = "0.7.0"
 description = "Optional activation/steering-vector tools for Serial Policy Editor"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "policy-editor-core>=0.6.5",
+    "policy-editor-core>=0.7.0",
     "numpy>=1.24",
 ]
 

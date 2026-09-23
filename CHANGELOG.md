@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.0 — 2026-09-23
+
+- **Terminal UI:** Consolidate durable, ephemeral, and live terminal flows
+  around shared request and lifecycle contracts, with documented terminal
+  interfaces. Add chord previews that advance ranked alternatives in parallel
+  and commit one selected path. Simplify the default candidate layout, let `c`
+  cycle optional diagnostic columns and `C` restore the default, and calculate
+  expensive probability overlays only when requested.
+- Improve classifier-free guidance across replay and model changes: provision
+  guidance when reachable sampler settings require it, keep its backend aligned
+  with the active primary backend, and reuse append-only prefix evaluation.
+- Remove retired research implementations from `archive/` and obsolete early
+  release-note files from the repository.
+
 ## 0.6.0 — 2026-09-21
 
 - Add teacher replay plans and storage-independent replay recipes, including
