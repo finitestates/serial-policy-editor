@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from .candidate_columns import CandidateColumns, CandidateViewPlan, next_column_focus
+from .chord import ChordRequested, parse_chord
 from .core.candidates import Candidate
 from .core.errors import EditorError
 from .core.ui import ChoiceSet
@@ -580,6 +581,11 @@ class InteractivePolicy:
                 raw = str(observation.proposal_raw_rank)
             proposal_prefill_available = False
             try:
+                ranks = parse_chord(raw, len(observation.logits))
+                if ranks is not None:
+                    if review_boundary is not None:
+                        raise EditorError("return to the current menu before starting a chord")
+                    raise ChordRequested(ranks)
                 command = parse_command(
                     raw,
                     menu_size=len(choice.candidates),

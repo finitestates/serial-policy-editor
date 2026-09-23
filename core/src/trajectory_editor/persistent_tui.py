@@ -43,6 +43,7 @@ class PromptState:
     single_key: bool = False
     page: bool = False
     multiline: bool = False
+    isolated: bool = False
 
 
 @dataclass(eq=False)
@@ -332,6 +333,9 @@ class PersistentTerminalSession(AbstractContextManager):
     def read(self, prompt: str, *, single_key=False):
         return self._read(PromptState(prompt, single_key=single_key))
 
+    def read_chord(self, prompt: str, body: str):
+        return self._read(PromptState(prompt, body=body, isolated=True))
+
     def read_multiline_prompt(
         self,
         prompt: str = "Write at least one character. Press Escape then Enter to continue.\n\n",
@@ -385,6 +389,11 @@ class PersistentTerminalSession(AbstractContextManager):
         else:
             if state.page:
                 self._prompt_context = state.body
+            elif state.isolated:
+                # Chord owns its whole preview. The generic prompt history
+                # includes model-loading output and previous chord rounds.
+                self._prompt_context = ""
+                self._notice = ""
             else:
                 state = replace(state, body=self._prompt_context or "\n".join(self._messages))
             if self._prompt_view is None:

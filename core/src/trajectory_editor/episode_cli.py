@@ -23,6 +23,7 @@ from . import (
     episode_prompts,
 )
 from .backend_factory import BACKEND_NAMES
+from .chord import ActionSequencePolicy, Chord, ChordRequested, chord_menu
 from .decoder import KV_CACHE_TYPES
 from .core.errors import EditorError
 from .core.cli_config import (
@@ -268,7 +269,7 @@ def build_parser(
     parser.add_argument(
         "--output",
         type=Path,
-        help="write full final episode text here when the episode is sealed",
+        help="write final or projected episode text here",
     )
 
     parser.add_argument("--backend", choices=BACKEND_NAMES, default=None)
@@ -645,7 +646,10 @@ def _seal(
 
 
 def _print_final_text(engine: EpisodeEngine, *, output: Path | None = None) -> None:
-    text = engine.text
+    _write_text(engine.text, output=output)
+
+
+def _write_text(text: str, *, output: Path | None = None) -> None:
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(text, encoding="utf-8")
@@ -739,19 +743,18 @@ def main(
                 if args.procedure:
                     print(project_procedure(store, args.projector))
                     return 0
-                print(
-                    project_episode(
-                        store,
-                        args.projector,
-                        annotations=getattr(args, "annotations", "none"),
-                        with_loss=getattr(args, "with_loss", False),
-                        with_rank=getattr(args, "with_rank", False),
-                        with_policy_rank=getattr(args, "with_policy_rank", False),
-                        full_evidence=getattr(args, "full_evidence", False),
-                        with_model_probs=getattr(args, "with_model_probs", False),
-                        with_lineage=getattr(args, "with_lineage", False),
-                    ).text
+                projection = project_episode(
+                    store,
+                    args.projector,
+                    annotations=getattr(args, "annotations", "none"),
+                    with_loss=getattr(args, "with_loss", False),
+                    with_rank=getattr(args, "with_rank", False),
+                    with_policy_rank=getattr(args, "with_policy_rank", False),
+                    full_evidence=getattr(args, "full_evidence", False),
+                    with_model_probs=getattr(args, "with_model_probs", False),
+                    with_lineage=getattr(args, "with_lineage", False),
                 )
+                _write_text(projection.text, output=args.output)
                 return 0
             if args.random_seed:
                 args.seed = random_seed()
@@ -1023,6 +1026,33 @@ def main(
                         io, store, episode_id, engine,
                         sampling_factory=sampling_factory,
                     )
+                except ChordRequested as request:
+                    pending_tape = None
+                    chord = Chord(engine, request.ranks)
+                    try:
+                        chord_action, actions = chord_menu(io, chord)
+                    finally:
+                        chord.discard()
+                    if chord_action == "quit":
+                        store.update_episode(
+                            episode_id,
+                            visible_text=engine.backend.render(engine.visible_token_ids),
+                            max_tokens=engine.max_tokens,
+                            status="open",
+                        )
+                        return 0
+                    if chord_action == "select":
+                        assert actions is not None
+                        selected = runner.run(
+                            live_policy=ActionSequencePolicy(actions),
+                            max_live_actions=len(actions),
+                        )
+                        if selected.handed_off:
+                            io.write(selected.handoff_reason or "Chord selection handed off.")
+                        if engine.ended:
+                            _print_final_text(engine, output=args.output)
+                            return 0
+                    continue
                 except SeamlessRewindRequested as request:
                     from_boundary = engine.boundary
                     io.write(f"Restoring context at boundary {request.boundary}...")

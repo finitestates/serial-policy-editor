@@ -23,6 +23,7 @@ from prompt_toolkit.styles import Style
 
 from .tui import parse_bias_command
 from .candidate_columns import CandidateColumns
+from .chord import parse_chord
 from .core.candidates import Candidate
 from .core.errors import EditorError
 from .core.ui import ChoiceSet, InsertMode
@@ -102,6 +103,24 @@ def action_preview(
     )
     stripped = raw.strip()
     lower = stripped.lower()
+
+    if lower == "chord" or lower.startswith("chord "):
+        try:
+            ranks = parse_chord(raw, choice.vocabulary_size or len(candidates))
+        except EditorError as exc:
+            return ActionPreview(
+                kind="invalid", label="invalid chord", detail=str(exc), valid=False,
+            )
+        assert ranks is not None
+        return ActionPreview(
+            kind="effect",
+            label="chord preview",
+            detail=(
+                f"Press Enter to preview {len(ranks)} paths from raw ranks "
+                + ", ".join(str(rank) for rank in ranks)
+                + ". No episode action is recorded yet."
+            ),
+        )
 
     if not stripped or lower == "accept":
         if sampled_candidate is not None:

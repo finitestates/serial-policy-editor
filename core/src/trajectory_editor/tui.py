@@ -220,6 +220,12 @@ class TerminalIO:
         except EOFError:
             return None
 
+    def read_chord_command(self, prompt: str, body: str) -> str | None:
+        if self._live_session is not None:
+            return self._live_session.read_chord(prompt, body)
+        self.write(body)
+        return self.read(prompt)
+
     def read_multiline_prompt(self) -> str | None:
         """Read a new root with the same composer used for initial prompts."""
         if self._live_session is not None:
@@ -368,6 +374,7 @@ HELP_TEXT = """Commands:
   N+ / N-           adjust token bias by the default step without advancing
   N+0.5 / N-0.5     adjust by an explicit amount; N= clears that token bias
   1..N              commit a candidate; the proposal rank records acceptance
+  chord RANK RANK... preview temporary continuations; select one by letter or starting rank
   t TEXT            insert continuation text (adds a joining space if needed)
   x TEXT            insert exact text
                     after `t ` or `x `, Tab inserts a literal tab character

@@ -12,6 +12,7 @@ from .core.cli_config import (
     sampler_override,
 )
 from .core.errors import EditorError
+from .chord import ActionSequencePolicy, Chord, ChordRequested, chord_menu
 from .edge_status import sampler_summary
 from .episode_engine import EpisodeEngine
 from .episode_prompts import read_new_prompt
@@ -305,6 +306,32 @@ def run_ephemeral(
         except EdgeRequested:
             pending_tape = None
             action, value = ephemeral_edge_menu(io, roster)
+        except ChordRequested as request:
+            pending_tape = None
+            chord = Chord(session.engine, request.ranks)
+            try:
+                chord_action, actions = chord_menu(io, chord)
+            finally:
+                chord.discard()
+            if chord_action == "quit":
+                roster.discard()
+                return 0
+            if chord_action == "select":
+                assert actions is not None
+                result = runner.run(
+                    live_policy=ActionSequencePolicy(actions),
+                    max_live_actions=len(actions),
+                )
+                if session.engine.ended:
+                    _print_final_text(session, args.output)
+                    roster.discard()
+                    return 0
+                if result.handed_off:
+                    io.write(result.handoff_reason or "Chord selection handed off.")
+                pending_tape = None
+            else:
+                pending_tape = None
+            continue
         except ForkRequested as request:
             action, value = "fork", request.boundary
         except SeamlessRewindRequested as request:
