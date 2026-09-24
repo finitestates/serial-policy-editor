@@ -4,9 +4,10 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 
-from tests.fakes import ConformingFakeBackend, ScriptedIO
+from tests.fakes import ConformingFakeBackend, ScriptedIO, SnapshotFakeBackend
 from trajectory_editor.chord import Chord, _recent_context, chord_menu, parse_chord
 from trajectory_editor.core.actions import Accept, SelectRawRank
 from trajectory_editor.core.errors import EditorError
@@ -28,6 +29,37 @@ def engine(*, budget=None, backend=None, guidance=None, sampling=None):
         sampling=sampling or SamplerConfig(), max_tokens=budget,
         guidance_backend=guidance,
     )
+
+
+class OrderedSnapshotBackend(SnapshotFakeBackend):
+    """Context-sensitive token paths for preview-to-commit invariants."""
+
+    pieces = {
+        0: "<EOG>",
+        1: " you",
+        2: " if",
+        3: " can",
+        4: " walk",
+        5: " follow",
+        6: " onward",
+        7: "P",
+    }
+
+    def last_logits(self):
+        order = {
+            (7,): (1, 2, 0),
+            (7, 1): (3, 4, 0),
+            (7, 1, 3): (4, 6, 0),
+            (7, 2): (5, 4, 0),
+            (7, 2, 5): (6, 4, 0),
+        }.get(tuple(self.tokens), (0, 6, 4))
+        logits = np.full(self.vocabulary_size(), -100.0, dtype=np.float32)
+        for score, token_id in enumerate(reversed(order), start=1):
+            logits[token_id] = score
+        return logits
+
+    def branch_to_prefix(self, prefix_token_ids):
+        self.tokens = list(prefix_token_ids)
 
 
 @pytest.mark.invariant
@@ -64,6 +96,66 @@ def test_chord_discard_and_survivor_match_ordinary_actions():
     initial = Chord(zero, (1, 2))
     assert initial.select("2") == (SelectRawRank(2),)
     assert zero.boundary == 0
+
+
+@pytest.mark.parametrize("warm", [False, True], ids=["cold", "warmed"])
+@pytest.mark.parametrize("branching", [False, True], ids=["reset", "branch"])
+@pytest.mark.parametrize(
+    ("selection", "expected_ids"),
+    [("1", (1, 3)), ("b", (2, 5))],
+    ids=["rank-alias", "letter-label"],
+)
+@pytest.mark.invariant
+def test_chord_menu_preview_matches_committed_tokens_after_switch_and_rewind(
+    warm, branching, selection, expected_ids,
+):
+    backend = OrderedSnapshotBackend()
+    if not branching:
+        backend.branch_to_prefix = None
+    original = engine(backend=backend, sampling=SamplerConfig(temperature=0.0))
+    base = tuple(original.token_ids)
+    observation = original.observe()
+    if warm:
+        assert original.speculate_accept(
+            observation, raw_rank=1, token_id=1, generation=1,
+        )
+        assert backend.tokens == list(base)
+
+    chord = Chord(original, (1, 2))
+    assert chord.advance()
+    assert chord.advance()
+    assert chord.rewind()
+
+    selected_path = chord.paths[0] if selection == "1" else chord.paths[1]
+    preview_ids = tuple(selected_path.token_ids)
+    preview_text = backend.render(list(preview_ids))
+    assert preview_ids == expected_ids
+    assert tuple(
+        selected_path.engine.visible_token_ids[len(chord.base_visible):]
+    ) == preview_ids
+
+    io = ScriptedIO([selection])
+    result, actions = chord_menu(io, chord)
+    assert result == "select"
+    assert actions == (
+        SelectRawRank(selected_path.starting_rank), Accept(),
+    )
+    assert any(
+        f"{selected_path.label}  rank {selected_path.starting_rank}  LIVE\n"
+        f"    {preview_text.lstrip()}" in request.body
+        for request in io.prompt_requests
+    )
+
+    outcomes = [original.apply(action) for action in actions]
+    committed_ids = tuple(
+        token_id
+        for outcome in outcomes
+        for token_id in outcome.resolved_token_ids
+    )
+    assert committed_ids == preview_ids
+    assert tuple(original.token_ids) == (*base, *preview_ids)
+    assert original.backend.render(original.token_ids) == f"P{preview_text}"
+    assert original.backend.tokens == original.token_ids
 
 
 @pytest.mark.current_workflow
@@ -391,6 +483,10 @@ def test_chord_cli_records_only_survivor_and_export(tmp_path, live, ephemeral):
         assert main(["--model", "fake", "--new-prompt", "P", *flags]) == 0
     assert any("a  rank 1" in item and "b  rank 2" in item and "c  rank 4" in item
                for item in io.output)
+    assert any(
+        "a  rank 1  LIVE\n    A B" in request.body
+        for request in io.prompt_requests
+    )
     assert any("Resolve the chord before changing the episode" in item for item in io.output)
     if ephemeral:
         tape = load_teacher_tape_jsonl(export)
@@ -399,6 +495,9 @@ def test_chord_cli_records_only_survivor_and_export(tmp_path, live, ephemeral):
         with EpisodeStore(workspace) as store:
             episode_id = store.resolve_id("#1")
             assert [step["action"] for step in replay_procedure(store, episode_id)] == [SelectRawRank(1), Accept()]
+            tokens = store.tokens(episode_id)
+            assert [token["token_id"] for token in tokens] == [1, 2]
+            assert [token["text"] for token in tokens] == [" A", " B"]
 
 
 @pytest.mark.invariant

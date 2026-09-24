@@ -351,6 +351,20 @@ class EpisodeEngine:
         """Drop a prepared one-token continuation without changing live state."""
         self._prepared_accept = None
 
+    def has_prepared_accept(
+        self, observation: Observation, raw_rank: int, token_id: int
+    ) -> bool:
+        """Return whether an exact warm is ready for this decision and target."""
+        prepared = self._prepared_accept
+        return bool(
+            prepared is not None
+            and prepared.observation is observation
+            and prepared.raw_rank == raw_rank
+            and prepared.token_id == token_id
+            and prepared.backend_snapshot.prefix_token_ids
+            == (*tuple(self.token_ids), token_id)
+        )
+
     def speculate_accept(
         self,
         observation: Observation,
@@ -394,6 +408,16 @@ class EpisodeEngine:
             return False
         token_id = selected_token_id
         self._latest_speculation_generation = generation
+        prepared = self._prepared_accept
+        if (
+            prepared is not None
+            and prepared.observation is observation
+            and prepared.raw_rank == raw_rank
+            and prepared.token_id == token_id
+            and prepared.backend_snapshot.prefix_token_ids
+            == (*tuple(self.token_ids), token_id)
+        ):
+            return True
         self.discard_speculative_accept()
         if (
             self.backend.is_eog(token_id)

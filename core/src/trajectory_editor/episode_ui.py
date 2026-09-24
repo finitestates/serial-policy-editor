@@ -193,7 +193,7 @@ class InteractivePolicy:
         observation: Observation,
         query: str,
         invoked_as: str,
-    ) -> tuple[SearchLens | None, ChoiceFeedback]:
+    ) -> tuple[SearchLens | None, ChoiceFeedback, tuple[int, int] | None]:
         try:
             token_ids = engine.backend.tokenize(query, add_bos=False, special=False)
         except Exception as exc:
@@ -241,7 +241,10 @@ class InteractivePolicy:
                 ),
                 completion_commands=suggestions,
             )
-            return None, feedback
+            first_token_id = pieces[0][0]
+            return None, feedback, (
+                raw_rank(observation.logits, first_token_id), first_token_id
+            )
         token_id = int(token_ids[0])
         if not 0 <= token_id < len(observation.logits):
             raise EditorError("the tokenizer returned a token outside the vocabulary")
@@ -263,7 +266,14 @@ class InteractivePolicy:
         self._record_search_view(
             engine, observation, lens, invoked_as=invoked_as, invocation="search"
         )
-        return lens, self._search_feedback(lens)
+        return lens, self._search_feedback(lens), (rank, token_id)
+
+    @staticmethod
+    def _search_warm_commands(query: str) -> tuple[str, ...]:
+        commands = ("/" + json.dumps(query, ensure_ascii=False),)
+        if not query.startswith('"'):
+            commands += ("/" + query,)
+        return commands
 
     @staticmethod
     def _search_feedback(lens: SearchLens) -> ChoiceFeedback:
@@ -421,6 +431,8 @@ class InteractivePolicy:
 
         search: SearchLens | None = None
         search_lens_active = False
+        search_warm_target: tuple[int, int] | None = None
+        search_warm_commands: tuple[str, ...] = ()
         feedback: ChoiceFeedback | None = None
         policy_sort = self.view_preferences.sort_by_policy
         review_boundary: int | None = None
@@ -525,6 +537,12 @@ class InteractivePolicy:
                 cancel_warm_selection=(
                     engine.discard_speculative_accept
                     if review_boundary is None else None
+                ),
+                search_warm_target=search_warm_target,
+                search_warm_commands=search_warm_commands,
+                search_warm_prepared=(
+                    search_warm_target is not None
+                    and engine.has_prepared_accept(observation, *search_warm_target)
                 ),
             ))
             if raw is None:
@@ -711,22 +729,30 @@ class InteractivePolicy:
                 continue
             if command.kind == CommandKind.MAIN_MENU:
                 search_lens_active = False
+                search_warm_target = None
+                search_warm_commands = ()
                 feedback = None
                 continue
             if command.kind == CommandKind.TOKEN_SEARCH:
                 assert command.search_query is not None
                 try:
-                    found, feedback = self._search(
+                    found, feedback, search_warm_target = self._search(
                         engine,
                         observation,
                         command.search_query,
                         command.invoked_as or raw,
+                    )
+                    search_warm_commands = (
+                        feedback.completion_commands[:1]
+                        if found is None else self._search_warm_commands(found.query)
                     )
                 except EditorError as exc:
                     feedback = ChoiceFeedback("error", "SEARCH FAILED", (str(exc),))
                     continue
                 if found is not None:
                     search = found
+                    search_warm_target = (found.target_rank, found.token_id)
+                    search_warm_commands = self._search_warm_commands(found.query)
                     search_lens_active = True
                     exposed.update(
                         (candidate.rank, candidate)
@@ -745,6 +771,8 @@ class InteractivePolicy:
                         lower_rank=max(1, rank - self.search_radius),
                         upper_rank=min(len(observation.logits), rank + self.search_radius),
                     )
+                    search_warm_target = (rank, candidate.token_id)
+                    search_warm_commands = self._search_warm_commands(candidate.text)
                 if search is None:
                     feedback = ChoiceFeedback(
                         "error", "NO ACTIVE SEARCH", ("Use /TERM or ms N first.",)
@@ -760,6 +788,8 @@ class InteractivePolicy:
                         1, search.lower_rank - int(command.search_rows or 0)
                     )
                 search_lens_active = True
+                search_warm_target = (search.target_rank, search.token_id)
+                search_warm_commands = self._search_warm_commands(search.query)
                 rows = self._lens_candidates(engine, observation, search)
                 exposed.update((candidate.rank, candidate) for candidate in rows)
                 self._record_search_view(

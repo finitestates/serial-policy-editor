@@ -69,6 +69,9 @@ class ChoiceViewState:
     cancel_warm_selection: Callable[[], None] | None = field(
         default=None, repr=False, compare=False
     )
+    search_warm_target: tuple[int, int] | None = None
+    search_warm_commands: tuple[str, ...] = ()
+    search_warm_prepared: bool = False
 
 
 @dataclass(frozen=True)

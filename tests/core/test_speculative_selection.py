@@ -48,6 +48,22 @@ def test_selected_raw_rank_promotes_prepared_state_without_second_evaluation():
 
 
 @pytest.mark.invariant
+def test_repeated_identical_warm_reuses_the_prepared_state():
+    backend = SnapshotFakeBackend()
+    episode = engine(backend)
+    observation = episode.observe()
+
+    assert episode.speculate_accept(observation, raw_rank=2, token_id=2, generation=1)
+    assert episode.speculate_accept(observation, raw_rank=2, token_id=2, generation=2)
+
+    assert backend.eval_calls == [(2,)]
+    assert episode.has_prepared_accept(observation, 2, 2)
+    episode.apply(SelectRawRank(2))
+    assert backend.eval_calls == [(2,)]
+    assert backend.tokens == [7, 2]
+
+
+@pytest.mark.invariant
 def test_accept_cannot_promote_a_different_selected_token():
     backend = SnapshotFakeBackend()
     episode = engine(backend)
