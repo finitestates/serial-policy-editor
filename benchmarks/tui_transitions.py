@@ -35,9 +35,18 @@ from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output.vt100 import Vt100_Output
 from trajectory_editor.core.candidates import Candidate
 from trajectory_editor.core.ui import ChoiceSet
-from trajectory_editor.terminal_contracts import (
-    BoundaryReview, ChoiceFeedback, ChoiceViewState, EdgeViewState, PromptRequest,
-)
+try:
+    from trajectory_editor.terminal_contracts import (
+        BoundaryReview, ChoiceFeedback, ChoiceViewState, EdgeViewState, PromptRequest,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != 'trajectory_editor.terminal_contracts':
+        raise
+    # Compare with the original chord implementation, before TUI consolidation.
+    from trajectory_editor.live_tui import ChoiceViewState
+    from trajectory_editor.edge_tui import EdgeViewState
+    from trajectory_editor.tui import BoundaryReview, ChoiceFeedback
+    from trajectory_editor.persistent_tui import PromptState as PromptRequest
 from trajectory_editor.persistent_tui import PersistentTerminalSession
 import trajectory_editor.persistent_tui as loaded_terminal
 
@@ -76,6 +85,10 @@ context = '\n'.join(f'History line {i}: previously generated text.' for i in ran
 base = ChoiceSet('bench', 'bench', 200, 200, '0'*64, context,
                  1, ' candidate 1', .01, .01, False, candidates[:12],
                  vocabulary_size=128000, proposal_raw_rank=1)
+chord_body = 'Shared context (last 4 lines):\nPreviously generated text.\n\nPaths:\n' + '\n'.join(
+    f'{label}  rank {rank}  LIVE\n' + '   A possible continuation for this path.\n' * 8
+    for rank, label in enumerate('abc', 1)
+)
 variants = [
     ('menu', 'choice', base, {}, '\r'),
     ('expanded menu', 'choice', replace(base, candidates=candidates), {}, '\r'),
@@ -87,6 +100,9 @@ variants = [
     ('edge', 'edge', EdgeViewState('bench', 200, 100, 100, 'temperature 1'), {}, 'q\r'),
     ('prompt', 'prompt', PromptRequest('Name> '), {}, 'name\r'),
     ('page', 'prompt', PromptRequest('', body=context, page=True), {}, '\r'),
+    ('chord', 'prompt', PromptRequest('Chord > ', body=chord_body, isolated=True), {}, '\r'),
+    ('chord advance', 'prompt', PromptRequest('Chord > ', body=chord_body + '   Another token.', isolated=True), {}, 'a\r'),
+    ('menu after chord', 'choice', base, {}, '\r'),
 ]
 output = Output()
 samples = defaultdict(list)
@@ -138,7 +154,8 @@ with create_pipe_input() as pipe:
             elif kind == 'edge':
                 session.read_edge(state)
             else:
-                session.prompt(state)
+                # Common request entry point before and after consolidation.
+                session._read(state)
 
 
 def summary(values):

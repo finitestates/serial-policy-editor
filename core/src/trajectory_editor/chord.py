@@ -97,6 +97,8 @@ class Chord:
         self.base_prefix = list(engine.token_ids)
         self.shared_context = engine.backend.render(self.base_prefix, special=True)
         self.paths: list[ChordPath] = []
+        self._active_path: ChordPath | None = None
+        self._context_cache: tuple[int, str] | None = None
         self.rounds: list[tuple[int, ...]] = []
         self.closed = False
         try:
@@ -127,6 +129,11 @@ class Chord:
             raise
 
     def _activate(self, path: ChordPath) -> None:
+        if self._active_path is path:
+            # The last preview still owns the primary cache. observe() appends
+            # any missing CFG token lazily; no shared-prefix rebuild is needed.
+            return
+        self._active_path = None
         suffix = list(path.engine.visible_token_ids[len(self.base_visible):])
         _position(self.original.backend, self.base_prefix, suffix)
         if path.engine._cfg_active() and path.engine.guidance_backend is not None:
@@ -139,6 +146,7 @@ class Chord:
                 [*prompt, *path.engine.visible_token_ids]
             )
             path.engine.guidance_backend._spe_cfg_owner = path.engine._guidance_owner
+        self._active_path = path
 
     def advance(self) -> bool:
         advanced: list[int] = []
@@ -157,6 +165,8 @@ class Chord:
     def rewind(self) -> bool:
         if not self.rounds:
             return False
+        # Rewind repositions the shared backend outside _activate().
+        self._active_path = None
         for index in self.rounds.pop():
             path = self.paths[index]
             path.actions.pop()
@@ -219,7 +229,9 @@ class Chord:
                     drop_whitespace=False,
                 ) or [""]
                 rows.extend(indent + part for part in wrapped)
-        context = _recent_context(self.shared_context, width=width)
+        if self._context_cache is None or self._context_cache[0] != width:
+            self._context_cache = (width, _recent_context(self.shared_context, width=width))
+        context = self._context_cache[1]
         return f"Shared context (last 4 lines):\n{context}\n\nPaths:\n" + "\n".join(rows)
 
 

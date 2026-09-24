@@ -1,0 +1,849 @@
+{
+  "comparison_order": [
+    "e28a21e",
+    "6f65055",
+    "e28a21e",
+    "6f65055"
+  ],
+  "historical_comparison": {
+    "e28a21e": [
+      {
+        "package_root": "/tmp/spe-chord-investigation/e28a21e",
+        "model": "/home/realityisfire/Documents/serial-policy-editor-lab/models/Llama-3.2-1B-Instruct-GGUF/Llama-3.2-1B-Instruct-f16.gguf",
+        "threads": 4,
+        "gpu_layers": 0,
+        "cache": "auto",
+        "prompt_repeats": 20,
+        "one_live_path": false,
+        "python": "3.14.4 (main, Aug 20 2026, 10:41:58) [GCC 15.2.0]",
+        "llama_cpp_version": "0.3.35",
+        "scope": "Ephemeral, greedy, no CFG; excludes load, initial prompt, input waits and terminal painting. Input positions count model eval arguments, not attention work.",
+        "samples": [
+          {
+            "repeat": 0,
+            "rounds": 0,
+            "phases": {
+              "construct": {
+                "ms": 602.9510560038034,
+                "model_calls": 5,
+                "input_positions": 5
+              },
+              "advance": {
+                "ms": 0.003282009856775403,
+                "model_calls": 0,
+                "input_positions": 0
+              },
+              "restore": {
+                "ms": 122.33545200433582,
+                "model_calls": 1,
+                "input_positions": 1
+              },
+              "commit": {
+                "ms": 117.29338599252515,
+                "model_calls": 1,
+                "input_positions": 1
+              },
+              "next_menu": {
+                "ms": 2.7180899924132973,
+                "model_calls": 0,
+                "input_positions": 0
+              }
+            },
+            "prompt_tokens": 162,
+            "visible_token_ids": [
+              578
+            ]
+          },
+          {
+            "repeat": 0,
+            "rounds": 3,
+            "phases": {
+              "construct": {
+                "ms": 649.8834820231423,
+                "model_calls": 5,
+                "input_positions": 5
+              },
+              "advance": {
+                "ms": 5195.744033000665,
+                "model_calls": 27,
+                "input_positions": 36
+              },
+              "restore": {
+                "ms": 128.4723529824987,
+                "model_calls": 1,
+                "input_positions": 1
+              },
+              "commit": {
+                "ms": 518.3775649929885,
+                "model_calls": 4,
+                "input_positions": 4
+              },
+              "next_menu": {
+                "ms": 2.4754620098974556,
+                "model_calls": 0,
+                "input_positions": 0
+              }
+            },
+            "prompt_tokens": 162,
+            "visible_token_ids": [
+              578,
+              3446,
+              12302,
+              449
+            ]
+          }
+        ],
+        "median_ms": {
+          "0": {
+            "construct": 602.951,
+            "advance": 0.003,
+            "restore": 122.335,
+            "commit": 117.293,
+            "next_menu": 2.718
+          },
+          "3": {
+            "construct": 649.883,
+            "advance": 5195.744,
+            "restore": 128.472,
+            "commit": 518.378,
+            "next_menu": 2.475
+          }
+        }
+      },
+      {
+        "package_root": "/tmp/spe-chord-investigation/e28a21e",
+        "model": "/home/realityisfire/Documents/serial-policy-editor-lab/models/Llama-3.2-1B-Instruct-GGUF/Llama-3.2-1B-Instruct-f16.gguf",
+        "threads": 4,
+        "gpu_layers": 0,
+        "cache": "auto",
+        "prompt_repeats": 20,
+        "one_live_path": false,
+        "python": "3.14.4 (main, Aug 20 2026, 10:41:58) [GCC 15.2.0]",
+        "llama_cpp_version": "0.3.35",
+        "scope": "Ephemeral, greedy, no CFG; excludes load, initial prompt, input waits and terminal painting. Input positions count model eval arguments, not attention work.",
+        "samples": [
+          {
+            "repeat": 0,
+            "rounds": 0,
+            "phases": {
+              "construct": {
+                "ms": 635.9476629877463,
+                "model_calls": 5,
+                "input_positions": 5
+              },
+              "advance": {
+                "ms": 0.005099020199850202,
+                "model_calls": 0,
+                "input_positions": 0
+              },
+              "restore": {
+                "ms": 139.55375098157674,
+                "model_calls": 1,
+                "input_positions": 1
+              },
+              "commit": {
+                "ms": 129.1090980230365,
+                "model_calls": 1,
+                "input_positions": 1
+              },
+              "next_menu": {
+                "ms": 2.711106004426256,
+                "model_calls": 0,
+                "input_positions": 0
+              }
+            },
+            "prompt_tokens": 162,
+            "visible_token_ids": [
+              578
+            ]
+          },
+          {
+            "repeat": 0,
+            "rounds": 3,
+            "phases": {
+              "construct": {
+                "ms": 654.5620230026543,
+                "model_calls": 5,
+                "input_positions": 5
+              },
+              "advance": {
+                "ms": 3651.962744013872,
+                "model_calls": 27,
+                "input_positions": 36
+              },
+              "restore": {
+                "ms": 117.67339400830679,
+                "model_calls": 1,
+                "input_positions": 1
+              },
+              "commit": {
+                "ms": 528.8201229996048,
+                "model_calls": 4,
+                "input_positions": 4
+              },
+              "next_menu": {
+                "ms": 3.344288998050615,
+                "model_calls": 0,
+                "input_positions": 0
+              }
+            },
+            "prompt_tokens": 162,
+            "visible_token_ids": [
+              578,
+              3446,
+              12302,
+              449
+            ]
+          }
+        ],
+        "median_ms": {
+          "0": {
+            "construct": 635.948,
+            "advance": 0.005,
+            "restore": 139.554,
+            "commit": 129.109,
+            "next_menu": 2.711
+          },
+          "3": {
+            "construct": 654.562,
+            "advance": 3651.963,
+            "restore": 117.673,
+            "commit": 528.82,
+            "next_menu": 3.344
+          }
+        }
+      }
+    ],
+    "6f65055": [
+      {
+        "package_root": "/tmp/spe-chord-investigation/6f65055",
+        "model": "/home/realityisfire/Documents/serial-policy-editor-lab/models/Llama-3.2-1B-Instruct-GGUF/Llama-3.2-1B-Instruct-f16.gguf",
+        "threads": 4,
+        "gpu_layers": 0,
+        "cache": "auto",
+        "prompt_repeats": 20,
+        "one_live_path": false,
+        "python": "3.14.4 (main, Aug 20 2026, 10:41:58) [GCC 15.2.0]",
+        "llama_cpp_version": "0.3.35",
+        "scope": "Ephemeral, greedy, no CFG; excludes load, initial prompt, input waits and terminal painting. Input positions count model eval arguments, not attention work.",
+        "samples": [
+          {
+            "repeat": 0,
+            "rounds": 0,
+            "phases": {
+              "construct": {
+                "ms": 674.8542560089845,
+                "model_calls": 5,
+                "input_positions": 5
+              },
+              "advance": {
+                "ms": 0.004330009687691927,
+                "model_calls": 0,
+                "input_positions": 0
+              },
+              "restore": {
+                "ms": 116.30952899577096,
+                "model_calls": 1,
+                "input_positions": 1
+              },
+              "commit": {
+                "ms": 118.41455198009498,
+                "model_calls": 1,
+                "input_positions": 1
+              },
+              "next_menu": {
+                "ms": 4.826325981412083,
+                "model_calls": 0,
+                "input_positions": 0
+              }
+            },
+            "prompt_tokens": 162,
+            "visible_token_ids": [
+              578
+            ]
+          },
+          {
+            "repeat": 0,
+            "rounds": 3,
+            "phases": {
+              "construct": {
+                "ms": 594.0768579894211,
+                "model_calls": 5,
+                "input_positions": 5
+              },
+              "advance": {
+                "ms": 3419.9244170158636,
+                "model_calls": 27,
+                "input_positions": 36
+              },
+              "restore": {
+                "ms": 132.24595799692906,
+                "model_calls": 1,
+                "input_positions": 1
+              },
+              "commit": {
+                "ms": 505.17612902331166,
+                "model_calls": 4,
+                "input_positions": 4
+              },
+              "next_menu": {
+                "ms": 2.7157159929629415,
+                "model_calls": 0,
+                "input_positions": 0
+              }
+            },
+            "prompt_tokens": 162,
+            "visible_token_ids": [
+              578,
+              3446,
+              12302,
+              449
+            ]
+          }
+        ],
+        "median_ms": {
+          "0": {
+            "construct": 674.854,
+            "advance": 0.004,
+            "restore": 116.31,
+            "commit": 118.415,
+            "next_menu": 4.826
+          },
+          "3": {
+            "construct": 594.077,
+            "advance": 3419.924,
+            "restore": 132.246,
+            "commit": 505.176,
+            "next_menu": 2.716
+          }
+        }
+      },
+      {
+        "package_root": "/tmp/spe-chord-investigation/6f65055",
+        "model": "/home/realityisfire/Documents/serial-policy-editor-lab/models/Llama-3.2-1B-Instruct-GGUF/Llama-3.2-1B-Instruct-f16.gguf",
+        "threads": 4,
+        "gpu_layers": 0,
+        "cache": "auto",
+        "prompt_repeats": 20,
+        "one_live_path": false,
+        "python": "3.14.4 (main, Aug 20 2026, 10:41:58) [GCC 15.2.0]",
+        "llama_cpp_version": "0.3.35",
+        "scope": "Ephemeral, greedy, no CFG; excludes load, initial prompt, input waits and terminal painting. Input positions count model eval arguments, not attention work.",
+        "samples": [
+          {
+            "repeat": 0,
+            "rounds": 0,
+            "phases": {
+              "construct": {
+                "ms": 648.4610909828916,
+                "model_calls": 5,
+                "input_positions": 5
+              },
+              "advance": {
+                "ms": 0.004678993718698621,
+                "model_calls": 0,
+                "input_positions": 0
+              },
+              "restore": {
+                "ms": 100.77350100618787,
+                "model_calls": 1,
+                "input_positions": 1
+              },
+              "commit": {
+                "ms": 138.22382999933325,
+                "model_calls": 1,
+                "input_positions": 1
+              },
+              "next_menu": {
+                "ms": 3.3159340091515332,
+                "model_calls": 0,
+                "input_positions": 0
+              }
+            },
+            "prompt_tokens": 162,
+            "visible_token_ids": [
+              578
+            ]
+          },
+          {
+            "repeat": 0,
+            "rounds": 3,
+            "phases": {
+              "construct": {
+                "ms": 604.8418039863463,
+                "model_calls": 5,
+                "input_positions": 5
+              },
+              "advance": {
+                "ms": 3386.1493580043316,
+                "model_calls": 27,
+                "input_positions": 36
+              },
+              "restore": {
+                "ms": 106.72113200416788,
+                "model_calls": 1,
+                "input_positions": 1
+              },
+              "commit": {
+                "ms": 515.3247239941265,
+                "model_calls": 4,
+                "input_positions": 4
+              },
+              "next_menu": {
+                "ms": 3.303292003693059,
+                "model_calls": 0,
+                "input_positions": 0
+              }
+            },
+            "prompt_tokens": 162,
+            "visible_token_ids": [
+              578,
+              3446,
+              12302,
+              449
+            ]
+          }
+        ],
+        "median_ms": {
+          "0": {
+            "construct": 648.461,
+            "advance": 0.005,
+            "restore": 100.774,
+            "commit": 138.224,
+            "next_menu": 3.316
+          },
+          "3": {
+            "construct": 604.842,
+            "advance": 3386.149,
+            "restore": 106.721,
+            "commit": 515.325,
+            "next_menu": 3.303
+          }
+        }
+      }
+    ]
+  },
+  "terminal_comparison": {
+    "e28a21e": {
+      "implementation": "persistent",
+      "package_root": "/tmp/spe-chord-investigation/e28a21e",
+      "terminal": {
+        "rows": 40,
+        "columns": 120
+      },
+      "samples": 160,
+      "transitions": {
+        "chord advance": {
+          "median_ms": 6.66,
+          "p95_ms": 12.425
+        },
+        "menu after chord": {
+          "median_ms": 7.937,
+          "p95_ms": 14.004
+        },
+        "menu": {
+          "median_ms": 4.219,
+          "p95_ms": 9.615
+        },
+        "expanded menu": {
+          "median_ms": 4.147,
+          "p95_ms": 12.57
+        },
+        "rank neighborhood": {
+          "median_ms": 5.201,
+          "p95_ms": 13.23
+        },
+        "history review": {
+          "median_ms": 5.33,
+          "p95_ms": 13.108
+        },
+        "edge": {
+          "median_ms": 4.553,
+          "p95_ms": 12.349
+        },
+        "prompt": {
+          "median_ms": 11.298,
+          "p95_ms": 14.561
+        },
+        "page": {
+          "median_ms": 9.752,
+          "p95_ms": 15.378
+        },
+        "chord": {
+          "median_ms": 9.33,
+          "p95_ms": 14.732
+        }
+      },
+      "all_transitions": {
+        "median_ms": 7.682,
+        "p95_ms": 14.012
+      },
+      "median_ansi_bytes_by_surface": {
+        "chord advance": 64.0,
+        "menu after chord": 3391.0,
+        "menu": 22.0,
+        "expanded menu": 84.0,
+        "rank neighborhood": 1740.0,
+        "history review": 1393.0,
+        "edge": 1682.0,
+        "prompt": 5740.0,
+        "page": 3071.0,
+        "chord": 2872.0
+      },
+      "median_ansi_bytes": 1722.0,
+      "erase_commands": 0,
+      "median_redraws": 1.0,
+      "applications": 1,
+      "renders": 198,
+      "fullscreen_enters": 1,
+      "fullscreen_exits": 1,
+      "scope": "Prepared views; excludes inference, database work, and emulator painting."
+    },
+    "71ddef5": {
+      "implementation": "persistent",
+      "package_root": "/tmp/spe-chord-investigation/71ddef5",
+      "terminal": {
+        "rows": 40,
+        "columns": 120
+      },
+      "samples": 160,
+      "transitions": {
+        "chord advance": {
+          "median_ms": 6.801,
+          "p95_ms": 12.877
+        },
+        "menu after chord": {
+          "median_ms": 8.011,
+          "p95_ms": 14.469
+        },
+        "menu": {
+          "median_ms": 4.217,
+          "p95_ms": 8.179
+        },
+        "expanded menu": {
+          "median_ms": 4.356,
+          "p95_ms": 8.574
+        },
+        "rank neighborhood": {
+          "median_ms": 5.384,
+          "p95_ms": 10.02
+        },
+        "history review": {
+          "median_ms": 5.222,
+          "p95_ms": 9.117
+        },
+        "edge": {
+          "median_ms": 4.562,
+          "p95_ms": 12.557
+        },
+        "prompt": {
+          "median_ms": 11.421,
+          "p95_ms": 14.583
+        },
+        "page": {
+          "median_ms": 9.859,
+          "p95_ms": 16.914
+        },
+        "chord": {
+          "median_ms": 10.685,
+          "p95_ms": 13.831
+        }
+      },
+      "all_transitions": {
+        "median_ms": 7.015,
+        "p95_ms": 13.886
+      },
+      "median_ansi_bytes_by_surface": {
+        "chord advance": 64.0,
+        "menu after chord": 3391.0,
+        "menu": 22.0,
+        "expanded menu": 84.0,
+        "rank neighborhood": 1740.0,
+        "history review": 1393.0,
+        "edge": 1682.0,
+        "prompt": 5740.0,
+        "page": 3071.0,
+        "chord": 2872.0
+      },
+      "median_ansi_bytes": 1722.0,
+      "erase_commands": 0,
+      "median_redraws": 1.0,
+      "applications": 1,
+      "renders": 192,
+      "fullscreen_enters": 1,
+      "fullscreen_exits": 1,
+      "scope": "Prepared views; excludes inference, database work, and emulator painting."
+    },
+    "6f65055": {
+      "implementation": "persistent",
+      "package_root": "/tmp/spe-chord-investigation/6f65055",
+      "terminal": {
+        "rows": 40,
+        "columns": 120
+      },
+      "samples": 160,
+      "transitions": {
+        "chord advance": {
+          "median_ms": 6.798,
+          "p95_ms": 12.693
+        },
+        "menu after chord": {
+          "median_ms": 8.07,
+          "p95_ms": 14.366
+        },
+        "menu": {
+          "median_ms": 4.336,
+          "p95_ms": 7.975
+        },
+        "expanded menu": {
+          "median_ms": 4.401,
+          "p95_ms": 11.173
+        },
+        "rank neighborhood": {
+          "median_ms": 5.369,
+          "p95_ms": 11.816
+        },
+        "history review": {
+          "median_ms": 5.461,
+          "p95_ms": 10.748
+        },
+        "edge": {
+          "median_ms": 4.645,
+          "p95_ms": 10.147
+        },
+        "prompt": {
+          "median_ms": 2.267,
+          "p95_ms": 5.481
+        },
+        "page": {
+          "median_ms": 14.616,
+          "p95_ms": 18.989
+        },
+        "chord": {
+          "median_ms": 9.519,
+          "p95_ms": 15.015
+        }
+      },
+      "all_transitions": {
+        "median_ms": 6.641,
+        "p95_ms": 14.942
+      },
+      "median_ansi_bytes_by_surface": {
+        "chord advance": 64.0,
+        "menu after chord": 3391.0,
+        "menu": 22.0,
+        "expanded menu": 84.0,
+        "rank neighborhood": 1740.0,
+        "history review": 1393.0,
+        "edge": 1739.0,
+        "prompt": 648.0,
+        "page": 6027.0,
+        "chord": 2876.0
+      },
+      "median_ansi_bytes": 1577.0,
+      "erase_commands": 0,
+      "median_redraws": 1.0,
+      "applications": 1,
+      "renders": 204,
+      "fullscreen_enters": 1,
+      "fullscreen_exits": 1,
+      "scope": "Prepared views; excludes inference, database work, and emulator painting."
+    }
+  },
+  "one_live_path": {
+    "before": {
+      "package_root": "/tmp/spe-chord-investigation/6f65055",
+      "model": "/home/realityisfire/Documents/serial-policy-editor-lab/models/Llama-3.2-1B-Instruct-GGUF/Llama-3.2-1B-Instruct-f16.gguf",
+      "threads": 4,
+      "gpu_layers": 0,
+      "cache": "auto",
+      "prompt_repeats": 20,
+      "one_live_path": true,
+      "scope": "Ephemeral, greedy, no CFG; excludes load, initial prompt, input waits and terminal painting. Input positions count model eval arguments, not attention work.",
+      "samples": [
+        {
+          "repeat": 0,
+          "rounds": 3,
+          "phases": {
+            "construct": {
+              "ms": 108.23243198683485,
+              "model_calls": 1,
+              "input_positions": 1
+            },
+            "advance": {
+              "ms": 1130.6776709971018,
+              "model_calls": 9,
+              "input_positions": 12
+            },
+            "restore": {
+              "ms": 137.48427899554372,
+              "model_calls": 1,
+              "input_positions": 1
+            },
+            "commit": {
+              "ms": 524.2087689985055,
+              "model_calls": 4,
+              "input_positions": 4
+            },
+            "next_menu": {
+              "ms": 2.51184799708426,
+              "model_calls": 0,
+              "input_positions": 0
+            }
+          },
+          "prompt_tokens": 162,
+          "visible_token_ids": [
+            578,
+            3446,
+            12302,
+            449
+          ]
+        },
+        {
+          "repeat": 1,
+          "rounds": 3,
+          "phases": {
+            "construct": {
+              "ms": 228.52397299720906,
+              "model_calls": 1,
+              "input_positions": 1
+            },
+            "advance": {
+              "ms": 1187.0544110133778,
+              "model_calls": 9,
+              "input_positions": 12
+            },
+            "restore": {
+              "ms": 122.65127501450479,
+              "model_calls": 1,
+              "input_positions": 1
+            },
+            "commit": {
+              "ms": 486.64837202522904,
+              "model_calls": 4,
+              "input_positions": 4
+            },
+            "next_menu": {
+              "ms": 2.8699259855784476,
+              "model_calls": 0,
+              "input_positions": 0
+            }
+          },
+          "prompt_tokens": 162,
+          "visible_token_ids": [
+            578,
+            3446,
+            12302,
+            449
+          ]
+        }
+      ],
+      "median_ms": {
+        "3": {
+          "construct": 168.378,
+          "advance": 1158.866,
+          "restore": 130.068,
+          "commit": 505.429,
+          "next_menu": 2.691
+        }
+      }
+    },
+    "after": {
+      "package_root": "/home/realityisfire/Documents/serial-policy-editor",
+      "model": "/home/realityisfire/Documents/serial-policy-editor-lab/models/Llama-3.2-1B-Instruct-GGUF/Llama-3.2-1B-Instruct-f16.gguf",
+      "threads": 4,
+      "gpu_layers": 0,
+      "cache": "auto",
+      "prompt_repeats": 20,
+      "one_live_path": true,
+      "scope": "Ephemeral, greedy, no CFG; excludes load, initial prompt, input waits and terminal painting. Input positions count model eval arguments, not attention work.",
+      "samples": [
+        {
+          "repeat": 0,
+          "rounds": 3,
+          "phases": {
+            "construct": {
+              "ms": 105.5274719838053,
+              "model_calls": 1,
+              "input_positions": 1
+            },
+            "advance": {
+              "ms": 369.78444000124,
+              "model_calls": 3,
+              "input_positions": 3
+            },
+            "restore": {
+              "ms": 127.35502899158746,
+              "model_calls": 1,
+              "input_positions": 1
+            },
+            "commit": {
+              "ms": 503.2621920108795,
+              "model_calls": 4,
+              "input_positions": 4
+            },
+            "next_menu": {
+              "ms": 2.4542300088796765,
+              "model_calls": 0,
+              "input_positions": 0
+            }
+          },
+          "prompt_tokens": 162,
+          "visible_token_ids": [
+            578,
+            3446,
+            12302,
+            449
+          ]
+        },
+        {
+          "repeat": 1,
+          "rounds": 3,
+          "phases": {
+            "construct": {
+              "ms": 123.6110370082315,
+              "model_calls": 1,
+              "input_positions": 1
+            },
+            "advance": {
+              "ms": 370.30503898859024,
+              "model_calls": 3,
+              "input_positions": 3
+            },
+            "restore": {
+              "ms": 137.24556099623442,
+              "model_calls": 1,
+              "input_positions": 1
+            },
+            "commit": {
+              "ms": 497.31079099001363,
+              "model_calls": 4,
+              "input_positions": 4
+            },
+            "next_menu": {
+              "ms": 2.5282610149588436,
+              "model_calls": 0,
+              "input_positions": 0
+            }
+          },
+          "prompt_tokens": 162,
+          "visible_token_ids": [
+            578,
+            3446,
+            12302,
+            449
+          ]
+        }
+      ],
+      "median_ms": {
+        "3": {
+          "construct": 114.569,
+          "advance": 370.045,
+          "restore": 132.3,
+          "commit": 500.286,
+          "next_menu": 2.491
+        }
+      }
+    }
+  }
+}

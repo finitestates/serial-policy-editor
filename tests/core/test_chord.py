@@ -295,6 +295,58 @@ def test_chord_switches_primary_and_cfg_by_shared_prefix():
                    for kind, tokens in guidance.work)
 
 
+@pytest.mark.parametrize("branching", [False, True])
+@pytest.mark.parametrize("cfg", [False, True])
+@pytest.mark.invariant
+def test_chord_keeps_active_survivor_cache_and_repositions_after_rewind(branching, cfg):
+    primary, guidance = BranchBackend(), BranchBackend()
+    if not branching:
+        primary.branch_to_prefix = guidance.branch_to_prefix = None
+    sampling = SamplerConfig(cfg_unconditional_prompt="P", cfg_scale=1.4) if cfg else SamplerConfig()
+    original = engine(backend=primary, guidance=guidance if cfg else None, sampling=sampling)
+    chord = Chord(original, (4, 1))  # EOG first; the last path remains live.
+    primary.work.clear()
+    guidance.work.clear()
+    assert chord.advance()
+    assert primary.work == [("eval", (2,))]
+    assert guidance.work == ([("eval", (1,))] if cfg else [])
+    assert chord.paths[1].token_ids == [1, 2]
+
+    # Observe EOG so CFG reaches the two-token prefix, then rewind both
+    # rounds. Guidance is now ahead of the one-token surviving continuation.
+    assert chord.advance()
+    assert chord.paths[1].state == "EOG"
+    assert chord.rewind()
+    assert chord.rewind()
+    assert chord.rewind() is False
+    assert chord.advance()
+    actions = chord.select("b")
+    for action in actions:
+        original.apply(action)
+    manual = engine(backend=BranchBackend(), guidance=BranchBackend() if cfg else None,
+                    sampling=sampling)
+    for action in actions:
+        manual.apply(action)
+    assert original.token_ids == manual.token_ids
+    assert original.observe().proposal_token_id == manual.observe().proposal_token_id
+    if cfg:
+        assert guidance.tokens == manual.guidance_backend.tokens
+
+
+@pytest.mark.current_workflow
+def test_chord_shared_context_wrap_is_reused_until_width_changes():
+    chord = Chord(engine(), (1, 2))
+    with patch("trajectory_editor.chord._recent_context", wraps=_recent_context) as wrap:
+        first = chord.display(width=40)
+        assert chord.display(width=40) == first
+        chord.advance()
+        assert chord.display(width=40) != first
+        assert wrap.call_count == 1
+        chord.display(width=20)
+        assert wrap.call_count == 2
+    chord.discard()
+
+
 class DurableFakeBackend(ConformingFakeBackend):
     def provenance(self, *, include_model_sha256=True):
         return {"backend": "llama.cpp", "vocabulary_size": self.vocabulary_size()}
