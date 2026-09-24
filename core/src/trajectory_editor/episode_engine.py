@@ -20,9 +20,7 @@ from .core.actions import (
     Write,
 )
 from .core.backend import (
-    BackendStateSnapshot,
     InferenceBackend,
-    SnapshotableInferenceBackend,
     require_inference_backend,
 )
 from .core.candidates import Candidate
@@ -163,7 +161,7 @@ class _PreparedAccept:
     raw_rank: int
     token_id: int
     generation: int
-    backend_snapshot: BackendStateSnapshot = field(repr=False, compare=False)
+    prefix_token_ids: tuple[int, ...]
 
 
 class EpisodeEngine:
@@ -243,6 +241,7 @@ class EpisodeEngine:
         self._observation: Observation | None = None
         self._observation_key: tuple | None = None
         self._latest_speculation_generation = -1
+        self._speculative_accept_prefix: tuple[int, ...] | None = None
         self._ephemeral_logit_biases: dict[int, float] = {}
         self._activation_validation_key: tuple | None = None
         self._activation_runtime_key: tuple | None = None
@@ -389,7 +388,7 @@ class EpisodeEngine:
         if sampling is not None:
             self.sampling = sampling
 
-    def rewind_to(self, boundary: int) -> None:
+    def rewind_to(self, boundary: int, *, _defer_backend_positioning: bool = False) -> None:
         """Discard visible state after a token boundary and reposition the backend.
 
         The checkpoint boundary is kept intact. The caller restores historical
@@ -401,16 +400,20 @@ class EpisodeEngine:
                 f"rewind boundary must be between 0 and {self.boundary}"
             )
         retained = list(self.visible_token_ids[:boundary])
+        self._rollback_speculative_accept()
         self._invalidate_observation()
         self._prefix_snapshot_dirty = True
         self._ephemeral_logit_biases = {}
-        prefix = [*self.initial_token_ids, *retained]
-        branch = getattr(self.backend, "branch_to_prefix", None)
-        if callable(branch):
-            branch(prefix)
+        if _defer_backend_positioning:
+            self._backend_positioned = False
         else:
-            self.backend.reset(prefix)
-        self._backend_positioned = True
+            prefix = [*self.initial_token_ids, *retained]
+            branch = getattr(self.backend, "branch_to_prefix", None)
+            if callable(branch):
+                branch(prefix)
+            else:
+                self.backend.reset(prefix)
+            self._backend_positioned = True
         self.trajectory.rewind_to(boundary)
 
     def terminate(self, reason: str = "menu-end") -> None:
@@ -449,6 +452,9 @@ class EpisodeEngine:
 
     def _ensure_backend_positioned(self) -> None:
         """Backfill a deferred preview cache before the next model mutation."""
+        if self._speculative_accept_prefix is not None:
+            self._rollback_speculative_accept()
+            return
         if self._backend_positioned:
             return
         prefix = list(self.token_ids)
@@ -460,8 +466,16 @@ class EpisodeEngine:
         self._backend_positioned = True
 
     def discard_speculative_accept(self) -> None:
-        """Drop a prepared one-token continuation without changing live state."""
+        """Drop a prepared continuation without backend work."""
         self._prepared_accept = None
+
+    def _rollback_speculative_accept(self) -> None:
+        if self._speculative_accept_prefix is None:
+            return
+        self.backend.rollback_speculation()
+        self._speculative_accept_prefix = None
+        self._prepared_accept = None
+        self._backend_positioned = True
 
     def has_prepared_accept(
         self, observation: Observation, raw_rank: int, token_id: int
@@ -473,8 +487,8 @@ class EpisodeEngine:
             and prepared.observation is observation
             and prepared.raw_rank == raw_rank
             and prepared.token_id == token_id
-            and prepared.backend_snapshot.prefix_token_ids
-            == (*tuple(self.token_ids), token_id)
+            and prepared.prefix_token_ids == tuple(self.token_ids)
+            and self._speculative_accept_prefix == prepared.prefix_token_ids
         )
 
     def speculate_accept(
@@ -486,14 +500,7 @@ class EpisodeEngine:
         generation: int = 0,
         cancelled: Callable[[], bool] | None = None,
     ) -> bool:
-        """Warm the primary backend for one selected raw-rank token.
-
-        The backend is restored to the current committed prefix before this
-        method returns. A matching ordinary action can later restore the
-        warmed state and skip its one-token model evaluation. Backends without
-        exact snapshot support, active CFG, terminal tokens, and the final
-        token before a checkpoint simply decline speculation.
-        """
+        """Warm one selected token in place, then commit or roll it back later."""
         is_cancelled = cancelled or (lambda: False)
         if (
             type(generation) is not int or generation < 0
@@ -526,56 +533,39 @@ class EpisodeEngine:
             and prepared.observation is observation
             and prepared.raw_rank == raw_rank
             and prepared.token_id == token_id
-            and prepared.backend_snapshot.prefix_token_ids
-            == (*tuple(self.token_ids), token_id)
+            and prepared.prefix_token_ids == tuple(self.token_ids)
+            and self._speculative_accept_prefix == prepared.prefix_token_ids
         ):
             return True
         self.discard_speculative_accept()
+        self._rollback_speculative_accept()
         if (
             self.backend.is_eog(token_id)
             or (self.remaining is not None and self.remaining <= 1)
             or self._cfg_active()
-            or not isinstance(self.backend, SnapshotableInferenceBackend)
+            or not callable(getattr(self.backend, "speculate", None))
+            or not callable(getattr(self.backend, "commit_speculation", None))
+            or not callable(getattr(self.backend, "rollback_speculation", None))
         ):
             return False
 
+        if not self._backend_positioned:
+            self._ensure_backend_positioned()
         prefix = tuple(self.token_ids)
-        try:
-            before = self.backend.snapshot_state()
-        except Exception:
+        self._speculative_accept_prefix = prefix
+        self._backend_positioned = False
+        if not self.backend.speculate(token_id):
+            self._speculative_accept_prefix = None
+            self._backend_positioned = True
             return False
-        if before is None or before.prefix_token_ids != prefix:
-            return False
-
-        warmed: BackendStateSnapshot | None = None
-        try:
-            if not is_cancelled():
-                self.backend.eval([token_id])
-                if not is_cancelled():
-                    candidate = self.backend.snapshot_state()
-                    expected = (*prefix, token_id)
-                    if candidate is not None and candidate.prefix_token_ids == expected:
-                        warmed = candidate
-        except Exception:
-            # Speculative inference is optional. Restore the committed position
-            # and let the ordinary action path report any real inference error.
-            warmed = None
-        finally:
-            try:
-                restored = self.backend.restore_state(before)
-            except Exception:
-                restored = False
-            if not restored:
-                # A failed native restore must not leave the live engine at the
-                # speculative prefix. Rebuild its semantic prefix as a fallback.
-                self.backend.reset(list(prefix))
-
-        if warmed is None or is_cancelled():
+        if is_cancelled():
+            self._rollback_speculative_accept()
             return False
         if self._observation is not observation or self._decision_key() != self._observation_key:
+            self._rollback_speculative_accept()
             return False
         self._prepared_accept = _PreparedAccept(
-            observation, raw_rank, token_id, generation, warmed
+            observation, raw_rank, token_id, generation, prefix
         )
         return True
 
@@ -1068,30 +1058,28 @@ class EpisodeEngine:
             raise EditorError("action resolved outside the vocabulary")
         evidence = self._evidence(observation, token_id)
         prepared = self._prepared_accept
+        promoted = bool(
+            prepared is not None
+            and prepared.observation is observation
+            and prepared.token_id == token_id
+            and prepared.prefix_token_ids == tuple(self.token_ids)
+            and self._speculative_accept_prefix == prepared.prefix_token_ids
+        )
         self._prepared_accept = None
         self._invalidate_observation()
         if evidence.is_eog:
+            if not promoted:
+                self._ensure_backend_positioned()
             self.terminal_token_id = token_id
         else:
-            self._ensure_backend_positioned()
-            promoted = False
-            if (
-                prepared is not None
-                and prepared.observation is observation
-                and prepared.token_id == token_id
-                and prepared.backend_snapshot.prefix_token_ids
-                == (*tuple(self.token_ids), token_id)
-            ):
-                try:
-                    promoted = self.backend.restore_state(prepared.backend_snapshot)
-                except Exception:
-                    promoted = False
-                if not promoted:
-                    # Treat restore failure as a cache miss. Reset first because
-                    # a native loader may have partially repositioned the model.
-                    self.backend.reset(list(self.token_ids))
-            if not promoted:
+            if promoted:
+                self.backend.commit_speculation()
+                self._speculative_accept_prefix = None
+                self._backend_positioned = True
+            else:
+                self._ensure_backend_positioned()
                 self.backend.eval([token_id])
+                self._backend_positioned = True
             self.visible_token_ids.append(token_id)
         return evidence
 

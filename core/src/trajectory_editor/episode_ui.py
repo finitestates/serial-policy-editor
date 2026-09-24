@@ -7,11 +7,9 @@ never compiled into a replay tape.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import sys
-import threading
 from bisect import bisect_right
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -63,26 +61,14 @@ class SearchLens:
 
 
 class _ContextRenderCursor:
-    """Persistent rendered contexts with background decoder prewarming on rewind."""
-
-    _DIGEST_CHECKPOINT_INTERVAL = 64
-    _PREWARM_DELAY_SECONDS = 0.075
+    """Persistent rendered contexts for live choices and boundary review."""
 
     def __init__(self) -> None:
         self._engine: EpisodeEngine | None = None
         self._prefix: TokenPrefixSnapshot | None = None
         self._stream: Any | None = None
-        self._digest: Any | None = None
         self._context = ContextText.root("")
         self._snapshots: list[ContextText | None] = [self._context]
-        self._digest_checkpoints: dict[int, Any] = {0: hashlib.sha256()}
-        self._stream_lock = threading.Lock()
-        self._warm_lock = threading.Lock()
-        self._warm_generation = 0
-        self._warm_timer: threading.Timer | None = None
-        self._warm_cancel: threading.Event | None = None
-        self._warm_key: tuple[EpisodeEngine, int, str] | None = None
-        self._prepared_stream: tuple[EpisodeEngine, int, str, Any] | None = None
 
     @staticmethod
     def _new_stream(engine: EpisodeEngine):
@@ -90,166 +76,35 @@ class _ContextRenderCursor:
         return factory(special=True) if callable(factory) else None
 
     @staticmethod
-    def _update_digest(digest: Any, token_ids: Any) -> None:
-        for token_id in token_ids:
-            digest.update(int(token_id).to_bytes(8, "little", signed=True))
-
-    def _append_stream(self, stream: Any, token_id: int) -> str:
-        # The live and prewarm streams share a backend tokenizer/model. Serialize
-        # individual detokenization calls, not the full background replay.
-        with self._stream_lock:
-            return stream.append([int(token_id)])
-
-    def _digest_at_boundary(self, prefix: Any, boundary: int) -> Any | None:
-        if not 0 <= boundary <= len(prefix):
-            return None
-        checkpoint_boundary = (
-            boundary // self._DIGEST_CHECKPOINT_INTERVAL
-        ) * self._DIGEST_CHECKPOINT_INTERVAL
-        checkpoint = self._digest_checkpoints.get(checkpoint_boundary)
-        if checkpoint is None:
-            return None
-        digest = checkpoint.copy()
-        self._update_digest(digest, prefix[checkpoint_boundary:boundary])
-        return digest
+    def _append_stream(stream: Any, token_id: int) -> str:
+        return stream.append([int(token_id)])
 
     def cancel_prewarm(self) -> None:
-        with self._warm_lock:
-            self._warm_generation += 1
-            timer = self._warm_timer
-            cancel = self._warm_cancel
-            self._warm_timer = None
-            self._warm_cancel = None
-            self._warm_key = None
-            self._prepared_stream = None
-            if cancel is not None:
-                cancel.set()
-            if timer is not None:
-                timer.cancel()
+        """Keep the existing adapter hook; review cursors have no warm job."""
+        return None
 
     def prewarm(self, engine: EpisodeEngine, boundary: int) -> None:
-        """Rebuild a decoder at a reviewed boundary without delaying the UI."""
-        prefix = self._prefix
-        absolute_boundary = len(engine.initial_token_ids) + boundary
-        if (
-            self._engine is not engine
-            or prefix is None
-            or absolute_boundary >= len(self._snapshots)
-            or self._snapshots[absolute_boundary] is None
-        ):
-            return
-        digest = self._digest_at_boundary(prefix, absolute_boundary)
-        if digest is None:
-            return
-        digest_key = digest.hexdigest()
-        key = (engine, boundary, digest_key)
-        with self._warm_lock:
-            if self._prepared_stream is not None and self._prepared_stream[:3] == key:
-                return
-            if self._warm_key == key and self._warm_cancel is not None:
-                return
-            if self._warm_cancel is not None:
-                self._warm_cancel.set()
-            if self._warm_timer is not None:
-                self._warm_timer.cancel()
-            self._warm_generation += 1
-            generation = self._warm_generation
-            cancel = threading.Event()
-            self._warm_cancel = cancel
-            self._warm_key = key
-
-            def replay() -> None:
-                with self._warm_lock:
-                    if generation != self._warm_generation or cancel.is_set():
-                        return
-                    self._warm_timer = None
-                try:
-                    stream = self._new_stream(engine)
-                    if stream is None:
-                        raise RuntimeError("incremental text stream unavailable")
-                    token_ids = (*engine.initial_token_ids, *engine.visible_token_ids[:boundary])
-                    for token_id in token_ids:
-                        if cancel.is_set():
-                            return
-                        self._append_stream(stream, token_id)
-                except Exception:
-                    with self._warm_lock:
-                        if generation == self._warm_generation:
-                            self._warm_cancel = None
-                            self._warm_key = None
-                    return
-                with self._warm_lock:
-                    if generation == self._warm_generation and not cancel.is_set():
-                        self._prepared_stream = (*key, stream)
-
-            timer = threading.Timer(self._PREWARM_DELAY_SECONDS, replay)
-            timer.daemon = True
-            self._warm_timer = timer
-            timer.start()
-
-    def _take_prepared_stream(
-        self, engine: EpisodeEngine, boundary: int, prefix: Any
-    ) -> Any | None:
-        absolute_boundary = len(engine.initial_token_ids) + boundary
-        digest = self._digest_at_boundary(prefix, absolute_boundary)
-        if digest is None:
-            return None
-        key = (engine, boundary, digest.hexdigest())
-        with self._warm_lock:
-            prepared = self._prepared_stream
-            if prepared is None or prepared[:3] != key:
-                return None
-            self._prepared_stream = None
-            self._warm_generation += 1
-            cancel = self._warm_cancel
-            self._warm_cancel = None
-            self._warm_key = None
-            if cancel is not None:
-                cancel.set()
-            return prepared[3]
-
-    def _rebuild_stream_only(self, engine: EpisodeEngine, boundary: int):
-        """Position a presentation decoder at a boundary if prewarming missed."""
-        stream = self._new_stream(engine)
-        if stream is None:
-            return None
-        for token_id in engine.initial_token_ids:
-            self._append_stream(stream, token_id)
-        for token_id in engine.visible_token_ids[:boundary]:
-            self._append_stream(stream, token_id)
-        return stream
+        """Record the review request without starting renderer work."""
+        return None
 
     def _reset(self, engine: EpisodeEngine, prefix: Any, boundary: int) -> None:
         token_ids = list(prefix)
-        self.cancel_prewarm()
         stream = self._new_stream(engine)
-        digest = hashlib.sha256()
-        checkpoints: dict[int, Any] = {0: digest.copy()}
-
         if stream is None:
             context = ContextText.root(engine.backend.render(token_ids, special=True))
             snapshots: list[ContextText | None] = [None] * len(token_ids) + [context]
-            for index, token_id in enumerate(token_ids, start=1):
-                digest.update(int(token_id).to_bytes(8, "little", signed=True))
-                if index % self._DIGEST_CHECKPOINT_INTERVAL == 0:
-                    checkpoints[index] = digest.copy()
         else:
             context = ContextText.root("")
             snapshots = [context]
-            for index, token_id in enumerate(token_ids, start=1):
+            for token_id in token_ids:
                 context = context.append(self._append_stream(stream, token_id))
                 snapshots.append(context)
-                digest.update(int(token_id).to_bytes(8, "little", signed=True))
-                if index % self._DIGEST_CHECKPOINT_INTERVAL == 0:
-                    checkpoints[index] = digest.copy()
 
         self._engine = engine
         self._prefix = prefix if isinstance(prefix, TokenPrefixSnapshot) else None
         self._stream = stream
-        self._digest = digest
         self._context = context
         self._snapshots = snapshots
-        self._digest_checkpoints = checkpoints
 
     def _restore_boundary(
         self, engine: EpisodeEngine, prefix: Any, boundary: int
@@ -260,24 +115,9 @@ class _ContextRenderCursor:
         context = self._snapshots[absolute_boundary]
         if context is None:
             return False
-        digest = self._digest_at_boundary(prefix, absolute_boundary)
-        if digest is None:
-            return False
-
-        digest_key = digest.hexdigest()
-        with self._warm_lock:
-            warm_key = self._warm_key
-        if warm_key is not None and warm_key != (engine, boundary, digest_key):
-            self.cancel_prewarm()
-        self._stream = self._take_prepared_stream(engine, boundary, prefix)
+        self._stream = None
         self._context = context
-        self._digest = digest
         del self._snapshots[absolute_boundary + 1 :]
-        self._digest_checkpoints = {
-            checkpoint: state
-            for checkpoint, state in self._digest_checkpoints.items()
-            if checkpoint <= absolute_boundary
-        }
         self._prefix = prefix if isinstance(prefix, TokenPrefixSnapshot) else None
         return True
 
@@ -293,10 +133,10 @@ class _ContextRenderCursor:
 
     def update(self, engine: EpisodeEngine, observation: Observation) -> tuple[ContextText, str]:
         prefix = observation.prefix_token_ids
-        if self._engine is engine and self._digest is not None:
+        if self._engine is engine and self._prefix is not None:
             chunks = (
                 prefix.chunks_since(self._prefix)
-                if isinstance(prefix, TokenPrefixSnapshot) and self._prefix is not None
+                if isinstance(prefix, TokenPrefixSnapshot)
                 else None
             )
             if chunks is not None:
@@ -304,16 +144,12 @@ class _ContextRenderCursor:
                 if appended:
                     if self._stream is None:
                         previous_boundary = observation.boundary - len(appended)
-                        self._stream = self._take_prepared_stream(
-                            engine, previous_boundary, self._prefix
-                        )
-                        if self._stream is None:
-                            self.cancel_prewarm()
-                            self._stream = self._rebuild_stream_only(
-                                engine, previous_boundary
-                            )
-                    else:
-                        self.cancel_prewarm()
+                        self._stream = self._new_stream(engine)
+                        if self._stream is not None:
+                            for token_id in engine.initial_token_ids:
+                                self._append_stream(self._stream, token_id)
+                            for token_id in engine.visible_token_ids[:previous_boundary]:
+                                self._append_stream(self._stream, token_id)
                     if self._stream is None:
                         self._context = ContextText.root(
                             engine.backend.render(list(prefix), special=True)
@@ -325,19 +161,15 @@ class _ContextRenderCursor:
                                 self._append_stream(self._stream, token_id)
                             )
                             self._snapshots.append(self._context)
-                    for token_id in appended:
-                        self._digest.update(
-                            int(token_id).to_bytes(8, "little", signed=True)
-                        )
-                        absolute = len(self._snapshots) - 1
-                        if absolute % self._DIGEST_CHECKPOINT_INTERVAL == 0:
-                            self._digest_checkpoints[absolute] = self._digest.copy()
                 self._prefix = prefix if isinstance(prefix, TokenPrefixSnapshot) else None
-                return self._context, self._digest.hexdigest()
+                context_key = f"{id(engine):x}:{id(prefix):x}"
+                return self._context, context_key
             if self._restore_boundary(engine, prefix, observation.boundary):
-                return self._context, self._digest.hexdigest()
+                context_key = f"{id(engine):x}:{id(prefix):x}"
+                return self._context, context_key
         self._reset(engine, prefix, observation.boundary)
-        return self._context, self._digest.hexdigest()
+        context_key = f"{id(engine):x}:{id(prefix):x}"
+        return self._context, context_key
 
 
 class _SeamlessActionIndex:

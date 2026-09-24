@@ -20,6 +20,11 @@ class ChordRequested(Exception):
 
 
 def _position(backend, base: list[int], suffix: list[int]) -> None:
+    truncate = getattr(backend, "truncate_to", None)
+    if callable(truncate) and truncate(len(base)) is not False:
+        if suffix:
+            backend.eval(suffix)
+        return
     branch = getattr(backend, "branch_to_prefix", None)
     if callable(branch):
         branch(base)
@@ -126,13 +131,8 @@ class Chord:
 
     def _activate(self, path: ChordPath) -> None:
         if self._active_path is path:
-            # The last preview still owns the primary cache. observe() appends
-            # any missing CFG token lazily; no shared-prefix rebuild is needed.
+            # Leave the current decision lazy until the next display or action.
             return
-        if self._active_path is not None and self._active_path.state == "live":
-            # Keep a ready-to-display choice snapshot before another path takes
-            # the single shared backend cache.
-            self._active_path.engine.observe()
         self._active_path = None
         suffix = list(path.engine.visible_token_ids[len(self.base_visible):])
         _position(self.original.backend, self.base_prefix, suffix)
@@ -182,13 +182,12 @@ class Chord:
                 len(self.base_visible) + sum(
                     not self.original.backend.is_eog(token_id)
                     for token_id in path.token_ids
-                )
+                ),
+                _defer_backend_positioning=True,
             )
             path.engine._prefix_snapshot = path.prefix_snapshots[-1]
             path.engine._prefix_snapshot_boundary = path.engine.boundary
             path.engine._prefix_snapshot_dirty = False
-            if path.state == "live":
-                path.engine.observe()
             active = path
         self._active_path = active
         return True
