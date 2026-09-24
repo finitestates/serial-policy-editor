@@ -26,6 +26,12 @@ KV_CACHE_TYPES = ("f16", "q8_0", "q4_0")
 
 
 @dataclass(frozen=True)
+class _LlamaCppSnapshotPayload:
+    state: Any
+    logits: np.ndarray
+
+
+@dataclass(frozen=True)
 class LlamaCppSettings:
     n_ctx: int = 2048
     n_batch: int = 256
@@ -177,6 +183,7 @@ class LlamaCppDecoder:
                 if value >= 0:
                     self._fallback_eog_ids.add(value)
         self._tokens: list[int] = []
+        self._restored_logits: np.ndarray | None = None
         self._snapshot_token = object()
         self._token_embedding_matrix_cache: np.ndarray | None = None
         self._activation_model: Any | None = None
@@ -187,6 +194,10 @@ class LlamaCppDecoder:
         self._real_model_probe = None
 
     def _measured_eval(self, values: list[int], kind: str, context_length: int) -> None:
+        # A restored snapshot supplies its saved final logits until the context
+        # is evaluated again. Once evaluation starts, the native output buffer
+        # becomes authoritative again.
+        self._restored_logits = None
         probe = getattr(self, "_real_model_probe", None)
         interval = probe.model_call(kind, len(values), context_length) if probe is not None else nullcontext()
         with interval:
@@ -199,6 +210,7 @@ class LlamaCppDecoder:
         if not prefix_token_ids:
             raise RuntimeError("decoder prefix cannot be empty")
         values = [int(value) for value in prefix_token_ids]
+        self._restored_logits = None
         self._model.reset()
         self._measured_eval(values, "prefill", len(values))
         self._tokens = values
@@ -258,11 +270,17 @@ class LlamaCppDecoder:
         if not callable(save_state) or not self._tokens:
             return None
         try:
+            logits = self.last_logits()
             state = save_state()
         except Exception:
             return None
+        if logits.shape != (self._vocabulary_size,):
+            return None
+        payload = _LlamaCppSnapshotPayload(
+            state=state, logits=np.asarray(logits, dtype=np.float32).copy()
+        )
         return BackendStateSnapshot(
-            self._snapshot_token, tuple(self._tokens), state
+            self._snapshot_token, tuple(self._tokens), payload
         )
 
     def restore_state(self, snapshot: BackendStateSnapshot) -> bool:
@@ -273,15 +291,24 @@ class LlamaCppDecoder:
         ):
             return False
         load_state = getattr(self._model, "load_state", None)
-        if not callable(load_state):
+        payload = snapshot.payload
+        if not callable(load_state) or not isinstance(payload, _LlamaCppSnapshotPayload):
             return False
-        # Let native restoration failures surface: the context may be partially
-        # repositioned, so callers must rebuild from the semantic prefix.
-        load_state(snapshot.payload)
+        if payload.logits.shape != (self._vocabulary_size,):
+            return False
+        # llama-cpp-python restores its context state, but the low-level C API
+        # logits pointer can still refer to the most recent speculative eval.
+        # Keep the matching output row alongside the state so rank resolution
+        # sees the restored prefix until the next real eval.
+        load_state(payload.state)
         self._tokens = list(snapshot.prefix_token_ids)
+        self._restored_logits = payload.logits.copy()
         return True
 
     def last_logits(self) -> np.ndarray:
+        restored_logits = getattr(self, "_restored_logits", None)
+        if restored_logits is not None:
+            return restored_logits.copy()
         model = self._model
         context = model._ctx.ctx if hasattr(model, "_ctx") else model.ctx
         get_ith = getattr(self._llama_cpp, "llama_get_logits_ith", None)
