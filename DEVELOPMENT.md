@@ -1,6 +1,6 @@
 # Development branches
 
-`main` is the current release line for `0.7.0`. It includes teacher replay
+`main` is the current release line for `0.7.5`. It includes teacher replay
 plans, storage-independent runtime seams, ephemeral runs, shared live/durable
 execution, and root-relative episode/replay semantics.
 
