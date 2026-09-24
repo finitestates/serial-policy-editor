@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   hot-path:
-    name: Hot-path rules (enforcement code from the base branch)
+    name: Hot-path rules
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
