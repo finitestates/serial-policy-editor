@@ -61,6 +61,8 @@ class ChoiceViewState:
     show_model_probabilities: bool = False
     column_focus: str | None = None
     overlays: frozenset[str] = frozenset()
+    default_hold_tokens: int = 100
+    default_search_radius: int = 3
 
 
 @dataclass(frozen=True)

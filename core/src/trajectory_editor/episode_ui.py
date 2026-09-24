@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from .candidate_columns import CandidateColumns, CandidateViewPlan, next_column_focus
-from .chord import ChordRequested, parse_chord
+from .chord import ChordRequested
 from .core.candidates import Candidate
 from .core.errors import EditorError
 from .core.ui import ChoiceSet
@@ -37,7 +37,7 @@ from .episode_runner import (
 from .episode_store import EpisodeStore
 from .episode_hash import token_prefix_sha256
 from .core.sampling import raw_rank
-from .teacher_commands import HELP_TEXT, CommandKind, ForkAddressKind, parse_command
+from .teacher_commands import HELP_TEXT, CommandKind, CommandState, ForkAddressKind, interpret_command
 from .terminal_contracts import (
     BoundaryReview, ChoiceFeedback, ChoiceViewState, PromptRequest, SEAMLESS_REACTIVATE,
     TerminalProtocol,
@@ -510,6 +510,8 @@ class InteractivePolicy:
                 show_model_probabilities=self.view_preferences.show_model_probabilities,
                 column_focus=self.view_preferences.column_focus,
                 overlays=self.view_preferences.overlays,
+                default_hold_tokens=self.default_hold_tokens,
+                default_search_radius=self.search_radius,
             ))
             if raw is None:
                 raise EdgeRequested()
@@ -519,25 +521,31 @@ class InteractivePolicy:
                 and raw == SEAMLESS_REACTIVATE
             ):
                 raise SeamlessRewindRequested(review_boundary)
-            if raw == "" and review_boundary is None:
-                raw = str(observation.proposal_raw_rank)
             proposal_prefill_available = False
-            try:
-                ranks = parse_chord(raw, len(observation.logits))
-                if ranks is not None:
-                    if review_boundary is not None:
-                        raise EditorError("return to the current menu before starting a chord")
-                    raise ChordRequested(ranks)
-                command = parse_command(
-                    raw,
-                    menu_size=len(choice.candidates),
-                    default_hold_tokens=self.default_hold_tokens,
-                    vocabulary_size=len(observation.logits),
-                    default_search_radius=self.search_radius,
+            interpretation = interpret_command(
+                raw,
+                menu_size=len(choice.candidates),
+                default_hold_tokens=self.default_hold_tokens,
+                vocabulary_size=len(observation.logits),
+                default_search_radius=self.search_radius,
+                implicit_accept=review_boundary is None,
+            )
+            if interpretation.state != CommandState.READY:
+                feedback = ChoiceFeedback(
+                    "error", "INVALID COMMAND", (interpretation.message,)
                 )
-            except EditorError as exc:
-                feedback = ChoiceFeedback("error", "INVALID COMMAND", (str(exc),))
                 continue
+            command = interpretation.command
+            assert command is not None
+            if command.kind == CommandKind.CHORD:
+                if review_boundary is not None:
+                    feedback = ChoiceFeedback(
+                        "error", "INVALID COMMAND",
+                        ("return to the current menu before starting a chord",),
+                    )
+                    continue
+                assert command.chord_ranks is not None
+                raise ChordRequested(command.chord_ranks)
             if review_boundary is not None:
                 if command.kind == CommandKind.REVIEW_BACK:
                     if self.seamless:

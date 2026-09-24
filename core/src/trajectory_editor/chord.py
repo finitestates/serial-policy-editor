@@ -9,28 +9,13 @@ from .core.actions import Accept, PolicyAction, SelectRawRank
 from .core.errors import EditorError
 from .episode_engine import EpisodeEngine
 from .terminal_contracts import PromptRequest
+from .teacher_commands import parse_chord
 
 
 class ChordRequested(Exception):
     def __init__(self, ranks: tuple[int, ...]) -> None:
         super().__init__(ranks)
         self.ranks = ranks
-
-
-def parse_chord(raw: str, vocabulary_size: int) -> tuple[int, ...] | None:
-    parts = raw.strip().split()
-    if not parts or parts[0].lower() != "chord":
-        return None
-    if not 2 <= len(parts) - 1 <= 26:
-        raise EditorError("use chord RANK RANK [RANK ...] (up to 26 paths)")
-    if any(not part.isdecimal() for part in parts[1:]):
-        raise EditorError("chord ranks must be positive integers")
-    ranks = tuple(int(part) for part in parts[1:])
-    if len(set(ranks)) != len(ranks):
-        raise EditorError("chord ranks must be distinct")
-    if any(rank < 1 or rank > vocabulary_size for rank in ranks):
-        raise EditorError(f"chord ranks must be between 1 and {vocabulary_size}")
-    return ranks
 
 
 def _position(backend, base: list[int], suffix: list[int]) -> None:
