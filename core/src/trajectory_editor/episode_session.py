@@ -655,6 +655,54 @@ class LiveSession:
         })
         return outcome
 
+    def adopt_promoted_outcomes(
+        self, outcomes: tuple[ActionOutcome, ...]
+    ) -> None:
+        """Record already-applied speculative actions as ordinary live history."""
+        self._require_live_branch()
+        if not outcomes:
+            return
+        if self._detached:
+            raise EditorError("the live session is detached from its shared backend")
+        state = self._branches[self._active_id]
+        engine = self._engine
+        boundary = state.boundary
+        for outcome in outcomes:
+            if outcome.boundary_before != boundary:
+                raise EditorError("promoted outcomes do not continue the live branch")
+            if outcome.status == "handed-off":
+                raise EditorError("a handed-off outcome cannot be promoted as live history")
+            boundary = outcome.boundary_after
+        if boundary != engine.boundary or boundary != len(engine.visible_token_ids):
+            raise EditorError("promoted outcomes do not match the active engine prefix")
+        if tuple(engine.visible_token_ids[:state.boundary]) != state.visible_token_ids:
+            raise EditorError("promoted engine does not share the live branch prefix")
+
+        control = _engine_control(engine)
+        control_points = state.control_points
+        if not _same_control(self._control_at(state, state.boundary), control):
+            control_points = (*control_points, replace(control, boundary=state.boundary))
+        promoted_tape = tuple(
+            TapeStep(item.action, item.expectation()) for item in outcomes
+        )
+        self._branches[self._active_id] = replace(
+            state,
+            visible_token_ids=tuple(engine.visible_token_ids),
+            tape=(*state.tape, *promoted_tape),
+            outcomes=(*state.outcomes, *outcomes),
+            control_points=control_points,
+            terminal_token_id=engine.terminal_token_id,
+            terminal_reason=engine.terminal_reason,
+            status="completed" if engine.ended else state.status,
+            backend_cache_snapshot=None,
+        )
+        for outcome in outcomes:
+            self._emit("generated", state.identity, outcome.boundary_after, {
+                "outcome": outcome,
+                "replay": False,
+                "promoted": True,
+            })
+
     def rewind(self, boundary: int, *, _branch_id: str | None = None) -> RewindState:
         branch_id = self._active_id if _branch_id is None else _branch_id
         self._require_live_branch(branch_id)

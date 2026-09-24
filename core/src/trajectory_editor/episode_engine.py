@@ -215,6 +215,7 @@ class EpisodeEngine:
         if not backend_positioned:
             backend.reset(list(tokens))
         self.backend = backend
+        self._backend_positioned = True
         self.sampling = sampling
         initial_text_value = (
             initial_text
@@ -409,6 +410,7 @@ class EpisodeEngine:
             branch(prefix)
         else:
             self.backend.reset(prefix)
+        self._backend_positioned = True
         self.trajectory.rewind_to(boundary)
 
     def terminate(self, reason: str = "menu-end") -> None:
@@ -444,6 +446,18 @@ class EpisodeEngine:
         self._observation = None
         self._observation_key = None
         self._prepared_accept = None
+
+    def _ensure_backend_positioned(self) -> None:
+        """Backfill a deferred preview cache before the next model mutation."""
+        if self._backend_positioned:
+            return
+        prefix = list(self.token_ids)
+        branch = getattr(self.backend, "branch_to_prefix", None)
+        if callable(branch):
+            branch(prefix)
+        else:
+            self.backend.reset(prefix)
+        self._backend_positioned = True
 
     def discard_speculative_accept(self) -> None:
         """Drop a prepared one-token continuation without changing live state."""
@@ -677,13 +691,14 @@ class EpisodeEngine:
     def observe(self) -> Observation:
         if self.ended or self.checkpointed:
             raise EditorError("the episode has no live decision boundary")
+        key = self._decision_key()
+        if self._observation is not None and self._observation_key == key:
+            return self._observation
         if self._cfg_active() and self.guidance_backend is not None and (
             getattr(self.guidance_backend, "_spe_cfg_owner", None) is not self._guidance_owner
         ):
             self._invalidate_guidance()
-        key = self._decision_key()
-        if self._observation is not None and self._observation_key == key:
-            return self._observation
+        self._ensure_backend_positioned()
         self._prepare_activation_runtime()
         logits = np.asarray(self.backend.last_logits(), dtype=np.float64)
         if logits.ndim != 1 or len(logits) != self.backend.vocabulary_size():
@@ -790,6 +805,39 @@ class EpisodeEngine:
         """Release knowledge of shared guidance state before backend reuse."""
         self._guidance_evaluated_prefix = None
         self._invalidate_observation()
+
+    def adopt_preview_state(
+        self, preview: "EpisodeEngine", *, backend_positioned: bool = True
+    ) -> None:
+        """Adopt a speculative engine that has already advanced this trajectory.
+
+        Chord previews use the same backend instances and the same starting
+        token ledger. Once one preview is selected, its semantic engine state
+        can become the live engine directly; replaying its actions would repeat
+        decoding and evidence work. The preview's mutable trajectory and
+        incremental snapshots are transferred by reference. Keep the live
+        metric sink, which belongs to the durable/runtime owner rather than to
+        speculative work.
+        """
+        if not isinstance(preview, EpisodeEngine):
+            raise TypeError("preview must be an EpisodeEngine")
+        if preview is self:
+            return
+        if (
+            self.backend is not preview.backend
+            or self.guidance_backend is not preview.guidance_backend
+            or self.initial_token_ids != preview.initial_token_ids
+            or self.initial_text != preview.initial_text
+        ):
+            raise EditorError("preview engine does not share this episode's model and root")
+        metric_sink = self._metric_sink
+        self.__dict__.update(preview.__dict__)
+        self._metric_sink = metric_sink
+        self._backend_positioned = backend_positioned
+        if not backend_positioned:
+            # The selected observation is still exact, but the shared primary
+            # and CFG caches belong to another preview until the next action.
+            self._guidance_evaluated_prefix = None
 
     def _guidance_prompt_tokens(self) -> tuple[int, ...]:
         backend = self.guidance_backend
@@ -1025,6 +1073,7 @@ class EpisodeEngine:
         if evidence.is_eog:
             self.terminal_token_id = token_id
         else:
+            self._ensure_backend_positioned()
             promoted = False
             if (
                 prepared is not None

@@ -35,6 +35,7 @@ class _RunnerTarget:
         tape: Sequence[TapeStep] | ReplayPlan | None = None,
         live_policy: LivePolicy | None = None,
         max_live_actions: int | None = None,
+        promoted_outcomes: Sequence[ActionOutcome] = (),
     ) -> RunResult:
         return run_plan(
             self,
@@ -42,6 +43,7 @@ class _RunnerTarget:
             tape=tape,
             live_policy=live_policy,
             max_live_actions=max_live_actions,
+            promoted_outcomes=promoted_outcomes,
         )
 
     def record_replay(
@@ -53,6 +55,9 @@ class _RunnerTarget:
         origin: ReplayOrigin | None,
     ) -> None:
         del ordinal, index, step, outcome, origin
+
+    def adopt_promoted(self, outcomes: Sequence[ActionOutcome]) -> None:
+        del outcomes
 
     def record_live(self, ordinal: int, outcome: ActionOutcome) -> None:
         del ordinal, outcome
@@ -236,6 +241,9 @@ class LiveSessionRunner(_RunnerTarget):
 
     def begin(self) -> int:
         return len(self.session.history_tape)
+
+    def adopt_promoted(self, outcomes: Sequence[ActionOutcome]) -> None:
+        self.session.adopt_promoted_outcomes(tuple(outcomes))
 
     def set_sampler(self, sampling: SamplerConfig) -> None:
         self.session.set_sampler(sampling)
