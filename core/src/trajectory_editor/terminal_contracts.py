@@ -32,7 +32,6 @@ class BoundaryReview:
     active_aligned_step: int
     aligned_step: int
     context_text_tail: str
-    context_token_sha256: str
     position: Mapping[str, Any]
     next_token: Mapping[str, Any] | None = None
 

@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 from bisect import bisect_right
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
@@ -44,6 +46,10 @@ from .terminal_contracts import (
     TerminalProtocol,
 )
 from .tui import TerminalIO
+
+
+_CONTEXT_CACHE_BUDGET_BYTES = 2 * 1024 * 1024
+_CONTEXT_CACHE_ENTRY_OVERHEAD_BYTES = 256
 
 
 @dataclass
@@ -221,9 +227,56 @@ class InteractivePolicy:
         self.episode_id = episode_id
         self.seamless = bool(seamless)
         self._seamless_action_index: _SeamlessActionIndex | None = None
+        self._context_cache: OrderedDict[int, tuple[str, int]] = OrderedDict()
+        self._context_cache_bytes = 0
+        self._context_cache_engine: EpisodeEngine | None = None
+        self._context_cache_high_water: int | None = None
         self.choice_serial = 0
 
-    def _prepare_seamless_action_index(self, boundary: int) -> None:
+    def _clear_context_cache(self) -> None:
+        self._context_cache.clear()
+        self._context_cache_bytes = 0
+
+    def _prepare_context_cache(self, engine: EpisodeEngine, boundary: int) -> None:
+        if engine is not self._context_cache_engine:
+            self._clear_context_cache()
+            self._seamless_action_index = None
+            self._context_cache_engine = engine
+            self._context_cache_high_water = None
+        if (
+            self._context_cache_high_water is not None
+            and boundary < self._context_cache_high_water
+        ):
+            # A rewind may replace the visible suffix; cached later boundaries
+            # then belong to a different history.
+            self._clear_context_cache()
+            self._seamless_action_index = None
+        self._context_cache_high_water = boundary
+
+    def _remember_context(self, boundary: int, context: str) -> None:
+        cost = sys.getsizeof(context) + _CONTEXT_CACHE_ENTRY_OVERHEAD_BYTES
+        previous = self._context_cache.pop(boundary, None)
+        if previous is not None:
+            self._context_cache_bytes -= previous[1]
+        if cost > _CONTEXT_CACHE_BUDGET_BYTES:
+            return
+        self._context_cache[boundary] = (context, cost)
+        self._context_cache_bytes += cost
+        while self._context_cache_bytes > _CONTEXT_CACHE_BUDGET_BYTES:
+            _, (_, removed_cost) = self._context_cache.popitem(last=False)
+            self._context_cache_bytes -= removed_cost
+
+    def _cached_context(self, boundary: int) -> str | None:
+        entry = self._context_cache.get(boundary)
+        if entry is None:
+            return None
+        self._context_cache.move_to_end(boundary)
+        return entry[0]
+
+    def _prepare_seamless_action_index(
+        self, engine: EpisodeEngine, boundary: int
+    ) -> None:
+        self._prepare_context_cache(engine, boundary)
         if not self.seamless:
             return
         if self._seamless_action_index is None:
@@ -425,7 +478,16 @@ class InteractivePolicy:
         *,
         position: dict[str, Any],
     ) -> BoundaryReview:
-        prefix = [*engine.initial_token_ids, *engine.visible_token_ids[:boundary]]
+        context_tail = self._cached_context(boundary)
+        if context_tail is None:
+            prefix = [*engine.initial_token_ids, *engine.visible_token_ids[:boundary]]
+            context = engine.backend.render(prefix, special=True)
+            context_tail = (
+                context[-self.context_characters :]
+                if self.context_characters
+                else context
+            )
+            self._remember_context(boundary, context_tail)
         next_token = (
             {
                 "token_id": engine.visible_token_ids[boundary],
@@ -438,16 +500,13 @@ class InteractivePolicy:
         return BoundaryReview(
             aligned_step=boundary,
             active_aligned_step=active,
-            context_text_tail=engine.backend.render(prefix, special=True)[
-                -self.context_characters :
-            ],
-            context_token_sha256=token_prefix_sha256(prefix),
+            context_text_tail=context_tail,
             next_token=next_token,
             position=position,
         )
 
     def choose(self, engine: EpisodeEngine, observation: Observation) -> PolicyAction:
-        self._prepare_seamless_action_index(observation.boundary)
+        self._prepare_seamless_action_index(engine, observation.boundary)
         self.choice_serial += 1
         view = self._view_plan(engine)
         candidates = engine.candidates(
@@ -463,6 +522,7 @@ class InteractivePolicy:
             serial=self.choice_serial,
             view=view,
         )
+        self._remember_context(observation.boundary, choice.context_text_tail)
         exposed = {candidate.rank: candidate for candidate in candidates}
         preview_candidates = dict(exposed)
         choice_view = view
