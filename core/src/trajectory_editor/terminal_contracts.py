@@ -8,10 +8,10 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from .core.candidates import Candidate
-from .core.ui import ChoiceSet, InsertMode
+from .core.ui import ChoiceSet, ContextText, InsertMode
 
 
 # Enter in seamless review is distinct from Escape and ordinary command text.
@@ -31,9 +31,14 @@ class ChoiceFeedback:
 class BoundaryReview:
     active_aligned_step: int
     aligned_step: int
-    context_text_tail: str
+    context_text_tail: str | ContextText
     position: Mapping[str, Any]
     next_token: Mapping[str, Any] | None = None
+    context_snapshots: Sequence[ContextText | None] = field(
+        default=(), repr=False, compare=False
+    )
+    context_character_start: int = 0
+    context_boundary: int | None = None
 
 
 @dataclass(frozen=True)

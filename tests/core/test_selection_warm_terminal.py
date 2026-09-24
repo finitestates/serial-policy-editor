@@ -17,6 +17,7 @@ from trajectory_editor.core.actions import SelectRawRank
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_ui import _choice_from_observation
+from trajectory_editor.episode_hash import token_prefix_sha256
 from trajectory_editor.persistent_tui import PersistentTerminalSession
 from trajectory_editor.terminal_contracts import ChoiceViewState
 
@@ -44,7 +45,10 @@ def _choice(engine: EpisodeEngine, warm):
     observation = engine.observe()
     candidates = engine.candidates(observation, count=3)
     choice = _choice_from_observation(
-        engine, observation, candidates, context_characters=0, serial=1,
+        engine, observation, candidates,
+        context_text_tail=observation.context_text,
+        context_token_sha256=token_prefix_sha256(list(observation.prefix_token_ids)),
+        serial=1,
     )
     state = ChoiceViewState(
         choice, engine.remaining, candidates, lambda text, mode: text,

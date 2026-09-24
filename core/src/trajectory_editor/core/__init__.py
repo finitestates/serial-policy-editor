@@ -18,6 +18,8 @@ from .actions import (
 from .backend import (
     BackendStateSnapshot,
     CacheMode,
+    IncrementalTextBackend,
+    IncrementalTextStream,
     InferenceBackend,
     SnapshotableInferenceBackend,
     require_inference_backend,
@@ -40,7 +42,7 @@ from .sampling import (
 from .sampler_config import SAMPLING_POLICY_SCHEME, SamplerConfig
 from .observation import ObservationStatistics
 from .trajectory import TrajectoryState
-from .ui import ActionKind, ChoiceSet, EditAction, InsertMode
+from .ui import ActionKind, ChoiceSet, ContextText, EditAction, InsertMode
 
 __all__ = [
     "Accept",
@@ -51,12 +53,15 @@ __all__ = [
     "CacheMode",
     "ActionKind",
     "ChoiceSet",
+    "ContextText",
     "EditAction",
     "InsertMode",
     "EditorError",
     "Divergence",
     "EndGeneration",
     "Hold",
+    "IncrementalTextBackend",
+    "IncrementalTextStream",
     "InferenceBackend",
     "SnapshotableInferenceBackend",
     "ObservationStatistics",

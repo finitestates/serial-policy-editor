@@ -67,6 +67,22 @@ class BackendStateSnapshot:
 
 
 @runtime_checkable
+class IncrementalTextStream(Protocol):
+    """Presentation-only decoder that accepts newly appended token IDs."""
+
+    def append(self, token_ids: list[int]) -> str: ...
+
+
+@runtime_checkable
+class IncrementalTextBackend(Protocol):
+    """Optional renderer capability; it never changes model inference state."""
+
+    def new_text_stream(
+        self, *, special: bool = False
+    ) -> IncrementalTextStream | None: ...
+
+
+@runtime_checkable
 class SnapshotableInferenceBackend(Protocol):
     """Optional capability for temporarily saving and restoring model state.
 

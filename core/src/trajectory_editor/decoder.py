@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 
+import codecs
 import ctypes
 import hashlib
 import platform
@@ -138,6 +139,23 @@ def _llama_options(
         if options["type_v"] in quantized_types:
             raise EditorError("Quantized V cache requires Flash Attention")
     return {key: value for key, value in options.items() if value is not None}
+
+
+class _LlamaCppTextStream:
+    """Incremental UTF-8 decoding over newly detokenized llama.cpp pieces."""
+
+    def __init__(self, model: Any, *, special: bool) -> None:
+        self._model = model
+        self._special = special
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+    def append(self, token_ids: list[int]) -> str:
+        if not token_ids:
+            return ""
+        raw = self._model.detokenize(
+            [int(value) for value in token_ids], special=self._special
+        )
+        return self._decoder.decode(raw, final=False)
 
 
 class LlamaCppDecoder:
@@ -756,6 +774,9 @@ class LlamaCppDecoder:
                 text.encode("utf-8"), add_bos=add_bos, special=special
             )
         ]
+
+    def new_text_stream(self, *, special: bool = False):
+        return _LlamaCppTextStream(self._model, special=special)
 
     def render(self, token_ids: list[int], *, special: bool = False) -> str:
         if not token_ids:

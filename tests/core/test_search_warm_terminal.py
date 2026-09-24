@@ -16,6 +16,7 @@ from trajectory_editor.core.actions import Accept, SelectRawRank
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_ui import InteractivePolicy, _choice_from_observation
+from trajectory_editor.episode_hash import token_prefix_sha256
 from trajectory_editor.persistent_tui import PersistentTerminalSession
 from trajectory_editor.terminal_contracts import ChoiceFeedback, ChoiceViewState
 
@@ -80,7 +81,10 @@ def _search_state(
     rows = tuple(engine.candidates(observation, start_rank=start, count=stop - start + 1))
     by_rank = {candidate.rank: candidate for candidate in (*menu, *rows)}
     choice = _choice_from_observation(
-        engine, observation, menu, context_characters=0, serial=1,
+        engine, observation, menu,
+        context_text_tail=observation.context_text,
+        context_token_sha256=token_prefix_sha256(list(observation.prefix_token_ids)),
+        serial=1,
     )
 
     def warm(raw_rank, selected_token_id, generation, cancelled):

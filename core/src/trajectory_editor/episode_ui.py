@@ -7,9 +7,11 @@ never compiled into a replay tape.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import sys
+import threading
 from bisect import bisect_right
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -20,7 +22,7 @@ from .candidate_columns import CandidateColumns, CandidateViewPlan, next_column_
 from .chord import ChordRequested
 from .core.candidates import Candidate
 from .core.errors import EditorError
-from .core.ui import ChoiceSet
+from .core.ui import ChoiceSet, ContextText
 from .core.actions import (
     EndGeneration,
     Hold,
@@ -31,14 +33,13 @@ from .core.actions import (
     SelectRawRank,
     Write,
 )
-from .episode_engine import EpisodeEngine, Observation
+from .episode_engine import EpisodeEngine, Observation, TokenPrefixSnapshot
 from .episode_runner import (
     EdgeRequested,
     ForkRequested,
     SeamlessRewindRequested,
 )
 from .episode_store import EpisodeStore
-from .episode_hash import token_prefix_sha256
 from .core.sampling import raw_rank
 from .teacher_commands import HELP_TEXT, CommandKind, CommandState, ForkAddressKind, interpret_command
 from .terminal_contracts import (
@@ -59,6 +60,284 @@ class SearchLens:
     target_rank: int
     lower_rank: int
     upper_rank: int
+
+
+class _ContextRenderCursor:
+    """Persistent rendered contexts with background decoder prewarming on rewind."""
+
+    _DIGEST_CHECKPOINT_INTERVAL = 64
+    _PREWARM_DELAY_SECONDS = 0.075
+
+    def __init__(self) -> None:
+        self._engine: EpisodeEngine | None = None
+        self._prefix: TokenPrefixSnapshot | None = None
+        self._stream: Any | None = None
+        self._digest: Any | None = None
+        self._context = ContextText.root("")
+        self._snapshots: list[ContextText | None] = [self._context]
+        self._digest_checkpoints: dict[int, Any] = {0: hashlib.sha256()}
+        self._stream_lock = threading.Lock()
+        self._warm_lock = threading.Lock()
+        self._warm_generation = 0
+        self._warm_timer: threading.Timer | None = None
+        self._warm_cancel: threading.Event | None = None
+        self._warm_key: tuple[EpisodeEngine, int, str] | None = None
+        self._prepared_stream: tuple[EpisodeEngine, int, str, Any] | None = None
+
+    @staticmethod
+    def _new_stream(engine: EpisodeEngine):
+        factory = getattr(engine.backend, "new_text_stream", None)
+        return factory(special=True) if callable(factory) else None
+
+    @staticmethod
+    def _update_digest(digest: Any, token_ids: Any) -> None:
+        for token_id in token_ids:
+            digest.update(int(token_id).to_bytes(8, "little", signed=True))
+
+    def _append_stream(self, stream: Any, token_id: int) -> str:
+        # The live and prewarm streams share a backend tokenizer/model. Serialize
+        # individual detokenization calls, not the full background replay.
+        with self._stream_lock:
+            return stream.append([int(token_id)])
+
+    def _digest_at_boundary(self, prefix: Any, boundary: int) -> Any | None:
+        if not 0 <= boundary <= len(prefix):
+            return None
+        checkpoint_boundary = (
+            boundary // self._DIGEST_CHECKPOINT_INTERVAL
+        ) * self._DIGEST_CHECKPOINT_INTERVAL
+        checkpoint = self._digest_checkpoints.get(checkpoint_boundary)
+        if checkpoint is None:
+            return None
+        digest = checkpoint.copy()
+        self._update_digest(digest, prefix[checkpoint_boundary:boundary])
+        return digest
+
+    def cancel_prewarm(self) -> None:
+        with self._warm_lock:
+            self._warm_generation += 1
+            timer = self._warm_timer
+            cancel = self._warm_cancel
+            self._warm_timer = None
+            self._warm_cancel = None
+            self._warm_key = None
+            self._prepared_stream = None
+            if cancel is not None:
+                cancel.set()
+            if timer is not None:
+                timer.cancel()
+
+    def prewarm(self, engine: EpisodeEngine, boundary: int) -> None:
+        """Rebuild a decoder at a reviewed boundary without delaying the UI."""
+        prefix = self._prefix
+        absolute_boundary = len(engine.initial_token_ids) + boundary
+        if (
+            self._engine is not engine
+            or prefix is None
+            or absolute_boundary >= len(self._snapshots)
+            or self._snapshots[absolute_boundary] is None
+        ):
+            return
+        digest = self._digest_at_boundary(prefix, absolute_boundary)
+        if digest is None:
+            return
+        digest_key = digest.hexdigest()
+        key = (engine, boundary, digest_key)
+        with self._warm_lock:
+            if self._prepared_stream is not None and self._prepared_stream[:3] == key:
+                return
+            if self._warm_key == key and self._warm_cancel is not None:
+                return
+            if self._warm_cancel is not None:
+                self._warm_cancel.set()
+            if self._warm_timer is not None:
+                self._warm_timer.cancel()
+            self._warm_generation += 1
+            generation = self._warm_generation
+            cancel = threading.Event()
+            self._warm_cancel = cancel
+            self._warm_key = key
+
+            def replay() -> None:
+                with self._warm_lock:
+                    if generation != self._warm_generation or cancel.is_set():
+                        return
+                    self._warm_timer = None
+                try:
+                    stream = self._new_stream(engine)
+                    if stream is None:
+                        raise RuntimeError("incremental text stream unavailable")
+                    token_ids = (*engine.initial_token_ids, *engine.visible_token_ids[:boundary])
+                    for token_id in token_ids:
+                        if cancel.is_set():
+                            return
+                        self._append_stream(stream, token_id)
+                except Exception:
+                    with self._warm_lock:
+                        if generation == self._warm_generation:
+                            self._warm_cancel = None
+                            self._warm_key = None
+                    return
+                with self._warm_lock:
+                    if generation == self._warm_generation and not cancel.is_set():
+                        self._prepared_stream = (*key, stream)
+
+            timer = threading.Timer(self._PREWARM_DELAY_SECONDS, replay)
+            timer.daemon = True
+            self._warm_timer = timer
+            timer.start()
+
+    def _take_prepared_stream(
+        self, engine: EpisodeEngine, boundary: int, prefix: Any
+    ) -> Any | None:
+        absolute_boundary = len(engine.initial_token_ids) + boundary
+        digest = self._digest_at_boundary(prefix, absolute_boundary)
+        if digest is None:
+            return None
+        key = (engine, boundary, digest.hexdigest())
+        with self._warm_lock:
+            prepared = self._prepared_stream
+            if prepared is None or prepared[:3] != key:
+                return None
+            self._prepared_stream = None
+            self._warm_generation += 1
+            cancel = self._warm_cancel
+            self._warm_cancel = None
+            self._warm_key = None
+            if cancel is not None:
+                cancel.set()
+            return prepared[3]
+
+    def _rebuild_stream_only(self, engine: EpisodeEngine, boundary: int):
+        """Position a presentation decoder at a boundary if prewarming missed."""
+        stream = self._new_stream(engine)
+        if stream is None:
+            return None
+        for token_id in engine.initial_token_ids:
+            self._append_stream(stream, token_id)
+        for token_id in engine.visible_token_ids[:boundary]:
+            self._append_stream(stream, token_id)
+        return stream
+
+    def _reset(self, engine: EpisodeEngine, prefix: Any, boundary: int) -> None:
+        token_ids = list(prefix)
+        self.cancel_prewarm()
+        stream = self._new_stream(engine)
+        digest = hashlib.sha256()
+        checkpoints: dict[int, Any] = {0: digest.copy()}
+
+        if stream is None:
+            context = ContextText.root(engine.backend.render(token_ids, special=True))
+            snapshots: list[ContextText | None] = [None] * len(token_ids) + [context]
+            for index, token_id in enumerate(token_ids, start=1):
+                digest.update(int(token_id).to_bytes(8, "little", signed=True))
+                if index % self._DIGEST_CHECKPOINT_INTERVAL == 0:
+                    checkpoints[index] = digest.copy()
+        else:
+            context = ContextText.root("")
+            snapshots = [context]
+            for index, token_id in enumerate(token_ids, start=1):
+                context = context.append(self._append_stream(stream, token_id))
+                snapshots.append(context)
+                digest.update(int(token_id).to_bytes(8, "little", signed=True))
+                if index % self._DIGEST_CHECKPOINT_INTERVAL == 0:
+                    checkpoints[index] = digest.copy()
+
+        self._engine = engine
+        self._prefix = prefix if isinstance(prefix, TokenPrefixSnapshot) else None
+        self._stream = stream
+        self._digest = digest
+        self._context = context
+        self._snapshots = snapshots
+        self._digest_checkpoints = checkpoints
+
+    def _restore_boundary(
+        self, engine: EpisodeEngine, prefix: Any, boundary: int
+    ) -> bool:
+        absolute_boundary = len(engine.initial_token_ids) + boundary
+        if not 0 <= absolute_boundary < len(self._snapshots):
+            return False
+        context = self._snapshots[absolute_boundary]
+        if context is None:
+            return False
+        digest = self._digest_at_boundary(prefix, absolute_boundary)
+        if digest is None:
+            return False
+
+        digest_key = digest.hexdigest()
+        with self._warm_lock:
+            warm_key = self._warm_key
+        if warm_key is not None and warm_key != (engine, boundary, digest_key):
+            self.cancel_prewarm()
+        self._stream = self._take_prepared_stream(engine, boundary, prefix)
+        self._context = context
+        self._digest = digest
+        del self._snapshots[absolute_boundary + 1 :]
+        self._digest_checkpoints = {
+            checkpoint: state
+            for checkpoint, state in self._digest_checkpoints.items()
+            if checkpoint <= absolute_boundary
+        }
+        self._prefix = prefix if isinstance(prefix, TokenPrefixSnapshot) else None
+        return True
+
+    def context_at(self, boundary: int) -> ContextText | None:
+        if 0 <= boundary < len(self._snapshots):
+            return self._snapshots[boundary]
+        return None
+
+    def snapshots_for(
+        self, engine: EpisodeEngine
+    ) -> tuple[ContextText | None, ...] | list[ContextText | None]:
+        return self._snapshots if self._engine is engine else ()
+
+    def update(self, engine: EpisodeEngine, observation: Observation) -> tuple[ContextText, str]:
+        prefix = observation.prefix_token_ids
+        if self._engine is engine and self._digest is not None:
+            chunks = (
+                prefix.chunks_since(self._prefix)
+                if isinstance(prefix, TokenPrefixSnapshot) and self._prefix is not None
+                else None
+            )
+            if chunks is not None:
+                appended = [token for chunk in chunks for token in chunk]
+                if appended:
+                    if self._stream is None:
+                        previous_boundary = observation.boundary - len(appended)
+                        self._stream = self._take_prepared_stream(
+                            engine, previous_boundary, self._prefix
+                        )
+                        if self._stream is None:
+                            self.cancel_prewarm()
+                            self._stream = self._rebuild_stream_only(
+                                engine, previous_boundary
+                            )
+                    else:
+                        self.cancel_prewarm()
+                    if self._stream is None:
+                        self._context = ContextText.root(
+                            engine.backend.render(list(prefix), special=True)
+                        )
+                        self._snapshots = [None] * len(prefix) + [self._context]
+                    else:
+                        for token_id in appended:
+                            self._context = self._context.append(
+                                self._append_stream(self._stream, token_id)
+                            )
+                            self._snapshots.append(self._context)
+                    for token_id in appended:
+                        self._digest.update(
+                            int(token_id).to_bytes(8, "little", signed=True)
+                        )
+                        absolute = len(self._snapshots) - 1
+                        if absolute % self._DIGEST_CHECKPOINT_INTERVAL == 0:
+                            self._digest_checkpoints[absolute] = self._digest.copy()
+                self._prefix = prefix if isinstance(prefix, TokenPrefixSnapshot) else None
+                return self._context, self._digest.hexdigest()
+            if self._restore_boundary(engine, prefix, observation.boundary):
+                return self._context, self._digest.hexdigest()
+        self._reset(engine, prefix, observation.boundary)
+        return self._context, self._digest.hexdigest()
 
 
 class _SeamlessActionIndex:
@@ -135,7 +414,8 @@ def _choice_from_observation(
     observation: Observation,
     candidates: tuple[Candidate, ...],
     *,
-    context_characters: int,
+    context_text_tail: str | ContextText,
+    context_token_sha256: str,
     serial: int,
     view: CandidateViewPlan | None = None,
 ) -> ChoiceSet:
@@ -144,8 +424,8 @@ def _choice_from_observation(
         prompt_id="episode",
         aligned_step=observation.boundary,
         sampling_coordinate=observation.sampling_coordinate,
-        context_token_sha256=token_prefix_sha256(list(observation.prefix_token_ids)),
-        context_text_tail=observation.context_text[-context_characters:],
+        context_token_sha256=context_token_sha256,
+        context_text_tail=context_text_tail,
         proposal_token_id=observation.proposal_token_id,
         proposal_text=observation.proposal_text,
         proposal_raw_probability=(
@@ -227,10 +507,11 @@ class InteractivePolicy:
         self.episode_id = episode_id
         self.seamless = bool(seamless)
         self._seamless_action_index: _SeamlessActionIndex | None = None
-        self._context_cache: OrderedDict[int, tuple[str, int]] = OrderedDict()
+        self._context_cache: OrderedDict[int, tuple[str | ContextText, int]] = OrderedDict()
         self._context_cache_bytes = 0
         self._context_cache_engine: EpisodeEngine | None = None
         self._context_cache_high_water: int | None = None
+        self._context_cursor = _ContextRenderCursor()
         self.choice_serial = 0
 
     def _clear_context_cache(self) -> None:
@@ -253,8 +534,10 @@ class InteractivePolicy:
             self._seamless_action_index = None
         self._context_cache_high_water = boundary
 
-    def _remember_context(self, boundary: int, context: str) -> None:
+    def _remember_context(self, boundary: int, context: str | ContextText) -> None:
         cost = sys.getsizeof(context) + _CONTEXT_CACHE_ENTRY_OVERHEAD_BYTES
+        if isinstance(context, ContextText):
+            cost += sys.getsizeof(context.chunk)
         previous = self._context_cache.pop(boundary, None)
         if previous is not None:
             self._context_cache_bytes -= previous[1]
@@ -266,12 +549,37 @@ class InteractivePolicy:
             _, (_, removed_cost) = self._context_cache.popitem(last=False)
             self._context_cache_bytes -= removed_cost
 
-    def _cached_context(self, boundary: int) -> str | None:
+    def _cached_context(self, boundary: int) -> str | ContextText | None:
         entry = self._context_cache.get(boundary)
         if entry is None:
             return None
         self._context_cache.move_to_end(boundary)
         return entry[0]
+
+    def _choice_for_observation(
+        self,
+        engine: EpisodeEngine,
+        observation: Observation,
+        candidates: tuple[Candidate, ...],
+        *,
+        view: CandidateViewPlan | None = None,
+    ) -> ChoiceSet:
+        context_snapshot, context_hash = self._context_cursor.update(engine, observation)
+        if self.context_characters == 0:
+            context_tail: str | ContextText = context_snapshot
+        elif self.context_characters > 0:
+            context_tail = context_snapshot.tail(self.context_characters)
+        else:
+            context_tail = context_snapshot.materialize()[-self.context_characters :]
+        return _choice_from_observation(
+            engine,
+            observation,
+            candidates,
+            context_text_tail=context_tail,
+            context_token_sha256=context_hash,
+            serial=self.choice_serial,
+            view=view,
+        )
 
     def _prepare_seamless_action_index(
         self, engine: EpisodeEngine, boundary: int
@@ -300,15 +608,12 @@ class InteractivePolicy:
 
     def _view_plan(self, engine: EpisodeEngine) -> CandidateViewPlan:
         """Resolve the visible columns once for lookup and rendering."""
-        size = self.io.terminal_size()
-        width = size[0] if size is not None else None
         plan = CandidateColumns(
             policy=self._show_policy_diagnostics(engine),
             logit_view=self.view_preferences.logit_view,
             show_model_probabilities=self.view_preferences.show_model_probabilities,
             column_focus=self.view_preferences.column_focus,
             overlays=self.view_preferences.overlays,
-            width=width,
         ).plan
         return plan.policy_ordered() if self.view_preferences.sort_by_policy else plan
 
@@ -478,16 +783,27 @@ class InteractivePolicy:
         *,
         position: dict[str, Any],
     ) -> BoundaryReview:
-        context_tail = self._cached_context(boundary)
+        context_boundary = len(engine.initial_token_ids) + boundary
+        snapshots = self._context_cursor.snapshots_for(engine)
+        context_tail = self._context_cursor.context_at(context_boundary)
+        cached_text_is_tail = False
         if context_tail is None:
-            prefix = [*engine.initial_token_ids, *engine.visible_token_ids[:boundary]]
-            context = engine.backend.render(prefix, special=True)
-            context_tail = (
-                context[-self.context_characters :]
-                if self.context_characters
-                else context
-            )
-            self._remember_context(boundary, context_tail)
+            cached = self._cached_context(boundary)
+            if isinstance(cached, ContextText):
+                context_tail = cached
+            elif isinstance(cached, str):
+                context_tail = ContextText.root(cached)
+                cached_text_is_tail = True
+            else:
+                context_tail = ContextText.root("")
+                cached_text_is_tail = True
+        context_length = context_tail.character_count
+        if cached_text_is_tail or self.context_characters == 0:
+            context_character_start = 0
+        elif self.context_characters > 0:
+            context_character_start = max(0, context_length - self.context_characters)
+        else:
+            context_character_start = min(context_length, -self.context_characters)
         next_token = (
             {
                 "token_id": engine.visible_token_ids[boundary],
@@ -503,6 +819,9 @@ class InteractivePolicy:
             context_text_tail=context_tail,
             next_token=next_token,
             position=position,
+            context_snapshots=snapshots,
+            context_character_start=context_character_start,
+            context_boundary=context_boundary,
         )
 
     def choose(self, engine: EpisodeEngine, observation: Observation) -> PolicyAction:
@@ -514,13 +833,8 @@ class InteractivePolicy:
             count=min(self.menu_size, len(observation.logits)),
             view=view,
         )
-        choice = _choice_from_observation(
-            engine,
-            observation,
-            candidates,
-            context_characters=self.context_characters,
-            serial=self.choice_serial,
-            view=view,
+        choice = self._choice_for_observation(
+            engine, observation, candidates, view=view
         )
         self._remember_context(observation.boundary, choice.context_text_tail)
         exposed = {candidate.rank: candidate for candidate in candidates}
@@ -605,6 +919,7 @@ class InteractivePolicy:
                     observation.boundary,
                     position=position,
                 )
+                self._context_cursor.prewarm(engine, review_boundary)
             raw = self.io.read_choice(ChoiceViewState(
                 choice,
                 remaining_tokens=engine.remaining,
@@ -658,6 +973,7 @@ class InteractivePolicy:
                 ),
             ))
             if raw is None:
+                self._context_cursor.cancel_prewarm()
                 raise EdgeRequested()
             if (
                 self.seamless
@@ -703,14 +1019,18 @@ class InteractivePolicy:
                         )
                     else:
                         review_boundary = min(observation.boundary, review_boundary + 1)
+                    if review_boundary is None:
+                        self._context_cursor.cancel_prewarm()
                     continue
                 if command.kind == CommandKind.FORK:
+                    self._context_cursor.cancel_prewarm()
                     self._interaction(
                         observation.boundary,
                         "fork-requested",
                         {"boundary": review_boundary},
                     )
                     raise ForkRequested(review_boundary)
+                self._context_cursor.cancel_prewarm()
                 review_boundary = None
                 continue
             if command.kind == CommandKind.BIAS:
@@ -752,9 +1072,12 @@ class InteractivePolicy:
                 }
                 preview_candidates = dict(exposed)
                 candidates = tuple(resolve_candidate(c.rank) for c in choice.candidates)
-                choice = _choice_from_observation(engine, observation, candidates,
-                    context_characters=self.context_characters, serial=self.choice_serial,
-                    view=self._view_plan(engine))
+                choice = self._choice_for_observation(
+                    engine,
+                    observation,
+                    candidates,
+                    view=self._view_plan(engine),
+                )
                 choice_view = self._view_plan(engine)
                 lines = tuple(f"{label}: {value:+g}" for _kind, _payload, label, value in updates)
                 feedback = ChoiceFeedback("status", "STEERING UPDATED", lines)
@@ -812,12 +1135,10 @@ class InteractivePolicy:
                     count=target,
                     view=view,
                 )
-                choice = _choice_from_observation(
+                choice = self._choice_for_observation(
                     engine,
                     observation,
                     candidates,
-                    context_characters=self.context_characters,
-                    serial=self.choice_serial,
                     view=view,
                 )
                 choice_view = view

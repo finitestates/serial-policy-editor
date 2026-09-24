@@ -8,6 +8,7 @@ from tests.fakes import ConformingFakeBackend, ScriptedIO
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_ui import InteractivePolicy, _choice_from_observation
+from trajectory_editor.episode_hash import token_prefix_sha256
 from trajectory_editor.live_tui import LIVE_STYLES, PreviewPending, _render_choice, action_preview
 from trajectory_editor.teacher_commands import (
     CommandKind, CommandState, interpret_command, parse_command,
@@ -24,7 +25,10 @@ def _decision():
     observation = engine.observe()
     candidates = engine.candidates(observation, count=4)
     choice = _choice_from_observation(
-        engine, observation, candidates, context_characters=1, serial=1,
+        engine, observation, candidates,
+        context_text_tail=observation.context_text[-1:],
+        context_token_sha256=token_prefix_sha256(list(observation.prefix_token_ids)),
+        serial=1,
     )
     return engine, choice, candidates
 

@@ -17,6 +17,7 @@ from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_replay_source import replay_procedure
 from trajectory_editor.episode_store import EpisodeStore
 from trajectory_editor.episode_ui import _choice_from_observation
+from trajectory_editor.episode_hash import token_prefix_sha256
 from trajectory_editor.live_tui import action_preview
 from trajectory_editor.persistent_tui import PersistentTerminalSession, _Request
 from trajectory_editor.terminal_contracts import PromptRequest
@@ -301,7 +302,10 @@ def test_live_choice_preview_recognizes_chord_and_validates_ranks():
     observation = runtime.observe()
     candidates = runtime.candidates(observation, count=4)
     choice = _choice_from_observation(
-        runtime, observation, candidates, context_characters=0, serial=1,
+        runtime, observation, candidates,
+        context_text_tail=observation.context_text,
+        context_token_sha256=token_prefix_sha256(list(observation.prefix_token_ids)),
+        serial=1,
     )
     before = tuple(runtime.token_ids)
     preview = action_preview(choice, "chord 1 2 4", candidates, lambda text, mode: text)

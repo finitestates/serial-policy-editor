@@ -47,11 +47,92 @@ class TokenBudgetExceeded(InstructionRejected):
     """An atomic action cannot fit within the current allowance."""
 
 
+@dataclass(frozen=True, eq=False, slots=True)
+class TokenPrefixSnapshot(Sequence[int]):
+    """Immutable token prefix assembled from shared append-only chunks."""
+
+    parent: "TokenPrefixSnapshot | None"
+    values: tuple[int, ...]
+    length: int
+
+    @classmethod
+    def root(cls, values: Sequence[int]) -> "TokenPrefixSnapshot":
+        tokens = tuple(values)
+        return cls(None, tokens, len(tokens))
+
+    def append(self, values: Sequence[int]) -> "TokenPrefixSnapshot":
+        tokens = tuple(values)
+        if not tokens:
+            return self
+        return TokenPrefixSnapshot(self, tokens, self.length + len(tokens))
+
+    def chunks_since(
+        self, ancestor: "TokenPrefixSnapshot | None"
+    ) -> tuple[tuple[int, ...], ...] | None:
+        chunks: list[tuple[int, ...]] = []
+        current: TokenPrefixSnapshot | None = self
+        while current is not ancestor and current is not None:
+            if current.values:
+                chunks.append(current.values)
+            current = current.parent
+        if current is not ancestor:
+            return None
+        return tuple(reversed(chunks))
+
+    def __len__(self) -> int:
+        return self.length
+
+    def __iter__(self):
+        chunks: list[TokenPrefixSnapshot] = []
+        current: TokenPrefixSnapshot | None = self
+        while current is not None:
+            if current.values:
+                chunks.append(current)
+            current = current.parent
+        for chunk in reversed(chunks):
+            yield from chunk.values
+
+    def __getitem__(self, index: int | slice) -> int | tuple[int, ...]:
+        if isinstance(index, slice):
+            start, stop, step = index.indices(self.length)
+            if step != 1:
+                return tuple(self)[index]
+            if stop <= start:
+                return ()
+            pieces: list[tuple[int, ...]] = []
+            current: TokenPrefixSnapshot | None = self
+            while current is not None and current.length > start:
+                chunk_start = current.length - len(current.values)
+                lower = max(start, chunk_start) - chunk_start
+                upper = min(stop, current.length) - chunk_start
+                if upper > lower:
+                    pieces.append(current.values[lower:upper])
+                current = current.parent
+            return tuple(token for piece in reversed(pieces) for token in piece)
+        resolved = index + self.length if index < 0 else index
+        if resolved < 0 or resolved >= self.length:
+            raise IndexError("token prefix index out of range")
+        current: TokenPrefixSnapshot | None = self
+        while current is not None:
+            chunk_start = current.length - len(current.values)
+            if resolved >= chunk_start:
+                return current.values[resolved - chunk_start]
+            current = current.parent
+        raise IndexError("token prefix index out of range")
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Sequence):
+            return False
+        return len(other) == self.length and all(
+            left == right for left, right in zip(self, other)
+        )
+
+
 @dataclass(frozen=True)
 class Observation:
     boundary: int
     sampling_coordinate: int
-    prefix_token_ids: tuple[int, ...]
+    prefix_token_ids: Sequence[int] = field(repr=False)
     _render_context: Callable[..., str] = field(repr=False, compare=False)
     logits: np.ndarray = field(repr=False, compare=False)
     distribution: SparseDistribution = field(repr=False, compare=False)
@@ -148,6 +229,9 @@ class EpisodeEngine:
             coordinate_offset=coordinate_offset,
             stream_fingerprint=fingerprint,
         )
+        self._prefix_snapshot = TokenPrefixSnapshot.root(tokens)
+        self._prefix_snapshot_boundary = 0
+        self._prefix_snapshot_dirty = False
         self.guidance_backend = guidance_backend
         self._guidance_owner = object()
         self._guidance_prompt_key: tuple | None = None
@@ -181,6 +265,7 @@ class EpisodeEngine:
     @visible_token_ids.setter
     def visible_token_ids(self, value: Sequence[int]) -> None:
         self.trajectory.visible_token_ids = list(value)
+        self._prefix_snapshot_dirty = True
 
     @property
     def terminal_token_id(self) -> int | None:
@@ -316,6 +401,7 @@ class EpisodeEngine:
             )
         retained = list(self.visible_token_ids[:boundary])
         self._invalidate_observation()
+        self._prefix_snapshot_dirty = True
         self._ephemeral_logit_biases = {}
         prefix = [*self.initial_token_ids, *retained]
         branch = getattr(self.backend, "branch_to_prefix", None)
@@ -341,6 +427,18 @@ class EpisodeEngine:
     @property
     def text(self) -> str:
         return self.backend.render(self.token_ids, special=True)
+
+    def _observation_prefix_snapshot(self) -> TokenPrefixSnapshot:
+        boundary = self.boundary
+        if self._prefix_snapshot_dirty or boundary < self._prefix_snapshot_boundary:
+            self._prefix_snapshot = TokenPrefixSnapshot.root(self.initial_token_ids)
+            self._prefix_snapshot_boundary = 0
+            self._prefix_snapshot_dirty = False
+        if boundary > self._prefix_snapshot_boundary:
+            appended = self.visible_token_ids[self._prefix_snapshot_boundary:boundary]
+            self._prefix_snapshot = self._prefix_snapshot.append(appended)
+            self._prefix_snapshot_boundary = boundary
+        return self._prefix_snapshot
 
     def _invalidate_observation(self) -> None:
         self._observation = None
@@ -674,7 +772,7 @@ class EpisodeEngine:
         observation = Observation(
             boundary=self.boundary,
             sampling_coordinate=coordinate,
-            prefix_token_ids=tuple(self.token_ids),
+            prefix_token_ids=self._observation_prefix_snapshot(),
             _render_context=self.backend.render,
             logits=logits,
             distribution=distribution,

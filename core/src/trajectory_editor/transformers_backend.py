@@ -95,6 +95,24 @@ class TransformersSettings:
             )
 
 
+class _TokenizersTextStream:
+    """Thin adapter over Hugging Face Tokenizers' stateful DecodeStream."""
+
+    def __init__(self, tokenizer: Any, *, special: bool) -> None:
+        from tokenizers.decoders import DecodeStream
+
+        self._tokenizer = tokenizer
+        self._stream = DecodeStream(skip_special_tokens=not special)
+
+    def append(self, token_ids: list[int]) -> str:
+        chunks: list[str] = []
+        for token_id in token_ids:
+            chunk = self._stream.step(self._tokenizer, int(token_id))
+            if chunk:
+                chunks.append(str(chunk))
+        return "".join(chunks)
+
+
 def _as_token_id_set(value: Any) -> set[int]:
     if value is None:
         return set()
@@ -1084,6 +1102,18 @@ class TransformersBackend:
             if type(bos) is int and int(bos) >= 0:
                 token_ids.insert(0, int(bos))
         return token_ids
+
+    def new_text_stream(self, *, special: bool = False):
+        try:
+            from tokenizers.decoders import DecodeStream
+        except (ImportError, AttributeError):
+            return None
+        backend_tokenizer = getattr(self._tokenizer, "backend_tokenizer", None)
+        if backend_tokenizer is None:
+            backend_tokenizer = getattr(self._tokenizer, "_tokenizer", None)
+        if backend_tokenizer is None or not callable(getattr(DecodeStream, "step", None)):
+            return None
+        return _TokenizersTextStream(backend_tokenizer, special=special)
 
     def render(self, token_ids: list[int], *, special: bool = False) -> str:
         if not token_ids:
