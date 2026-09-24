@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from copy import deepcopy
 import importlib.util
 import hashlib
 import inspect
@@ -15,7 +16,7 @@ from typing import Any
 import numpy as np
 
 from .core.errors import EditorError
-from .core.backend import CacheMode, validate_cache_mode
+from .core.backend import BackendStateSnapshot, CacheMode, validate_cache_mode
 from .model_hash import sha256_path
 
 
@@ -189,6 +190,13 @@ class _CacheUnavailable(RuntimeError):
     """The model cannot provide the optional incremental evaluation path."""
 
 
+@dataclass(frozen=True)
+class _TransformersSnapshotPayload:
+    cache_active: bool
+    past_key_values: Any
+    last_logits: np.ndarray
+
+
 def _supports_logits_to_keep(model: Any) -> bool:
     """Return whether the model explicitly exposes final-row projection."""
 
@@ -347,6 +355,7 @@ class TransformersBackend:
         self._eog_ids, self._eog_source = self._discover_eog_ids()
         self._tokens: list[int] = []
         self._last_logits: np.ndarray | None = None
+        self._snapshot_token = object()
         self._activation_logit_cache: dict[tuple[str, str, str], np.ndarray] = {}
         self._hidden_state_control_handles: list[Any] = []
         self._hidden_state_control_key: tuple[Any, ...] | None = None
@@ -573,6 +582,61 @@ class TransformersBackend:
             if probe is not None:
                 probe.cache_fallback("branch-cache-unavailable")
             self.reset(values)
+
+    def snapshot_state(self) -> BackendStateSnapshot | None:
+        """Copy the current prefix, logits, and any active Transformers KV cache.
+
+        Cache implementations differ across Transformers releases. If the
+        active cache cannot be copied independently, report no snapshot so a
+        caller can use its ordinary prefix-rebuild fallback.
+        """
+        if not self._tokens or self._last_logits is None:
+            return None
+        past_key_values = None
+        if self._cache_active:
+            if self._past_key_values is None:
+                return None
+            try:
+                past_key_values = deepcopy(self._past_key_values)
+            except Exception:
+                return None
+            if past_key_values is self._past_key_values:
+                return None
+        payload = _TransformersSnapshotPayload(
+            cache_active=self._cache_active,
+            past_key_values=past_key_values,
+            last_logits=self._last_logits.copy(),
+        )
+        return BackendStateSnapshot(
+            self._snapshot_token, tuple(self._tokens), payload
+        )
+
+    def restore_state(self, snapshot: BackendStateSnapshot) -> bool:
+        """Restore a snapshot created by this exact backend instance."""
+        if (
+            not isinstance(snapshot, BackendStateSnapshot)
+            or snapshot.backend_token is not self._snapshot_token
+            or not isinstance(snapshot.payload, _TransformersSnapshotPayload)
+        ):
+            return False
+        payload = snapshot.payload
+        past_key_values = None
+        if payload.cache_active:
+            if payload.past_key_values is None:
+                return False
+            try:
+                # Keep the saved snapshot reusable; cache objects may mutate
+                # in place during the next incremental model call.
+                past_key_values = deepcopy(payload.past_key_values)
+            except Exception:
+                return False
+            if past_key_values is payload.past_key_values:
+                return False
+        self._tokens = list(snapshot.prefix_token_ids)
+        self._past_key_values = past_key_values
+        self._cache_active = payload.cache_active
+        self._last_logits = payload.last_logits.copy()
+        return True
 
     def _set_last_logits(self, logits: Any) -> None:
         if logits is None or getattr(logits, "ndim", None) != 3:

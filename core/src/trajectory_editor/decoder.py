@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 
 from .core.errors import EditorError
-from .core.backend import CacheMode, InferenceBackend, validate_cache_mode
+from .core.backend import BackendStateSnapshot, CacheMode, InferenceBackend, validate_cache_mode
 from .model_hash import sha256_path
 
 
@@ -177,6 +177,7 @@ class LlamaCppDecoder:
                 if value >= 0:
                     self._fallback_eog_ids.add(value)
         self._tokens: list[int] = []
+        self._snapshot_token = object()
         self._token_embedding_matrix_cache: np.ndarray | None = None
         self._activation_model: Any | None = None
         self._activation_logit_cache: dict[tuple[str, str, str], np.ndarray] = {}
@@ -250,6 +251,35 @@ class LlamaCppDecoder:
             if probe is not None:
                 probe.cache_fallback("branch-cache-unavailable")
             self.reset(values)
+
+    def snapshot_state(self) -> BackendStateSnapshot | None:
+        """Capture llama.cpp's full context state when the wrapper supports it."""
+        save_state = getattr(self._model, "save_state", None)
+        if not callable(save_state) or not self._tokens:
+            return None
+        try:
+            state = save_state()
+        except Exception:
+            return None
+        return BackendStateSnapshot(
+            self._snapshot_token, tuple(self._tokens), state
+        )
+
+    def restore_state(self, snapshot: BackendStateSnapshot) -> bool:
+        """Restore an exact llama.cpp state saved by this backend instance."""
+        if (
+            not isinstance(snapshot, BackendStateSnapshot)
+            or snapshot.backend_token is not self._snapshot_token
+        ):
+            return False
+        load_state = getattr(self._model, "load_state", None)
+        if not callable(load_state):
+            return False
+        # Let native restoration failures surface: the context may be partially
+        # repositioned, so callers must rebuild from the semantic prefix.
+        load_state(snapshot.payload)
+        self._tokens = list(snapshot.prefix_token_ids)
+        return True
 
     def last_logits(self) -> np.ndarray:
         model = self._model
