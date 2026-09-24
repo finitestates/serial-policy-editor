@@ -187,9 +187,14 @@ def action_preview(
         try:
             rendered = resolve_insertion(supplied, action.insert_mode)
         except PreviewPending as pending:
+            # Keep the insertion status stable until the latest preview resolves.
+            # Retain the last resolved text for the live context display.
             return ActionPreview(
-                kind="pending", label=label, detail="Waiting for insertion preview…",
-                appended_text=pending.appended_text, state="pending", command=command,
+                kind="insertion",
+                label=label,
+                detail="Tokenization and budget are validated on Enter.",
+                appended_text=pending.appended_text,
+                command=command,
             )
         except Exception as exc:
             return ActionPreview(

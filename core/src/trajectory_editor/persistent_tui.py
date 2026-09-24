@@ -23,10 +23,19 @@ from prompt_toolkit.application import Application, create_app_session
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition
-from prompt_toolkit.key_binding import KeyBindings, DynamicKeyBindings, merge_key_bindings
+from prompt_toolkit.key_binding import (
+    KeyBindings,
+    DynamicKeyBindings,
+    merge_key_bindings,
+)
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import Layout
-from prompt_toolkit.layout.containers import HSplit, Window, DynamicContainer, ConditionalContainer
+from prompt_toolkit.layout.containers import (
+    HSplit,
+    Window,
+    DynamicContainer,
+    ConditionalContainer,
+)
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.widgets import TextArea
@@ -45,6 +54,11 @@ class _Request:
     previews: OrderedDict = field(default_factory=OrderedDict)
     latest: dict[str, tuple] = field(default_factory=dict)
     insertion_display: dict[Any, str] = field(default_factory=dict)
+    idle_cancelled: threading.Event = field(default_factory=threading.Event)
+    idle_queued: bool = False
+    idle_future: Future | None = None
+    idle_cancel_queued: bool = False
+    idle_cancel_future: Future | None = None
 
 
 @dataclass
@@ -61,42 +75,76 @@ class _PromptView:
         self.state = PromptRequest("")
         self._error = ""
         self.submit = submit
-        self.command_buffer = Buffer(multiline=True, read_only=Condition(lambda: not enabled()))
+        self.command_buffer = Buffer(
+            multiline=True, read_only=Condition(lambda: not enabled())
+        )
         self.body = TextArea(read_only=True, scrollbar=True, wrap_lines=True)
         self.input_control = BufferControl(buffer=self.command_buffer)
-        self.layout = Layout(HSplit([
-            ConditionalContainer(self.body, Condition(lambda: bool(self.state.body))),
-            ConditionalContainer(Window(FormattedTextControl(lambda: self.state.prompt),
-                                        dont_extend_height=True),
-                                 Condition(lambda: not self.state.page)),
-            ConditionalContainer(Window(
-                self.input_control,
-                height=lambda: (
-                    Dimension.exact(1)
-                    if not self.state.multiline
-                    else Dimension(min=3, preferred=8)
-                ),
-                style="class:input",
-                wrap_lines=True,
-            ),
-                                 Condition(lambda: not self.state.page)),
-            Window(FormattedTextControl(lambda: self._error or (
-                "↑/↓ · PgUp/PgDn scroll · Enter/Esc returns" if self.state.page else
-                "Press a key" if self.state.single_key else
-                "Escape then Enter submits · Ctrl-D cancels" if self.state.multiline else
-                "PgUp/PgDn scroll · Enter submits · Ctrl-D cancels" if self.state.body else
-                "Enter submits · Ctrl-D cancels"
-            )), height=1, style="class:hint"),
-        ]))
+        self.layout = Layout(
+            HSplit(
+                [
+                    ConditionalContainer(
+                        self.body, Condition(lambda: bool(self.state.body))
+                    ),
+                    ConditionalContainer(
+                        Window(
+                            FormattedTextControl(lambda: self.state.prompt),
+                            dont_extend_height=True,
+                        ),
+                        Condition(lambda: not self.state.page),
+                    ),
+                    ConditionalContainer(
+                        Window(
+                            self.input_control,
+                            height=lambda: (
+                                Dimension.exact(1)
+                                if not self.state.multiline
+                                else Dimension(min=3, preferred=8)
+                            ),
+                            style="class:input",
+                            wrap_lines=True,
+                        ),
+                        Condition(lambda: not self.state.page),
+                    ),
+                    Window(
+                        FormattedTextControl(
+                            lambda: (
+                                self._error
+                                or (
+                                    "↑/↓ · PgUp/PgDn scroll · Enter/Esc returns"
+                                    if self.state.page
+                                    else "Press a key"
+                                    if self.state.single_key
+                                    else "Escape then Enter submits · Ctrl-D cancels"
+                                    if self.state.multiline
+                                    else "PgUp/PgDn scroll · Enter submits · Ctrl-D cancels"
+                                    if self.state.body
+                                    else "Enter submits · Ctrl-D cancels"
+                                )
+                            )
+                        ),
+                        height=1,
+                        style="class:hint",
+                    ),
+                ]
+            )
+        )
         self.bindings = KeyBindings()
 
         @self.bindings.add("enter", filter=Condition(lambda: not self.state.multiline))
         def enter(event):
-            self.submit(result="" if self.state.page else "\n" if self.state.single_key
-                        else self.command_buffer.text)
+            self.submit(
+                result=""
+                if self.state.page
+                else "\n"
+                if self.state.single_key
+                else self.command_buffer.text
+            )
 
         @self.bindings.add(
-            "escape", "enter", eager=True,
+            "escape",
+            "enter",
+            eager=True,
             filter=Condition(lambda: self.state.multiline),
         )
         def submit_multiline(event):
@@ -106,19 +154,35 @@ class _PromptView:
                 return
             self.submit(result=self.command_buffer.text)
 
-        @self.bindings.add("pageup", filter=Condition(lambda: bool(self.state.body) and not self.state.page))
+        @self.bindings.add(
+            "pageup",
+            filter=Condition(lambda: bool(self.state.body) and not self.state.page),
+        )
         def scroll_up(event):
-            self.body.window.vertical_scroll = max(0, self.body.window.vertical_scroll - 10)
+            self.body.window.vertical_scroll = max(
+                0, self.body.window.vertical_scroll - 10
+            )
             event.app.invalidate()
 
-        @self.bindings.add("pagedown", filter=Condition(lambda: bool(self.state.body) and not self.state.page))
+        @self.bindings.add(
+            "pagedown",
+            filter=Condition(lambda: bool(self.state.body) and not self.state.page),
+        )
         def scroll_down(event):
             self.body.window.vertical_scroll += 10
             event.app.invalidate()
 
-        @self.bindings.add("escape", eager=True, filter=Condition(lambda: not self.state.multiline))
+        @self.bindings.add(
+            "escape", eager=True, filter=Condition(lambda: not self.state.multiline)
+        )
         def escape(event):
-            self.submit(result="\x1b" if self.state.single_key else "" if self.state.page else None)
+            self.submit(
+                result="\x1b"
+                if self.state.single_key
+                else ""
+                if self.state.page
+                else None
+            )
 
         @self.bindings.add("c-d")
         def eof(event):
@@ -140,7 +204,9 @@ class _PromptView:
         self.state = state
         self._error = ""
         self.command_buffer.reset()
-        self.body.buffer.set_document(Document(_safe_context_text(state.body)), bypass_readonly=True)
+        self.body.buffer.set_document(
+            Document(_safe_context_text(state.body)), bypass_readonly=True
+        )
         self.layout.focus(self.body if state.page else self.input_control)
 
 
@@ -152,7 +218,9 @@ class PersistentTerminalSession(AbstractContextManager):
     only while that owner is waiting for the corresponding command.
     """
 
-    def __init__(self, *, input_device=None, output_device=None, theme=DEFAULT_LIVE_THEME):
+    def __init__(
+        self, *, input_device=None, output_device=None, theme=DEFAULT_LIVE_THEME
+    ):
         self.input_device = input_device
         self.output_device = output_device
         self.theme = theme
@@ -217,7 +285,9 @@ class PersistentTerminalSession(AbstractContextManager):
 
     def _run(self):
         try:
-            with create_app_session(input=self.input_device, output=self.output_device) as session:
+            with create_app_session(
+                input=self.input_device, output=self.output_device
+            ) as session:
                 self.input_device, self.output_device = session.input, session.output
                 asyncio.run(self._run_application())
         except BaseException as exc:
@@ -248,37 +318,126 @@ class PersistentTerminalSession(AbstractContextManager):
         for key in Keys:
             busy_keys.add(key, eager=True)(lambda event: None)
         waiting = Window(FormattedTextControl("Preparing editor…"))
-        root = HSplit([
-            ConditionalContainer(Window(FormattedTextControl(lambda: self._notice),
-                                        height=1, style="class:hint"),
-                                 Condition(lambda: bool(self._notice))),
-            DynamicContainer(lambda: self._surface.layout.container if self._surface else waiting),
-        ])
-        active_keys = merge_key_bindings([
-            DynamicKeyBindings(lambda: self._surface.bindings if self.accepting_input else busy_keys),
-            global_keys,
-        ])
+        root = HSplit(
+            [
+                ConditionalContainer(
+                    Window(
+                        FormattedTextControl(lambda: self._notice),
+                        height=1,
+                        style="class:hint",
+                    ),
+                    Condition(lambda: bool(self._notice)),
+                ),
+                DynamicContainer(
+                    lambda: self._surface.layout.container if self._surface else waiting
+                ),
+            ]
+        )
+        active_keys = merge_key_bindings(
+            [
+                DynamicKeyBindings(
+                    lambda: (
+                        self._surface.bindings if self.accepting_input else busy_keys
+                    )
+                ),
+                global_keys,
+            ]
+        )
         self.application = Application(
-            layout=Layout(root), key_bindings=active_keys, style=_live_style(self.theme),
-            full_screen=True, erase_when_done=True,
-            input=self.input_device, output=self.output_device,
+            layout=Layout(root),
+            key_bindings=active_keys,
+            style=_live_style(self.theme),
+            full_screen=True,
+            erase_when_done=True,
+            input=self.input_device,
+            output=self.output_device,
             before_render=self._before_render,
             after_render=self._rendered,
         )
-        await self.application.run_async(set_exception_handler=False, handle_sigint=False)
+        self.application.key_processor.after_key_press += self._after_key_press
+        await self.application.run_async(
+            set_exception_handler=False, handle_sigint=False
+        )
 
     def _rendered(self, app):
         if not self._ready.done():
             self._ready.set_result(None)
+        request = self._current
+        if (
+            request is not None
+            and not request.response.done()
+            and not request.idle_queued
+            and isinstance(request.state, ChoiceViewState)
+            and request.state.idle_work is not None
+        ):
+            request.idle_queued = True
+            request.idle_future = Future()
+
+            def run_idle_work():
+                if request.idle_cancelled.is_set():
+                    return None
+
+                return request.state.idle_work(request.idle_cancelled.is_set)
+
+            self._events.put(_Resolution(request, run_idle_work, request.idle_future))
         if self._closing:
             self._stop()
+
+    def _after_key_press(self, key_processor):
+        del key_processor
+        request = self._current
+        if (
+            request is None
+            or not isinstance(request.state, ChoiceViewState)
+            or request.state.idle_work is None
+        ):
+            return
+        if self._is_idle_promotion(request):
+            return
+        request.idle_cancelled.set()
+        if request.idle_future is not None and not request.idle_future.done():
+            request.idle_future.cancel()
+        if not request.response.done() and not request.idle_cancel_queued:
+            cancel_idle = request.state.cancel_idle_work
+            if callable(cancel_idle):
+                request.idle_cancel_queued = True
+                request.idle_cancel_future = Future()
+                self._events.put(
+                    _Resolution(request, cancel_idle, request.idle_cancel_future)
+                )
+
+    @staticmethod
+    def _is_idle_promotion(request: _Request) -> bool:
+        if (
+            request.idle_cancelled.is_set()
+            or not request.response.done()
+            or request.response.cancelled()
+        ):
+            return False
+        try:
+            result = request.response.result()
+        except BaseException:
+            return False
+        if (
+            not isinstance(request.state, ChoiceViewState)
+            or request.state.review is not None
+            or request.state.idle_work is None
+        ):
+            return False
+        return result == "" or (
+            request.state.initial_command is not None
+            and result == request.state.initial_command
+        )
+
 
     def _before_render(self, app):
         if self._current is not None and not self._current.response.done():
             self._view_ready = self._current
 
     def _ui_exception(self, loop, context):
-        error = context.get("exception") or RuntimeError(context.get("message", "terminal error"))
+        error = context.get("exception") or RuntimeError(
+            context.get("message", "terminal error")
+        )
         self._failure = error
         if self.application.is_running and not self.application.is_done:
             self.application.exit(exception=error)
@@ -295,7 +454,9 @@ class PersistentTerminalSession(AbstractContextManager):
 
     def _read(self, state):
         if threading.get_ident() != self._owner:
-            raise RuntimeError("terminal requests must come from the episode-owning thread")
+            raise RuntimeError(
+                "terminal requests must come from the episode-owning thread"
+            )
         if self._closing or not self._thread.is_alive():
             raise self._failure or EOFError("terminal session is closed")
         request = _Request(state)
@@ -310,8 +471,11 @@ class PersistentTerminalSession(AbstractContextManager):
                     return request.response.result()
                 event = self._events.get()
                 if isinstance(event, _Resolution):
-                    if (event.request is not request or request.response.done()
-                            or not event.result.set_running_or_notify_cancel()):
+                    if (
+                        event.request is not request
+                        or request.response.done()
+                        or not event.result.set_running_or_notify_cancel()
+                    ):
                         continue
                     try:
                         value = event.callback()
@@ -340,6 +504,20 @@ class PersistentTerminalSession(AbstractContextManager):
             # caller is applying an action or repositioning the backend.
             if not request.response.done():
                 request.response.cancel()
+            keep_prepared = self._is_idle_promotion(request)
+            if not keep_prepared:
+                request.idle_cancelled.set()
+            if request.idle_future is not None and not request.idle_future.done():
+                request.idle_future.cancel()
+            if (
+                request.idle_cancel_future is not None
+                and not request.idle_cancel_future.done()
+            ):
+                request.idle_cancel_future.cancel()
+            if not keep_prepared and isinstance(request.state, ChoiceViewState):
+                cancel_idle = request.state.cancel_idle_work
+                if callable(cancel_idle):
+                    cancel_idle()
             for preview in request.previews.values():
                 if not preview.done():
                     preview.cancel()
@@ -371,7 +549,9 @@ class PersistentTerminalSession(AbstractContextManager):
     def _write(self, text):
         lines = _safe_context_text(text).splitlines()
         if lines:
-            self._notice = next((line for line in reversed(lines) if line), self._notice)
+            self._notice = next(
+                (line for line in reversed(lines) if line), self._notice
+            )
         self.application.invalidate()
 
     def _show(self, request):
@@ -382,24 +562,36 @@ class PersistentTerminalSession(AbstractContextManager):
         state = request.state
         if isinstance(state, ChoiceViewState):
             resolver = state.resolve_candidate
-            state = replace(state,
+            state = replace(
+                state,
                 resolve_insertion=lambda text, mode: self._preview(
-                    request, ("insertion", text, mode),
-                    lambda: request.state.resolve_insertion(text, mode)),
-                resolve_candidate=(lambda rank: self._preview(
-                    request, ("candidate", rank), lambda: resolver(rank))) if resolver else None,
+                    request,
+                    ("insertion", text, mode),
+                    lambda: request.state.resolve_insertion(text, mode),
+                ),
+                resolve_candidate=(
+                    lambda rank: self._preview(
+                        request, ("candidate", rank), lambda: resolver(rank)
+                    )
+                )
+                if resolver
+                else None,
             )
             if self.choice_view is None:
-                self.choice_view = LiveChoiceView(state, submit=self._submit,
-                                                  enabled=lambda: self.accepting_input,
-                                                  terminal_size=self._surface_size)
+                self.choice_view = LiveChoiceView(
+                    state,
+                    submit=self._submit,
+                    enabled=lambda: self.accepting_input,
+                    terminal_size=self._surface_size,
+                )
             else:
                 self.choice_view.update(state)
             self._surface = self.choice_view
         elif isinstance(state, EdgeViewState):
             if self.edge_view is None:
-                self.edge_view = LiveEdgeView(state, submit=self._submit,
-                                              enabled=lambda: self.accepting_input)
+                self.edge_view = LiveEdgeView(
+                    state, submit=self._submit, enabled=lambda: self.accepting_input
+                )
             else:
                 self.edge_view.update(state)
             self._surface = self.edge_view
@@ -407,7 +599,9 @@ class PersistentTerminalSession(AbstractContextManager):
             if state.isolated:
                 self._notice = ""
             if self._prompt_view is None:
-                self._prompt_view = _PromptView(self._submit, lambda: self.accepting_input)
+                self._prompt_view = _PromptView(
+                    self._submit, lambda: self.accepting_input
+                )
             self._prompt_view.update(state)
             self._surface = self._prompt_view
         self.application.layout.focus(self._surface.layout.current_control)
