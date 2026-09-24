@@ -692,12 +692,12 @@ class EpisodeEngine:
         if self.ended or self.checkpointed:
             raise EditorError("the episode has no live decision boundary")
         key = self._decision_key()
-        if self._observation is not None and self._observation_key == key:
-            return self._observation
         if self._cfg_active() and self.guidance_backend is not None and (
             getattr(self.guidance_backend, "_spe_cfg_owner", None) is not self._guidance_owner
         ):
             self._invalidate_guidance()
+        if self._observation is not None and self._observation_key == key:
+            return self._observation
         self._ensure_backend_positioned()
         self._prepare_activation_runtime()
         logits = np.asarray(self.backend.last_logits(), dtype=np.float64)

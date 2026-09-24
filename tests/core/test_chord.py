@@ -285,7 +285,7 @@ def test_chord_prompts_distinguish_options_and_help_explains_commit():
     result, actions = chord_menu(io, Chord(engine(), (1, 2)))
     assert result == "select" and actions == (SelectRawRank(1),)
     output = "".join(io.output)
-    assert "Enter: advance live paths | rewind: undo one round" in output
+    assert "Enter or ]: advance live paths | [: rewind one round" in output
     assert "a–z or starting rank: choose and commit | q: options" in output
     assert "c: resume chord | discard: restore episode | q: quit editor" in output
     assert "commit that path's actions and drop the other previews" in output
