@@ -11,7 +11,6 @@ from .core.actions import (
 from .core.backend import InferenceBackend
 from .core.candidates import Candidate
 from .core.errors import EditorError
-from .core.observation import ControllerTrace, ControllerTraceStage
 from .core.results import ActionOutcome, Divergence, ReplayExpectation, TokenEvidence
 from .core.sampler_config import SamplerConfig
 from .episode_engine import EpisodeEngine, Observation
@@ -32,8 +31,6 @@ __all__ = [
     "Accept",
     "ActionOutcome",
     "Candidate",
-    "ControllerTrace",
-    "ControllerTraceStage",
     "Divergence",
     "EditorError",
     "EndGeneration",

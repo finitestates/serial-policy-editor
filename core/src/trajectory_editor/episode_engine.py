@@ -590,7 +590,6 @@ class EpisodeEngine:
         logits = np.asarray(self.backend.last_logits(), dtype=np.float64)
         if logits.ndim != 1 or len(logits) != self.backend.vocabulary_size():
             raise RuntimeError("backend logits do not match its vocabulary")
-        model_phase_diagnostics = None
         if self._cfg_active():
             self._position_guidance()
             unconditional = np.asarray(self.guidance_backend.last_logits(), dtype=np.float64)
@@ -599,16 +598,6 @@ class EpisodeEngine:
             logits = unconditional + float(self.sampling.cfg_scale) * (logits - unconditional)
             if not np.all(np.isfinite(logits)):
                 raise RuntimeError("CFG guidance produced non-finite logits")
-            model_phase_diagnostics = {
-                "name": "classifier-free guidance",
-                "scale": float(self.sampling.cfg_scale),
-                "prefix_tokens": int(self.sampling.cfg_prefix_tokens),
-                "tokens_consumed": int(
-                    len(self.visible_token_ids)
-                ),
-                "branch_scope": "conditional-only hidden-state controls",
-                "unconditional_logit_rms": float(np.sqrt(np.mean(unconditional ** 2))),
-            }
         activation_logit_adjustments = None
         if (
             self.sampling.activation_vector_layer == "output"
@@ -665,17 +654,12 @@ class EpisodeEngine:
                 )
             if not np.all(np.isfinite(activation_logit_adjustments)):
                 raise RuntimeError("output-head steering adjustments are not finite")
-        statistics_kwargs = dict(
-            render_tokens=self.backend.render,
-            activation_logit_adjustments=activation_logit_adjustments,
-            model_phase_diagnostics=model_phase_diagnostics,
-            ephemeral_logit_biases=self._ephemeral_logit_biases,
-        )
         statistics = ObservationStatistics(
             logits,
             self.sampling,
             key[0],
-            **statistics_kwargs,
+            activation_logit_adjustments=activation_logit_adjustments,
+            ephemeral_logit_biases=self._ephemeral_logit_biases,
         )
         logits = statistics.logits
         distribution = statistics.distribution

@@ -38,7 +38,7 @@ from .sampling import (
     top_raw_ids,
 )
 from .sampler_config import SAMPLING_POLICY_SCHEME, SamplerConfig
-from .observation import ControllerTrace, ControllerTraceStage, ObservationStatistics
+from .observation import ObservationStatistics
 from .trajectory import TrajectoryState
 from .ui import ActionKind, ChoiceSet, EditAction, InsertMode
 
@@ -49,8 +49,6 @@ __all__ = [
     "Candidate",
     "BackendStateSnapshot",
     "CacheMode",
-    "ControllerTrace",
-    "ControllerTraceStage",
     "ActionKind",
     "ChoiceSet",
     "EditAction",
