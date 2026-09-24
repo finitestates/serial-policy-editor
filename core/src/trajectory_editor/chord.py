@@ -94,6 +94,14 @@ class Chord:
         self._active_path: ChordPath | None = None
         self._context_cache: tuple[int, str] | None = None
         self.rounds: list[tuple[int, ...]] = []
+        # All paths start at one decision; keep its logits stable while cache
+        # activation truncates and switches the shared backend prefix.
+        shared_observation = (
+            engine._observation
+            if engine._observation is not None
+            and engine._observation_key == engine._decision_key()
+            else None
+        )
         self.selected_outcomes: tuple[ActionOutcome, ...] = ()
         self.closed = False
         try:
@@ -116,10 +124,15 @@ class Chord:
                 preview.checkpoint_boundary = engine.checkpoint_boundary
                 preview._activation_runtime_key = engine._activation_runtime_key
                 preview._activation_validation_key = engine._activation_validation_key
+                if shared_observation is not None:
+                    preview._observation = shared_observation
+                    preview._observation_key = preview._decision_key()
                 path = ChordPath(chr(ord("a") + index), rank, preview)
                 path.prefix_snapshots.append(shared_prefix_snapshot)
                 self.paths.append(path)
                 self._activate(path)
+                if shared_observation is None:
+                    shared_observation = preview.observe()
                 outcome = preview.apply(SelectRawRank(rank))
                 path.actions.append(SelectRawRank(rank))
                 path.outcomes.append(outcome)
