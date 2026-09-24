@@ -236,7 +236,7 @@ class PersistentTerminalSession(AbstractContextManager):
         input_device=None,
         output_device=None,
         theme=DEFAULT_LIVE_THEME,
-        warm_debounce_mode: str = "adaptive",
+        warm_debounce_mode: str | None = None,
         fixed_delay: float = DEFAULT_WARM_SELECTION_DELAY,
         adaptive_min_delay: float = 0.08,
         adaptive_max_delay: float = 0.25,
@@ -264,9 +264,10 @@ class PersistentTerminalSession(AbstractContextManager):
         self._warm_generation = 0
 
         # Debounce experiment controls (internal default is adaptive)
-        resolved_mode = warm_debounce_mode or os.getenv(
-            "SPE_WARM_DEBOUNCE_MODE", "adaptive"
-        )
+        resolved_mode = warm_debounce_mode
+        if resolved_mode is None:
+            resolved_mode = os.getenv("SPE_TEST_WARM_DEBOUNCE_MODE", "adaptive")
+
         self.warm_debounce_mode = resolved_mode.lower()
         self.fixed_delay = fixed_delay
         self.min_delay = adaptive_min_delay
