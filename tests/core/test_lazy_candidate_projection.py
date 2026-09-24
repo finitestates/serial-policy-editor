@@ -213,3 +213,32 @@ def test_v1_token_table_migrates_to_nullable_report_columns(tmp_path):
         assert store.tokens(episode_id)[0]["raw_model_nll"] == 1.5
         assert store.connection.execute("SELECT version FROM schema_info").fetchone()[0] == 2
         assert store.connection.execute("PRAGMA table_info(tokens)").fetchall()[10][3] == 0
+
+
+def test_projector_refuses_to_reconstruct_metrics_past_unknown_saved_action(tmp_path):
+    backend = ConformingFakeBackend()
+    engine = EpisodeEngine(
+        backend, sampling=SamplerConfig(temperature=0.0), initial_token_ids=[7],
+    )
+    outcome = engine.apply(Accept())
+    with EpisodeStore(tmp_path / "episode.db") as store:
+        episode_id = store.create_episode(
+            initial_text=engine.initial_text,
+            initial_token_ids=engine.initial_token_ids,
+            sampling=engine.sampling,
+            stream_fingerprint=engine.stream_fingerprint,
+            coordinate_offset=engine.coordinate_offset,
+            max_tokens=engine.max_tokens,
+            backend=backend.provenance(),
+        )
+        store.record_action(episode_id, 0, outcome)
+        with store.transaction() as db:
+            db.execute(
+                "UPDATE actions SET arguments_json = ? WHERE episode_id = ?",
+                ('{"kind":"future-action"}', episode_id),
+            )
+
+        with pytest.raises(EditorError, match="source step 1"):
+            project_episode(
+                store, episode_id, with_loss=True, backend=ConformingFakeBackend(),
+            )

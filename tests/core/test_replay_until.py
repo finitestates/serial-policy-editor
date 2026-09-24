@@ -284,3 +284,50 @@ def test_durable_edge_bare_sampler_opens_the_existing_override_prompt(source_wor
 
     assert (action, value) == ("quit", None)
     assert engine.sampling.temperature == 0.7
+
+
+@pytest.mark.parametrize("unsupported_ordinal, expected_text, expected_actions", [
+    (0, "", 0),
+    (1, " A B", 1),
+])
+@pytest.mark.invariant
+def test_cli_historical_unknown_action_yields_to_operational_edge(
+    source_workspace, unsupported_ordinal, expected_text, expected_actions
+):
+    with EpisodeStore(source_workspace) as store:
+        with store.transaction() as db:
+            db.execute(
+                "UPDATE actions SET arguments_json = ? "
+                "WHERE episode_id = ? AND ordinal = ?",
+                ('{"kind":"future-action"}', "source", unsupported_ordinal),
+            )
+        if unsupported_ordinal == 1:
+            segment = store.sampling_segment("source", 0)
+            store.record_sampling_segment(
+                "source",
+                start_boundary=2,
+                sampling=replace(
+                    SamplerConfig.from_record(segment["sampling"]), seed=123
+                ),
+                stream_fingerprint=segment["stream_fingerprint"],
+                coordinate_offset=40,
+            )
+
+    io = run_cli(
+        source_workspace,
+        ["quit"],
+        "--replay", "#1",
+        "--episode-id", "destination",
+    )
+
+    output = "".join(io.output)
+    assert len(io.edge_requests) == 1
+    assert f"source step {unsupported_ordinal + 1}" in output
+    assert "unsupported policy action kind 'future-action'" in output
+    assert "Execution handed off" in output
+    assert "SPR route exhausted" not in output
+    with EpisodeStore(source_workspace) as store:
+        destination = store.get_episode("destination")
+        assert destination["visible_text"] == expected_text
+        assert len(store.actions("destination")) == expected_actions
+        assert final_sampling(store, "destination").seed == 999

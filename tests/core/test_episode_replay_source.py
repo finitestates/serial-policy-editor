@@ -4,13 +4,20 @@ import pytest
 
 from tests.core.runtime_helpers import NoEogBackend
 from trajectory_editor.core.actions import Hold, Write
+from trajectory_editor.core.errors import EditorError
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_replay_source import (
     build_source_replay_recipe,
     final_sampling,
+    replay_procedure,
 )
 from trajectory_editor.episode_store import EpisodeStore
+from trajectory_editor.episode_runner import LiveSessionRunner
+from trajectory_editor.episode_session import LiveSession
+from trajectory_editor.spr_recipe import (
+    ReplayControlPolicy, ReplayPlacement, compose_replay_plan,
+)
 
 pytestmark = pytest.mark.invariant
 
@@ -167,3 +174,172 @@ def test_completed_holds_replay_across_source_checkpoints_with_unlimited_budget(
     ]
     assert [outcome.status for outcome in outcomes] == ["completed", "completed"]
     assert replay.visible_token_ids == [1, 2]
+
+
+def _two_step_reader() -> MemoryReader:
+    reader = MemoryReader()
+    reader._actions[0]["arguments"] = Write(" A B", mode="exact").to_dict()
+    reader._tokens = reader._tokens[:2]
+    reader._actions.extend([
+        {
+            "ordinal": 1,
+            "boundary_before": 2,
+            "status": "completed",
+            "stop_reason": "completed",
+            "arguments": {"kind": "future-action"},
+        },
+        {
+            "ordinal": 2,
+            "boundary_before": 2,
+            "status": "completed",
+            "stop_reason": "completed",
+            "arguments": Write(" C", mode="exact").to_dict(),
+        },
+    ])
+    return reader
+
+
+def _run_reader(reader: MemoryReader, *, until: int | None = None):
+    recipe = build_source_replay_recipe(reader, "source", until=until)
+    plan = compose_replay_plan(
+        recipe, ReplayPlacement.SOURCE_ROOT, ReplayControlPolicy.FOLLOW_SOURCE
+    )
+    session = LiveSession(EpisodeEngine(
+        NoEogBackend(),
+        sampling=SamplerConfig(temperature=0.0, seed=17),
+        initial_text="P",
+        initial_token_ids=[7],
+    ))
+    result = LiveSessionRunner(session).run(tape=plan)
+    return recipe, plan, session, result
+
+
+def test_unsupported_first_step_hands_off_without_action_or_sampler_change():
+    reader = _two_step_reader()
+    reader._actions = reader._actions[:1]
+    reader._actions[0]["arguments"] = {"kind": "future-action"}
+    reader._tokens = []
+
+    recipe, plan, session, result = _run_reader(reader)
+
+    assert recipe.procedure.steps == ()
+    assert plan.steps == ()
+    assert result.handed_off and not result.replay_exhausted
+    assert result.replayed_actions == 0
+    assert result.outcomes == ()
+    assert session.engine.boundary == 0
+    assert session.engine.sampling.seed == 17
+    assert "source step 1" in result.handoff_reason
+    assert "future-action" in result.handoff_reason
+
+
+def test_unsupported_after_prefix_hands_off_before_later_actions_and_final_sampler():
+    reader = _two_step_reader()
+
+    recipe, plan, session, result = _run_reader(reader)
+
+    assert len(recipe.procedure.steps) == len(plan.steps) == 1
+    assert result.handed_off and not result.replay_exhausted
+    assert result.replayed_actions == 1
+    assert [outcome.action for outcome in result.outcomes] == [Write(" A B", "exact")]
+    assert session.engine.visible_token_ids == [1, 2]
+    assert session.engine.boundary == 2
+    assert session.engine.sampling.seed == 3
+    assert "source step 2" in result.handoff_reason
+    assert "future-action" in result.handoff_reason
+    with pytest.raises(EditorError, match="source step 2"):
+        replay_procedure(reader, "source")
+
+
+def test_supported_action_without_source_expectation_executes_without_comparison():
+    reader = _two_step_reader()
+    reader._actions = reader._actions[:1]
+    reader._actions[0].pop("stop_reason")
+    reader._tokens[0]["token_id"] = 5
+
+    recipe, plan, session, result = _run_reader(reader)
+
+    assert recipe.procedure.steps[0].expectation is None
+    assert plan.steps[0].expectation is None
+    assert result.replayed_actions == 1
+    assert result.replay_exhausted and not result.handed_off
+    assert result.outcomes[0].divergence is None
+    assert session.engine.visible_token_ids == [1, 2]
+    assert session.engine.sampling.seed == 5
+
+
+def test_explicit_endpoint_before_unsupported_step_exhausts_normally():
+    reader = _two_step_reader()
+
+    _, _, session, result = _run_reader(reader, until=2)
+
+    assert result.replayed_actions == 1
+    assert result.replay_exhausted and not result.handed_off
+    assert session.engine.visible_token_ids == [1, 2]
+    assert session.engine.sampling.seed == 5
+
+
+@pytest.mark.parametrize("arguments, message", [
+    ({"kind": "hold", "limit": "bad"}, "valid limit"),
+    ({"kind": ""}, "nonempty string"),
+])
+def test_malformed_action_is_not_unsupported_handoff(arguments, message):
+    reader = _two_step_reader()
+    reader._actions[1]["arguments"] = arguments
+
+    with pytest.raises(EditorError, match=message):
+        build_source_replay_recipe(reader, "source")
+
+
+def test_source_sampler_transitions_within_supported_prefix_still_apply():
+    reader = MemoryReader()
+    reader._actions = [
+        {**reader._actions[0], "arguments": Write(" A", "exact").to_dict()},
+        {
+            "ordinal": 1,
+            "boundary_before": 1,
+            "status": "completed",
+            "stop_reason": "completed",
+            "arguments": Write(" B", "exact").to_dict(),
+        },
+        {
+            "ordinal": 2,
+            "boundary_before": 2,
+            "status": "completed",
+            "stop_reason": "completed",
+            "arguments": {"kind": "future-action"},
+        },
+    ]
+    reader._tokens[1]["action_ordinal"] = 1
+    reader._tokens[2]["action_ordinal"] = 2
+    reader._samplers.append({
+        **reader._samplers[0],
+        "start_boundary": 2,
+        "sampling": SamplerConfig(temperature=0.0, seed=9).to_dict(),
+    })
+
+    _, plan, session, result = _run_reader(reader)
+
+    assert len(plan.steps) == result.replayed_actions == 2
+    assert plan.final_sampling is None
+    assert result.handed_off and not result.replay_exhausted
+    assert session.engine.visible_token_ids == [1, 2]
+    assert session.engine.sampling.seed == 5
+    assert [state.seed for _, state, _, _ in session.sampler_states] == [3, 5]
+
+
+def test_supported_action_without_any_recorded_result_runs_at_full_endpoint():
+    reader = MemoryReader()
+    reader._actions[0]["arguments"] = Write(" A", "exact").to_dict()
+    reader._actions[0].pop("stop_reason")
+    reader._tokens = []
+
+    recipe, plan, session, result = _run_reader(reader)
+
+    assert recipe.source_visible_boundary == 0
+    assert len(plan.steps) == 1
+    assert plan.steps[0].expectation is None
+    assert result.replayed_actions == 1
+    assert result.replay_exhausted and not result.handed_off
+    assert session.engine.visible_token_ids == [1]
+    assert result.outcomes[0].divergence is None

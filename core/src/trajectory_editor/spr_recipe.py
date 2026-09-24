@@ -44,6 +44,7 @@ class SourceReplayRecipe:
     source_visible_boundary: int
     source_end_boundary: int
     source_id: str | None = None
+    incomplete_handoff_reason: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_prompt, str):
@@ -67,6 +68,10 @@ class SourceReplayRecipe:
             )
         if self.source_id is not None and not isinstance(self.source_id, str):
             raise TypeError("source id must be a string or None")
+        if self.incomplete_handoff_reason is not None and not isinstance(
+            self.incomplete_handoff_reason, str
+        ):
+            raise TypeError("incomplete handoff reason must be a string or None")
 
 _SAMPLER_FIELDS = frozenset(
     field.name for field in fields(SamplerConfig) if field.init
@@ -165,8 +170,9 @@ def compose_replay_plan(
             source_samplers.append(None)
 
     if control_policy is ReplayControlPolicy.FOLLOW_SOURCE:
-        final_sampling = _resolve_sampler(
-            recipe, recipe.source_end_boundary, overrides
+        final_sampling = (
+            _resolve_sampler(recipe, recipe.source_end_boundary, overrides)
+            if recipe.incomplete_handoff_reason is None else None
         )
         follow_source_sampling = True
     else:
@@ -177,6 +183,7 @@ def compose_replay_plan(
         steps=tuple(steps),
         follow_source_sampling=follow_source_sampling,
         final_sampling=final_sampling,
+        incomplete_handoff_reason=recipe.incomplete_handoff_reason,
         context=ReplayContext(
             sampling=tuple(source_samplers),
             origins=tuple(origins),

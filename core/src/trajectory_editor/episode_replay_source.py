@@ -12,7 +12,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
-from .core.actions import Hold, Phrase, PolicyAction, Write, action_from_dict
+from .core.actions import (
+    Hold, Phrase, UnsupportedPolicyActionKind, Write, action_from_dict,
+)
 from .core.errors import EditorError
 from .core.results import ReplayExpectation
 from .core.sampler_config import SamplerConfig
@@ -47,6 +49,8 @@ class _ProjectedSource:
     action_rows: tuple[Mapping[str, Any], ...]
     tokens_by_action: tuple[tuple[Mapping[str, Any], ...], ...]
     visible_boundary: int
+    unsupported_boundary: int | None = None
+    handoff_reason: str | None = None
 
 
 def _required_int(record: Mapping[str, Any], field: str) -> int:
@@ -140,6 +144,8 @@ def _projected_source(
     )
 
     records: list[ProcedureRecord] = []
+    unsupported_boundary: int | None = None
+    handoff_reason: str | None = None
     for row, tokens in zip(action_rows, tokens_by_action):
         arguments = row.get("arguments")
         if not isinstance(arguments, Mapping):
@@ -158,8 +164,20 @@ def _projected_source(
             ),
             None,
         )
-        action = action_from_dict(dict(arguments))
-        stop_reason = str(row["stop_reason"])
+        try:
+            action = action_from_dict(arguments)
+        except UnsupportedPolicyActionKind as exc:
+            unsupported_boundary = boundary
+            ordinal = _required_int(row, "ordinal")
+            handoff_reason = (
+                f"Warning: replay stopped before source step {ordinal + 1} "
+                f"at boundary {boundary}: {exc}."
+            )
+            break
+        raw_stop_reason = row.get("stop_reason")
+        if raw_stop_reason is not None and not isinstance(raw_stop_reason, str):
+            raise EditorError("saved stop_reason must be a string or null")
+        stop_reason = raw_stop_reason
         if (
             isinstance(action, Hold)
             and stop_reason == "checkpoint"
@@ -169,10 +187,14 @@ def _projected_source(
             # The budget also expired, but the finite hold completed. Replay
             # may use a different budget, so use the hold's completion reason.
             stop_reason = "requested-length"
+        expectation = (
+            ReplayExpectation(visible, terminal, stop_reason)
+            if stop_reason is not None else None
+        )
         records.append(
             ProcedureRecord(
                 action=action,
-                expectation=ReplayExpectation(visible, terminal, stop_reason),
+                expectation=expectation,
                 status=str(row["status"]),
                 visible_token_ids=visible,
                 visible_text="",
@@ -189,19 +211,25 @@ def _projected_source(
         action_rows=action_rows,
         tokens_by_action=tokens_by_action,
         visible_boundary=visible_boundary,
+        unsupported_boundary=unsupported_boundary,
+        handoff_reason=handoff_reason,
     )
 
 
 def _select_through(
     source: _ProjectedSource,
     end_boundary: int,
+    *,
+    full_source: bool,
 ) -> SurvivingProcedure:
     """Select a procedure prefix without rebasing its source coordinates."""
 
     selected: list[ProcedureStep] = []
     partial = set(source.procedure.partial_source_indices)
     for step in source.procedure.steps:
-        if step.boundary >= end_boundary:
+        if step.boundary > end_boundary or (
+            step.boundary == end_boundary and not full_source
+        ):
             break
         tokens = source.tokens_by_action[step.source_index]
         visible = tuple(token for token in tokens if bool(token.get("realized_visible")))
@@ -211,8 +239,8 @@ def _select_through(
         cut = len(visible) > count
         # A Hold ending exactly at the selected boundary is made finite so
         # the selected procedure yields at that live edge.
-        make_finite = cut or (
-            len(visible) == count and isinstance(action, Hold)
+        make_finite = count > 0 and (
+            cut or (len(visible) == count and isinstance(action, Hold))
         )
         if make_finite:
             retained = visible[:count]
@@ -226,7 +254,10 @@ def _select_through(
             else:
                 action = Hold(count)
                 reason = "requested-length"
-            expectation = ReplayExpectation(visible_ids, None, reason)
+            expectation = (
+                ReplayExpectation(visible_ids, None, reason)
+                if step.expectation is not None else None
+            )
             if cut:
                 partial.add(step.source_index)
         selected.append(
@@ -264,11 +295,19 @@ def build_source_replay_recipe(
         raise EditorError("saved initial prompt must be a string")
     return SourceReplayRecipe(
         source_prompt=prompt,
-        procedure=_select_through(source, end_boundary),
+        procedure=_select_through(
+            source, end_boundary, full_source=until is None
+        ),
         controls=controls.truncate_after(end_boundary),
         source_visible_boundary=source.visible_boundary,
         source_end_boundary=end_boundary,
         source_id=episode_id,
+        incomplete_handoff_reason=(
+            source.handoff_reason
+            if source.unsupported_boundary is not None
+            and (until is None or source.unsupported_boundary < end_boundary)
+            else None
+        ),
     )
 
 
@@ -282,6 +321,8 @@ def replay_procedure(
 
     controls = _controls(reader, episode_id, sampling_factory=sampling_factory)
     source = _projected_source(reader, episode_id, controls=controls)
+    if source.handoff_reason is not None:
+        raise EditorError(source.handoff_reason)
     return [
         {
             "action": step.action,

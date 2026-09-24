@@ -129,8 +129,14 @@ PolicyAction: TypeAlias = (
 )
 
 
+class UnsupportedPolicyActionKind(EditorError):
+    """A well-formed action names a kind this runtime cannot execute."""
+
+
 def action_from_dict(raw: Mapping[str, Any]) -> PolicyAction:
     kind = raw.get("kind")
+    if not isinstance(kind, str) or not kind.strip():
+        raise EditorError("policy action kind must be a nonempty string")
     if kind == "accept":
         return Accept()
     if kind in {"select", "select-raw-rank"}:
@@ -164,4 +170,4 @@ def action_from_dict(raw: Mapping[str, Any]) -> PolicyAction:
         return Hold(limit, str(boundary) if boundary is not None else None)
     if kind in {"teacher-eog", "end-generation"}:
         return EndGeneration()
-    raise EditorError(f"unsupported policy action kind {kind!r}")
+    raise UnsupportedPolicyActionKind(f"unsupported policy action kind {kind!r}")

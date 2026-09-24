@@ -84,6 +84,7 @@ class ReplayPlan(Sequence[TapeStep]):
     follow_source_sampling: bool = True
     final_sampling: SamplerConfig | None = None
     context: ReplayContext = ReplayContext()
+    incomplete_handoff_reason: str | None = None
 
     def __post_init__(self) -> None:
         for label, values in (
@@ -208,13 +209,15 @@ def run_plan(
                 break
             replayed += 1
 
-        if (
-            had_tape
-            and not handed_off
-            and not target.engine.ended
-            and not target.engine.checkpointed
-        ):
-            replay_exhausted = replayed == len(plan.steps)
+        if had_tape and not handed_off and not target.engine.ended:
+            if (
+                replayed == len(plan.steps)
+                and plan.incomplete_handoff_reason is not None
+            ):
+                handed_off = True
+                handoff_reason = plan.incomplete_handoff_reason
+            elif not target.engine.checkpointed:
+                replay_exhausted = replayed == len(plan.steps)
         if (
             replay_exhausted
             and plan.follow_source_sampling

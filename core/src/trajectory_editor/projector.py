@@ -159,6 +159,8 @@ def _recompute_missing_metrics(
         plan = compose_replay_plan(
             recipe, ReplayPlacement.SOURCE_ROOT, ReplayControlPolicy.FOLLOW_SOURCE
         )
+        if plan.incomplete_handoff_reason is not None:
+            raise EditorError(plan.incomplete_handoff_reason)
         target = ProjectionTarget()
         replayed = 0
         while replayed < len(plan.steps):
