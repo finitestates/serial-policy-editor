@@ -1,0 +1,53 @@
+name: Hot-path rules
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  hot-path:
+    name: Hot-path rules
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Replace enforcement code with the base branch's copy
+        # A PR cannot weaken the checker, the tripwire, or the tests by editing
+        # them: CI always runs main's versions. The PR's rules.py is kept only so
+        # the ratchet can verify it differs from main by DEBT deletions alone.
+        if: github.event_name == 'pull_request'
+        run: |
+          base="origin/${{ github.base_ref }}"
+          git fetch --no-tags origin "${{ github.base_ref }}"
+          mkdir -p "$RUNNER_TEMP/base"
+          git show "$base:tests/hot_path/rules.py" > "$RUNNER_TEMP/base/rules.py"
+          for f in __init__.py checker.py tripwire.py test_static_rules.py \
+                   test_runtime_budgets.py test_checker_selftest.py; do
+            git show "$base:tests/hot_path/$f" > "tests/hot_path/$f"
+          done
+          echo "SPE_BASE_RULES=$RUNNER_TEMP/base/rules.py" >> "$GITHUB_ENV"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.x"
+          cache: pip
+          cache-dependency-path: core/pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e "core[test]"
+
+      - name: Run hot-path rules
+        env:
+          CI: "true"
+        run: python -m pytest -q tests/hot_path
