@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.fakes import ConformingFakeBackend, ScriptedIO
+from tests.fakes import ConformingFakeBackend, ScriptedIO, SnapshotFakeBackend
 from tests.core.runtime_helpers import LiveScriptedIO
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.edge_help import edge_help
@@ -180,3 +180,36 @@ def test_edge_help_is_shared_by_plain_and_live_with_mode_specific_actions():
     assert "save WORKSPACE [ID]" not in "".join(
         item.command for item in edge_help("episode")
     )
+
+
+@pytest.mark.parametrize("submitted_rank", (1, 2))
+def test_choice_warm_callback_resolves_selected_rank_through_policy(submitted_rank):
+    class WarmCapture(LiveScriptedIO):
+        def __init__(self):
+            super().__init__([])
+            self.target = None
+
+        def read_choice(self, state):
+            candidate = state.resolve_candidate(2)
+            self.target = (candidate.rank, candidate.token_id)
+            assert state.warm_selection is not None
+            assert state.warm_selection(
+                candidate.rank, candidate.token_id, 1, lambda: False,
+            )
+            return str(submitted_rank)
+
+    terminal = WarmCapture()
+    backend = SnapshotFakeBackend()
+    engine = EpisodeEngine(
+        backend, initial_text="P", initial_token_ids=[7],
+        sampling=SamplerConfig(temperature=0.0),
+    )
+    observation = engine.observe()
+    action = InteractivePolicy(io=terminal, menu_size=1).choose(engine, observation)
+    assert terminal.target == (2, 2)
+    assert action.rank == submitted_rank
+    assert backend.eval_calls == [(2,)]
+
+    engine.apply(action)
+    assert backend.tokens == [7, submitted_rank]
+    assert backend.eval_calls == ([(2,)] if submitted_rank == 2 else [(2,), (1,)])

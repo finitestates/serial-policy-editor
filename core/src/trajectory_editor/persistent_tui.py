@@ -9,6 +9,7 @@ accepting input, so queued keystrokes cannot commit against an obsolete decision
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import threading
 from _thread import interrupt_main
@@ -42,9 +43,19 @@ from prompt_toolkit.widgets import TextArea
 
 from .edge_tui import LiveEdgeView
 from .core.errors import EditorError
-from .live_tui import LiveChoiceView, PreviewPending, _live_style, _safe_context_text
+from .live_tui import (
+    LiveChoiceView,
+    PreviewPending,
+    action_preview,
+    _live_style,
+    _safe_context_text,
+)
 from .terminal_contracts import ChoiceViewState, EdgeViewState, PromptRequest
 from .ui_themes import DEFAULT_LIVE_THEME
+
+
+# Default fallback matching the baseline
+DEFAULT_WARM_SELECTION_DELAY = 0.15
 
 
 @dataclass(eq=False)
@@ -54,11 +65,12 @@ class _Request:
     previews: OrderedDict = field(default_factory=OrderedDict)
     latest: dict[str, tuple] = field(default_factory=dict)
     insertion_display: dict[Any, str] = field(default_factory=dict)
-    idle_cancelled: threading.Event = field(default_factory=threading.Event)
-    idle_queued: bool = False
-    idle_future: Future | None = None
-    idle_cancel_queued: bool = False
-    idle_cancel_future: Future | None = None
+    warm_target: tuple[int, int] | None = None
+    submitted_target: tuple[int, int] | None = None
+    warm_generation: int | None = None
+    warm_cancelled: threading.Event = field(default_factory=threading.Event)
+    warm_timer: asyncio.TimerHandle | None = None
+    warm_future: Future | None = None
 
 
 @dataclass
@@ -219,7 +231,16 @@ class PersistentTerminalSession(AbstractContextManager):
     """
 
     def __init__(
-        self, *, input_device=None, output_device=None, theme=DEFAULT_LIVE_THEME
+        self,
+        *,
+        input_device=None,
+        output_device=None,
+        theme=DEFAULT_LIVE_THEME,
+        warm_debounce_mode: str | None = None,
+        fixed_delay: float = DEFAULT_WARM_SELECTION_DELAY,
+        adaptive_min_delay: float = 0.08,
+        adaptive_max_delay: float = 0.25,
+        adaptive_burst_threshold: float = 0.18,
     ):
         self.input_device = input_device
         self.output_device = output_device
@@ -230,9 +251,6 @@ class PersistentTerminalSession(AbstractContextManager):
         self._prompt_view = None
         self._surface = None
         self._current: _Request | None = None
-        # A request is not allowed to receive input until its first render
-        # cycle has begun. Rendering is synchronous on the UI thread, so this
-        # closes the handoff window without delaying after-render observers.
         self._view_ready: _Request | None = None
         self._events: Queue = Queue()
         self._ready: Future = Future()
@@ -243,6 +261,26 @@ class PersistentTerminalSession(AbstractContextManager):
         self._interrupted = threading.Event()
         self._closing = False
         self._notice = ""
+        self._warm_generation = 0
+
+        # Debounce experiment controls (internal default is adaptive)
+        resolved_mode = warm_debounce_mode
+        if resolved_mode is None:
+            resolved_mode = os.getenv("SPE_TEST_WARM_DEBOUNCE_MODE", "adaptive")
+
+        self.warm_debounce_mode = resolved_mode.lower()
+        self.fixed_delay = fixed_delay
+        self.min_delay = adaptive_min_delay
+        self.max_delay = adaptive_max_delay
+        self.burst_threshold = adaptive_burst_threshold
+
+        # Timing and telemetry state
+        self._last_target_time: float | None = None
+        self.stats = {
+            "warm_dispatches": 0,
+            "warm_aborts": 0,
+            "promotions": 0,
+        }
 
     @property
     def accepting_input(self) -> bool:
@@ -313,8 +351,6 @@ class PersistentTerminalSession(AbstractContextManager):
             self._interrupt()
 
         busy_keys = KeyBindings()
-        # Override special/default bindings too (including Ctrl-L's forced
-        # repaint). Ordinary typeahead is consumed until a fresh view is ready.
         for key in Keys:
             busy_keys.add(key, eager=True)(lambda event: None)
         waiting = Window(FormattedTextControl("Preparing editor…"))
@@ -363,72 +399,154 @@ class PersistentTerminalSession(AbstractContextManager):
         if not self._ready.done():
             self._ready.set_result(None)
         request = self._current
-        if (
-            request is not None
-            and not request.response.done()
-            and not request.idle_queued
-            and isinstance(request.state, ChoiceViewState)
-            and request.state.idle_work is not None
-        ):
-            request.idle_queued = True
-            request.idle_future = Future()
-
-            def run_idle_work():
-                if request.idle_cancelled.is_set():
-                    return None
-
-                return request.state.idle_work(request.idle_cancelled.is_set)
-
-            self._events.put(_Resolution(request, run_idle_work, request.idle_future))
+        if request is not None:
+            self._refresh_warm_target(request)
         if self._closing:
             self._stop()
 
     def _after_key_press(self, key_processor):
         del key_processor
         request = self._current
-        if (
-            request is None
-            or not isinstance(request.state, ChoiceViewState)
-            or request.state.idle_work is None
-        ):
-            return
-        if self._is_idle_promotion(request):
-            return
-        request.idle_cancelled.set()
-        if request.idle_future is not None and not request.idle_future.done():
-            request.idle_future.cancel()
-        if not request.response.done() and not request.idle_cancel_queued:
-            cancel_idle = request.state.cancel_idle_work
-            if callable(cancel_idle):
-                request.idle_cancel_queued = True
-                request.idle_cancel_future = Future()
-                self._events.put(
-                    _Resolution(request, cancel_idle, request.idle_cancel_future)
-                )
+        if request is not None:
+            self._refresh_warm_target(request)
 
     @staticmethod
-    def _is_idle_promotion(request: _Request) -> bool:
+    def _is_warm_promotion(request: _Request) -> bool:
         if (
-            request.idle_cancelled.is_set()
+            request.warm_cancelled.is_set()
             or not request.response.done()
             or request.response.cancelled()
+            or request.warm_target is None
+            or request.submitted_target != request.warm_target
+            or request.warm_future is None
+            or not request.warm_future.done()
+            or request.warm_future.cancelled()
         ):
             return False
         try:
-            result = request.response.result()
+            request.response.result()
+            return bool(request.warm_future.result())
         except BaseException:
             return False
-        if (
-            not isinstance(request.state, ChoiceViewState)
-            or request.state.review is not None
-            or request.state.idle_work is None
-        ):
-            return False
-        return result == "" or (
-            request.state.initial_command is not None
-            and result == request.state.initial_command
-        )
 
+    def _choice_target(self, request: _Request, raw: str) -> tuple[int, int] | None:
+        state = self.choice_view.state
+        if request.state.review is not None:
+            return None
+        preview = action_preview(
+            state.choice,
+            raw,
+            state.candidates,
+            state.resolve_insertion,
+            remaining_tokens=state.remaining_tokens,
+            resolve_candidate=state.resolve_candidate,
+            default_hold_tokens=state.default_hold_tokens,
+            default_search_radius=state.default_search_radius,
+        )
+        if (
+            not preview.valid
+            or preview.state != "ready"
+            or preview.kind != "candidate"
+            or preview.candidate_rank is None
+            or preview.token_id is None
+        ):
+            return None
+        return preview.candidate_rank, preview.token_id
+
+    def _refresh_warm_target(self, request: _Request) -> None:
+        if (
+            request is not self._current
+            or request.response.done()
+            or not isinstance(request.state, ChoiceViewState)
+            or request.state.warm_selection is None
+            or self.choice_view is None
+        ):
+            return
+        target = self._choice_target(request, self.choice_view.command_buffer.text)
+        if target == request.warm_target:
+            return
+
+        # Measure inter-arrival time across cursor shifts
+        now = self._loop.time()
+        delta = (
+            now - self._last_target_time
+            if self._last_target_time is not None
+            else float("inf")
+        )
+        self._last_target_time = now
+
+        # Cancel any pending timer or in-flight compute
+        if request.warm_timer is not None or (
+            request.warm_future and not request.warm_future.done()
+        ):
+            self.stats["warm_aborts"] += 1
+
+        request.warm_cancelled.set()
+        if request.warm_timer is not None:
+            request.warm_timer.cancel()
+            request.warm_timer = None
+        if request.warm_future is not None and not request.warm_future.done():
+            request.warm_future.cancel()
+        if request.warm_target is not None:
+            cancel = request.state.cancel_warm_selection
+            if cancel is not None:
+                self._events.put(_Resolution(request, cancel, Future()))
+
+        self._warm_generation += 1
+        request.warm_generation = self._warm_generation
+        request.warm_target = target
+        request.warm_cancelled = threading.Event()
+        request.warm_future = None
+
+        if target is not None:
+            if self.warm_debounce_mode == "adaptive":
+                if delta < self.burst_threshold:
+                    speed_ratio = 1.0 - (max(0.0, delta) / self.burst_threshold)
+                    delay = (
+                        self.min_delay + (self.max_delay - self.min_delay) * speed_ratio
+                    )
+                else:
+                    delay = self.min_delay
+            else:
+                delay = self.fixed_delay
+
+            request.warm_timer = self._loop.call_later(
+                delay,
+                self._queue_warm_selection,
+                request,
+                request.warm_generation,
+                target,
+                request.warm_cancelled,
+            )
+
+    def _queue_warm_selection(
+        self,
+        request: _Request,
+        generation: int,
+        target: tuple[int, int],
+        cancelled: threading.Event,
+    ) -> None:
+        request.warm_timer = None
+        if (
+            request is not self._current
+            or request.response.done()
+            or request.warm_generation != generation
+            or request.warm_target != target
+            or cancelled.is_set()
+        ):
+            return
+        future = Future()
+        request.warm_future = future
+        self.stats["warm_dispatches"] += 1
+
+        def warm():
+            if cancelled.is_set():
+                return None
+            return request.state.warm_selection(
+                target[0], target[1], generation, cancelled.is_set
+            )
+
+        self._events.put(_Resolution(request, warm, future))
 
     def _before_render(self, app):
         if self._current is not None and not self._current.response.done():
@@ -446,8 +564,6 @@ class PersistentTerminalSession(AbstractContextManager):
         if self._interrupted.is_set():
             return
         self._interrupted.set()
-        # Signal before waking a blocked read: the caller must not miss an
-        # interrupt in the small handoff between returning a command and apply().
         if self._owner == threading.main_thread().ident:
             interrupt_main()
         self._events.put(None)
@@ -483,10 +599,6 @@ class PersistentTerminalSession(AbstractContextManager):
                         if not event.result.cancelled():
                             event.result.set_exception(exc)
                     except Exception as exc:
-                        # Command validation can be previewed as feedback, but
-                        # an unexpected backend failure must wake the owner and
-                        # end this live application. Re-entering plain input
-                        # here could repeat a command against changed state.
                         if not event.result.cancelled():
                             event.result.set_exception(exc)
                         self._failure = exc
@@ -500,24 +612,21 @@ class PersistentTerminalSession(AbstractContextManager):
                 elif not self._thread.is_alive() and not request.response.done():
                     raise self._failure or EOFError("terminal input closed")
         finally:
-            # Prevent any late paint from scheduling callbacks while the
-            # caller is applying an action or repositioning the backend.
             if not request.response.done():
                 request.response.cancel()
-            keep_prepared = self._is_idle_promotion(request)
+            keep_prepared = self._is_warm_promotion(request)
+            if keep_prepared:
+                self.stats["promotions"] += 1
+            if request.warm_timer is not None:
+                self._call(request.warm_timer.cancel)
             if not keep_prepared:
-                request.idle_cancelled.set()
-            if request.idle_future is not None and not request.idle_future.done():
-                request.idle_future.cancel()
-            if (
-                request.idle_cancel_future is not None
-                and not request.idle_cancel_future.done()
-            ):
-                request.idle_cancel_future.cancel()
-            if not keep_prepared and isinstance(request.state, ChoiceViewState):
-                cancel_idle = request.state.cancel_idle_work
-                if callable(cancel_idle):
-                    cancel_idle()
+                request.warm_cancelled.set()
+                if request.warm_future is not None and not request.warm_future.done():
+                    request.warm_future.cancel()
+                if isinstance(request.state, ChoiceViewState):
+                    cancel_warm = request.state.cancel_warm_selection
+                    if callable(cancel_warm):
+                        cancel_warm()
             for preview in request.previews.values():
                 if not preview.done():
                     preview.cancel()
@@ -612,7 +721,6 @@ class PersistentTerminalSession(AbstractContextManager):
         return size.columns, max(1, size.rows - bool(self._notice))
 
     def terminal_size(self) -> tuple[int, int]:
-        """Available content area after the session's status row."""
         return self._surface_size()
 
     def _submit(self, *, result=None, exception=None):
@@ -622,6 +730,13 @@ class PersistentTerminalSession(AbstractContextManager):
         if not self.accepting_input:
             return
         request = self._current
+        if (
+            exception is None
+            and isinstance(request.state, ChoiceViewState)
+            and request.state.warm_selection is not None
+            and isinstance(result, str)
+        ):
+            request.submitted_target = self._choice_target(request, result)
         if not request.response.set_running_or_notify_cancel():
             return
         if exception is None:
@@ -632,8 +747,6 @@ class PersistentTerminalSession(AbstractContextManager):
         self._events.put(None)
 
     def _preview(self, request, key, callback):
-        # UI-only cache containing thread-safe futures. A newer preview of the
-        # same kind cancels obsolete queued work, and each view has its own cache.
         cached = request.previews.get(key)
         if cached is not None and not cached.cancelled() and cached.done():
             result = cached.result()
@@ -655,6 +768,4 @@ class PersistentTerminalSession(AbstractContextManager):
             self._events.put(_Resolution(request, callback, cached))
         if key[0] == "candidate":
             return None
-        # Preserve the displayed draft while its replacement is being resolved.
-        # Clearing it here collapses wrapped context rows between keystrokes.
         raise PreviewPending(request.insertion_display.get(key[2]))

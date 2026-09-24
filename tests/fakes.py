@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 from contextlib import contextmanager
 
 import numpy as np
+
+from trajectory_editor.core.backend import BackendStateSnapshot
 
 
 class ConformingFakeBackend:
@@ -77,6 +79,39 @@ class ConformingFakeBackend:
     def provenance(self, *, include_model_sha256: bool = True) -> dict[str, Any]:
         del include_model_sha256
         return {"backend": "fake", "vocabulary_size": self.vocabulary_size()}
+
+
+class SnapshotFakeBackend(ConformingFakeBackend):
+    """Instrumented exact-snapshot backend for speculative continuation tests."""
+
+    def __init__(self, *, on_eval: Callable[[], None] | None = None) -> None:
+        super().__init__()
+        self._snapshot_token = object()
+        self.on_eval = on_eval
+        self.eval_calls: list[tuple[int, ...]] = []
+        self.snapshot_calls = 0
+        self.restore_calls = 0
+
+    def eval(self, token_ids: list[int]) -> None:
+        self.eval_calls.append(tuple(token_ids))
+        super().eval(token_ids)
+        if self.on_eval is not None:
+            self.on_eval()
+
+    def snapshot_state(self) -> BackendStateSnapshot:
+        self.snapshot_calls += 1
+        prefix = tuple(self.tokens)
+        return BackendStateSnapshot(self._snapshot_token, prefix, prefix)
+
+    def restore_state(self, snapshot: BackendStateSnapshot) -> bool:
+        self.restore_calls += 1
+        if (
+            snapshot.backend_token is not self._snapshot_token
+            or snapshot.payload != snapshot.prefix_token_ids
+        ):
+            return False
+        self.tokens = list(snapshot.prefix_token_ids)
+        return True
 
 
 class ChangedProposalBackend(ConformingFakeBackend):
