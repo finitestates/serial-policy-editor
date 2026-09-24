@@ -9,28 +9,13 @@ from .core.actions import Accept, PolicyAction, SelectRawRank
 from .core.errors import EditorError
 from .episode_engine import EpisodeEngine
 from .terminal_contracts import PromptRequest
+from .teacher_commands import parse_chord
 
 
 class ChordRequested(Exception):
     def __init__(self, ranks: tuple[int, ...]) -> None:
         super().__init__(ranks)
         self.ranks = ranks
-
-
-def parse_chord(raw: str, vocabulary_size: int) -> tuple[int, ...] | None:
-    parts = raw.strip().split()
-    if not parts or parts[0].lower() != "chord":
-        return None
-    if not 2 <= len(parts) - 1 <= 26:
-        raise EditorError("use chord RANK RANK [RANK ...] (up to 26 paths)")
-    if any(not part.isdecimal() for part in parts[1:]):
-        raise EditorError("chord ranks must be positive integers")
-    ranks = tuple(int(part) for part in parts[1:])
-    if len(set(ranks)) != len(ranks):
-        raise EditorError("chord ranks must be distinct")
-    if any(rank < 1 or rank > vocabulary_size for rank in ranks):
-        raise EditorError(f"chord ranks must be between 1 and {vocabulary_size}")
-    return ranks
 
 
 def _position(backend, base: list[int], suffix: list[int]) -> None:
@@ -97,6 +82,8 @@ class Chord:
         self.base_prefix = list(engine.token_ids)
         self.shared_context = engine.backend.render(self.base_prefix, special=True)
         self.paths: list[ChordPath] = []
+        self._active_path: ChordPath | None = None
+        self._context_cache: tuple[int, str] | None = None
         self.rounds: list[tuple[int, ...]] = []
         self.closed = False
         try:
@@ -127,6 +114,11 @@ class Chord:
             raise
 
     def _activate(self, path: ChordPath) -> None:
+        if self._active_path is path:
+            # The last preview still owns the primary cache. observe() appends
+            # any missing CFG token lazily; no shared-prefix rebuild is needed.
+            return
+        self._active_path = None
         suffix = list(path.engine.visible_token_ids[len(self.base_visible):])
         _position(self.original.backend, self.base_prefix, suffix)
         if path.engine._cfg_active() and path.engine.guidance_backend is not None:
@@ -139,6 +131,7 @@ class Chord:
                 [*prompt, *path.engine.visible_token_ids]
             )
             path.engine.guidance_backend._spe_cfg_owner = path.engine._guidance_owner
+        self._active_path = path
 
     def advance(self) -> bool:
         advanced: list[int] = []
@@ -157,6 +150,8 @@ class Chord:
     def rewind(self) -> bool:
         if not self.rounds:
             return False
+        # Rewind repositions the shared backend outside _activate().
+        self._active_path = None
         for index in self.rounds.pop():
             path = self.paths[index]
             path.actions.pop()
@@ -219,7 +214,9 @@ class Chord:
                     drop_whitespace=False,
                 ) or [""]
                 rows.extend(indent + part for part in wrapped)
-        context = _recent_context(self.shared_context, width=width)
+        if self._context_cache is None or self._context_cache[0] != width:
+            self._context_cache = (width, _recent_context(self.shared_context, width=width))
+        context = self._context_cache[1]
         return f"Shared context (last 4 lines):\n{context}\n\nPaths:\n" + "\n".join(rows)
 
 

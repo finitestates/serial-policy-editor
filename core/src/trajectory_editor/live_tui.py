@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from typing import Callable
 
@@ -22,11 +22,9 @@ from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.styles import Style
 
 from .teacher_commands import (
-    ForkAddressKind, normalize_command_syntax, parse_bias_command,
-    parse_fork_address,
+    CommandKind, CommandState, ForkAddressKind, TeacherCommand, interpret_command,
 )
 from .candidate_columns import CandidateColumns
-from .chord import parse_chord
 from .core.candidates import Candidate
 from .core.errors import EditorError
 from .core.ui import ChoiceSet, InsertMode
@@ -64,6 +62,8 @@ class ActionPreview:
     policy_probability: float | None = None
     is_eog: bool = False
     valid: bool = True
+    state: str = "ready"
+    command: TeacherCommand | None = None
 
 
 def _candidate_preview(candidate: Candidate, *, label: str) -> ActionPreview:
@@ -90,274 +90,175 @@ def action_preview(
     *,
     remaining_tokens: int | None = None,
     resolve_candidate: Callable[[int], Candidate] | None = None,
+    default_hold_tokens: int = 100,
+    default_search_radius: int = 3,
 ) -> ActionPreview:
-    """Project an unsubmitted input buffer without changing editor state."""
+    """Render the shared interpretation, enriching it with owner-thread previews."""
+    interpretation = interpret_command(
+        raw,
+        menu_size=len(choice.candidates),
+        default_hold_tokens=default_hold_tokens,
+        vocabulary_size=choice.vocabulary_size or len(candidates),
+        default_search_radius=default_search_radius,
+    )
+    if interpretation.state != CommandState.READY:
+        return ActionPreview(
+            kind=interpretation.state.value,
+            label=("invalid chord" if [part.lower() for part in raw.strip().split()[:1]] == ["chord"]
+                   and interpretation.state == CommandState.INVALID
+                   else interpretation.state.value + " command"),
+            detail=interpretation.message,
+            valid=False,
+            state=interpretation.state.value,
+        )
+    command = interpretation.command
+    assert command is not None
     by_rank = {candidate.rank: candidate for candidate in candidates}
     sampled_candidate = next(
-        (
-            candidate
-            for candidate in candidates
-            if candidate.token_id == choice.proposal_token_id
-        ),
+        (candidate for candidate in candidates
+         if candidate.token_id == choice.proposal_token_id),
         None,
     )
-    stripped = raw.strip()
-    lower = stripped.lower()
 
-    if lower == "chord" or lower.startswith("chord "):
-        try:
-            ranks = parse_chord(raw, choice.vocabulary_size or len(candidates))
-        except EditorError as exc:
-            return ActionPreview(
-                kind="invalid", label="invalid chord", detail=str(exc), valid=False,
-            )
+    if command.kind == CommandKind.CHORD:
+        ranks = command.chord_ranks
         assert ranks is not None
         return ActionPreview(
-            kind="effect",
-            label="chord preview",
+            kind="effect", label="chord preview",
             detail=(
                 f"Press Enter to preview {len(ranks)} paths from raw ranks "
                 + ", ".join(str(rank) for rank in ranks)
                 + ". No episode action is recorded yet."
             ),
+            command=command,
         )
 
-    if not stripped or lower == "accept":
-        if sampled_candidate is not None:
-            return _candidate_preview(sampled_candidate, label="sampled proposal")
-        return ActionPreview(
-            kind="candidate",
-            label="sampled proposal",
-            detail="",
-            appended_text=choice.proposal_text,
-            candidate_rank=choice.proposal_raw_rank,
-            token_id=choice.proposal_token_id,
-            raw_probability=choice.proposal_raw_probability,
-            decoder_probability=choice.proposal_decoder_probability,
-            policy_rank=choice.proposal_policy_rank,
-            policy_probability=choice.proposal_policy_probability,
-            is_eog=choice.proposal_is_eog,
-        )
-
-    try:
-        bias_command = parse_bias_command(stripped, vocabulary_size=choice.vocabulary_size or len(candidates))
-    except EditorError as exc:
-        return ActionPreview(kind="effect", label="invalid bias", valid=False, detail=str(exc))
-    if bias_command is not None:
-        return ActionPreview(kind="effect", label="token bias", valid=True,
-            detail="Update this bias rule; stay at this step.")
-
-    if stripped.isdigit():
-        requested_rank = int(stripped)
-        if requested_rank < 1 or (
-            choice.vocabulary_size is not None and requested_rank > choice.vocabulary_size
-        ):
-            return ActionPreview(
-                kind="effect", label="invalid rank",
-                detail=f"Choose a rank from 1 through {choice.vocabulary_size}.",
-                valid=False,
-            )
-        if requested_rank == choice.proposal_raw_rank:
-            if sampled_candidate is not None:
-                return _candidate_preview(sampled_candidate, label="sampled proposal")
-            return ActionPreview(
-                kind="candidate",
-                label="sampled proposal",
-                detail="",
-                appended_text=choice.proposal_text,
-                candidate_rank=choice.proposal_raw_rank,
-                token_id=choice.proposal_token_id,
-                raw_probability=choice.proposal_raw_probability,
-                decoder_probability=choice.proposal_decoder_probability,
-                policy_rank=choice.proposal_policy_rank,
-                policy_probability=choice.proposal_policy_probability,
-                is_eog=choice.proposal_is_eog,
-            )
-        candidate = by_rank.get(requested_rank)
-        if candidate is None and resolve_candidate is not None:
-            try:
-                candidate = resolve_candidate(requested_rank)
-            except EditorError as exc:
+    if command.kind == CommandKind.EDIT:
+        action = command.action
+        assert action is not None
+        if action.kind.value in {"accept", "select"}:
+            rank = (choice.proposal_raw_rank if action.kind.value == "accept"
+                    else int(action.selected_rank))
+            if rank == choice.proposal_raw_rank:
+                if sampled_candidate is not None:
+                    preview = _candidate_preview(sampled_candidate, label="sampled proposal")
+                    return replace(preview, command=command)
                 return ActionPreview(
-                    kind="invalid", label="candidate cannot be previewed",
-                    detail=str(exc), valid=False,
+                    kind="candidate", label="sampled proposal", detail="",
+                    appended_text=choice.proposal_text,
+                    candidate_rank=choice.proposal_raw_rank,
+                    token_id=choice.proposal_token_id,
+                    raw_probability=choice.proposal_raw_probability,
+                    decoder_probability=choice.proposal_decoder_probability,
+                    policy_rank=choice.proposal_policy_rank,
+                    policy_probability=choice.proposal_policy_probability,
+                    is_eog=choice.proposal_is_eog,
+                    command=command,
                 )
-        if candidate is not None:
-            return _candidate_preview(candidate, label="selected candidate")
-        return ActionPreview(
-            kind="effect",
-            label="selected raw rank",
-            detail=(
-                f"Press Enter to select raw rank {requested_rank}. "
-                "This token is not shown in the current menu."
-            ),
-            valid=True,
-        )
-
-    if len(raw) >= 2 and raw[:2].lower() in {"t ", "x "}:
-        supplied = raw[2:]
-        label = "continuation insertion" if raw[:1].lower() == "t" else "exact insertion"
-        if not supplied:
+            candidate = by_rank.get(rank)
+            if candidate is None and resolve_candidate is not None:
+                try:
+                    candidate = resolve_candidate(rank)
+                except PreviewPending:
+                    return ActionPreview(
+                        kind="pending", label="selected raw rank",
+                        detail=f"Resolving raw rank {rank}…", state="pending",
+                        command=command,
+                    )
+                except EditorError as exc:
+                    return ActionPreview(
+                        kind="effect", label="selected raw rank",
+                        detail=f"Candidate preview unavailable: {exc}",
+                        valid=False, state="invalid", command=command,
+                    )
+            if candidate is not None:
+                preview = _candidate_preview(candidate, label="selected candidate")
+                return replace(preview, command=command)
             return ActionPreview(
-                kind="effect",
-                label=label,
-                detail="Type text after the insertion command.",
-                valid=True,
+                kind="effect", label="selected raw rank",
+                detail=(f"Press Enter to select raw rank {rank}. "
+                        "This token is not shown in the current menu."),
+                command=command,
             )
-        mode = (
-            InsertMode.CONTINUATION
-            if raw[:1].lower() == "t"
-            else InsertMode.EXACT
-        )
+        assert action.supplied_text is not None and action.insert_mode is not None
+        supplied = action.supplied_text
+        label = ("continuation insertion" if action.insert_mode == InsertMode.CONTINUATION
+                 else "exact insertion")
         try:
-            rendered = resolve_insertion(supplied, mode)
+            rendered = resolve_insertion(supplied, action.insert_mode)
         except PreviewPending as pending:
+            # Keep the insertion status stable until the latest preview resolves.
+            # Retain the last resolved text for the live context display.
             return ActionPreview(
-                kind="pending", label=label, detail="",
+                kind="insertion",
+                label=label,
+                detail="Tokenization and budget are validated on Enter.",
                 appended_text=pending.appended_text,
+                command=command,
             )
         except Exception as exc:
             return ActionPreview(
-                kind="invalid",
-                label="insertion cannot be previewed",
-                detail=f"{type(exc).__name__}: {exc}",
-                valid=False,
+                kind="effect", label=label,
+                detail=f"Insertion preview unavailable: {type(exc).__name__}: {exc}",
+                valid=False, state="invalid", command=command,
             )
         return ActionPreview(
-            kind="insertion",
-            label=label,
+            kind="insertion", label=label,
             detail="Tokenization and budget are validated on Enter.",
-            appended_text=rendered,
+            appended_text=rendered, command=command,
         )
 
-    if lower in {"t", "x"}:
-        label = "continuation insertion" if lower == "t" else "exact insertion"
-        return ActionPreview(
-            kind="effect",
-            label=label,
-            detail="Add a space and the text to insert.",
-            valid=True,
-        )
-
-    for spelling, label, detail in (
-        ("check", "phrase check", "Press Enter to probe and commit a continuation phrase."),
-        ("checkx", "exact phrase check", "Press Enter to probe and commit the exact phrase."),
-        ("force", "phrase force", "Press Enter to force a continuation phrase with temporary shifts."),
-        ("forcex", "exact phrase force", "Press Enter to force the exact phrase with temporary shifts."),
-    ):
-        if lower == spelling or lower.startswith(spelling + " "):
-            return ActionPreview(
-                kind="effect",
-                label=label,
-                detail=detail if lower != spelling else f"Type text after {spelling}.",
-                valid=lower != spelling,
-            )
-
-    try:
-        fork_address = parse_fork_address(raw)
-    except EditorError as exc:
-        return ActionPreview(
-            kind="invalid",
-            label="invalid fork address",
-            detail=str(exc),
-            valid=False,
-        )
-    if fork_address is not None:
+    if command.kind == CommandKind.FORK:
+        address = command.fork_address
+        assert address is not None
         current = choice.aligned_step
-        if fork_address.kind == ForkAddressKind.CURRENT:
+        if address.kind == ForkAddressKind.CURRENT:
             target = current
-        elif fork_address.kind == ForkAddressKind.ABSOLUTE:
-            target = int(fork_address.value or 0)
+        elif address.kind == ForkAddressKind.ABSOLUTE:
+            target = int(address.value or 0)
         else:
-            target = current - int(fork_address.value or 0)
-        if not 0 <= target <= current:
-            return ActionPreview(
-                kind="invalid",
-                label="fork boundary unavailable",
-                detail=f"Step {target} is outside this run's recorded range 0..{current}.",
-                valid=False,
-            )
-        return ActionPreview(
-            kind="effect",
-            label="fork recorded boundary",
-            detail=(
-                f"The parent will seal at step {current}; a child will open "
-                f"fresh from step {target}."
-            ),
+            target = current - int(address.value or 0)
+        detail = (
+            f"The parent will seal at step {current}; a child will open fresh from step {target}."
+            if 0 <= target <= current
+            else f"Step {target} is outside the recorded range 0..{current}; Enter validates the boundary."
         )
+        return ActionPreview(kind="effect", label="fork recorded boundary",
+                             detail=detail, command=command)
 
-    normalized = normalize_command_syntax(raw)
-    normalized_lower = normalized.lower()
     effects = {
-        "h": "Hold will release control only after Enter.",
-        "hold": "Hold will release control only after Enter.",
-        "q": "Open the live edge menu on Enter; no tokens are generated.",
-        "quit": "Open the live edge menu on Enter; no tokens are generated.",
-        "finish": "Open the live edge menu on Enter; no tokens are generated.",
-        "e": "Teacher EOG selection begins on Enter.",
-        "eog": "Teacher EOG selection begins on Enter.",
-        "e!": "A recognized teacher EOG is committed on Enter.",
-        "eog!": "A recognized teacher EOG is committed on Enter.",
-        "m": "The main candidate table returns without disclosing rows on Enter.",
-        "more": "The main candidate table returns without disclosing rows on Enter.",
-        "v": "The table toggles between raw-model and policy ordering on Enter.",
-        "policy-view": "The table toggles between raw-model and policy ordering on Enter.",
-        "policy-sort": "The table toggles between raw-model and policy ordering on Enter.",
-        "policy-column": "Policy diagnostics toggle on Enter without reordering.",
-        "policy-columns": "Policy diagnostics toggle on Enter without reordering.",
-        "policy-rank-column": "Policy diagnostics toggle on Enter without reordering.",
-        "ms": "The active token-search neighborhood redraws on Enter.",
-        "context": "The requested context view opens on Enter.",
-        "column-focus": "Middle-column focus cycles on Enter.",
-        "column-cycle": "Middle-column focus cycles on Enter.",
-        "column-clear": "Column focus clears to identity on Enter.",
-        "column-focus-clear": "Column focus clears to identity on Enter.",
-        "n": "The note-before action begins on Enter.",
-        "p": "The note-after action begins on Enter.",
-        "?": "Full command help opens on Enter.",
-        "help": "Full command help opens on Enter.",
+        CommandKind.BIAS: ("token bias", "Update this bias rule; stay at this step."),
+        CommandKind.PHRASE: ("phrase action", "Press Enter to probe or apply the phrase; runtime limits are checked then."),
+        CommandKind.HOLD: ("hold", "Hold will release control only after Enter."),
+        CommandKind.FINISH: ("finish", "Open the live edge menu on Enter; no tokens are generated."),
+        CommandKind.TEACHER_EOG: ("teacher EOG", "Teacher EOG selection begins on Enter."),
+        CommandKind.MAIN_MENU: ("main menu", "The main candidate table returns on Enter."),
+        CommandKind.MENU_EXPAND: ("more rows", "The main candidate table returns and expands on Enter."),
+        CommandKind.TOKEN_SEARCH: ("token search", "Exact-token search executes on Enter; no text is committed."),
+        CommandKind.TOKEN_SEARCH_VIEW: ("search view", "The token-search neighborhood updates on Enter."),
+        CommandKind.CONTEXT: ("context", "The requested context view opens on Enter."),
+        CommandKind.POLICY_VIEW: ("policy view", "The table toggles between raw-model and policy ordering on Enter."),
+        CommandKind.POLICY_COLUMN: ("policy columns", "Policy diagnostics toggle on Enter without reordering."),
+        CommandKind.LOGIT_VIEW: ("logit view", "Logit view changes on Enter."),
+        CommandKind.PROBABILITY_VIEW: ("probability view", "Model probability overlays toggle on Enter."),
+        CommandKind.COLUMN_FOCUS: ("column focus", "Middle-column focus changes on Enter."),
+        CommandKind.OVERLAY_TOGGLE: ("overlay", f"Toggle the {command.overlay} overlay on Enter."),
+        CommandKind.REVIEW_BACK: ("review back", "Review the previous durable token boundary on Enter."),
+        CommandKind.REVIEW_FORWARD: ("review forward", "Review the next durable token boundary on Enter."),
+        CommandKind.NOTE_BEFORE: ("note before", "The note-before action begins on Enter."),
+        CommandKind.NOTE_AFTER: ("note after", "The note-after action begins on Enter."),
+        CommandKind.HELP: ("help", "Full command help opens on Enter."),
     }
-    head = normalized_lower.split(maxsplit=1)[0] if normalized_lower else ""
-    if raw == "/":
-        return ActionPreview(
-            kind="effect",
-            label="token search",
-            detail="Type the exact token text after /.",
-            valid=True,
-        )
-    if raw.startswith("/"):
-        detail = "Exact-token search executes on Enter; no text is committed."
-    elif normalized_lower.startswith(("m ", "more ")):
-        detail = "The main candidate table returns and expands on Enter."
-    elif normalized == "V":
-        detail = "Policy diagnostics toggle on Enter without reordering."
-    elif normalized == "L":
-        detail = "Logit view toggles both ↔ none on Enter."
-    elif normalized_lower in {"l", "logit", "logits", "logit-view"}:
-        detail = "Logit view cycles none → raw → gap on Enter."
-    elif normalized == "%" or normalized_lower in {"pct", "probs", "probabilities", "probability-view"}:
-        detail = "Model soft-max % overlays toggle on Enter."
-    elif normalized == "C":
-        detail = "Column focus clears to identity on Enter (also resets l / %)."
-    elif normalized_lower == "c":
-        detail = "Middle-column focus cycles on Enter (logit → gap → margin → z → pct → decode-p)."
-    elif normalized_lower.startswith(("c ", "context")):
-        detail = "The requested context view opens on Enter."
-    elif head in effects:
-        detail = effects[head]
-    else:
-        return ActionPreview(
-            kind="invalid",
-            label="unrecognized command",
-            detail="Enter will submit it to the ordinary parser, which may reject it.",
-            valid=False,
-        )
-    return ActionPreview(
-        kind="effect",
-        label="command effect",
-        detail=detail,
-        valid=True,
-    )
+    label, detail = effects[command.kind]
+    if command.kind == CommandKind.TEACHER_EOG and command.force:
+        detail = "A teacher EOG is committed on Enter."
+    if command.kind == CommandKind.HOLD:
+        boundary = (f" through the next {command.hold_boundary} boundary"
+                    if command.hold_boundary else "")
+        detail = f"Release control for up to {command.hold_tokens} tokens{boundary} on Enter."
+    if command.kind == CommandKind.PHRASE:
+        label = f"{command.invoked_as} phrase"
+    return ActionPreview(kind="effect", label=label, detail=detail, command=command)
 
 
 def _safe_rendered_text(value: str) -> str:
@@ -593,6 +494,17 @@ def _one_line(text: str, width: int) -> str:
     return result
 
 
+def _preview_status(preview: ActionPreview) -> tuple[str, str]:
+    """Static text and style cues; color is never the only state signal."""
+    if preview.state == "invalid":
+        return "class:invalid", "INVALID · "
+    if preview.state == "incomplete":
+        return "class:hint", "INCOMPLETE · "
+    if preview.state == "pending":
+        return "class:pending", "PENDING · "
+    return "class:effect", "READY · "
+
+
 def _render_writing(choice: ChoiceSet, candidates: tuple[Candidate, ...],
                     preview: ActionPreview, width: int, height: int,
                     offset: int, sort_by_policy: bool,
@@ -620,7 +532,8 @@ def _render_writing(choice: ChoiceSet, candidates: tuple[Candidate, ...],
         effect = f"{preview.label} · {text.count(chr(10)) + 1} lines · {len(text)} characters"
     else:
         effect = f"{preview.label} · {preview.detail}"
-    fragments.append(("class:effect" if preview.valid else "class:hint", _one_line(effect, width) + "\n"))
+    style, cue = _preview_status(preview)
+    fragments.append((style, _one_line(cue + effect, width) + "\n"))
     fragments.append(("class:rule", "─" * (width - 1) + "\n"))
     columns = CandidateColumns(
         policy=show_policy_rank,
@@ -670,6 +583,8 @@ def _render_choice(
     context_offset: int = 0,
     expanded_editor: bool = False,
     terminal_size: tuple[int, int] | None = None,
+    default_hold_tokens: int = 100,
+    default_search_radius: int = 3,
 ) -> StyleAndTextTuples:
     width, height = terminal_size or _terminal_size()
     width = max(width, 36)
@@ -680,6 +595,8 @@ def _render_choice(
         resolve_insertion,
         remaining_tokens=remaining_tokens,
         resolve_candidate=resolve_candidate,
+        default_hold_tokens=default_hold_tokens,
+        default_search_radius=default_search_radius,
     )
     if expanded_editor and _is_writing(command_text):
         return _render_writing(choice, tuple(candidates if display_candidates is None else display_candidates),
@@ -779,7 +696,7 @@ def _render_choice(
         terminal = " · END" if preview.is_eog else ""
         fragments.extend(
             [
-                ("class:proposal-label", preview.label),
+                ("class:proposal-label", "READY · " + preview.label),
                 ("class:muted", rank),
                 ("class:muted", f" · exact {repr(preview.appended_text or '')}"),
                 ("class:muted", f" · token {preview.token_id}"),
@@ -807,17 +724,18 @@ def _render_choice(
             ]
         )
     elif preview.kind in {"insertion", "pending"}:
+        style, cue = _preview_status(preview)
         fragments.extend(
             [
-                ("class:proposal-label", preview.label),
-                ("class:muted", "\n"),
+                (style if cue else "class:proposal-label", cue + preview.label),
+                ("class:muted", f" · {preview.detail}\n"),
             ]
         )
     else:
-        style = "class:effect" if preview.valid else "class:hint"
+        style, cue = _preview_status(preview)
         fragments.extend(
             [
-                (style, preview.label),
+                (style, cue + preview.label),
                 ("class:muted", f" · {preview.detail}\n"),
             ]
         )
@@ -1031,6 +949,8 @@ LIVE_STYLES = {
             "proposal": "ansiyellow bold reverse",
             "proposal-label": "ansiyellow bold",
             "effect": "ansicyan bold",
+            "invalid": "ansiyellow bold",
+            "pending": "ansicyan",
             "table-header": "ansibrightblack",
             "table-row": "",
             "selected-row": "ansicyan bold reverse",
@@ -1055,6 +975,8 @@ LIVE_STYLES = {
             "proposal": "bold reverse",
             "proposal-label": "bold underline",
             "effect": "bold",
+            "invalid": "bold underline",
+            "pending": "underline",
             "table-header": "underline",
             "table-row": "",
             "selected-row": "bold reverse",
@@ -1079,6 +1001,8 @@ LIVE_STYLES = {
             "proposal": "ansibrightyellow bold reverse",
             "proposal-label": "ansibrightyellow bold underline",
             "effect": "ansibrightcyan bold",
+            "invalid": "ansibrightyellow bold underline",
+            "pending": "ansibrightcyan underline",
             "table-header": "bold underline",
             "table-row": "",
             "selected-row": "ansibrightcyan bold reverse",
@@ -1262,7 +1186,9 @@ class LiveChoiceView(ViewLifecycle):
         def _context_up(event: object) -> None:
             width, height = self.terminal_size()
             preview = action_preview(self.state.choice, self.command_buffer.text, self.state.candidates, self.state.resolve_insertion,
-                                     remaining_tokens=self.state.remaining_tokens, resolve_candidate=self.state.resolve_candidate)
+                                     remaining_tokens=self.state.remaining_tokens, resolve_candidate=self.state.resolve_candidate,
+                                     default_hold_tokens=self.state.default_hold_tokens,
+                                     default_search_radius=self.state.default_search_radius)
             rows = _context_rows(_safe_context_text(self.state.review.context_text_tail if self.state.review else self.state.choice.context_text_tail),
                                  "" if self.state.review else _safe_rendered_text(preview.appended_text or ""), max(1, max(36, width) - 1))
             budget = _scroll_budget(height, preview)
@@ -1272,7 +1198,9 @@ class LiveChoiceView(ViewLifecycle):
         def _context_down(event: object) -> None:
             _, height = self.terminal_size()
             preview = action_preview(self.state.choice, self.command_buffer.text, self.state.candidates, self.state.resolve_insertion,
-                                     remaining_tokens=self.state.remaining_tokens, resolve_candidate=self.state.resolve_candidate)
+                                     remaining_tokens=self.state.remaining_tokens, resolve_candidate=self.state.resolve_candidate,
+                                     default_hold_tokens=self.state.default_hold_tokens,
+                                     default_search_radius=self.state.default_search_radius)
             budget = _scroll_budget(height, preview)
             self.context_offset = max(0, self.context_offset - max(1, budget - 1))
 
@@ -1453,4 +1381,6 @@ class LiveChoiceView(ViewLifecycle):
             state.resolve_candidate, self.context_offset,
             self.expanded_editor and _is_writing(self.command_buffer.text),
             terminal_size=self.terminal_size(),
+            default_hold_tokens=state.default_hold_tokens,
+            default_search_radius=state.default_search_radius,
         )

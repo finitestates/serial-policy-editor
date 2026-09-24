@@ -19,7 +19,12 @@ from .core.actions import (
     SelectRawRank,
     Write,
 )
-from .core.backend import InferenceBackend, require_inference_backend
+from .core.backend import (
+    BackendStateSnapshot,
+    InferenceBackend,
+    SnapshotableInferenceBackend,
+    require_inference_backend,
+)
 from .core.candidates import Candidate
 from .candidate_columns import CandidateViewPlan
 from .core.errors import EditorError
@@ -69,6 +74,13 @@ class Observation:
     @cached_property
     def proposal_policy_rank(self) -> int:
         return self.statistics.policy_rank(self.proposal_token_id)
+
+
+@dataclass(frozen=True)
+class _PreparedAccept:
+    observation: Observation = field(repr=False, compare=False)
+    token_id: int
+    backend_snapshot: BackendStateSnapshot = field(repr=False, compare=False)
 
 
 class EpisodeEngine:
@@ -330,6 +342,77 @@ class EpisodeEngine:
     def _invalidate_observation(self) -> None:
         self._observation = None
         self._observation_key = None
+        self._prepared_accept = None
+
+    def discard_speculative_accept(self) -> None:
+        """Drop a prepared one-token continuation without changing live state."""
+        self._prepared_accept = None
+
+    def speculate_accept(
+        self,
+        observation: Observation,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> bool:
+        """Warm the primary backend as if this boundary's proposal were accepted.
+
+        The backend is restored to the current committed prefix before this
+        method returns. A matching ordinary action can later restore the
+        warmed state and skip its one-token model evaluation. Backends without
+        exact snapshot support, active CFG, terminal proposals, and the final
+        token before a checkpoint simply decline speculation.
+        """
+        self.discard_speculative_accept()
+        is_cancelled = cancelled or (lambda: False)
+        if is_cancelled():
+            return False
+        self._validate_observation(observation)
+        token_id = int(observation.proposal_token_id)
+        if (
+            self.backend.is_eog(token_id)
+            or (self.remaining is not None and self.remaining <= 1)
+            or self._cfg_active()
+            or not isinstance(self.backend, SnapshotableInferenceBackend)
+        ):
+            return False
+
+        prefix = tuple(self.token_ids)
+        try:
+            before = self.backend.snapshot_state()
+        except Exception:
+            return False
+        if before is None or before.prefix_token_ids != prefix:
+            return False
+
+        warmed: BackendStateSnapshot | None = None
+        try:
+            if not is_cancelled():
+                self.backend.eval([token_id])
+                if not is_cancelled():
+                    candidate = self.backend.snapshot_state()
+                    expected = (*prefix, token_id)
+                    if candidate is not None and candidate.prefix_token_ids == expected:
+                        warmed = candidate
+        except Exception:
+            # Speculative inference is optional. Restore the committed position
+            # and let the ordinary action path report any real inference error.
+            warmed = None
+        finally:
+            try:
+                restored = self.backend.restore_state(before)
+            except Exception:
+                restored = False
+            if not restored:
+                # A failed native restore must not leave the live engine at the
+                # speculative prefix. Rebuild its semantic prefix as a fallback.
+                self.backend.reset(list(prefix))
+
+        if warmed is None or is_cancelled():
+            return False
+        if self._observation is not observation or self._decision_key() != self._observation_key:
+            return False
+        self._prepared_accept = _PreparedAccept(observation, token_id, warmed)
+        return True
 
     @staticmethod
     def _activation_backend_key_for(sampling: SamplerConfig | None) -> tuple:
@@ -801,11 +884,30 @@ class EpisodeEngine:
         if not 0 <= token_id < self.backend.vocabulary_size():
             raise EditorError("action resolved outside the vocabulary")
         evidence = self._evidence(observation, token_id)
+        prepared = self._prepared_accept
+        self._prepared_accept = None
         self._invalidate_observation()
         if evidence.is_eog:
             self.terminal_token_id = token_id
         else:
-            self.backend.eval([token_id])
+            promoted = False
+            if (
+                prepared is not None
+                and prepared.observation is observation
+                and prepared.token_id == token_id
+                and prepared.backend_snapshot.prefix_token_ids
+                == (*tuple(self.token_ids), token_id)
+            ):
+                try:
+                    promoted = self.backend.restore_state(prepared.backend_snapshot)
+                except Exception:
+                    promoted = False
+                if not promoted:
+                    # Treat restore failure as a cache miss. Reset first because
+                    # a native loader may have partially repositioned the model.
+                    self.backend.reset(list(self.token_ids))
+            if not promoted:
+                self.backend.eval([token_id])
             self.visible_token_ids.append(token_id)
         return evidence
 
@@ -993,6 +1095,14 @@ class EpisodeEngine:
             raise EditorError("cannot apply an action after the episode ended")
         if self.checkpointed:
             raise EditorError("cannot apply an action until the checkpoint is resumed")
+        if replay or not isinstance(action, (Accept, SelectRawRank)):
+            self.discard_speculative_accept()
+        elif (
+            self._prepared_accept is not None
+            and isinstance(action, SelectRawRank)
+            and action.rank != self._prepared_accept.observation.proposal_raw_rank
+        ):
+            self.discard_speculative_accept()
         if (
             isinstance(action, Hold)
             and self.remaining is not None

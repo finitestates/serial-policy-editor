@@ -105,3 +105,38 @@ top-token divergence. The profile's `rtol` and `atol` apply to the entire logit
 vector and are not automatically widened after failure.
 
 Just as an example: On the local CPU Q4_K_M GGUF reference in one trial, we observed a numerical mismatch at checkpoint 2 (maximum 0.403), which peaked at 0.511 at checkpoint 5, and persisted through checkpoint 8 (0.433). The top token continued to agree throughout the duration of the run. The harness will report this as a failure, but the episode would still be replayable. One of the reasons that replay has the definition it does is to separate numerical failures from "practical effects." Interestingly, the numerical divergence widened, but then narrowed again, which suggests at least in this limited episode that the numerical divergence didn't "snowball" into greater downstream effects. (This matches what has been observed elsewhere about successful replay episodes being conducted using handoff rules at lengths far longer than what the harness currently tests for. The current "record" for maximum replay length without token selection divergence is ~700 matched teacher actions using GPT-2).
+
+
+## Chord latency investigation
+
+`chord_latency.py` isolates ephemeral chord construction/advancement, selection
+restore, ordinary-action commit, and next-menu preparation. It uses an explicitly
+selected local GGUF, greedy sampling, and no CFG. Every measured phase records
+elapsed milliseconds, model-evaluation calls, and evaluated input positions.
+The initial prompt, loading, human input, and terminal painting are excluded.
+
+```bash
+.venv/bin/python benchmarks/chord_latency.py \
+  --model /absolute/path/to/model.gguf --rounds 0 3 --repeats 3 \
+  --output /tmp/chord-latency.json
+```
+
+The default is CPU inference with four threads and cache reuse. Match the actual
+launch with `--gpu-layers`, `--threads`, and `--cache`; adjust starting context
+length with `--prompt-repeats`. Add `--one-live-path` to measure continued
+advancement when another path has already reached EOG. An early-ending fixture
+fails explicitly instead of silently timing a shorter workload.
+
+Use `--package-root /path/to/source-copy` to compare revisions without changing
+the working checkout. Alternate revisions with the same interpreter, model and
+settings, and check token IDs and model work as well as timings. This focused
+diagnostic does not replace the full harness's provenance/comparison checks.
+For normal cache truncation, `restore` evaluates one input position; evaluating
+the entire starting prefix identifies a full rebuild (expected with cache off,
+or possible when the installed binding cannot truncate its cache).
+
+`tui_transitions.py` now includes chord display, chord advance and return to the
+regular menu, and can load the pre-consolidation request types for historical
+comparisons. It measures prepared views separately from inference. See
+[the investigation](CHORD_PERF_REVIEW.md) for the measured results and remaining
+optimization targets.

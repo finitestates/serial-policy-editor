@@ -16,8 +16,10 @@ from .actions import (
     action_from_dict,
 )
 from .backend import (
+    BackendStateSnapshot,
     CacheMode,
     InferenceBackend,
+    SnapshotableInferenceBackend,
     require_inference_backend,
     validate_cache_mode,
 )
@@ -45,6 +47,7 @@ __all__ = [
     "ActionOutcome",
     "CandidateFilterResult",
     "Candidate",
+    "BackendStateSnapshot",
     "CacheMode",
     "ControllerTrace",
     "ControllerTraceStage",
@@ -57,6 +60,7 @@ __all__ = [
     "EndGeneration",
     "Hold",
     "InferenceBackend",
+    "SnapshotableInferenceBackend",
     "ObservationStatistics",
     "Phrase",
     "PolicyAction",

@@ -13,6 +13,7 @@ from .core.ui import EditAction, InsertMode
 
 
 class CommandKind(str, Enum):
+    CHORD = "chord"
     BIAS = "bias"
     EDIT = "edit"
     PHRASE = "phrase"
@@ -84,9 +85,27 @@ class TeacherCommand:
     bias_group_name: str | None = None
     bias_group_members: tuple[str, ...] | None = None
     bias_group_member_bare: tuple[bool, ...] | None = None
+    chord_ranks: tuple[int, ...] | None = None
+
+
+class CommandState(str, Enum):
+    INCOMPLETE = "incomplete"
+    INVALID = "invalid"
+    READY = "ready"
+
+
+@dataclass(frozen=True)
+class CommandInterpretation:
+    """Syntax only. A ready command may still fail episode validation."""
+
+    raw: str
+    state: CommandState
+    command: TeacherCommand | None = None
+    message: str = ""
 
 
 HELP_TEXT = """Commands:
+  READY means command syntax is understood; episode checks still happen on Enter.
   Tab / Shift-Tab   move down/up through the current table's visual order;
                     a search lens cycles only within its neighborhood
                     the first Tab selects the sampled proposal's backend rank
@@ -459,6 +478,24 @@ def parse_bias_command(raw: str, *, vocabulary_size: int) -> TeacherCommand | No
             bias_stop_text=stop_text, bias_stop_token=stop_token)
     return None
 
+
+def parse_chord(raw: str, vocabulary_size: int) -> tuple[int, ...] | None:
+    """Recognize chord syntax without importing its runtime simulation."""
+    parts = raw.strip().split()
+    if not parts or parts[0].lower() != "chord":
+        return None
+    if not 2 <= len(parts) - 1 <= 26:
+        raise EditorError("use chord RANK RANK [RANK ...] (up to 26 paths)")
+    if any(not part.isdecimal() for part in parts[1:]):
+        raise EditorError("chord ranks must be positive integers")
+    ranks = tuple(int(part) for part in parts[1:])
+    if len(set(ranks)) != len(ranks):
+        raise EditorError("chord ranks must be distinct")
+    if any(rank < 1 or rank > vocabulary_size for rank in ranks):
+        raise EditorError(f"chord ranks must be between 1 and {vocabulary_size}")
+    return ranks
+
+
 def parse_command(
     raw: str,
     *,
@@ -467,6 +504,9 @@ def parse_command(
     vocabulary_size: int | None = None,
     default_search_radius: int = 3,
 ) -> TeacherCommand:
+    chord_ranks = parse_chord(raw, vocabulary_size or menu_size)
+    if chord_ranks is not None:
+        return TeacherCommand(CommandKind.CHORD, chord_ranks=chord_ranks)
     bias_command = parse_bias_command(raw, vocabulary_size=vocabulary_size or menu_size)
     if bias_command is not None:
         return bias_command
@@ -673,13 +713,69 @@ def parse_command(
         note = raw[2:] if len(raw) >= 2 and raw[1:2].isspace() else None
         return TeacherCommand(CommandKind.NOTE_AFTER, note=note)
     if len(raw) >= 2 and raw[:2].lower() == "t ":
+        if not raw[2:]:
+            raise EditorError("t requires insertion text")
         return TeacherCommand(
             CommandKind.EDIT,
             action=EditAction.insert(raw[2:], InsertMode.CONTINUATION),
         )
     if len(raw) >= 2 and raw[:2].lower() == "x ":
+        if not raw[2:]:
+            raise EditorError("x requires insertion text")
         return TeacherCommand(
             CommandKind.EDIT,
             action=EditAction.insert(raw[2:], InsertMode.EXACT),
         )
     raise EditorError("unknown command; use ? for help")
+
+
+def interpret_command(
+    raw: str,
+    *,
+    menu_size: int,
+    default_hold_tokens: int,
+    vocabulary_size: int,
+    default_search_radius: int = 3,
+    implicit_accept: bool = True,
+) -> CommandInterpretation:
+    """Classify a draft and carry the exact command to the submit path.
+
+    Blank input selects the sampled proposal only in an active choice. Other
+    prefixes are incomplete only when more input can make them valid.
+    """
+    if not raw.strip() and implicit_accept:
+        return CommandInterpretation(
+            raw, CommandState.READY,
+            TeacherCommand(CommandKind.EDIT, action=EditAction.accept()),
+        )
+
+    stripped = raw.strip()
+    lower = stripped.lower()
+    if raw == "/":
+        return CommandInterpretation(raw, CommandState.INCOMPLETE, message="Type token text after /.")
+    if lower in {"t", "x"} or (len(raw) == 2 and raw[:2].lower() in {"t ", "x "}):
+        return CommandInterpretation(raw, CommandState.INCOMPLETE, message="Type text after the insertion command.")
+    if lower in {"check", "checkx", "force", "forcex"} or any(
+        raw.lstrip().lower() == spelling + " "
+        for spelling in ("check", "checkx", "force", "forcex")
+    ):
+        return CommandInterpretation(raw, CommandState.INCOMPLETE, message="Type phrase text after the command.")
+    if lower == "overlay":
+        return CommandInterpretation(raw, CommandState.INCOMPLETE, message="Type a wired overlay name.")
+    chord_parts = stripped.split()
+    if chord_parts and chord_parts[0].lower() == "chord" and len(chord_parts) < 3:
+        if len(chord_parts) == 1:
+            return CommandInterpretation(raw, CommandState.INCOMPLETE, message="Type at least two distinct raw ranks.")
+        if chord_parts[1].isdecimal() and 1 <= int(chord_parts[1]) <= vocabulary_size:
+            return CommandInterpretation(raw, CommandState.INCOMPLETE, message="Type another distinct raw rank.")
+    try:
+        command = parse_command(
+            raw,
+            menu_size=menu_size,
+            default_hold_tokens=default_hold_tokens,
+            vocabulary_size=vocabulary_size,
+            default_search_radius=default_search_radius,
+        )
+    except EditorError as exc:
+        return CommandInterpretation(raw, CommandState.INVALID, message=str(exc))
+    return CommandInterpretation(raw, CommandState.READY, command)

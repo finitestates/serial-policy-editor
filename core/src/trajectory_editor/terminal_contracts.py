@@ -7,7 +7,7 @@ but command interpretation and engine work stay with the caller.
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol
 
 from .core.candidates import Candidate
@@ -61,6 +61,14 @@ class ChoiceViewState:
     show_model_probabilities: bool = False
     column_focus: str | None = None
     overlays: frozenset[str] = frozenset()
+    default_hold_tokens: int = 100
+    default_search_radius: int = 3
+    idle_work: Callable[[Callable[[], bool]], Any] | None = field(
+        default=None, repr=False, compare=False
+    )
+    cancel_idle_work: Callable[[], None] | None = field(
+        default=None, repr=False, compare=False
+    )
 
 
 @dataclass(frozen=True)
