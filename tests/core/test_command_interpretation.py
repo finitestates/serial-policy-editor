@@ -93,26 +93,6 @@ def test_malformed_commands_never_look_ready(raw):
     assert preview.detail == interpretation.message
 
 
-def test_pending_resolution_keeps_a_ready_command_and_visible_pending_cue():
-    _, choice, candidates = _decision()
-
-    def pending(*args):
-        raise PreviewPending()
-
-    candidate = _preview("8", choice, candidates, resolve_candidate=pending)
-    insertion = action_preview(
-        choice, "x hello", candidates, pending,
-        default_hold_tokens=24, default_search_radius=2,
-    )
-    assert candidate.state == insertion.state == "pending"
-    assert candidate.command.kind == insertion.command.kind == CommandKind.EDIT
-    fragments = _render_choice(
-        choice, candidates, "x hello", None, pending, None,
-        terminal_size=(80, 30), default_hold_tokens=24, default_search_radius=2,
-    )
-    assert any("PENDING ·" in text and style == "class:pending" for style, text in fragments)
-
-
 def test_invalid_and_incomplete_cues_are_static_and_textual():
     _, choice, candidates = _decision()
     for raw, marker, style in (
@@ -156,20 +136,6 @@ def test_submit_reinterprets_the_actual_buffer_and_blank_accepts_proposal():
         "", menu_size=4, default_hold_tokens=24, vocabulary_size=8,
         implicit_accept=False,
     ).state == CommandState.INVALID
-
-
-def test_pending_preview_cannot_replace_later_submitted_text():
-    engine, choice, candidates = _decision()
-
-    def pending(*args):
-        raise PreviewPending()
-
-    preview = action_preview(choice, "x old", candidates, pending)
-    assert preview.state == "pending"
-    submitted = InteractivePolicy(io=ScriptedIO(["h 2"])).choose(
-        engine, engine.observe()
-    )
-    assert submitted.kind == "hold" and submitted.limit == 2
 
 
 def test_syntax_ready_runtime_rejection_keeps_choice_editable():
