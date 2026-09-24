@@ -79,7 +79,9 @@ class Observation:
 @dataclass(frozen=True)
 class _PreparedAccept:
     observation: Observation = field(repr=False, compare=False)
+    raw_rank: int
     token_id: int
+    generation: int
     backend_snapshot: BackendStateSnapshot = field(repr=False, compare=False)
 
 
@@ -155,6 +157,7 @@ class EpisodeEngine:
             self._guidance_prompt_tokens()
         self._observation: Observation | None = None
         self._observation_key: tuple | None = None
+        self._latest_speculation_generation = -1
         self._ephemeral_logit_biases: dict[int, float] = {}
         self._activation_validation_key: tuple | None = None
         self._activation_runtime_key: tuple | None = None
@@ -352,22 +355,46 @@ class EpisodeEngine:
         self,
         observation: Observation,
         *,
+        raw_rank: int | None = None,
+        token_id: int | None = None,
+        generation: int = 0,
         cancelled: Callable[[], bool] | None = None,
     ) -> bool:
-        """Warm the primary backend as if this boundary's proposal were accepted.
+        """Warm the primary backend for one selected raw-rank token.
 
         The backend is restored to the current committed prefix before this
         method returns. A matching ordinary action can later restore the
         warmed state and skip its one-token model evaluation. Backends without
-        exact snapshot support, active CFG, terminal proposals, and the final
+        exact snapshot support, active CFG, terminal tokens, and the final
         token before a checkpoint simply decline speculation.
         """
-        self.discard_speculative_accept()
         is_cancelled = cancelled or (lambda: False)
-        if is_cancelled():
+        if (
+            type(generation) is not int or generation < 0
+            or generation < self._latest_speculation_generation
+            or is_cancelled()
+        ):
+            return False
+        if self.ended or self.checkpointed:
             return False
         self._validate_observation(observation)
-        token_id = int(observation.proposal_token_id)
+        if raw_rank is None and token_id is None:
+            raw_rank = observation.proposal_raw_rank
+            token_id = observation.proposal_token_id
+        elif raw_rank is None:
+            if type(token_id) is not int or not 0 <= token_id < len(observation.logits):
+                return False
+            raw_rank = observation.statistics.raw_rank(token_id)
+        if type(raw_rank) is not int or not 1 <= raw_rank <= len(observation.logits):
+            return False
+        selected_token_id = int(observation.statistics.top_raw_ids(raw_rank)[-1])
+        if token_id is not None and (
+            type(token_id) is not int or token_id != selected_token_id
+        ):
+            return False
+        token_id = selected_token_id
+        self._latest_speculation_generation = generation
+        self.discard_speculative_accept()
         if (
             self.backend.is_eog(token_id)
             or (self.remaining is not None and self.remaining <= 1)
@@ -411,7 +438,9 @@ class EpisodeEngine:
             return False
         if self._observation is not observation or self._decision_key() != self._observation_key:
             return False
-        self._prepared_accept = _PreparedAccept(observation, token_id, warmed)
+        self._prepared_accept = _PreparedAccept(
+            observation, raw_rank, token_id, generation, warmed
+        )
         return True
 
     @staticmethod
@@ -1095,12 +1124,18 @@ class EpisodeEngine:
             raise EditorError("cannot apply an action after the episode ended")
         if self.checkpointed:
             raise EditorError("cannot apply an action until the checkpoint is resumed")
+        prepared = self._prepared_accept
         if replay or not isinstance(action, (Accept, SelectRawRank)):
             self.discard_speculative_accept()
-        elif (
-            self._prepared_accept is not None
-            and isinstance(action, SelectRawRank)
-            and action.rank != self._prepared_accept.observation.proposal_raw_rank
+        elif prepared is not None and (
+            (
+                isinstance(action, Accept)
+                and prepared.token_id != prepared.observation.proposal_token_id
+            )
+            or (
+                isinstance(action, SelectRawRank)
+                and action.rank != prepared.raw_rank
+            )
         ):
             self.discard_speculative_accept()
         if (

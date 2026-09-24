@@ -63,10 +63,10 @@ class ChoiceViewState:
     overlays: frozenset[str] = frozenset()
     default_hold_tokens: int = 100
     default_search_radius: int = 3
-    idle_work: Callable[[Callable[[], bool]], Any] | None = field(
+    warm_selection: Callable[[int, int, int, Callable[[], bool]], Any] | None = field(
         default=None, repr=False, compare=False
     )
-    cancel_idle_work: Callable[[], None] | None = field(
+    cancel_warm_selection: Callable[[], None] | None = field(
         default=None, repr=False, compare=False
     )
 

@@ -512,17 +512,19 @@ class InteractivePolicy:
                 overlays=self.view_preferences.overlays,
                 default_hold_tokens=self.default_hold_tokens,
                 default_search_radius=self.search_radius,
-                idle_work=(
-                    (lambda cancelled: engine.speculate_accept(
-                        observation, cancelled=cancelled
+                warm_selection=(
+                    (lambda rank, token_id, generation, cancelled: engine.speculate_accept(
+                        observation,
+                        raw_rank=rank,
+                        token_id=token_id,
+                        generation=generation,
+                        cancelled=cancelled,
                     ))
-                    if review_boundary is None and not search_lens_active
-                    else None
+                    if review_boundary is None else None
                 ),
-                cancel_idle_work=(
+                cancel_warm_selection=(
                     engine.discard_speculative_accept
-                    if review_boundary is None and not search_lens_active
-                    else None
+                    if review_boundary is None else None
                 ),
             ))
             if raw is None:
