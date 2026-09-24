@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+from bisect import bisect_right
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
@@ -52,6 +53,75 @@ class SearchLens:
     target_rank: int
     lower_rank: int
     upper_rank: int
+
+
+class _SeamlessActionIndex:
+    """Action-boundary labels with an O(1) cursor for adjacent review steps."""
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._starts: dict[int, str] = {}
+        self._ends: dict[int, str] = {}
+        self._spans: list[tuple[int, int, str]] = []
+        self._span_ends: list[int] = []
+        self._last_ordinal = -1
+        self._span_cursor = 0
+        self._boundary: int | None = None
+        self.extend(rows)
+
+    @property
+    def last_ordinal(self) -> int:
+        return self._last_ordinal
+
+    def extend(self, rows: list[dict[str, Any]]) -> None:
+        for row in rows:
+            before = int(row["boundary_before"])
+            after = int(row["boundary_after"])
+            kind = str(row["kind"])
+            self._starts.setdefault(before, kind)
+            self._ends.setdefault(after, kind)
+            if after > before:
+                self._spans.append((before, after, kind))
+                self._span_ends.append(after)
+            self._last_ordinal = max(self._last_ordinal, int(row["ordinal"]))
+
+    def position(self, boundary: int) -> dict[str, Any]:
+        if self._boundary is None:
+            self._span_cursor = bisect_right(self._span_ends, boundary)
+        elif boundary == self._boundary:
+            pass
+        elif abs(boundary - self._boundary) != 1:
+            self._span_cursor = bisect_right(self._span_ends, boundary)
+        elif boundary > self._boundary:
+            if (
+                self._span_cursor < len(self._spans)
+                and self._spans[self._span_cursor][1] <= boundary
+            ):
+                self._span_cursor += 1
+        elif (
+            self._span_cursor > 0
+            and self._spans[self._span_cursor - 1][1] > boundary
+        ):
+            self._span_cursor -= 1
+        self._boundary = boundary
+
+        start = self._starts.get(boundary)
+        if start is not None:
+            return {"kind": "action-boundary", "action_kind": start, "side": "before"}
+        if self._span_cursor < len(self._spans):
+            before, after, kind = self._spans[self._span_cursor]
+            if before < boundary < after:
+                if kind == "hold":
+                    return {
+                        "kind": "inside-span",
+                        "span_type": "hold",
+                        "offset_visible_tokens": boundary - before,
+                        "total_visible_tokens": after - before,
+                    }
+                return {"kind": "action-boundary", "action_kind": kind, "side": "inside"}
+        end = self._ends.get(boundary)
+        if end is not None:
+            return {"kind": "action-boundary", "action_kind": end, "side": "after"}
+        return {"kind": "token-boundary"}
 
 
 def _choice_from_observation(
@@ -150,7 +220,26 @@ class InteractivePolicy:
         self.store = store
         self.episode_id = episode_id
         self.seamless = bool(seamless)
+        self._seamless_action_index: _SeamlessActionIndex | None = None
         self.choice_serial = 0
+
+    def _prepare_seamless_action_index(self, boundary: int) -> None:
+        if not self.seamless:
+            return
+        if self._seamless_action_index is None:
+            rows = (
+                self.store.action_boundaries(self.episode_id)
+                if self.store is not None and self.episode_id is not None
+                else []
+            )
+            self._seamless_action_index = _SeamlessActionIndex(rows)
+        elif self.store is not None and self.episode_id is not None:
+            rows = self.store.action_boundaries(
+                self.episode_id,
+                after_ordinal=self._seamless_action_index.last_ordinal,
+            )
+            self._seamless_action_index.extend(rows)
+        self._seamless_action_index.position(boundary)
 
     def _show_policy_diagnostics(self, engine: EpisodeEngine) -> bool:
         del engine
@@ -329,7 +418,12 @@ class InteractivePolicy:
         )
 
     def _review(
-        self, engine: EpisodeEngine, boundary: int, active: int
+        self,
+        engine: EpisodeEngine,
+        boundary: int,
+        active: int,
+        *,
+        position: dict[str, Any],
     ) -> BoundaryReview:
         prefix = [*engine.initial_token_ids, *engine.visible_token_ids[:boundary]]
         next_token = (
@@ -349,57 +443,11 @@ class InteractivePolicy:
             ],
             context_token_sha256=token_prefix_sha256(prefix),
             next_token=next_token,
-            position=(
-                self._seamless_position(boundary)
-                if self.seamless
-                else {"kind": "token-boundary"}
-            ),
+            position=position,
         )
 
-    def _seamless_targets(
-        self, engine: EpisodeEngine, active_boundary: int
-    ) -> tuple[int, ...]:
-        """Return every visible token boundary, including the interior of writes."""
-        return tuple(range(active_boundary + 1))
-
-    def _seamless_position(self, boundary: int) -> dict[str, Any]:
-        if self.store is None or self.episode_id is None:
-            return {"kind": "token-boundary"}
-        rows = self.store.actions(self.episode_id)
-        for row in rows:
-            if int(row["boundary_before"]) == boundary:
-                return {
-                    "kind": "action-boundary",
-                    "action_kind": str(row["kind"]),
-                    "side": "before",
-                }
-        for row in rows:
-            before = int(row["boundary_before"])
-            after = int(row["boundary_after"])
-            if before < boundary < after:
-                kind = str(row["kind"])
-                if kind == "hold":
-                    return {
-                        "kind": "inside-span",
-                        "span_type": "hold",
-                        "offset_visible_tokens": boundary - before,
-                        "total_visible_tokens": after - before,
-                    }
-                return {
-                    "kind": "action-boundary",
-                    "action_kind": kind,
-                    "side": "inside",
-                }
-        for row in rows:
-            if int(row["boundary_after"]) == boundary:
-                return {
-                    "kind": "action-boundary",
-                    "action_kind": str(row["kind"]),
-                    "side": "after",
-                }
-        return {"kind": "token-boundary"}
-
     def choose(self, engine: EpisodeEngine, observation: Observation) -> PolicyAction:
+        self._prepare_seamless_action_index(observation.boundary)
         self.choice_serial += 1
         view = self._view_plan(engine)
         candidates = engine.candidates(
@@ -436,11 +484,6 @@ class InteractivePolicy:
         feedback: ChoiceFeedback | None = None
         policy_sort = self.view_preferences.sort_by_policy
         review_boundary: int | None = None
-        seamless_targets = (
-            self._seamless_targets(engine, observation.boundary)
-            if self.seamless
-            else ()
-        )
         proposal_prefill_available = not self.manual_acceptance
         while True:
             policy_columns = self._show_policy_diagnostics(engine)
@@ -489,6 +532,19 @@ class InteractivePolicy:
             )
             if policy_sort and not search_lens_active:
                 exposed.update((candidate.rank, candidate) for candidate in displayed)
+            review = None
+            if review_boundary is not None:
+                position = (
+                    self._seamless_action_index.position(review_boundary)
+                    if self.seamless and self._seamless_action_index is not None
+                    else {"kind": "token-boundary"}
+                )
+                review = self._review(
+                    engine,
+                    review_boundary,
+                    observation.boundary,
+                    position=position,
+                )
             raw = self.io.read_choice(ChoiceViewState(
                 choice,
                 remaining_tokens=engine.remaining,
@@ -505,11 +561,7 @@ class InteractivePolicy:
                     if proposal_prefill_available and review_boundary is None
                     else None
                 ),
-                review=(
-                    self._review(engine, review_boundary, observation.boundary)
-                    if review_boundary is not None
-                    else None
-                ),
+                review=review,
                 seamless=self.seamless,
                 reactivate_on_review_enter=(
                     self.seamless and review_boundary is not None
@@ -580,26 +632,15 @@ class InteractivePolicy:
                 raise ChordRequested(command.chord_ranks)
             if review_boundary is not None:
                 if command.kind == CommandKind.REVIEW_BACK:
-                    if self.seamless:
-                        previous = [
-                            target
-                            for target in seamless_targets
-                            if target < review_boundary
-                        ]
-                        if previous:
-                            review_boundary = previous[-1]
-                    else:
-                        review_boundary = max(0, review_boundary - 1)
+                    review_boundary = max(0, review_boundary - 1)
                     continue
                 if command.kind == CommandKind.REVIEW_FORWARD:
                     if self.seamless:
-                        following = [
-                            target
-                            for target in seamless_targets
-                            if target > review_boundary
-                            and target < observation.boundary
-                        ]
-                        review_boundary = following[0] if following else None
+                        review_boundary = (
+                            review_boundary + 1
+                            if review_boundary + 1 < observation.boundary
+                            else None
+                        )
                     else:
                         review_boundary = min(observation.boundary, review_boundary + 1)
                     continue
@@ -903,13 +944,8 @@ class InteractivePolicy:
                 continue
             if command.kind == CommandKind.REVIEW_BACK:
                 if self.seamless:
-                    previous = [
-                        target
-                        for target in seamless_targets
-                        if target < observation.boundary
-                    ]
-                    if previous:
-                        review_boundary = previous[-1]
+                    if observation.boundary > 0:
+                        review_boundary = observation.boundary - 1
                 else:
                     review_boundary = max(0, observation.boundary - 1)
                 continue

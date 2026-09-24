@@ -228,7 +228,13 @@ def action_preview(
 
     effects = {
         CommandKind.BIAS: ("token bias", "Update this bias rule; stay at this step."),
-        CommandKind.PHRASE: ("phrase action", "Press Enter to probe or apply the phrase; runtime limits are checked then."),
+        CommandKind.PHRASE: (
+            "phrase action",
+            (
+                "Enter validates and applies the phrase as one action; checked phrases "
+                "roll back if a token exceeds the shift bound."
+            ),
+        ),
         CommandKind.HOLD: ("hold", "Hold will release control only after Enter."),
         CommandKind.FINISH: ("finish", "Open the live edge menu on Enter; no tokens are generated."),
         CommandKind.TEACHER_EOG: ("teacher EOG", "Teacher EOG selection begins on Enter."),

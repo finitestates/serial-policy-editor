@@ -1031,30 +1031,6 @@ class EpisodeEngine:
                     divergence=divergence,
                 )
 
-        def probe() -> list[dict[str, Any]]:
-            details: list[dict[str, Any]] = []
-            try:
-                for token_id in planned:
-                    observation = self.observe()
-                    required = self._phrase_required_shift(observation, token_id)
-                    if required > float(action.max_shift):
-                        text = self.backend.token_text(token_id)
-                        raise InstructionRejected(
-                            f"check phrase rejected at token {len(details) + 1} {text!r}: "
-                            f"requires policy shift +{required:.4g}, "
-                            f"bound is +{float(action.max_shift):.4g}"
-                        )
-                    details.append(self._phrase_step_diagnostic(observation, token_id, required))
-                    self._commit_token(observation, token_id)
-                return details
-            finally:
-                self.rewind_to(before)
-
-        if not action.force:
-            # The dry run is separate from the committing pass so live learner
-            # updates still affect each subsequent token.
-            probe()
-
         evidence: list[TokenEvidence] = []
         visible: list[int] = []
         resolved: list[int] = []
@@ -1063,6 +1039,13 @@ class EpisodeEngine:
             for token_id in planned:
                 natural = self.observe()
                 required = self._phrase_required_shift(natural, token_id)
+                if not action.force and required > float(action.max_shift):
+                    text = self.backend.token_text(token_id)
+                    raise InstructionRejected(
+                        f"check phrase rejected at token {len(details) + 1} {text!r}: "
+                        f"requires policy shift +{required:.4g}, "
+                        f"bound is +{float(action.max_shift):.4g}"
+                    )
                 applied = required if action.force else 0.0
                 detail = self._phrase_step_diagnostic(
                     natural, token_id, required, applied_shift=applied
@@ -1082,6 +1065,12 @@ class EpisodeEngine:
                 if item.realized_visible:
                     visible.append(token_id)
                 details.append(detail)
+        except InstructionRejected:
+            if not action.force:
+                # Validate successive prefixes in one pass while keeping the
+                # checked phrase atomic to its caller.
+                self.rewind_to(before)
+            raise
         finally:
             self._ephemeral_logit_biases = {}
             self._invalidate_observation()

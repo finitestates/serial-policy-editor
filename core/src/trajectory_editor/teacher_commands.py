@@ -132,8 +132,8 @@ HELP_TEXT = """Commands:
   t TEXT            insert continuation text (adds a joining space if needed)
   x TEXT            insert exact text
                     after `t ` or `x `, Tab inserts a literal tab character
-  check TEXT        probe and commit a continuation phrase if every token is within the configured shift bound
-  checkx TEXT       probe and commit an exact phrase without implicit whitespace
+  check TEXT        commit a continuation phrase only if every token is within the shift bound
+  checkx TEXT       same check for an exact phrase without implicit whitespace
   force TEXT        force a continuation phrase with temporary per-token policy shifts
   forcex TEXT       force an exact phrase without implicit whitespace
   h [N]              release control for N tokens (default: configured limit)
