@@ -5,8 +5,6 @@ from contextlib import contextmanager
 
 import numpy as np
 
-from trajectory_editor.core.backend import BackendStateSnapshot
-
 
 class ConformingFakeBackend:
     pieces = {
@@ -81,37 +79,49 @@ class ConformingFakeBackend:
         return {"backend": "fake", "vocabulary_size": self.vocabulary_size()}
 
 
-class SnapshotFakeBackend(ConformingFakeBackend):
-    """Instrumented exact-snapshot backend for speculative continuation tests."""
+class SpeculativeFakeBackend(ConformingFakeBackend):
+    """Instrumented backend that speculates by appending one token in place."""
 
     def __init__(self, *, on_eval: Callable[[], None] | None = None) -> None:
         super().__init__()
-        self._snapshot_token = object()
         self.on_eval = on_eval
         self.eval_calls: list[tuple[int, ...]] = []
-        self.snapshot_calls = 0
-        self.restore_calls = 0
+        self._speculation_prefix: tuple[int, ...] | None = None
+
+    def reset(self, prefix_token_ids: list[int]) -> None:
+        self.rollback_speculation()
+        super().reset(prefix_token_ids)
 
     def eval(self, token_ids: list[int]) -> None:
+        if self._speculation_prefix is not None:
+            self.rollback_speculation()
         self.eval_calls.append(tuple(token_ids))
         super().eval(token_ids)
         if self.on_eval is not None:
             self.on_eval()
 
-    def snapshot_state(self) -> BackendStateSnapshot:
-        self.snapshot_calls += 1
-        prefix = tuple(self.tokens)
-        return BackendStateSnapshot(self._snapshot_token, prefix, prefix)
-
-    def restore_state(self, snapshot: BackendStateSnapshot) -> bool:
-        self.restore_calls += 1
-        if (
-            snapshot.backend_token is not self._snapshot_token
-            or snapshot.payload != snapshot.prefix_token_ids
-        ):
-            return False
-        self.tokens = list(snapshot.prefix_token_ids)
+    def speculate(self, token_id: int) -> bool:
+        if self._speculation_prefix is not None:
+            self.rollback_speculation()
+        self._speculation_prefix = tuple(self.tokens)
+        self.eval_calls.append((int(token_id),))
+        super().eval([int(token_id)])
+        if self.on_eval is not None:
+            self.on_eval()
         return True
+
+    def commit_speculation(self) -> None:
+        if self._speculation_prefix is None:
+            return
+        if len(self.tokens) != len(self._speculation_prefix) + 1:
+            raise RuntimeError("fake backend position changed before speculative commit")
+        self._speculation_prefix = None
+
+    def rollback_speculation(self) -> None:
+        if self._speculation_prefix is None:
+            return
+        self.tokens = list(self._speculation_prefix)
+        self._speculation_prefix = None
 
 
 class ChangedProposalBackend(ConformingFakeBackend):

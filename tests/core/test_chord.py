@@ -7,7 +7,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from tests.fakes import ConformingFakeBackend, ScriptedIO, SnapshotFakeBackend
+from tests.fakes import ConformingFakeBackend, ScriptedIO, SpeculativeFakeBackend
 from trajectory_editor.chord import Chord, _recent_context, chord_menu, parse_chord
 from trajectory_editor.core.actions import Accept, SelectRawRank
 from trajectory_editor.core.errors import EditorError
@@ -32,7 +32,7 @@ def engine(*, budget=None, backend=None, guidance=None, sampling=None):
     )
 
 
-class OrderedSnapshotBackend(SnapshotFakeBackend):
+class OrderedSpeculativeBackend(SpeculativeFakeBackend):
     """Context-sensitive token paths for preview-to-commit invariants."""
 
     pieces = {
@@ -110,7 +110,7 @@ def test_chord_discard_and_survivor_match_ordinary_actions():
 def test_chord_menu_preview_matches_committed_tokens_after_switch_and_rewind(
     warm, branching, selection, expected_ids,
 ):
-    backend = OrderedSnapshotBackend()
+    backend = OrderedSpeculativeBackend()
     if not branching:
         backend.branch_to_prefix = None
     original = engine(backend=backend, sampling=SamplerConfig(temperature=0.0))
@@ -120,9 +120,13 @@ def test_chord_menu_preview_matches_committed_tokens_after_switch_and_rewind(
         assert original.speculate_accept(
             observation, raw_rank=1, token_id=1, generation=1,
         )
-        assert backend.tokens == list(base)
+        assert original.token_ids == list(base)
+        assert backend.tokens == [*base, 1]
 
     chord = Chord(original, (1, 2))
+    if warm:
+        assert original.token_ids == list(base)
+        assert not original.has_prepared_accept(observation, 1, 1)
     assert chord.advance()
     assert chord.advance()
     assert chord.rewind()

@@ -509,6 +509,8 @@ def test_s08_adapter_cfg_evaluation_preserves_cache_mode(kind, cache):
             decode=lambda ids, **kw: fake.render(ids),
         )
     guidance._tokens = []
+    guidance._speculation_prefix = None
+    guidance._speculation_logits = None
     guidance._vocabulary_size = 12
     guidance._cache_enabled = cache
     runtime = engine(guidance_backend=guidance)

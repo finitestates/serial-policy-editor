@@ -85,6 +85,9 @@ class Chord:
     def __init__(self, engine: EpisodeEngine, ranks: tuple[int, ...]) -> None:
         if engine.ended or engine.checkpointed:
             raise EditorError("chord requires a live decision boundary")
+        if engine._speculative_accept_prefix is not None:
+            engine.discard_speculative_accept()
+            engine._ensure_backend_positioned()
         self.original = engine
         self.base_visible = list(engine.visible_token_ids)
         self.base_prefix = list(engine.token_ids)

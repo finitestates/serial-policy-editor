@@ -6,7 +6,7 @@ from dataclasses import replace
 
 import pytest
 
-from tests.fakes import ConformingFakeBackend, ScriptedIO, SnapshotFakeBackend
+from tests.fakes import ConformingFakeBackend, ScriptedIO, SpeculativeFakeBackend
 from tests.core.runtime_helpers import LiveScriptedIO
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.edge_help import edge_help
@@ -116,11 +116,16 @@ def test_choice_requests_preserve_actions_feedback_and_lazy_statistics():
 
     assert len(requests[0]) == len(requests[1]) == 4
     for plain, live in zip(*requests):
+        # This key identifies an engine/prefix pair; the remaining request data agrees.
         plain_choice = replace(
-            plain.choice, context_text_tail=str(plain.choice.context_text_tail)
+            plain.choice,
+            context_token_sha256="per-run context cursor",
+            context_text_tail=str(plain.choice.context_text_tail),
         )
         live_choice = replace(
-            live.choice, context_text_tail=str(live.choice.context_text_tail)
+            live.choice,
+            context_token_sha256="per-run context cursor",
+            context_text_tail=str(live.choice.context_text_tail),
         )
         assert plain_choice == live_choice
         assert plain.display_candidates == live.display_candidates
@@ -233,7 +238,7 @@ def test_choice_warm_callback_resolves_selected_rank_through_policy(submitted_ra
             return str(submitted_rank)
 
     terminal = WarmCapture()
-    backend = SnapshotFakeBackend()
+    backend = SpeculativeFakeBackend()
     engine = EpisodeEngine(
         backend, initial_text="P", initial_token_ids=[7],
         sampling=SamplerConfig(temperature=0.0),

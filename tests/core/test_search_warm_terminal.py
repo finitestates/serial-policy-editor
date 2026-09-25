@@ -11,7 +11,7 @@ from prompt_toolkit.data_structures import Size
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output.vt100 import Vt100_Output
 
-from tests.fakes import SnapshotFakeBackend
+from tests.fakes import SpeculativeFakeBackend
 from trajectory_editor.core.actions import Accept, SelectRawRank
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine
@@ -40,7 +40,7 @@ def _terminal():
     )
 
 
-class SearchBackend(SnapshotFakeBackend):
+class SearchBackend(SpeculativeFakeBackend):
     def __init__(self, *, on_eval=None):
         super().__init__(on_eval=on_eval)
         self.pieces = {**self.pieces, 3: "TERM", 4: "SECOND"}
@@ -166,8 +166,10 @@ def test_exact_search_warms_before_tab_and_rank_commit_promotes_it():
                     assert request.warm_future.result() is True
                     assert request.state.search_lens_active
                     assert session.choice_view.command_buffer.text == ""
-                    # Speculation restored the committed prefix before selection.
-                    assert backend.tokens == [7]
+                    # The semantic episode prefix stays fixed while the backend holds the warm token.
+                    assert engine.token_ids == [7]
+                    assert backend.tokens == [7, 3]
+                    assert engine.has_prepared_accept(observation, rank, 3)
                     pipe.send_text("\t")
                     assert _until(lambda: session.choice_view.command_buffer.text == str(rank))
                     pipe.send_text("\r")
