@@ -3,6 +3,12 @@
 This project is an interactive episode runtime: a menu-driven environment
 for selecting tokens sequentially. This environment also has the capacity for rewinding, forking, speculative decoding, as well as replaying episodes.
 
+The engine's complete semantic state is the token ledger plus the sampler configuration and coordinate. The kernel of the program deterministically samples the probability distribution of a language model by constructing sampler coordinates out of the SHA256 hash of prefix, the current offset, and a seed number.
+
+The deterministic sampler state makes forking, chording, rewinding, and replaying comparatively easy to do. Assuming you know the step, seed number, and prefix, you can calculate the sampler coordinates at a given step exactly.
+
+Even though the sampler state is deterministic, it doesn't feel that way unless you do a lot of episodes with the exact same prefix, model, and teacher decisions. The editor gives the user the freedom to intervene basically whenever, so no trajectory is "set in stone," unless the user wants it to be.
+
 **The core test of program correctness is that replay must always terminate at a live edge:**
 - *What this means*: a sequence of teacher actions represented as a replay tape can be executed automatically by the program itself without program failure, leaving the running program at an operational runtime menu (called `the EDGE menu`) within an active episode.
 - *What this does not mean*: a given replay tape will emit the exact same sequence of tokens as the episode from which the tape was derived (although it often does mean that). Whether divergence from the original token sequence is desirable or undesirable depends on what a particular replay episode is attempting to demonstrate or accomplish.
