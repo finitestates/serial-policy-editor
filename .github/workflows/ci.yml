@@ -47,6 +47,9 @@ jobs:
       - name: Run vector tests
         run: python -m pytest -q tests/vectors
 
+      - name: Run reference-kernel parity tests
+        run: python -m pytest -q reference-kernel
+
   build:
     name: Build distributions
     runs-on: ubuntu-latest

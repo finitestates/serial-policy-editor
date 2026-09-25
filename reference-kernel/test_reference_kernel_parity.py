@@ -5,7 +5,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from tests.core.test_reference_kernel import ScriptedBackend, start
+from test_reference_kernel import ScriptedBackend, start
 from trajectory_editor.core.actions import Accept as ProductionAccept
 from trajectory_editor.core.actions import Hold as ProductionHold
 from trajectory_editor.core.sampler_config import SamplerConfig
@@ -15,7 +15,7 @@ from trajectory_editor.core.sampling import (
 )
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_hash import token_prefix_sha256 as production_sha256
-from trajectory_editor.reference_kernel import (
+from reference_kernel import (
     Accept, Branch, Distribution, Hold, Policy, State, World, apply, draw, observe,
     position_uniform, position_uniform_token, rewind, token_prefix_sha256,
 )
