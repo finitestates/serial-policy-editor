@@ -6,7 +6,7 @@ import secrets
 
 import pytest
 
-from trajectory_editor.reference_kernel import (
+from reference_kernel import (
     Accept, Branch, Distribution, End, Hold, Policy, Reroll, SelectToken,
     SetPolicy, State, Tape, World, WriteTokens, apply, draw, fork, observe,
     position_uniform, position_uniform_token, record, replay, reroll, rewind,
