@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from typing import Callable
@@ -27,7 +28,7 @@ from .teacher_commands import (
 from .candidate_columns import CandidateColumns
 from .core.candidates import Candidate
 from .core.errors import EditorError
-from .core.ui import ChoiceSet, InsertMode
+from .core.ui import ChoiceSet, ContextText, InsertMode
 from .terminal_contracts import (
     BoundaryReview,
     ChoiceFeedback,
@@ -228,7 +229,13 @@ def action_preview(
 
     effects = {
         CommandKind.BIAS: ("token bias", "Update this bias rule; stay at this step."),
-        CommandKind.PHRASE: ("phrase action", "Press Enter to probe or apply the phrase; runtime limits are checked then."),
+        CommandKind.PHRASE: (
+            "phrase action",
+            (
+                "Enter validates and applies the phrase as one action; checked phrases "
+                "roll back if a token exceeds the shift bound."
+            ),
+        ),
         CommandKind.HOLD: ("hold", "Hold will release control only after Enter."),
         CommandKind.FINISH: ("finish", "Open the live edge menu on Enter; no tokens are generated."),
         CommandKind.TEACHER_EOG: ("teacher EOG", "Teacher EOG selection begins on Enter."),
@@ -420,6 +427,377 @@ def _append_wrapped_text(rows: list[StyleAndTextTuples], column: int,
     return column
 
 
+@dataclass(frozen=True)
+class _ContextRowsView:
+    base_rows: Sequence[StyleAndTextTuples]
+    tail_rows: list[StyleAndTextTuples] | None = None
+
+    @property
+    def base_count(self) -> int:
+        return len(self.base_rows) - (1 if self.tail_rows is not None else 0)
+
+    def __len__(self) -> int:
+        if self.tail_rows is None:
+            return len(self.base_rows)
+        return self.base_count + len(self.tail_rows)
+
+    def __getitem__(self, index: int | slice):
+        if isinstance(index, slice):
+            return [self[position] for position in range(*index.indices(len(self)))]
+        resolved = index + len(self) if index < 0 else index
+        if resolved < 0 or resolved >= len(self):
+            raise IndexError("context row index out of range")
+        if self.tail_rows is not None and resolved >= self.base_count:
+            return self.tail_rows[resolved - self.base_count]
+        return self.base_rows[resolved]
+
+
+@dataclass(frozen=True, slots=True)
+class _ContextLayoutUndo:
+    snapshot: ContextText | None
+    row_count: int
+    last_row: tuple[tuple[str, str], ...]
+    column: int
+
+
+class _IncrementalContextLayout:
+    """Reversible wrapped rows, extended by only newly decoded text chunks."""
+
+    def __init__(self, snapshot: ContextText, width: int) -> None:
+        self.snapshot: ContextText | None = None
+        self.width = max(1, width)
+        self.rows: list[StyleAndTextTuples] = [[]]
+        self.column = 0
+        self._undo: list[_ContextLayoutUndo] = []
+        self.sync(snapshot, self.width)
+
+    def _append_node(self, node: ContextText) -> None:
+        self._undo.append(
+            _ContextLayoutUndo(
+                snapshot=self.snapshot,
+                row_count=len(self.rows),
+                last_row=tuple(self.rows[-1]),
+                column=self.column,
+            )
+        )
+        if node.chunk:
+            self.column = _append_wrapped_text(
+                self.rows, self.column, _safe_rendered_text(node.chunk), "", self.width
+            )
+        self.snapshot = node
+
+    def _rebuild(self, snapshot: ContextText, width: int) -> None:
+        self.width = width
+        self.rows = [[]]
+        self.column = 0
+        self.snapshot = None
+        self._undo.clear()
+        nodes = snapshot.nodes_since(None)
+        assert nodes is not None
+        for node in nodes:
+            self._append_node(node)
+
+    def _step_back(self) -> None:
+        undo = self._undo.pop()
+        del self.rows[undo.row_count:]
+        self.rows[-1] = list(undo.last_row)
+        self.column = undo.column
+        self.snapshot = undo.snapshot
+
+    def sync(self, snapshot: ContextText, width: int) -> None:
+        width = max(1, width)
+        if width != self.width:
+            self._rebuild(snapshot, width)
+            return
+        if snapshot is self.snapshot:
+            return
+        if self.snapshot is not None:
+            appended = snapshot.nodes_since(self.snapshot)
+            if appended is not None:
+                for node in appended:
+                    self._append_node(node)
+                return
+            removed = self.snapshot.nodes_since(snapshot)
+            if removed is not None:
+                for _node in reversed(removed):
+                    self._step_back()
+                return
+        self._rebuild(snapshot, width)
+
+    def rows_with_proposal(self, proposal: str) -> _ContextRowsView:
+        if not proposal:
+            return _ContextRowsView(self.rows)
+        tail = [list(self.rows[-1])]
+        _append_wrapped_text(
+            tail,
+            self.column,
+            _safe_rendered_text(proposal),
+            "class:proposal",
+            self.width,
+        )
+        return _ContextRowsView(self.rows, tail)
+
+
+@dataclass(frozen=True, slots=True)
+class _ReviewAnchor:
+    boundary: int
+    end_character: int | None = None
+
+
+@dataclass(frozen=True)
+class _ReviewContextPage:
+    rows: tuple[StyleAndTextTuples, ...]
+    top_anchor: _ReviewAnchor
+    more_above: bool
+    more_below: bool
+
+
+def _wrap_review_window(
+    chunks: Iterable[str], start_character: int, width: int
+) -> tuple[list[StyleAndTextTuples], list[int]]:
+    """Wrap a bounded chunk slice while retaining absolute source offsets."""
+    rows: list[StyleAndTextTuples] = [[]]
+    row_starts = [start_character]
+    column = 0
+    width = max(1, width)
+    source_offset = start_character
+    for chunk in chunks:
+        for character in chunk:
+            if character == "\n":
+                rows.append([])
+                source_offset += 1
+                row_starts.append(source_offset)
+                column = 0
+                continue
+            codepoint = ord(character)
+            if character == "\t":
+                rendered = "\\t"
+            elif codepoint < 32 or codepoint == 127:
+                rendered = f"\\x{codepoint:02x}"
+            else:
+                rendered = character
+            for glyph in rendered:
+                cells = max(0, get_cwidth(glyph))
+                if column + cells > width:
+                    rows.append([])
+                    row_starts.append(source_offset)
+                    column = 0
+                if rows[-1] and rows[-1][-1][0] == "":
+                    previous_style, previous_text = rows[-1][-1]
+                    rows[-1][-1] = (previous_style, previous_text + glyph)
+                else:
+                    rows[-1].append(("", glyph))
+                column += cells
+            source_offset += 1
+    return rows, row_starts
+
+
+class _ReviewContextViewport:
+    """A token-boundary anchored review page that wraps only its visible slice."""
+
+    def __init__(self, review: BoundaryReview) -> None:
+        self.review = review
+        self.anchor = _ReviewAnchor(self._review_end_boundary(review))
+        self._forward: list[_ReviewAnchor] = []
+        self._page_cache: tuple[tuple[int, int, int, int], _ReviewContextPage] | None = None
+
+    def update(self, review: BoundaryReview) -> None:
+        same_review = (
+            review.aligned_step == self.review.aligned_step
+            and self._review_end_boundary(review) == self._review_end_boundary(self.review)
+            and review.context_snapshots is self.review.context_snapshots
+            and review.context_text_tail is self.review.context_text_tail
+        )
+        self.review = review
+        if not same_review:
+            self.anchor = _ReviewAnchor(self._review_end_boundary(review))
+            self._forward.clear()
+        self._page_cache = None
+
+    @staticmethod
+    def _review_end_boundary(review: BoundaryReview) -> int:
+        return (
+            review.aligned_step
+            if review.context_boundary is None
+            else review.context_boundary
+        )
+
+    def _context_at(self, boundary: int) -> ContextText | None:
+        snapshots = self.review.context_snapshots
+        if 0 <= boundary < len(snapshots):
+            context = snapshots[boundary]
+            if context is not None:
+                return context
+        if boundary == self._review_end_boundary(self.review):
+            context = self.review.context_text_tail
+            if isinstance(context, ContextText):
+                return context
+            return ContextText.root(context)
+        return None
+
+    def _anchor_for_character(
+        self, character: int, lower_boundary: int, upper_boundary: int
+    ) -> _ReviewAnchor:
+        previous: tuple[int, int] | None = None
+        for boundary in range(lower_boundary, upper_boundary + 1):
+            context = self._context_at(boundary)
+            if context is None:
+                continue
+            count = context.character_count
+            if count == character:
+                return _ReviewAnchor(boundary)
+            if count > character:
+                if previous is None:
+                    return _ReviewAnchor(boundary, character)
+                return _ReviewAnchor(boundary, character)
+            previous = (boundary, count)
+        if previous is not None:
+            boundary, count = previous
+            if count == character:
+                return _ReviewAnchor(boundary)
+            return _ReviewAnchor(upper_boundary, character)
+        return _ReviewAnchor(upper_boundary, character)
+
+    def page(self, width: int, budget: int) -> _ReviewContextPage:
+        width = max(1, width)
+        budget = max(1, budget)
+        key = (
+            self.anchor.boundary,
+            -1 if self.anchor.end_character is None else self.anchor.end_character,
+            width,
+            budget,
+        )
+        if self._page_cache is not None and self._page_cache[0] == key:
+            return self._page_cache[1]
+        end_context = self._context_at(self.anchor.boundary)
+        if end_context is None:
+            result = _ReviewContextPage((), self.anchor, False, False)
+            self._page_cache = (key, result)
+            return result
+
+        end_character = self.anchor.end_character
+        if end_character is None:
+            end_character = end_context.character_count
+        end_character = max(0, min(end_character, end_context.character_count))
+        floor = max(0, min(self.review.context_character_start, end_context.character_count))
+        start_boundary = self.anchor.boundary
+        start_character = end_character
+        target_characters = width * budget
+        selected_newlines = 0
+
+        while (
+            start_character - floor < target_characters
+            and selected_newlines < budget
+        ):
+            needed = target_characters - (end_character - start_character)
+            if start_boundary > 0:
+                previous = self._context_at(start_boundary - 1)
+                current = self._context_at(start_boundary)
+                if (
+                    previous is None
+                    or current is None
+                    or current.nodes_since(previous) is None
+                ):
+                    next_start = max(floor, start_character - needed)
+                    selected_newlines += sum(
+                        chunk.count("\n")
+                        for chunk in current.iter_slices(next_start, start_character)
+                    ) if current is not None else 0
+                    start_character = next_start
+                    break
+                token_start = previous.character_count
+                if start_character - token_start > needed:
+                    next_start = start_character - needed
+                    selected_newlines += sum(
+                        chunk.count("\n")
+                        for chunk in current.iter_slices(next_start, start_character)
+                    )
+                    start_character = next_start
+                    break
+                next_start = max(floor, token_start)
+                selected_newlines += sum(
+                    chunk.count("\n")
+                    for chunk in current.iter_slices(next_start, start_character)
+                )
+                start_boundary -= 1
+                start_character = next_start
+                continue
+            next_start = max(floor, start_character - needed)
+            selected_newlines += sum(
+                chunk.count("\n")
+                for chunk in end_context.iter_slices(next_start, start_character)
+            )
+            start_character = next_start
+            break
+
+        start_character = max(floor, min(start_character, end_character))
+        wrapped, row_starts = _wrap_review_window(
+            end_context.iter_slices(start_character, end_character),
+            start_character,
+            width,
+        )
+        dropped_rows = max(0, len(wrapped) - budget)
+        visible_rows = wrapped[dropped_rows:]
+        top_character = row_starts[dropped_rows]
+        top_anchor = self._anchor_for_character(
+            top_character, start_boundary, self.anchor.boundary
+        )
+        review_context = self._context_at(self._review_end_boundary(self.review))
+        review_end = (
+            review_context.character_count if review_context is not None else end_character
+        )
+        more_above = top_character > floor or (
+            start_boundary > 0
+            and self._context_at(start_boundary - 1) is not None
+        )
+        more_below = (
+            self.anchor.boundary < self._review_end_boundary(self.review)
+            or end_character < review_end
+        )
+        result = _ReviewContextPage(
+            tuple(visible_rows), top_anchor, more_above, more_below
+        )
+        self._page_cache = (key, result)
+        return result
+
+    def page_up(self, width: int, budget: int) -> None:
+        page = self.page(width, budget)
+        if page.top_anchor == self.anchor:
+            if self.anchor.end_character is not None and self.anchor.end_character > 0:
+                next_anchor = _ReviewAnchor(
+                    self.anchor.boundary,
+                    max(0, self.anchor.end_character - max(1, width * budget)),
+                )
+            elif (
+                self.anchor.boundary > 0
+                and self._context_at(self.anchor.boundary - 1) is not None
+            ):
+                next_anchor = _ReviewAnchor(self.anchor.boundary - 1)
+            else:
+                return
+        else:
+            next_anchor = page.top_anchor
+        self._forward.append(self.anchor)
+        self.anchor = next_anchor
+        self._page_cache = None
+
+    def page_down(self) -> None:
+        if self._forward:
+            self.anchor = self._forward.pop()
+            self._page_cache = None
+
+
+def _review_scroll_hint(page: _ReviewContextPage) -> str:
+    hints = []
+    if page.more_above:
+        hints.append("More above")
+    if page.more_below:
+        hints.append("More below")
+    if not hints:
+        hints.append("All context shown")
+    return " · ".join((*hints, "PgUp/PgDn scroll"))
+
+
 @lru_cache(maxsize=1)
 def _wrapped_context(context: str, width: int):
     """Keep only the latest context layout, with immutable cached rows."""
@@ -429,7 +807,9 @@ def _wrapped_context(context: str, width: int):
 
 
 @lru_cache(maxsize=1)
-def _safe_context_text(context: str) -> str:
+def _safe_context_text(context: str | ContextText) -> str:
+    if isinstance(context, ContextText):
+        context = context.materialize()
     return _safe_rendered_text(context)
 
 
@@ -457,9 +837,26 @@ def _choice_context_budget(height: int, candidate_count: int,
     return max(1, available - table)
 
 
-def _context_view(context: str, proposal: str, width: int, height: int,
-                  offset: int = 0, *, budget: int | None = None) -> tuple[StyleAndTextTuples, int]:
-    rows = _context_rows(context, proposal, max(1, width - 1))
+def _context_scroll_hint(start: int, end: int, total: int) -> str:
+    hints = []
+    if start > 0:
+        hints.append("More above")
+    if end < total:
+        hints.append("More below")
+    if not hints:
+        hints.append("All context shown")
+    return " · ".join((*hints, "PgUp/PgDn scroll"))
+
+
+def _context_view(context: str | ContextText, proposal: str, width: int, height: int,
+                  offset: int = 0, *, budget: int | None = None,
+                  context_layout: _IncrementalContextLayout | None = None
+                  ) -> tuple[StyleAndTextTuples, int]:
+    rows = (
+        context_layout.rows_with_proposal(proposal)
+        if context_layout is not None
+        else _context_rows(_safe_context_text(context), proposal, max(1, width - 1))
+    )
     budget = max(1, height // 3) if budget is None else max(1, budget)
     offset = min(max(0, offset), max(0, len(rows) - budget))
     end = len(rows) - offset
@@ -468,8 +865,7 @@ def _context_view(context: str, proposal: str, width: int, height: int,
     for row in rows[start:end]:
         fragments.extend(row)
         fragments.append(("", "\n"))
-    fragments.append(("class:muted",
-                      f"Context rows {start + 1}–{end}/{len(rows)} · PgUp/PgDn scroll\n"))
+    fragments.append(("class:muted", _context_scroll_hint(start, end, len(rows)) + "\n"))
     return fragments, end - start + 1
 
 
@@ -512,10 +908,16 @@ def _render_writing(choice: ChoiceSet, candidates: tuple[Candidate, ...],
                     logit_view: str = "none",
                     show_model_probabilities: bool = False,
                     column_focus: str | None = None,
-                    overlays: frozenset[str] = frozenset()) -> StyleAndTextTuples:
+                    overlays: frozenset[str] = frozenset(),
+                    context_layout: _IncrementalContextLayout | None = None
+                    ) -> StyleAndTextTuples:
     _, budget = _writing_sizes(height)
-    rows = _context_rows(_safe_context_text(choice.context_text_tail),
-                         _safe_rendered_text(preview.appended_text or ""), width - 1)
+    rows = (
+        context_layout.rows_with_proposal(preview.appended_text or "")
+        if context_layout is not None
+        else _context_rows(_safe_context_text(choice.context_text_tail),
+                           _safe_rendered_text(preview.appended_text or ""), width - 1)
+    )
     end = len(rows) - min(max(0, offset), max(0, len(rows) - budget))
     start = max(0, end - budget)
     fragments: StyleAndTextTuples = [
@@ -526,7 +928,7 @@ def _render_writing(choice: ChoiceSet, candidates: tuple[Candidate, ...],
         fragments.extend(row)
         fragments.append(("", "\n"))
     fragments.append(("", "\n" * (budget - (end - start))))
-    fragments.append(("class:muted", f"Context rows {start + 1}–{end}/{len(rows)} · PgUp/PgDn\n"))
+    fragments.append(("class:muted", _context_scroll_hint(start, end, len(rows)) + "\n"))
     if preview.kind in {"insertion", "pending"}:
         text = preview.appended_text or ""
         effect = f"{preview.label} · {text.count(chr(10)) + 1} lines · {len(text)} characters"
@@ -541,7 +943,6 @@ def _render_writing(choice: ChoiceSet, candidates: tuple[Candidate, ...],
         show_model_probabilities=show_model_probabilities,
         column_focus=column_focus,
         overlays=overlays,
-        width=36,
         raw_k1_logit=choice.raw_k1_logit,
     )
     heading = (
@@ -585,6 +986,7 @@ def _render_choice(
     terminal_size: tuple[int, int] | None = None,
     default_hold_tokens: int = 100,
     default_search_radius: int = 3,
+    context_layout: _IncrementalContextLayout | None = None,
 ) -> StyleAndTextTuples:
     width, height = terminal_size or _terminal_size()
     width = max(width, 36)
@@ -601,9 +1003,11 @@ def _render_choice(
     if expanded_editor and _is_writing(command_text):
         return _render_writing(choice, tuple(candidates if display_candidates is None else display_candidates),
                                preview, width, height, context_offset, sort_by_policy,
-                               show_policy_rank, logit_view, show_model_probabilities,
-                               column_focus, overlays)
-    context = _safe_context_text(choice.context_text_tail)
+                               show_policy_rank, logit_view,
+                               show_model_probabilities, column_focus, overlays,
+                               context_layout=context_layout)
+    context = (choice.context_text_tail if context_layout is not None
+               else _safe_context_text(choice.context_text_tail))
     proposal = (
         _safe_rendered_text(preview.appended_text)
         if preview.appended_text is not None
@@ -655,6 +1059,7 @@ def _render_choice(
     )
     context_fragments, approximate_context_lines = _context_view(
         context, proposal or "", width, height, context_offset, budget=context_budget,
+        context_layout=context_layout,
     )
     maximum_rows = max(
         1,
@@ -747,7 +1152,6 @@ def _render_choice(
         show_model_probabilities=show_model_probabilities,
         column_focus=column_focus,
         overlays=overlays,
-        width=width,
         raw_k1_logit=choice.raw_k1_logit,
     )
     fragments.append((
@@ -854,14 +1258,15 @@ def _render_review(
     review: BoundaryReview,
     *,
     seamless: bool = False,
-    context_offset: int = 0,
     terminal_size: tuple[int, int] | None = None,
+    context_viewport: _ReviewContextViewport | None = None,
 ) -> StyleAndTextTuples:
     """Render one journal-backed historical boundary, never a live preview."""
     width, height = terminal_size or _terminal_size()
     width = max(width, 36)
     rule = "─" * max(20, width - 1)
-    context = _safe_context_text(review.context_text_tail)
+    viewport = context_viewport or _ReviewContextViewport(review)
+    page = viewport.page(max(1, width - 1), max(1, height - 15))
     position = dict(review.position)
     fragments: StyleAndTextTuples = [
         ("class:status-strong", f"Review boundary {review.aligned_step}"),
@@ -869,10 +1274,10 @@ def _render_review(
         ("class:rule", rule + "\n"),
         ("class:section", "HISTORICAL BOUNDARY REVIEW\n\n"),
     ]
-    context_fragments, _ = _context_view(
-        context, "", width, height, context_offset, budget=max(1, height - 15),
-    )
-    fragments.extend(context_fragments)
+    for row in page.rows:
+        fragments.extend(row)
+        fragments.append(("", "\n"))
+    fragments.append(("class:muted", _review_scroll_hint(page) + "\n"))
     fragments.append(("", "\n"))
     if position.get("kind") == "inside-span":
         label = str(position.get("span_type") or "span").replace("-", " ").upper()
@@ -1040,6 +1445,8 @@ class LiveChoiceView(ViewLifecycle):
         self.context_offset = 0
         self.expanded_editor = False
         self._context_key = None
+        self._context_layout: _IncrementalContextLayout | None = None
+        self._review_viewport: _ReviewContextViewport | None = None
         self.update(state)
 
         def _replace_buffer(text: str, *, owned: bool) -> None:
@@ -1185,18 +1592,32 @@ class LiveChoiceView(ViewLifecycle):
         @self.bindings.add("pageup")
         def _context_up(event: object) -> None:
             width, height = self.terminal_size()
+            if self.state.review is not None:
+                if self._review_viewport is not None:
+                    self._review_viewport.page_up(
+                        max(1, max(36, width) - 1), max(1, height - 15)
+                    )
+                return
             preview = action_preview(self.state.choice, self.command_buffer.text, self.state.candidates, self.state.resolve_insertion,
                                      remaining_tokens=self.state.remaining_tokens, resolve_candidate=self.state.resolve_candidate,
                                      default_hold_tokens=self.state.default_hold_tokens,
                                      default_search_radius=self.state.default_search_radius)
-            rows = _context_rows(_safe_context_text(self.state.review.context_text_tail if self.state.review else self.state.choice.context_text_tail),
-                                 "" if self.state.review else _safe_rendered_text(preview.appended_text or ""), max(1, max(36, width) - 1))
             budget = _scroll_budget(height, preview)
+            self._sync_context_layout(self.state, max(1, max(36, width) - 1))
+            if self._context_layout is not None:
+                rows = self._context_layout.rows_with_proposal(preview.appended_text or "")
+            else:
+                rows = _context_rows(_safe_context_text(self.state.choice.context_text_tail),
+                                     _safe_rendered_text(preview.appended_text or ""), max(1, max(36, width) - 1))
             self.context_offset = min(max(0, len(rows) - budget), self.context_offset + max(1, budget - 1))
 
         @self.bindings.add("pagedown")
         def _context_down(event: object) -> None:
             _, height = self.terminal_size()
+            if self.state.review is not None:
+                if self._review_viewport is not None:
+                    self._review_viewport.page_down()
+                return
             preview = action_preview(self.state.choice, self.command_buffer.text, self.state.candidates, self.state.resolve_insertion,
                                      remaining_tokens=self.state.remaining_tokens, resolve_candidate=self.state.resolve_candidate,
                                      default_hold_tokens=self.state.default_hold_tokens,
@@ -1351,6 +1772,15 @@ class LiveChoiceView(ViewLifecycle):
             self.context_offset = 0
         self._context_key = context_key
         self.state = state
+        if state.review is None:
+            self._review_viewport = None
+            self._sync_context_layout(
+                state, max(1, max(36, self.terminal_size()[0]) - 1)
+            )
+        elif self._review_viewport is None:
+            self._review_viewport = _ReviewContextViewport(state.review)
+        else:
+            self._review_viewport.update(state.review)
         self.expanded_editor = False
         self.completion_owned = bool(state.initial_command and state.review is None)
         self.active_table_candidates = tuple(
@@ -1364,11 +1794,31 @@ class LiveChoiceView(ViewLifecycle):
         text = state.initial_command if self.completion_owned else ""
         self.command_buffer.reset(document=Document(text, cursor_position=len(text)))
 
+    def _sync_context_layout(self, state: ChoiceViewState, width: int) -> None:
+        if state.review is not None:
+            return
+        context = state.choice.context_text_tail
+        if not isinstance(context, ContextText):
+            self._context_layout = None
+            return
+        if self._context_layout is None:
+            self._context_layout = _IncrementalContextLayout(context, width)
+        else:
+            self._context_layout.sync(context, width)
+
     def _render(self):
         state = self.state
+        terminal_size = self.terminal_size()
         if state.review is not None:
-            return _render_review(state.review, seamless=state.seamless,
-                                  context_offset=self.context_offset, terminal_size=self.terminal_size())
+            return _render_review(
+                state.review,
+                seamless=state.seamless,
+                terminal_size=terminal_size,
+                context_viewport=self._review_viewport,
+            )
+        self._sync_context_layout(
+            state, max(1, max(36, terminal_size[0]) - 1)
+        )
         return _render_choice(
             state.choice, state.candidates, self.command_buffer.text,
             state.remaining_tokens, state.resolve_insertion, state.target_token_id,
@@ -1380,7 +1830,8 @@ class LiveChoiceView(ViewLifecycle):
             state.search_lens_active,
             state.resolve_candidate, self.context_offset,
             self.expanded_editor and _is_writing(self.command_buffer.text),
-            terminal_size=self.terminal_size(),
+            terminal_size=terminal_size,
             default_hold_tokens=state.default_hold_tokens,
             default_search_radius=state.default_search_radius,
+            context_layout=self._context_layout,
         )

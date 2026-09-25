@@ -885,6 +885,22 @@ class EpisodeStore:
             result.append(item)
         return result
 
+    def action_boundaries(
+        self, episode_id: str, *, after_ordinal: int = -1
+    ) -> list[dict[str, Any]]:
+        """Return the compact action fields used to label visible boundaries."""
+        self.get_episode(episode_id)
+        rows = self.connection.execute(
+            """
+            SELECT ordinal, boundary_before, boundary_after, kind
+            FROM actions
+            WHERE episode_id = ? AND ordinal > ?
+            ORDER BY ordinal
+            """,
+            (episode_id, after_ordinal),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def tokens(self, episode_id: str) -> list[dict[str, Any]]:
         self.get_episode(episode_id)
         rows = self.connection.execute(

@@ -12,7 +12,7 @@ from .core.cli_config import (
     sampler_override,
 )
 from .core.errors import EditorError
-from .chord import ActionSequencePolicy, Chord, ChordRequested, chord_menu
+from .chord import Chord, ChordRequested, chord_menu
 from .edge_status import sampler_summary
 from .episode_engine import EpisodeEngine
 from .episode_prompts import read_new_prompt, read_prompt_file
@@ -293,7 +293,7 @@ def run_ephemeral(
             pending_tape = None
             chord = Chord(session.engine, request.ranks)
             try:
-                chord_action, actions = chord_menu(io, chord)
+                chord_action, actions = chord_menu(io, chord, promote_on_select=True)
             finally:
                 chord.discard()
             if chord_action == "quit":
@@ -302,8 +302,7 @@ def run_ephemeral(
             if chord_action == "select":
                 assert actions is not None
                 result = runner.run(
-                    live_policy=ActionSequencePolicy(actions),
-                    max_live_actions=len(actions),
+                    promoted_outcomes=chord.selected_outcomes,
                 )
                 if session.engine.ended:
                     _print_final_text(session, args.output)

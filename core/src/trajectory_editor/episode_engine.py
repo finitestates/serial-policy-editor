@@ -20,9 +20,7 @@ from .core.actions import (
     Write,
 )
 from .core.backend import (
-    BackendStateSnapshot,
     InferenceBackend,
-    SnapshotableInferenceBackend,
     require_inference_backend,
 )
 from .core.candidates import Candidate
@@ -47,11 +45,92 @@ class TokenBudgetExceeded(InstructionRejected):
     """An atomic action cannot fit within the current allowance."""
 
 
+@dataclass(frozen=True, eq=False, slots=True)
+class TokenPrefixSnapshot(Sequence[int]):
+    """Immutable token prefix assembled from shared append-only chunks."""
+
+    parent: "TokenPrefixSnapshot | None"
+    values: tuple[int, ...]
+    length: int
+
+    @classmethod
+    def root(cls, values: Sequence[int]) -> "TokenPrefixSnapshot":
+        tokens = tuple(values)
+        return cls(None, tokens, len(tokens))
+
+    def append(self, values: Sequence[int]) -> "TokenPrefixSnapshot":
+        tokens = tuple(values)
+        if not tokens:
+            return self
+        return TokenPrefixSnapshot(self, tokens, self.length + len(tokens))
+
+    def chunks_since(
+        self, ancestor: "TokenPrefixSnapshot | None"
+    ) -> tuple[tuple[int, ...], ...] | None:
+        chunks: list[tuple[int, ...]] = []
+        current: TokenPrefixSnapshot | None = self
+        while current is not ancestor and current is not None:
+            if current.values:
+                chunks.append(current.values)
+            current = current.parent
+        if current is not ancestor:
+            return None
+        return tuple(reversed(chunks))
+
+    def __len__(self) -> int:
+        return self.length
+
+    def __iter__(self):
+        chunks: list[TokenPrefixSnapshot] = []
+        current: TokenPrefixSnapshot | None = self
+        while current is not None:
+            if current.values:
+                chunks.append(current)
+            current = current.parent
+        for chunk in reversed(chunks):
+            yield from chunk.values
+
+    def __getitem__(self, index: int | slice) -> int | tuple[int, ...]:
+        if isinstance(index, slice):
+            start, stop, step = index.indices(self.length)
+            if step != 1:
+                return tuple(self)[index]
+            if stop <= start:
+                return ()
+            pieces: list[tuple[int, ...]] = []
+            current: TokenPrefixSnapshot | None = self
+            while current is not None and current.length > start:
+                chunk_start = current.length - len(current.values)
+                lower = max(start, chunk_start) - chunk_start
+                upper = min(stop, current.length) - chunk_start
+                if upper > lower:
+                    pieces.append(current.values[lower:upper])
+                current = current.parent
+            return tuple(token for piece in reversed(pieces) for token in piece)
+        resolved = index + self.length if index < 0 else index
+        if resolved < 0 or resolved >= self.length:
+            raise IndexError("token prefix index out of range")
+        current: TokenPrefixSnapshot | None = self
+        while current is not None:
+            chunk_start = current.length - len(current.values)
+            if resolved >= chunk_start:
+                return current.values[resolved - chunk_start]
+            current = current.parent
+        raise IndexError("token prefix index out of range")
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Sequence):
+            return False
+        return len(other) == self.length and all(
+            left == right for left, right in zip(self, other)
+        )
+
+
 @dataclass(frozen=True)
 class Observation:
     boundary: int
     sampling_coordinate: int
-    prefix_token_ids: tuple[int, ...]
+    prefix_token_ids: Sequence[int] = field(repr=False)
     _render_context: Callable[..., str] = field(repr=False, compare=False)
     logits: np.ndarray = field(repr=False, compare=False)
     distribution: SparseDistribution = field(repr=False, compare=False)
@@ -82,7 +161,7 @@ class _PreparedAccept:
     raw_rank: int
     token_id: int
     generation: int
-    backend_snapshot: BackendStateSnapshot = field(repr=False, compare=False)
+    prefix_token_ids: tuple[int, ...]
 
 
 class EpisodeEngine:
@@ -134,6 +213,7 @@ class EpisodeEngine:
         if not backend_positioned:
             backend.reset(list(tokens))
         self.backend = backend
+        self._backend_positioned = True
         self.sampling = sampling
         initial_text_value = (
             initial_text
@@ -148,6 +228,9 @@ class EpisodeEngine:
             coordinate_offset=coordinate_offset,
             stream_fingerprint=fingerprint,
         )
+        self._prefix_snapshot = TokenPrefixSnapshot.root(tokens)
+        self._prefix_snapshot_boundary = 0
+        self._prefix_snapshot_dirty = False
         self.guidance_backend = guidance_backend
         self._guidance_owner = object()
         self._guidance_prompt_key: tuple | None = None
@@ -158,6 +241,7 @@ class EpisodeEngine:
         self._observation: Observation | None = None
         self._observation_key: tuple | None = None
         self._latest_speculation_generation = -1
+        self._speculative_accept_prefix: tuple[int, ...] | None = None
         self._ephemeral_logit_biases: dict[int, float] = {}
         self._activation_validation_key: tuple | None = None
         self._activation_runtime_key: tuple | None = None
@@ -181,6 +265,7 @@ class EpisodeEngine:
     @visible_token_ids.setter
     def visible_token_ids(self, value: Sequence[int]) -> None:
         self.trajectory.visible_token_ids = list(value)
+        self._prefix_snapshot_dirty = True
 
     @property
     def terminal_token_id(self) -> int | None:
@@ -303,7 +388,7 @@ class EpisodeEngine:
         if sampling is not None:
             self.sampling = sampling
 
-    def rewind_to(self, boundary: int) -> None:
+    def rewind_to(self, boundary: int, *, _defer_backend_positioning: bool = False) -> None:
         """Discard visible state after a token boundary and reposition the backend.
 
         The checkpoint boundary is kept intact. The caller restores historical
@@ -315,14 +400,20 @@ class EpisodeEngine:
                 f"rewind boundary must be between 0 and {self.boundary}"
             )
         retained = list(self.visible_token_ids[:boundary])
+        self._rollback_speculative_accept()
         self._invalidate_observation()
+        self._prefix_snapshot_dirty = True
         self._ephemeral_logit_biases = {}
-        prefix = [*self.initial_token_ids, *retained]
-        branch = getattr(self.backend, "branch_to_prefix", None)
-        if callable(branch):
-            branch(prefix)
+        if _defer_backend_positioning:
+            self._backend_positioned = False
         else:
-            self.backend.reset(prefix)
+            prefix = [*self.initial_token_ids, *retained]
+            branch = getattr(self.backend, "branch_to_prefix", None)
+            if callable(branch):
+                branch(prefix)
+            else:
+                self.backend.reset(prefix)
+            self._backend_positioned = True
         self.trajectory.rewind_to(boundary)
 
     def terminate(self, reason: str = "menu-end") -> None:
@@ -342,14 +433,63 @@ class EpisodeEngine:
     def text(self) -> str:
         return self.backend.render(self.token_ids, special=True)
 
+    def _observation_prefix_snapshot(self) -> TokenPrefixSnapshot:
+        boundary = self.boundary
+        if self._prefix_snapshot_dirty or boundary < self._prefix_snapshot_boundary:
+            self._prefix_snapshot = TokenPrefixSnapshot.root(self.initial_token_ids)
+            self._prefix_snapshot_boundary = 0
+            self._prefix_snapshot_dirty = False
+        if boundary > self._prefix_snapshot_boundary:
+            appended = self.visible_token_ids[self._prefix_snapshot_boundary:boundary]
+            self._prefix_snapshot = self._prefix_snapshot.append(appended)
+            self._prefix_snapshot_boundary = boundary
+        return self._prefix_snapshot
+
     def _invalidate_observation(self) -> None:
         self._observation = None
         self._observation_key = None
         self._prepared_accept = None
 
+    def _ensure_backend_positioned(self) -> None:
+        """Backfill a deferred preview cache before the next model mutation."""
+        if self._speculative_accept_prefix is not None:
+            self._rollback_speculative_accept()
+            return
+        if self._backend_positioned:
+            return
+        prefix = list(self.token_ids)
+        branch = getattr(self.backend, "branch_to_prefix", None)
+        if callable(branch):
+            branch(prefix)
+        else:
+            self.backend.reset(prefix)
+        self._backend_positioned = True
+
     def discard_speculative_accept(self) -> None:
-        """Drop a prepared one-token continuation without changing live state."""
+        """Drop a prepared continuation without backend work."""
         self._prepared_accept = None
+
+    def _rollback_speculative_accept(self) -> None:
+        if self._speculative_accept_prefix is None:
+            return
+        self.backend.rollback_speculation()
+        self._speculative_accept_prefix = None
+        self._prepared_accept = None
+        self._backend_positioned = True
+
+    def has_prepared_accept(
+        self, observation: Observation, raw_rank: int, token_id: int
+    ) -> bool:
+        """Return whether an exact warm is ready for this decision and target."""
+        prepared = self._prepared_accept
+        return bool(
+            prepared is not None
+            and prepared.observation is observation
+            and prepared.raw_rank == raw_rank
+            and prepared.token_id == token_id
+            and prepared.prefix_token_ids == tuple(self.token_ids)
+            and self._speculative_accept_prefix == prepared.prefix_token_ids
+        )
 
     def speculate_accept(
         self,
@@ -360,14 +500,7 @@ class EpisodeEngine:
         generation: int = 0,
         cancelled: Callable[[], bool] | None = None,
     ) -> bool:
-        """Warm the primary backend for one selected raw-rank token.
-
-        The backend is restored to the current committed prefix before this
-        method returns. A matching ordinary action can later restore the
-        warmed state and skip its one-token model evaluation. Backends without
-        exact snapshot support, active CFG, terminal tokens, and the final
-        token before a checkpoint simply decline speculation.
-        """
+        """Warm one selected token in place, then commit or roll it back later."""
         is_cancelled = cancelled or (lambda: False)
         if (
             type(generation) is not int or generation < 0
@@ -394,52 +527,45 @@ class EpisodeEngine:
             return False
         token_id = selected_token_id
         self._latest_speculation_generation = generation
+        prepared = self._prepared_accept
+        if (
+            prepared is not None
+            and prepared.observation is observation
+            and prepared.raw_rank == raw_rank
+            and prepared.token_id == token_id
+            and prepared.prefix_token_ids == tuple(self.token_ids)
+            and self._speculative_accept_prefix == prepared.prefix_token_ids
+        ):
+            return True
         self.discard_speculative_accept()
+        self._rollback_speculative_accept()
         if (
             self.backend.is_eog(token_id)
             or (self.remaining is not None and self.remaining <= 1)
             or self._cfg_active()
-            or not isinstance(self.backend, SnapshotableInferenceBackend)
+            or not callable(getattr(self.backend, "speculate", None))
+            or not callable(getattr(self.backend, "commit_speculation", None))
+            or not callable(getattr(self.backend, "rollback_speculation", None))
         ):
             return False
 
+        if not self._backend_positioned:
+            self._ensure_backend_positioned()
         prefix = tuple(self.token_ids)
-        try:
-            before = self.backend.snapshot_state()
-        except Exception:
+        self._speculative_accept_prefix = prefix
+        self._backend_positioned = False
+        if not self.backend.speculate(token_id):
+            self._speculative_accept_prefix = None
+            self._backend_positioned = True
             return False
-        if before is None or before.prefix_token_ids != prefix:
-            return False
-
-        warmed: BackendStateSnapshot | None = None
-        try:
-            if not is_cancelled():
-                self.backend.eval([token_id])
-                if not is_cancelled():
-                    candidate = self.backend.snapshot_state()
-                    expected = (*prefix, token_id)
-                    if candidate is not None and candidate.prefix_token_ids == expected:
-                        warmed = candidate
-        except Exception:
-            # Speculative inference is optional. Restore the committed position
-            # and let the ordinary action path report any real inference error.
-            warmed = None
-        finally:
-            try:
-                restored = self.backend.restore_state(before)
-            except Exception:
-                restored = False
-            if not restored:
-                # A failed native restore must not leave the live engine at the
-                # speculative prefix. Rebuild its semantic prefix as a fallback.
-                self.backend.reset(list(prefix))
-
-        if warmed is None or is_cancelled():
+        if is_cancelled():
+            self._rollback_speculative_accept()
             return False
         if self._observation is not observation or self._decision_key() != self._observation_key:
+            self._rollback_speculative_accept()
             return False
         self._prepared_accept = _PreparedAccept(
-            observation, raw_rank, token_id, generation, warmed
+            observation, raw_rank, token_id, generation, prefix
         )
         return True
 
@@ -555,18 +681,18 @@ class EpisodeEngine:
     def observe(self) -> Observation:
         if self.ended or self.checkpointed:
             raise EditorError("the episode has no live decision boundary")
+        key = self._decision_key()
         if self._cfg_active() and self.guidance_backend is not None and (
             getattr(self.guidance_backend, "_spe_cfg_owner", None) is not self._guidance_owner
         ):
             self._invalidate_guidance()
-        key = self._decision_key()
         if self._observation is not None and self._observation_key == key:
             return self._observation
+        self._ensure_backend_positioned()
         self._prepare_activation_runtime()
         logits = np.asarray(self.backend.last_logits(), dtype=np.float64)
         if logits.ndim != 1 or len(logits) != self.backend.vocabulary_size():
             raise RuntimeError("backend logits do not match its vocabulary")
-        model_phase_diagnostics = None
         if self._cfg_active():
             self._position_guidance()
             unconditional = np.asarray(self.guidance_backend.last_logits(), dtype=np.float64)
@@ -575,16 +701,6 @@ class EpisodeEngine:
             logits = unconditional + float(self.sampling.cfg_scale) * (logits - unconditional)
             if not np.all(np.isfinite(logits)):
                 raise RuntimeError("CFG guidance produced non-finite logits")
-            model_phase_diagnostics = {
-                "name": "classifier-free guidance",
-                "scale": float(self.sampling.cfg_scale),
-                "prefix_tokens": int(self.sampling.cfg_prefix_tokens),
-                "tokens_consumed": int(
-                    len(self.visible_token_ids)
-                ),
-                "branch_scope": "conditional-only hidden-state controls",
-                "unconditional_logit_rms": float(np.sqrt(np.mean(unconditional ** 2))),
-            }
         activation_logit_adjustments = None
         if (
             self.sampling.activation_vector_layer == "output"
@@ -641,17 +757,12 @@ class EpisodeEngine:
                 )
             if not np.all(np.isfinite(activation_logit_adjustments)):
                 raise RuntimeError("output-head steering adjustments are not finite")
-        statistics_kwargs = dict(
-            render_tokens=self.backend.render,
-            activation_logit_adjustments=activation_logit_adjustments,
-            model_phase_diagnostics=model_phase_diagnostics,
-            ephemeral_logit_biases=self._ephemeral_logit_biases,
-        )
         statistics = ObservationStatistics(
             logits,
             self.sampling,
             key[0],
-            **statistics_kwargs,
+            activation_logit_adjustments=activation_logit_adjustments,
+            ephemeral_logit_biases=self._ephemeral_logit_biases,
         )
         logits = statistics.logits
         distribution = statistics.distribution
@@ -666,7 +777,7 @@ class EpisodeEngine:
         observation = Observation(
             boundary=self.boundary,
             sampling_coordinate=coordinate,
-            prefix_token_ids=tuple(self.token_ids),
+            prefix_token_ids=self._observation_prefix_snapshot(),
             _render_context=self.backend.render,
             logits=logits,
             distribution=distribution,
@@ -684,6 +795,39 @@ class EpisodeEngine:
         """Release knowledge of shared guidance state before backend reuse."""
         self._guidance_evaluated_prefix = None
         self._invalidate_observation()
+
+    def adopt_preview_state(
+        self, preview: "EpisodeEngine", *, backend_positioned: bool = True
+    ) -> None:
+        """Adopt a speculative engine that has already advanced this trajectory.
+
+        Chord previews use the same backend instances and the same starting
+        token ledger. Once one preview is selected, its semantic engine state
+        can become the live engine directly; replaying its actions would repeat
+        decoding and evidence work. The preview's mutable trajectory and
+        incremental snapshots are transferred by reference. Keep the live
+        metric sink, which belongs to the durable/runtime owner rather than to
+        speculative work.
+        """
+        if not isinstance(preview, EpisodeEngine):
+            raise TypeError("preview must be an EpisodeEngine")
+        if preview is self:
+            return
+        if (
+            self.backend is not preview.backend
+            or self.guidance_backend is not preview.guidance_backend
+            or self.initial_token_ids != preview.initial_token_ids
+            or self.initial_text != preview.initial_text
+        ):
+            raise EditorError("preview engine does not share this episode's model and root")
+        metric_sink = self._metric_sink
+        self.__dict__.update(preview.__dict__)
+        self._metric_sink = metric_sink
+        self._backend_positioned = backend_positioned
+        if not backend_positioned:
+            # The selected observation is still exact, but the shared primary
+            # and CFG caches belong to another preview until the next action.
+            self._guidance_evaluated_prefix = None
 
     def _guidance_prompt_tokens(self) -> tuple[int, ...]:
         backend = self.guidance_backend
@@ -914,29 +1058,28 @@ class EpisodeEngine:
             raise EditorError("action resolved outside the vocabulary")
         evidence = self._evidence(observation, token_id)
         prepared = self._prepared_accept
+        promoted = bool(
+            prepared is not None
+            and prepared.observation is observation
+            and prepared.token_id == token_id
+            and prepared.prefix_token_ids == tuple(self.token_ids)
+            and self._speculative_accept_prefix == prepared.prefix_token_ids
+        )
         self._prepared_accept = None
         self._invalidate_observation()
         if evidence.is_eog:
+            if not promoted:
+                self._ensure_backend_positioned()
             self.terminal_token_id = token_id
         else:
-            promoted = False
-            if (
-                prepared is not None
-                and prepared.observation is observation
-                and prepared.token_id == token_id
-                and prepared.backend_snapshot.prefix_token_ids
-                == (*tuple(self.token_ids), token_id)
-            ):
-                try:
-                    promoted = self.backend.restore_state(prepared.backend_snapshot)
-                except Exception:
-                    promoted = False
-                if not promoted:
-                    # Treat restore failure as a cache miss. Reset first because
-                    # a native loader may have partially repositioned the model.
-                    self.backend.reset(list(self.token_ids))
-            if not promoted:
+            if promoted:
+                self.backend.commit_speculation()
+                self._speculative_accept_prefix = None
+                self._backend_positioned = True
+            else:
+                self._ensure_backend_positioned()
                 self.backend.eval([token_id])
+                self._backend_positioned = True
             self.visible_token_ids.append(token_id)
         return evidence
 
@@ -1023,30 +1166,6 @@ class EpisodeEngine:
                     divergence=divergence,
                 )
 
-        def probe() -> list[dict[str, Any]]:
-            details: list[dict[str, Any]] = []
-            try:
-                for token_id in planned:
-                    observation = self.observe()
-                    required = self._phrase_required_shift(observation, token_id)
-                    if required > float(action.max_shift):
-                        text = self.backend.token_text(token_id)
-                        raise InstructionRejected(
-                            f"check phrase rejected at token {len(details) + 1} {text!r}: "
-                            f"requires policy shift +{required:.4g}, "
-                            f"bound is +{float(action.max_shift):.4g}"
-                        )
-                    details.append(self._phrase_step_diagnostic(observation, token_id, required))
-                    self._commit_token(observation, token_id)
-                return details
-            finally:
-                self.rewind_to(before)
-
-        if not action.force:
-            # The dry run is separate from the committing pass so live learner
-            # updates still affect each subsequent token.
-            probe()
-
         evidence: list[TokenEvidence] = []
         visible: list[int] = []
         resolved: list[int] = []
@@ -1055,6 +1174,13 @@ class EpisodeEngine:
             for token_id in planned:
                 natural = self.observe()
                 required = self._phrase_required_shift(natural, token_id)
+                if not action.force and required > float(action.max_shift):
+                    text = self.backend.token_text(token_id)
+                    raise InstructionRejected(
+                        f"check phrase rejected at token {len(details) + 1} {text!r}: "
+                        f"requires policy shift +{required:.4g}, "
+                        f"bound is +{float(action.max_shift):.4g}"
+                    )
                 applied = required if action.force else 0.0
                 detail = self._phrase_step_diagnostic(
                     natural, token_id, required, applied_shift=applied
@@ -1074,6 +1200,12 @@ class EpisodeEngine:
                 if item.realized_visible:
                     visible.append(token_id)
                 details.append(detail)
+        except InstructionRejected:
+            if not action.force:
+                # Validate successive prefixes in one pass while keeping the
+                # checked phrase atomic to its caller.
+                self.rewind_to(before)
+            raise
         finally:
             self._ephemeral_logit_biases = {}
             self._invalidate_observation()

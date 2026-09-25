@@ -124,6 +124,8 @@ class RunTarget(Protocol):
 
     def begin(self) -> int: ...
 
+    def adopt_promoted(self, outcomes: Sequence[ActionOutcome]) -> None: ...
+
     def set_sampler(self, sampling: SamplerConfig) -> None: ...
 
     def observe(self) -> Observation: ...
@@ -166,10 +168,17 @@ def run_plan(
     tape: Sequence[TapeStep] | ReplayPlan | None = None,
     live_policy: LivePolicy | None = None,
     max_live_actions: int | None = None,
+    promoted_outcomes: Sequence[ActionOutcome] = (),
 ) -> RunResult:
-    """Run replay or live actions; any supplied tape returns at the live edge."""
+    """Run replay/live work, optionally committing already-applied previews."""
 
-    outcomes: list[ActionOutcome] = []
+    promoted = tuple(promoted_outcomes)
+    if promoted and (tape is not None or live_policy is not None):
+        raise ValueError("promoted outcomes cannot be combined with replay or live actions")
+    if promoted:
+        target.adopt_promoted(promoted)
+
+    outcomes: list[ActionOutcome] = list(promoted)
     replayed = 0
     handed_off = False
     handoff_reason: str | None = None
@@ -177,6 +186,9 @@ def run_plan(
     plan = tape if isinstance(tape, ReplayPlan) else ReplayPlan(tuple(tape or ()))
     replay_exhausted = False
     ordinal = target.begin()
+    for outcome in promoted:
+        target.record_live(ordinal, outcome)
+        ordinal += 1
     active_action: PolicyAction | None = None
     executing_replay = False
 

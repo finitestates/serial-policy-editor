@@ -50,7 +50,6 @@ def test_review_labels_an_interior_action_boundary_as_inside():
         active_aligned_step=2,
         aligned_step=1,
         context_text_tail="P",
-        context_token_sha256="0" * 64,
         position={"kind": "action-boundary", "action_kind": "write", "side": "inside"},
     )
     rendered = "".join(text for _, text in _render_review(review, terminal_size=(80, 24)))

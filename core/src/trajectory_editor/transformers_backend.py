@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-from copy import deepcopy
 import importlib.util
 import hashlib
 import inspect
@@ -16,7 +15,7 @@ from typing import Any
 import numpy as np
 
 from .core.errors import EditorError
-from .core.backend import BackendStateSnapshot, CacheMode, validate_cache_mode
+from .core.backend import CacheMode, validate_cache_mode
 from .model_hash import sha256_path
 
 
@@ -93,6 +92,24 @@ class TransformersSettings:
             raise EditorError(
                 "Transformers float32 matmul precision must be highest, high, or medium"
             )
+
+
+class _TokenizersTextStream:
+    """Thin adapter over Hugging Face Tokenizers' stateful DecodeStream."""
+
+    def __init__(self, tokenizer: Any, *, special: bool) -> None:
+        from tokenizers.decoders import DecodeStream
+
+        self._tokenizer = tokenizer
+        self._stream = DecodeStream(skip_special_tokens=not special)
+
+    def append(self, token_ids: list[int]) -> str:
+        chunks: list[str] = []
+        for token_id in token_ids:
+            chunk = self._stream.step(self._tokenizer, int(token_id))
+            if chunk:
+                chunks.append(str(chunk))
+        return "".join(chunks)
 
 
 def _as_token_id_set(value: Any) -> set[int]:
@@ -188,13 +205,6 @@ def _addressable_token_ids(tokenizer: Any) -> tuple[int, ...]:
 
 class _CacheUnavailable(RuntimeError):
     """The model cannot provide the optional incremental evaluation path."""
-
-
-@dataclass(frozen=True)
-class _TransformersSnapshotPayload:
-    cache_active: bool
-    past_key_values: Any
-    last_logits: np.ndarray
 
 
 def _supports_logits_to_keep(model: Any) -> bool:
@@ -355,7 +365,8 @@ class TransformersBackend:
         self._eog_ids, self._eog_source = self._discover_eog_ids()
         self._tokens: list[int] = []
         self._last_logits: np.ndarray | None = None
-        self._snapshot_token = object()
+        self._speculation_prefix: tuple[int, ...] | None = None
+        self._speculation_logits: np.ndarray | None = None
         self._activation_logit_cache: dict[tuple[str, str, str], np.ndarray] = {}
         self._hidden_state_control_handles: list[Any] = []
         self._hidden_state_control_key: tuple[Any, ...] | None = None
@@ -443,6 +454,8 @@ class TransformersBackend:
             )
 
     def reset(self, prefix_token_ids: list[int]) -> None:
+        if self._speculation_prefix is not None:
+            self.rollback_speculation()
         if not prefix_token_ids:
             raise RuntimeError("decoder prefix cannot be empty")
         self._tokens = [int(v) for v in prefix_token_ids]
@@ -453,8 +466,6 @@ class TransformersBackend:
                 self._evaluate_complete_prefix(use_cache=True)
                 return
             except (AttributeError, TypeError, ValueError, _CacheUnavailable):
-                # Cache support is optional. Fall through to the canonical
-                # complete-prefix path when this model/configuration lacks it.
                 probe = getattr(self, "_real_model_probe", None)
                 if probe is not None:
                     probe.cache_fallback("prefill-cache-unavailable")
@@ -465,6 +476,11 @@ class TransformersBackend:
     def eval(self, token_ids: list[int]) -> None:
         if not token_ids:
             return
+        if self._speculation_prefix is not None:
+            self.rollback_speculation()
+        self._eval_tokens(token_ids)
+
+    def _eval_tokens(self, token_ids: list[int]) -> None:
         values = [int(v) for v in token_ids]
         if self._cache_active:
             try:
@@ -478,6 +494,45 @@ class TransformersBackend:
                 self._cache_active = False
         self._tokens.extend(values)
         self._evaluate_complete_prefix(use_cache=False)
+
+    def speculate(self, token_id: int) -> bool:
+        cache = self._past_key_values
+        if (
+            not self._cache_active
+            or cache is None
+            or not self._tokens
+            or not (
+                callable(getattr(cache, "crop", None))
+                or isinstance(cache, (tuple, list))
+            )
+        ):
+            return False
+        if self._speculation_prefix is not None:
+            self.rollback_speculation()
+        if self._last_logits is None:
+            raise RuntimeError("decoder has not evaluated a prefix")
+        self._speculation_prefix = tuple(self._tokens)
+        self._speculation_logits = self._last_logits
+        self._evaluate_incremental([int(token_id)])
+        return True
+
+    def commit_speculation(self) -> None:
+        if self._speculation_prefix is None:
+            return
+        if len(self._tokens) != len(self._speculation_prefix) + 1:
+            raise RuntimeError("Transformers position changed before speculative commit")
+        self._speculation_prefix = None
+        self._speculation_logits = None
+
+    def rollback_speculation(self) -> None:
+        prefix = self._speculation_prefix
+        if prefix is None:
+            return
+        self._past_key_values = _crop_cache(self._past_key_values, len(prefix))
+        self._tokens = list(prefix)
+        self._last_logits = self._speculation_logits
+        self._speculation_prefix = None
+        self._speculation_logits = None
 
     def _evaluate_complete_prefix(self, *, use_cache: bool) -> None:
         self._validate_tokens(self._tokens)
@@ -555,8 +610,24 @@ class TransformersBackend:
         probe = getattr(self, "_real_model_probe", None)
         return probe.model_call(kind, positions, context_length) if probe is not None else nullcontext()
 
+    def truncate_to(self, length: int) -> bool:
+        if not self._cache_active or self._past_key_values is None:
+            return False
+        if type(length) is not int or length < 1 or length > len(self._tokens):
+            raise RuntimeError("Transformers cache truncation target is out of range")
+        if self._speculation_prefix is not None:
+            self.rollback_speculation()
+        if length == len(self._tokens):
+            return True
+        self._past_key_values = _crop_cache(self._past_key_values, length)
+        self._tokens = self._tokens[:length]
+        self._last_logits = None
+        return True
+
     def branch_to_prefix(self, prefix_token_ids: list[int]) -> None:
         """Move to an existing prefix, reusing and cropping the current cache."""
+        if self._speculation_prefix is not None:
+            self.rollback_speculation()
         values = [int(v) for v in prefix_token_ids]
         if not values:
             raise RuntimeError("decoder prefix cannot be empty")
@@ -582,61 +653,6 @@ class TransformersBackend:
             if probe is not None:
                 probe.cache_fallback("branch-cache-unavailable")
             self.reset(values)
-
-    def snapshot_state(self) -> BackendStateSnapshot | None:
-        """Copy the current prefix, logits, and any active Transformers KV cache.
-
-        Cache implementations differ across Transformers releases. If the
-        active cache cannot be copied independently, report no snapshot so a
-        caller can use its ordinary prefix-rebuild fallback.
-        """
-        if not self._tokens or self._last_logits is None:
-            return None
-        past_key_values = None
-        if self._cache_active:
-            if self._past_key_values is None:
-                return None
-            try:
-                past_key_values = deepcopy(self._past_key_values)
-            except Exception:
-                return None
-            if past_key_values is self._past_key_values:
-                return None
-        payload = _TransformersSnapshotPayload(
-            cache_active=self._cache_active,
-            past_key_values=past_key_values,
-            last_logits=self._last_logits.copy(),
-        )
-        return BackendStateSnapshot(
-            self._snapshot_token, tuple(self._tokens), payload
-        )
-
-    def restore_state(self, snapshot: BackendStateSnapshot) -> bool:
-        """Restore a snapshot created by this exact backend instance."""
-        if (
-            not isinstance(snapshot, BackendStateSnapshot)
-            or snapshot.backend_token is not self._snapshot_token
-            or not isinstance(snapshot.payload, _TransformersSnapshotPayload)
-        ):
-            return False
-        payload = snapshot.payload
-        past_key_values = None
-        if payload.cache_active:
-            if payload.past_key_values is None:
-                return False
-            try:
-                # Keep the saved snapshot reusable; cache objects may mutate
-                # in place during the next incremental model call.
-                past_key_values = deepcopy(payload.past_key_values)
-            except Exception:
-                return False
-            if past_key_values is payload.past_key_values:
-                return False
-        self._tokens = list(snapshot.prefix_token_ids)
-        self._past_key_values = past_key_values
-        self._cache_active = payload.cache_active
-        self._last_logits = payload.last_logits.copy()
-        return True
 
     def _set_last_logits(self, logits: Any) -> None:
         if logits is None or getattr(logits, "ndim", None) != 3:
@@ -942,6 +958,8 @@ class TransformersBackend:
         self.clear_hidden_state_vector()
 
     def last_logits(self) -> np.ndarray:
+        if getattr(self, "_speculation_prefix", None) is not None:
+            raise RuntimeError("cannot read logits while a speculative token is cached")
         if self._last_logits is None:
             raise RuntimeError("decoder has not evaluated a prefix")
         return self._last_logits.copy()
@@ -1084,6 +1102,18 @@ class TransformersBackend:
             if type(bos) is int and int(bos) >= 0:
                 token_ids.insert(0, int(bos))
         return token_ids
+
+    def new_text_stream(self, *, special: bool = False):
+        try:
+            from tokenizers.decoders import DecodeStream
+        except (ImportError, AttributeError):
+            return None
+        backend_tokenizer = getattr(self._tokenizer, "backend_tokenizer", None)
+        if backend_tokenizer is None:
+            backend_tokenizer = getattr(self._tokenizer, "_tokenizer", None)
+        if backend_tokenizer is None or not callable(getattr(DecodeStream, "step", None)):
+            return None
+        return _TokenizersTextStream(backend_tokenizer, special=special)
 
     def render(self, token_ids: list[int], *, special: bool = False) -> str:
         if not token_ids:

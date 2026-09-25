@@ -288,11 +288,6 @@ def test_s04d_candidates_skip_probabilities_until_requested():
     assert needs_raw(policy=True, logit_view="none") is False
     assert needs_raw(show_model_probabilities=True) is True
     assert needs_raw(policy=True, show_model_probabilities=True) is True
-    # Narrow width that drops raw-p must not claim soft-max is needed.
-    assert needs_raw(
-        policy=True, show_model_probabilities=True, width=40
-    ) is False
-
     default_labels = dict(CandidateColumns().columns)
     assert "raw-p" not in default_labels
     assert "decode-p" not in default_labels

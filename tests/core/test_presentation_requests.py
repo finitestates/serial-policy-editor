@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
-from tests.fakes import ConformingFakeBackend, ScriptedIO, SnapshotFakeBackend
+from tests.fakes import ConformingFakeBackend, ScriptedIO, SpeculativeFakeBackend
 from tests.core.runtime_helpers import LiveScriptedIO
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.edge_help import edge_help
@@ -114,7 +116,18 @@ def test_choice_requests_preserve_actions_feedback_and_lazy_statistics():
 
     assert len(requests[0]) == len(requests[1]) == 4
     for plain, live in zip(*requests):
-        assert plain.choice == live.choice
+        # This key identifies an engine/prefix pair; the remaining request data agrees.
+        plain_choice = replace(
+            plain.choice,
+            context_token_sha256="per-run context cursor",
+            context_text_tail=str(plain.choice.context_text_tail),
+        )
+        live_choice = replace(
+            live.choice,
+            context_token_sha256="per-run context cursor",
+            context_text_tail=str(live.choice.context_text_tail),
+        )
+        assert plain_choice == live_choice
         assert plain.display_candidates == live.display_candidates
         assert plain.feedback == live.feedback
         assert plain.target_token_id == live.target_token_id
@@ -129,6 +142,32 @@ def test_choice_requests_preserve_actions_feedback_and_lazy_statistics():
     assert [row[2] for row in interactions[0]] == [
         "vocabulary-search-view",
     ]
+
+
+def test_candidate_columns_do_not_depend_on_terminal_width():
+    class SizedIO(ScriptedIO):
+        def __init__(self, width):
+            super().__init__([])
+            self.width = width
+
+        def terminal_size(self):
+            return self.width, 24
+
+    engine = EpisodeEngine(
+        CountingBackend(), initial_text="P", initial_token_ids=[7],
+        sampling=SamplerConfig(temperature=0.0),
+    )
+    narrow = InteractivePolicy(
+        io=SizedIO(36), menu_size=1, show_model_probabilities=True,
+    )._view_plan(engine)
+    wide = InteractivePolicy(
+        io=SizedIO(160), menu_size=1, show_model_probabilities=True,
+    )._view_plan(engine)
+
+    assert narrow == wide
+    assert {label for label, _ in narrow.columns} == {
+        "raw-p", "decode-p", "token-id",
+    }
 
 
 def test_review_request_does_not_position_backend_or_commit_action():
@@ -199,7 +238,7 @@ def test_choice_warm_callback_resolves_selected_rank_through_policy(submitted_ra
             return str(submitted_rank)
 
     terminal = WarmCapture()
-    backend = SnapshotFakeBackend()
+    backend = SpeculativeFakeBackend()
     engine = EpisodeEngine(
         backend, initial_text="P", initial_token_ids=[7],
         sampling=SamplerConfig(temperature=0.0),

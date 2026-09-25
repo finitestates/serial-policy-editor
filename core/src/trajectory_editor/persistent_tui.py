@@ -71,6 +71,7 @@ class _Request:
     warm_cancelled: threading.Event = field(default_factory=threading.Event)
     warm_timer: asyncio.TimerHandle | None = None
     warm_future: Future | None = None
+    warm_search_priority: bool = False
 
 
 @dataclass
@@ -429,6 +430,30 @@ class PersistentTerminalSession(AbstractContextManager):
         except BaseException:
             return False
 
+    @staticmethod
+    def _is_search_warm_carryover(request: _Request) -> bool:
+        state = request.state
+        if (
+            not isinstance(state, ChoiceViewState)
+            or request.warm_cancelled.is_set()
+            or not request.warm_search_priority
+            or request.warm_target is None
+            or not request.response.done()
+            or request.response.cancelled()
+            or request.warm_future is None
+            or not request.warm_future.done()
+            or request.warm_future.cancelled()
+        ):
+            return False
+        try:
+            raw = request.response.result()
+            return (
+                raw in state.search_warm_commands
+                and bool(request.warm_future.result())
+            )
+        except BaseException:
+            return False
+
     def _choice_target(self, request: _Request, raw: str) -> tuple[int, int] | None:
         state = self.choice_view.state
         if request.state.review is not None:
@@ -462,8 +487,19 @@ class PersistentTerminalSession(AbstractContextManager):
             or self.choice_view is None
         ):
             return
-        target = self._choice_target(request, self.choice_view.command_buffer.text)
+        raw = self.choice_view.command_buffer.text
+        selected_target = self._choice_target(request, raw)
+        search_target = request.state.search_warm_target
+        carries_search_target = False
+        if search_target is not None:
+            if not raw or selected_target == search_target:
+                carries_search_target = True
+            elif raw in request.state.search_warm_commands:
+                carries_search_target = True
+        target = search_target if carries_search_target else selected_target
+        search_priority = carries_search_target
         if target == request.warm_target:
+            request.warm_search_priority = search_priority
             return
 
         # Measure inter-arrival time across cursor shifts
@@ -495,11 +531,19 @@ class PersistentTerminalSession(AbstractContextManager):
         self._warm_generation += 1
         request.warm_generation = self._warm_generation
         request.warm_target = target
+        request.warm_search_priority = search_priority
         request.warm_cancelled = threading.Event()
         request.warm_future = None
 
+        if target is not None and search_priority and request.state.search_warm_prepared:
+            request.warm_future = Future()
+            request.warm_future.set_result(True)
+            return
+
         if target is not None:
-            if self.warm_debounce_mode == "adaptive":
+            if search_priority:
+                delay = 0.0
+            elif self.warm_debounce_mode == "adaptive":
                 if delta < self.burst_threshold:
                     speed_ratio = 1.0 - (max(0.0, delta) / self.burst_threshold)
                     delay = (
@@ -614,8 +658,10 @@ class PersistentTerminalSession(AbstractContextManager):
         finally:
             if not request.response.done():
                 request.response.cancel()
-            keep_prepared = self._is_warm_promotion(request)
-            if keep_prepared:
+            promoted = self._is_warm_promotion(request)
+            carryover = self._is_search_warm_carryover(request)
+            keep_prepared = promoted or carryover
+            if promoted:
                 self.stats["promotions"] += 1
             if request.warm_timer is not None:
                 self._call(request.warm_timer.cancel)

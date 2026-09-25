@@ -200,32 +200,8 @@ ALLOW[("invalidate-dont-refresh", "core.backend:require_inference_backend", "las
 
 DEBT = {
     # ---- Task A: chord ------------------------------------------------------
-    ("invalidate-dont-refresh", "chord:Chord._activate", "observe"): "A",
-    ("invalidate-dont-refresh", "chord:Chord.rewind", "observe"): "A",
     # ---- Task B: speculation ------------------------------------------------
-    ("never-on-interactive-path", "episode_engine:EpisodeEngine.speculate_accept", "snapshot_state"): "B",
-    ("never-on-interactive-path", "episode_engine:EpisodeEngine.speculate_accept", "restore_state"): "B",
-    ("never-on-interactive-path", "episode_engine:EpisodeEngine._commit_token", "restore_state"): "B",
-    ("never-on-interactive-path", "decoder:LlamaCppDecoder.snapshot_state", "save_state"): "B",
-    ("never-on-interactive-path", "decoder:LlamaCppDecoder.restore_state", "load_state"): "B",
-    ("never-on-interactive-path", "transformers_backend:TransformersBackend.snapshot_state", "copy.deepcopy"): "B",
-    ("never-on-interactive-path", "transformers_backend:TransformersBackend.restore_state", "copy.deepcopy"): "B",
-    ("no-full-prefill", "episode_engine:EpisodeEngine.speculate_accept", "reset"): "B",
-    ("no-full-prefill", "episode_engine:EpisodeEngine._commit_token", "reset"): "B",
-    ("no-swallowed-backend-errors", "episode_engine:EpisodeEngine.speculate_accept", "snapshot_state"): "B",
-    ("no-swallowed-backend-errors", "episode_engine:EpisodeEngine.speculate_accept", "eval"): "B",
-    ("no-swallowed-backend-errors", "episode_engine:EpisodeEngine.speculate_accept", "restore_state"): "B",
-    ("no-swallowed-backend-errors", "episode_engine:EpisodeEngine._commit_token", "restore_state"): "B",
-    ("no-swallowed-backend-errors", "decoder:LlamaCppDecoder.snapshot_state", "last_logits"): "B",
-    ("no-swallowed-backend-errors", "transformers_backend:TransformersBackend.snapshot_state", "copy.deepcopy"): "B",
-    ("no-swallowed-backend-errors", "transformers_backend:TransformersBackend.snapshot_state", "_past_key_values"): "B",
-    ("no-swallowed-backend-errors", "transformers_backend:TransformersBackend.restore_state", "copy.deepcopy"): "B",
-    ("invalidate-dont-refresh", "transformers_backend:TransformersBackend.restore_state", "last_logits"): "B",
     # ---- Task C: review cursor ----------------------------------------------
-    ("never-on-interactive-path", "episode_ui:_ContextRenderCursor._reset", "hashlib"): "C",
-    ("never-on-interactive-path", "episode_ui:_ContextRenderCursor.prewarm", "threading.Timer"): "C",
-    ("invalidate-dont-refresh", "episode_ui:_ContextRenderCursor.prewarm", "_append_stream"): "C",
-    ("invalidate-dont-refresh", "episode_ui:_ContextRenderCursor._new_stream", "new_text_stream"): "C",
     # ---- U: found by the checker, not yet triaged by the owner ---------------
     # Chord open builds k preview engines; each hashes the whole initial prompt.
     ("never-on-interactive-path", "episode_hash:token_prefix_sha256", "hashlib"): "U",

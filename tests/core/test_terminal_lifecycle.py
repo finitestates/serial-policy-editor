@@ -65,7 +65,7 @@ def test_one_application_transitions_across_choice_review_edge_page_prompt_choic
     edge = EdgeViewState("episode", 0, 3, 3, "temperature 1")
     choice = _choice_state()
     review = replace(choice, review=BoundaryReview(
-        0, 0, "P", "0" * 64, {"kind": "token-boundary"},
+        0, 0, "P", {"kind": "token-boundary"},
     ))
     next_choice = replace(choice, choice=replace(choice.choice, choice_set_id="next"))
     with create_pipe_input() as pipe:

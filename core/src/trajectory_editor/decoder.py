@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 
+import codecs
 import ctypes
 import hashlib
 import platform
@@ -15,7 +16,7 @@ from typing import Any
 import numpy as np
 
 from .core.errors import EditorError
-from .core.backend import BackendStateSnapshot, CacheMode, InferenceBackend, validate_cache_mode
+from .core.backend import CacheMode, InferenceBackend, validate_cache_mode
 from .model_hash import sha256_path
 
 
@@ -134,6 +135,23 @@ def _llama_options(
     return {key: value for key, value in options.items() if value is not None}
 
 
+class _LlamaCppTextStream:
+    """Incremental UTF-8 decoding over newly detokenized llama.cpp pieces."""
+
+    def __init__(self, model: Any, *, special: bool) -> None:
+        self._model = model
+        self._special = special
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+    def append(self, token_ids: list[int]) -> str:
+        if not token_ids:
+            return ""
+        raw = self._model.detokenize(
+            [int(value) for value in token_ids], special=self._special
+        )
+        return self._decoder.decode(raw, final=False)
+
+
 class LlamaCppDecoder:
     """Thin adapter over llama-cpp-python's token evaluation API."""
 
@@ -177,7 +195,10 @@ class LlamaCppDecoder:
                 if value >= 0:
                     self._fallback_eog_ids.add(value)
         self._tokens: list[int] = []
-        self._snapshot_token = object()
+        self._restored_logits: np.ndarray | None = None
+        self._last_logits_cache: np.ndarray | None = None
+        self._speculation_prefix: tuple[int, ...] | None = None
+        self._speculation_logits: np.ndarray | None = None
         self._token_embedding_matrix_cache: np.ndarray | None = None
         self._activation_model: Any | None = None
         self._activation_logit_cache: dict[tuple[str, str, str], np.ndarray] = {}
@@ -187,6 +208,11 @@ class LlamaCppDecoder:
         self._real_model_probe = None
 
     def _measured_eval(self, values: list[int], kind: str, context_length: int) -> None:
+        # A restored snapshot supplies its saved final logits until the context
+        # is evaluated again. Once evaluation starts, the native output buffer
+        # becomes authoritative again.
+        self._restored_logits = None
+        self._last_logits_cache = None
         probe = getattr(self, "_real_model_probe", None)
         interval = probe.model_call(kind, len(values), context_length) if probe is not None else nullcontext()
         with interval:
@@ -196,9 +222,12 @@ class LlamaCppDecoder:
         return self._vocabulary_size
 
     def reset(self, prefix_token_ids: list[int]) -> None:
+        if self._speculation_prefix is not None:
+            self.rollback_speculation()
         if not prefix_token_ids:
             raise RuntimeError("decoder prefix cannot be empty")
         values = [int(value) for value in prefix_token_ids]
+        self._restored_logits = None
         self._model.reset()
         self._measured_eval(values, "prefill", len(values))
         self._tokens = values
@@ -206,6 +235,11 @@ class LlamaCppDecoder:
     def eval(self, token_ids: list[int]) -> None:
         if not token_ids:
             return
+        if self._speculation_prefix is not None:
+            self.rollback_speculation()
+        self._eval_tokens(token_ids)
+
+    def _eval_tokens(self, token_ids: list[int]) -> None:
         values = [int(value) for value in token_ids]
         self._tokens.extend(values)
         if self._cache_enabled:
@@ -214,8 +248,75 @@ class LlamaCppDecoder:
             self._model.reset()
             self._measured_eval(self._tokens, "rebuild", len(self._tokens))
 
+    def speculate(self, token_id: int) -> bool:
+        if not self._cache_enabled or not self._tokens:
+            return False
+        if self._speculation_prefix is not None:
+            self.rollback_speculation()
+        context = getattr(self._model, "_ctx", None)
+        remove = getattr(context, "kv_cache_seq_rm", None)
+        if not callable(remove):
+            return False
+        logits = getattr(self, "_last_logits_cache", None)
+        if logits is None:
+            logits = self.last_logits()
+        self._speculation_prefix = tuple(self._tokens)
+        self._speculation_logits = logits
+        self._eval_tokens([int(token_id)])
+        return True
+
+    def commit_speculation(self) -> None:
+        if self._speculation_prefix is None:
+            return
+        if len(self._tokens) != len(self._speculation_prefix) + 1:
+            raise RuntimeError("speculative decoder position changed before commit")
+        self._speculation_prefix = None
+        self._speculation_logits = None
+
+    def rollback_speculation(self) -> None:
+        prefix = self._speculation_prefix
+        if prefix is None:
+            return
+        context = getattr(self._model, "_ctx", None)
+        remove = getattr(context, "kv_cache_seq_rm", None)
+        if not callable(remove):
+            raise RuntimeError("llama.cpp cache cannot roll back a speculative token")
+        if not remove(-1, len(prefix), -1):
+            raise RuntimeError("llama.cpp rejected speculative cache rollback")
+        self._model.n_tokens = len(prefix)
+        self._model._requires_eval = True
+        self._tokens = list(prefix)
+        self._restored_logits = self._speculation_logits
+        self._last_logits_cache = self._speculation_logits
+        self._speculation_prefix = None
+        self._speculation_logits = None
+
+    def truncate_to(self, length: int) -> bool:
+        if not self._cache_enabled:
+            return False
+        if type(length) is not int or length < 1 or length > len(self._tokens):
+            raise RuntimeError("decoder cache truncation target is out of range")
+        if self._speculation_prefix is not None:
+            self.rollback_speculation()
+        if length == len(self._tokens):
+            return True
+        context = getattr(self._model, "_ctx", None)
+        remove = getattr(context, "kv_cache_seq_rm", None)
+        if not callable(remove):
+            raise RuntimeError("llama.cpp cache cannot be truncated")
+        if not remove(-1, length, -1):
+            raise RuntimeError("llama.cpp rejected cache truncation")
+        self._model.n_tokens = length
+        self._model._requires_eval = True
+        self._tokens = self._tokens[:length]
+        self._restored_logits = None
+        self._last_logits_cache = None
+        return True
+
     def branch_to_prefix(self, prefix_token_ids: list[int]) -> None:
         """Move to an existing prefix, reusing the current cache when possible."""
+        if self._speculation_prefix is not None:
+            self.rollback_speculation()
         values = [int(value) for value in prefix_token_ids]
         if not values:
             raise RuntimeError("decoder prefix cannot be empty")
@@ -252,36 +353,16 @@ class LlamaCppDecoder:
                 probe.cache_fallback("branch-cache-unavailable")
             self.reset(values)
 
-    def snapshot_state(self) -> BackendStateSnapshot | None:
-        """Capture llama.cpp's full context state when the wrapper supports it."""
-        save_state = getattr(self._model, "save_state", None)
-        if not callable(save_state) or not self._tokens:
-            return None
-        try:
-            state = save_state()
-        except Exception:
-            return None
-        return BackendStateSnapshot(
-            self._snapshot_token, tuple(self._tokens), state
-        )
-
-    def restore_state(self, snapshot: BackendStateSnapshot) -> bool:
-        """Restore an exact llama.cpp state saved by this backend instance."""
-        if (
-            not isinstance(snapshot, BackendStateSnapshot)
-            or snapshot.backend_token is not self._snapshot_token
-        ):
-            return False
-        load_state = getattr(self._model, "load_state", None)
-        if not callable(load_state):
-            return False
-        # Let native restoration failures surface: the context may be partially
-        # repositioned, so callers must rebuild from the semantic prefix.
-        load_state(snapshot.payload)
-        self._tokens = list(snapshot.prefix_token_ids)
-        return True
-
     def last_logits(self) -> np.ndarray:
+        if getattr(self, "_speculation_prefix", None) is not None:
+            raise RuntimeError("cannot read logits while a speculative token is cached")
+        restored_logits = getattr(self, "_restored_logits", None)
+        if restored_logits is not None:
+            self._last_logits_cache = restored_logits
+            return restored_logits.copy()
+        cached = getattr(self, "_last_logits_cache", None)
+        if cached is not None:
+            return cached.copy()
         model = self._model
         context = model._ctx.ctx if hasattr(model, "_ctx") else model.ctx
         get_ith = getattr(self._llama_cpp, "llama_get_logits_ith", None)
@@ -292,9 +373,11 @@ class LlamaCppDecoder:
         )
         if not pointer:
             raise RuntimeError("llama.cpp returned no final-position logits")
-        return np.ctypeslib.as_array(pointer, shape=(self._vocabulary_size,)).astype(
+        logits = np.ctypeslib.as_array(pointer, shape=(self._vocabulary_size,)).astype(
             np.float32, copy=True
         )
+        self._last_logits_cache = logits
+        return logits.copy()
 
     def activation_width(self) -> int:
         """Return the final hidden/output-head width for this GGUF model."""
@@ -729,6 +812,9 @@ class LlamaCppDecoder:
                 text.encode("utf-8"), add_bos=add_bos, special=special
             )
         ]
+
+    def new_text_stream(self, *, special: bool = False):
+        return _LlamaCppTextStream(self._model, special=special)
 
     def render(self, token_ids: list[int], *, special: bool = False) -> str:
         if not token_ids:

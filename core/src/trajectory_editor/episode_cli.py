@@ -23,7 +23,7 @@ from . import (
     episode_prompts,
 )
 from .backend_factory import BACKEND_NAMES
-from .chord import ActionSequencePolicy, Chord, ChordRequested, chord_menu
+from .chord import Chord, ChordRequested, chord_menu
 from .decoder import KV_CACHE_TYPES
 from .core.errors import EditorError
 from .core.cli_config import (
@@ -1030,7 +1030,7 @@ def main(
                     pending_tape = None
                     chord = Chord(engine, request.ranks)
                     try:
-                        chord_action, actions = chord_menu(io, chord)
+                        chord_action, actions = chord_menu(io, chord, promote_on_select=True)
                     finally:
                         chord.discard()
                     if chord_action == "quit":
@@ -1044,8 +1044,7 @@ def main(
                     if chord_action == "select":
                         assert actions is not None
                         selected = runner.run(
-                            live_policy=ActionSequencePolicy(actions),
-                            max_live_actions=len(actions),
+                            promoted_outcomes=chord.selected_outcomes,
                         )
                         if selected.handed_off:
                             io.write(selected.handoff_reason or "Chord selection handed off.")

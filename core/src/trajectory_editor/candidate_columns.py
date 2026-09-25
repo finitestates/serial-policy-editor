@@ -1,4 +1,4 @@
-"""Shared policy diagnostics and responsive candidate-table columns.
+"""Shared policy diagnostics and user-selected candidate-table columns.
 
 Presentation is an identity core (rank | token-id | text — rank/text stay
 outside the column tuple) plus named overlays. Soft-max % overlays are
@@ -134,7 +134,6 @@ class CandidateViewPlan:
 class CandidateColumns:
     policy: bool = False
     logit_view: str = "none"
-    width: int | None = None
     raw_k1_logit: float | None = None
     show_model_probabilities: bool = False
     column_focus: str | None = None
@@ -189,14 +188,8 @@ class CandidateColumns:
         if "decode_pct" in enabled and OVERLAYS["decode_pct"].wired:
             requested.append("decode-p")
 
-        # Reserve rank, token ID, and a useful text span before fitting extras.
-        columns: list[tuple[str, int]] = []
-        used = 30
-        for label in requested:
-            cost = _COLUMN_WIDTHS[label] + 2
-            if self.width is None or used + cost <= self.width:
-                columns.append((label, _COLUMN_WIDTHS[label]))
-                used += cost
+        # Column visibility follows user preferences, never terminal geometry.
+        columns = [(label, _COLUMN_WIDTHS[label]) for label in requested]
         columns.append(("token-id", _COLUMN_WIDTHS["token-id"]))
         return tuple(columns)
 

@@ -12,11 +12,12 @@ from prompt_toolkit.data_structures import Size
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output.vt100 import Vt100_Output
 
-from tests.fakes import SnapshotFakeBackend
+from tests.fakes import SpeculativeFakeBackend
 from trajectory_editor.core.actions import SelectRawRank
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_ui import _choice_from_observation
+from trajectory_editor.episode_hash import token_prefix_sha256
 from trajectory_editor.persistent_tui import PersistentTerminalSession
 from trajectory_editor.terminal_contracts import ChoiceViewState
 
@@ -44,7 +45,10 @@ def _choice(engine: EpisodeEngine, warm):
     observation = engine.observe()
     candidates = engine.candidates(observation, count=3)
     choice = _choice_from_observation(
-        engine, observation, candidates, context_characters=0, serial=1,
+        engine, observation, candidates,
+        context_text_tail=observation.context_text,
+        context_token_sha256=token_prefix_sha256(list(observation.prefix_token_ids)),
+        serial=1,
     )
     state = ChoiceViewState(
         choice, engine.remaining, candidates, lambda text, mode: text,
@@ -60,7 +64,7 @@ def _choice(engine: EpisodeEngine, warm):
 
 @pytest.mark.invariant
 def test_fast_tab_sequence_warms_only_final_rank_and_enter_promotes_it():
-    backend = SnapshotFakeBackend()
+    backend = SpeculativeFakeBackend()
     engine = EpisodeEngine(
         backend, initial_token_ids=[7], sampling=SamplerConfig(temperature=0.0),
     )
@@ -118,7 +122,7 @@ def test_fast_tab_sequence_warms_only_final_rank_and_enter_promotes_it():
 
 @pytest.mark.invariant
 def test_typed_rank_warms_after_pause_but_changed_enter_misses():
-    backend = SnapshotFakeBackend()
+    backend = SpeculativeFakeBackend()
     engine = EpisodeEngine(
         backend, initial_token_ids=[7], sampling=SamplerConfig(temperature=0.0),
     )
@@ -180,7 +184,7 @@ def test_selection_change_during_uninterruptible_warm_cancels_old_result():
         started.set()
         assert release.wait(3)
 
-    backend = SnapshotFakeBackend(on_eval=block_after_eval)
+    backend = SpeculativeFakeBackend(on_eval=block_after_eval)
     engine = EpisodeEngine(
         backend, initial_token_ids=[7], sampling=SamplerConfig(temperature=0.0),
     )
