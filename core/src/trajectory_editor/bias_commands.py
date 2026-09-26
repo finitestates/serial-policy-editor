@@ -55,7 +55,7 @@ def _scope(command, backend, groups):
 
 
 def apply_bias_command(command, backend, sampling, observation, resolve_candidate):
-    """Return a core sampler edit and interaction records."""
+    """Return an updated sampler and concise user-facing change labels."""
     if command.bias_status:
         return sampling, []
     groups = {group.name: group for group in sampling.bias_groups}
@@ -88,7 +88,7 @@ def apply_bias_command(command, backend, sampling, observation, resolve_candidat
         )
         groups[name] = group
         return replace(sampling, bias_groups=tuple(groups.values())), [
-            ("bias-group", {"group": group.to_dict()}, f"Group {name!r} · {len(group.members)} members", group.bias)
+            (f"Group {name!r} · {len(group.members)} members", group.bias)
         ]
 
     if command.bias_targets is None:
@@ -111,7 +111,7 @@ def apply_bias_command(command, backend, sampling, observation, resolve_candidat
             step if command.bias_operator == "+" else -step
         )
         rules[template.key] = replace(template, bias=amount)
-        updates.append(("bias-rule", {"previous": old, "rule": rules[template.key].to_dict()}, "Token bias", amount))
+        updates.append(("Token bias", amount))
         return replace(sampling, bias_rules=tuple(rules.values())), updates
 
     flags = command.bias_target_bare or (True,) * len(command.bias_targets)
@@ -122,7 +122,7 @@ def apply_bias_command(command, backend, sampling, observation, resolve_candidat
         groups[group.name] = group
         if command.bias_operator == "off":
             groups[group.name] = replace(group, enabled=False)
-            updates.append(("bias-group", {"group": groups[group.name].to_dict()}, f"Group {group.name!r} off", 0.0))
+            updates.append((f"Group {group.name!r} off", 0.0))
             continue
         step = command.bias_amount if command.bias_amount is not None else sampling.bias_step
         amount = 0.0 if command.bias_operator == "=" else group.bias + (
@@ -133,5 +133,5 @@ def apply_bias_command(command, backend, sampling, observation, resolve_candidat
                 scoped = replace(rule, triggers=triggers, until=until, logical_target=f"group:{group.name}")
                 rules[scoped.key] = replace(scoped, bias=amount)
         groups[group.name] = replace(group, bias=amount, enabled=True)
-        updates.append(("bias-group", {"group": groups[group.name].to_dict()}, f"Group {group.name!r} manual", amount))
+        updates.append((f"Group {group.name!r} manual", amount))
     return replace(sampling, bias_groups=tuple(groups.values()), bias_rules=tuple(rules.values())), updates

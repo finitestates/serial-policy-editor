@@ -14,7 +14,7 @@ from .core.errors import EditorError
 from .core.results import ActionOutcome, Divergence, ReplayExpectation, TokenEvidence
 from .core.sampler_config import SamplerConfig
 from .episode_engine import EpisodeEngine, Observation
-from .episode_runner import TapeStep
+from .run_loop import RunResult, TapeStep
 from .episode_session import (
     BranchIdentity,
     BranchState,
@@ -36,7 +36,6 @@ __all__ = [
     "EndGeneration",
     "EpisodeEngine",
     "EpisodeProjection",
-    "EpisodeRunner",
     "EpisodeStore",
     "Hold",
     "InferenceBackend",
@@ -48,7 +47,6 @@ __all__ = [
     "LiveRosterEntry",
     "LiveSession",
     "LiveSessionRoster",
-    "LiveSessionRunner",
     "Phrase",
     "ReplayExpectation",
     "RunResult",
@@ -66,14 +64,7 @@ __version__ = VERSION
 
 
 def __getattr__(name: str):
-    """Keep persistence adapters out of the lightweight live-session import."""
-    if name in {"EpisodeRunner", "LiveSessionRunner", "RunResult"}:
-        from .episode_runner import EpisodeRunner, LiveSessionRunner, RunResult
-        return {
-            "EpisodeRunner": EpisodeRunner,
-            "LiveSessionRunner": LiveSessionRunner,
-            "RunResult": RunResult,
-        }[name]
+    """Keep SQLite modules out of the lightweight live-session import."""
     if name == "EpisodeStore":
         from .episode_store import EpisodeStore
         return EpisodeStore

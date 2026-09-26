@@ -1,19 +1,17 @@
 from __future__ import annotations
 
 import random
-from dataclasses import replace
 
 import pytest
 
-from tests.core.test_lifecycle_contracts import NoEogBackend, create as create_episode
+from tests.core.test_lifecycle_contracts import NoEogBackend
 from tests.core.test_replay_contracts import runtime
 from trajectory_editor.core.actions import Accept, Hold
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.core.results import ReplayExpectation
-from trajectory_editor.episode_cli import _fork_engine, _rewind_episode
 from trajectory_editor.episode_engine import EpisodeEngine
-from trajectory_editor.episode_replay_source import replay_procedure
-from trajectory_editor.episode_store import EpisodeStore
+from trajectory_editor.episode_session import LiveSession
+from trajectory_editor.run_loop import run_plan
 
 pytestmark = pytest.mark.invariant
 
@@ -55,46 +53,37 @@ def test_q02_generated_replay_prefixes_are_never_changed_by_replay():
         assert replayed.divergence is None
 
 
-def test_q03_rewind_then_replay_reproduces_each_retained_prefix(tmp_path):
+def test_q03_rewind_then_replay_reproduces_each_retained_prefix():
     for boundary in range(4):
-        path = tmp_path / f"rewind-{boundary}.sqlite3"
-        with EpisodeStore(path) as store:
-            source = runtime([1, 3, 5])
-            identifier = create_episode(store, "episode", source)
-            outcome = source.apply(Hold(3))
-            store.record_action(identifier, 0, outcome)
-            store.update_episode(identifier, visible_text="word next more", max_tokens=None)
+        source = LiveSession(runtime([1, 3, 5]))
+        source.generate(Hold(3))
+        source.rewind(boundary)
+        retained = tuple(source.engine.visible_token_ids)
 
-            _rewind_episode(store, identifier, source, boundary)
-            retained = tuple(source.visible_token_ids)
-            replay = runtime([1, 3, 5])
-            tape = replay_procedure(store, identifier)
-            if tape:
-                replay_action, expectation = tape[0]["action"], tape[0]["expectation"]
-                replay.apply(replay_action, replay=True, expectation=expectation)
-
-        assert retained == tuple(replay.visible_token_ids)
+        replay = LiveSession(runtime([1, 3, 5]))
+        if source.history_tape:
+            result = run_plan(
+                replay,
+                divergence_policy="handoff",
+                tape=source.history_tape,
+            )
+            assert not result.handed_off
+        assert retained == tuple(replay.engine.visible_token_ids)
 
 
 @pytest.mark.parametrize("boundary", [0, 1, 2, 3])
-def test_q04_fork_at_every_generated_boundary_preserves_the_prefix(tmp_path, boundary):
-    with EpisodeStore(tmp_path / f"fork-{boundary}.sqlite3") as store:
-        parent = EpisodeEngine(
-            NoEogBackend(),
-            initial_token_ids=[7],
-            sampling=SamplerConfig(temperature=0.0),
-        )
-        identifier = create_episode(store, "parent", parent)
-        outcome = parent.apply(Hold(3))
-        store.record_action(identifier, 0, outcome)
-        store.update_episode(identifier, visible_text=parent.text, max_tokens=None)
+def test_q04_fork_at_every_generated_boundary_preserves_the_prefix(boundary):
+    parent = LiveSession(EpisodeEngine(
+        NoEogBackend(),
+        initial_token_ids=[7],
+        sampling=SamplerConfig(temperature=0.0),
+    ))
+    outcome = parent.generate(Hold(3))
 
-        child = _fork_engine(
-            store, identifier, parent, boundary, backend=NoEogBackend(), max_tokens=None
-        )
+    child = parent.fork(boundary=boundary)
 
-    assert child.initial_token_ids == (7,)
-    assert child.visible_token_ids == list(outcome.visible_token_ids[:boundary])
+    assert child.engine.initial_token_ids == (7,)
+    assert child.engine.visible_token_ids == list(outcome.visible_token_ids[:boundary])
 
 
 def test_q05_generated_divergence_always_handoffs_or_goes_ballistic():

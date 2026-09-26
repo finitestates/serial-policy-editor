@@ -23,7 +23,10 @@ def test_shared_command_scenario_through_live_and_plain_adapters(tmp_path, ephem
         workspace = tmp_path / f"{suffix}.sqlite3"
         export = tmp_path / f"{suffix}.jsonl"
         commands = ["1", "q"]
-        commands += [f"export {export}", "q"] if ephemeral else ["q"]
+        commands += (
+            [f"export {export}", "q"] if ephemeral
+            else [f"save {workspace} saved", "q"]
+        )
         terminal = LiveScriptedIO(commands) if live else ScriptedIO(commands)
         flags = ["--ephemeral"] if ephemeral else ["--workspace", str(workspace)]
         if not live:
@@ -36,7 +39,7 @@ def test_shared_command_scenario_through_live_and_plain_adapters(tmp_path, ephem
 
         assert terminal.choice_requests
         assert terminal.edge_requests
-        assert all(request.mode == ("session" if ephemeral else "episode")
+        assert all(request.mode == "session"
                    for request in terminal.edge_requests)
         assert not terminal.responses
         if live:
@@ -46,8 +49,7 @@ def test_shared_command_scenario_through_live_and_plain_adapters(tmp_path, ephem
             actions = [step.action.kind for step in load_teacher_tape_jsonl(export).plan]
         else:
             with EpisodeStore(workspace) as store:
-                actions = [step["action"].kind for step in replay_procedure(
-                    store, store.resolve_id("#1"))]
+                actions = [step["action"].kind for step in replay_procedure(store, "saved")]
         records.append((actions, terminal.choice_requests[0].choice.proposal_token_id))
 
     assert records[0] == records[1]

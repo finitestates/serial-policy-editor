@@ -1,4 +1,4 @@
-"""Separate ephemeral chord restoration, commit, and next-menu preparation.
+"""Measure chord restoration, commit, and next-menu preparation on live sessions.
 
 Requires an explicitly selected local GGUF. No downloads or database writes.
 Use the same interpreter/model/settings with --package-root pointing at source
@@ -15,6 +15,14 @@ import sys
 from time import perf_counter
 from types import SimpleNamespace
 from unittest.mock import patch
+
+
+class FixedActionPolicy:
+    def __init__(self, actions):
+        self._actions = iter(actions)
+
+    def choose(self, _engine, _observation):
+        return next(self._actions)
 
 
 def main():
@@ -35,12 +43,12 @@ def main():
     root = args.package_root.resolve()
     sys.path.insert(0, str(root / 'core' / 'src'))
     from trajectory_editor import chord as chord_module, live_tui
-    from trajectory_editor.chord import Chord, ActionSequencePolicy
+    from trajectory_editor.chord import Chord
     from trajectory_editor.core.sampler_config import SamplerConfig
     from trajectory_editor.decoder import LlamaCppDecoder, LlamaCppSettings
     from trajectory_editor.episode_engine import EpisodeEngine
-    from trajectory_editor.episode_runner import LiveSessionRunner
     from trajectory_editor.episode_session import LiveSession
+    from trajectory_editor.run_loop import run_plan
     from trajectory_editor.episode_ui import InteractivePolicy
 
     if Path(chord_module.__file__).resolve() != root / 'core/src/trajectory_editor/chord.py':
@@ -119,8 +127,8 @@ def main():
                         with phase(phases, 'restore'):
                             actions = chord.select(selected_path.label)
                         with phase(phases, 'commit'):
-                            result = LiveSessionRunner(session).run(
-                                live_policy=ActionSequencePolicy(actions), max_live_actions=len(actions),
+                            result = run_plan(session, divergence_policy="handoff",
+                                live_policy=FixedActionPolicy(actions), max_live_actions=len(actions),
                             )
                         if len(result.outcomes) != len(actions) or engine.visible_token_ids != preview:
                             raise RuntimeError('selected continuation did not match the preview')

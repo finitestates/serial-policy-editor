@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from .core.errors import EditorError
 from .core.results import ActionOutcome
 from .episode_history import EpisodeHistory, RecordedAttempt
-from .episode_runner import TapeStep
+from .run_loop import TapeStep
 
 
 @dataclass(frozen=True)

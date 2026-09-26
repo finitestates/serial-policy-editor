@@ -127,32 +127,18 @@ def _recompute_missing_metrics(
         engine._metric_sink = capture
 
         class ProjectionTarget:
-            identifier = episode_id
-
             def __init__(self) -> None:
                 self.engine = engine
-
-            def begin(self) -> int:
-                return 0
 
             def set_sampler(self, sampling: SamplerConfig) -> None:
                 engine.sampling = sampling
 
-            def apply(self, action: Any, *, expectation: Any, divergence_policy: str, replay: bool) -> Any:
+            def generate(self, action: Any, *, expectation: Any, divergence_policy: str, replay: bool) -> Any:
                 boundary = engine.boundary
                 budget = next(row for row in reversed(budgets) if int(row["start_boundary"]) <= boundary)
                 engine.max_tokens = budget["max_tokens"]
                 engine.checkpoint_boundary = budget["checkpoint_boundary"]
                 return engine.apply(action, expectation=expectation, divergence_policy=divergence_policy, replay=replay)
-
-            def record_replay(self, *_args: Any) -> None:
-                return None
-
-            def record_instruction_rejected(self, *_args: Any) -> None:
-                return None
-
-            def complete(self, _had_tape: bool) -> None:
-                return None
 
         recipe = build_source_replay_recipe(store, episode_id)
         plan = compose_replay_plan(
@@ -179,10 +165,7 @@ def _recompute_missing_metrics(
                 steps=plan.steps[replayed:],
                 follow_source_sampling=plan.follow_source_sampling,
                 final_sampling=plan.final_sampling,
-                context=ReplayContext(
-                    sampling=plan.context.sampling[replayed:],
-                    origins=plan.context.origins[replayed:],
-                ),
+                context=ReplayContext(sampling=plan.context.sampling[replayed:]),
             )
             result = run_plan(target, divergence_policy="handoff", tape=chunk)
             if result.handed_off or result.replayed_actions == 0:

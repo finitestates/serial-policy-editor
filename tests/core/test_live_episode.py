@@ -25,29 +25,21 @@ def engine() -> EpisodeEngine:
 
 
 @pytest.mark.current_workflow
-def test_live_session_owns_records_metadata_and_adapter_hooks():
-    events = []
-    exports = []
+def test_live_session_owns_records_and_metadata():
     session = LiveSession(
         engine(),
         prompt="Prompt",
         environment_stamp={"model": "fake", "revision": "test"},
-        recorder=events.append,
-        export_targets={"memory": lambda session: exports.append(session.history_tape)},
     )
     episode = session.branch_handle(session.branch.branch_id)
 
     outcome = episode.generate(Accept())
-    result = episode.export("memory")
 
     assert outcome.visible_token_ids == (1,)
     assert episode.prompt == "Prompt"
     assert episode.sampler.temperature == 0.0
     assert episode.environment_stamp["model"] == "fake"
     assert episode.tape[0].expectation == outcome.expectation()
-    assert result is None
-    assert exports == [episode.history_tape]
-    assert [event.kind for event in events] == ["created", "generated", "exported"]
 
 
 @pytest.mark.invariant

@@ -16,7 +16,7 @@ from typing import Any
 from .core.actions import Write
 from .core.sampler_config import SamplerConfig
 from .episode_controls import ControlTimeline
-from .run_loop import ReplayContext, ReplayOrigin, ReplayPlan, TapeStep
+from .run_loop import ReplayContext, ReplayPlan, TapeStep
 from .surviving_procedure import SurvivingProcedure
 
 
@@ -148,7 +148,6 @@ def compose_replay_plan(
     overrides = _validate_overrides(sampler_overrides)
 
     steps: list[TapeStep] = []
-    origins: list[ReplayOrigin | None] = []
     source_samplers: list[SamplerConfig | None] = []
 
     if (
@@ -156,12 +155,10 @@ def compose_replay_plan(
         and recipe.source_prompt
     ):
         steps.append(TapeStep(Write(recipe.source_prompt, mode="exact"), None))
-        origins.append(ReplayOrigin(recipe.source_id, 0, "prompt"))
         source_samplers.append(None)
 
     for procedure_step in recipe.procedure.steps:
         steps.append(procedure_step.tape_step)
-        origins.append(ReplayOrigin(recipe.source_id, procedure_step.boundary))
         if control_policy is ReplayControlPolicy.FOLLOW_SOURCE:
             source_samplers.append(
                 _resolve_sampler(recipe, procedure_step.boundary, overrides)
@@ -184,10 +181,7 @@ def compose_replay_plan(
         follow_source_sampling=follow_source_sampling,
         final_sampling=final_sampling,
         incomplete_handoff_reason=recipe.incomplete_handoff_reason,
-        context=ReplayContext(
-            sampling=tuple(source_samplers),
-            origins=tuple(origins),
-        ),
+        context=ReplayContext(sampling=tuple(source_samplers)),
     )
 
 

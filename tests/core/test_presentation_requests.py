@@ -86,17 +86,8 @@ def test_help_note_and_eog_confirmation_return_to_the_choice():
 
 def test_choice_requests_preserve_actions_feedback_and_lazy_statistics():
     requests = []
-    interactions = []
     for terminal in (PlainCapture(["/P", "nonsense", "l", "1"]),
                      LiveCapture(["/P", "nonsense", "l", "1"])):
-        class Recorder:
-            def __init__(self):
-                self.rows = []
-
-            def record_interaction(self, episode_id, boundary, kind, payload):
-                self.rows.append((episode_id, boundary, kind, payload))
-
-        recorder = Recorder()
         backend = CountingBackend()
         engine = EpisodeEngine(
             backend, initial_text="P", initial_token_ids=[7],
@@ -104,15 +95,12 @@ def test_choice_requests_preserve_actions_feedback_and_lazy_statistics():
         )
         observation = engine.observe()
         positions_before = backend.positions
-        action = InteractivePolicy(
-            io=terminal, menu_size=1, store=recorder, episode_id="same",
-        ).choose(engine, observation)
+        action = InteractivePolicy(io=terminal, menu_size=1).choose(engine, observation)
         assert action.rank == 1
         assert backend.positions == positions_before
         assert not observation.statistics._raw_logsumexp_ready
         assert not observation.statistics._policy_logsumexp_ready
         requests.append(terminal.states)
-        interactions.append(recorder.rows)
 
     assert len(requests[0]) == len(requests[1]) == 4
     for plain, live in zip(*requests):
@@ -138,10 +126,6 @@ def test_choice_requests_preserve_actions_feedback_and_lazy_statistics():
     assert requests[0][1].search_lens_active
     assert requests[0][2].feedback.category == "error"
     assert requests[0][3].logit_view == "raw"
-    assert interactions[0] == interactions[1]
-    assert [row[2] for row in interactions[0]] == [
-        "vocabulary-search-view",
-    ]
 
 
 def test_candidate_columns_do_not_depend_on_terminal_width():

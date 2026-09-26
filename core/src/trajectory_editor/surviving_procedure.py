@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from .core.actions import Hold, Phrase, PolicyAction, Write
 from .core.results import ActionOutcome, ReplayExpectation
 from .core.sampler_config import SamplerConfig
-from .episode_runner import TapeStep
+from .run_loop import TapeStep
 
 
 HANDED_OFF = "handed-off"

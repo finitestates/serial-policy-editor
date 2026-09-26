@@ -123,10 +123,10 @@ class DivergingBackend(Backend):
         return values
 
 
-from trajectory_editor import EpisodeEngine, EpisodeRunner, EpisodeStore, SamplerConfig
+from trajectory_editor import EpisodeEngine, EpisodeStore, LiveSession, SamplerConfig
 from trajectory_editor.core.actions import Accept
 from trajectory_editor.episode_cli import main
-from trajectory_editor.episode_runner import TapeStep
+from trajectory_editor.run_loop import TapeStep, run_plan
 from trajectory_editor.projector import project_episode
 
 exec("from trajectory_editor import *", {})
@@ -214,15 +214,8 @@ with EpisodeStore(workspace) as store:
 
     handoff_backend = DivergingBackend()
     handoff_engine = EpisodeEngine(handoff_backend, sampling=SamplerConfig(), initial_token_ids=[1])
-    handoff = store.create_episode(
-        initial_text="P",
-        initial_token_ids=[1],
-        sampling=handoff_engine.sampling,
-        stream_fingerprint=handoff_engine.stream_fingerprint,
-        max_tokens=None,
-        backend=handoff_backend.provenance(),
-    )
-    handoff_result = EpisodeRunner(handoff_engine, store, handoff, divergence_policy="handoff").run(
+    handoff_result = run_plan(
+        LiveSession(handoff_engine), divergence_policy="handoff",
         tape=[TapeStep(action, expectation)]
     )
     assert handoff_result.handed_off
@@ -231,18 +224,17 @@ with EpisodeStore(workspace) as store:
 
     target_backend = Backend()
     target_engine = EpisodeEngine(target_backend, sampling=SamplerConfig(), initial_token_ids=[1])
-    target = store.create_episode(
-        initial_text="P",
-        initial_token_ids=[1],
-        sampling=target_engine.sampling,
-        stream_fingerprint=target_engine.stream_fingerprint,
-        max_tokens=None,
-        backend=target_backend.provenance(),
-    )
-    result = EpisodeRunner(target_engine, store, target, divergence_policy="ballistic").run(
+    target_session = LiveSession(target_engine)
+    result = run_plan(
+        target_session, divergence_policy="ballistic",
         tape=[TapeStep(action, expectation)]
     )
     assert result.replayed_actions == 1
+    from trajectory_editor.episode_materializer import materialize_live_branch
+    target = materialize_live_branch(
+        store, target_session, target_session.branch_state(),
+        target_backend.provenance(), episode_id="target",
+    )
     assert project_episode(store, target).text == "P B"
 '''
     script = script.replace("__WORKSPACE__", str(tmp_path / "core.sqlite3"))

@@ -16,14 +16,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 from . import (
-    edge_commands,
-    ephemeral_runtime,
     episode_backend_loader,
-    episode_policy_setup,
     episode_prompts,
+    session_runtime,
 )
 from .backend_factory import BACKEND_NAMES
-from .chord import Chord, ChordRequested, chord_menu
 from .decoder import KV_CACHE_TYPES
 from .core.errors import EditorError
 from .core.cli_config import (
@@ -32,45 +29,28 @@ from .core.cli_config import (
     apply_activation_artifact,
     random_seed,
     sampler_from_args,
-    sampler_override,
     sampler_overrides_present,
 )
 from .core.sampler_config import SamplerConfig
 from .episode_lifecycle import (
-    POLICY_FIELDS, _inherit_budget, _materialize_model_change_fork,
-    _model_continuation, _visible_tokens, _restore_engine,
-    _create_episode, _rewind_episode, _fork_engine, _spr_engine_from_source,
+    POLICY_FIELDS, _inherit_budget, _visible_tokens, _restore_engine,
+    _spr_engine_from_source,
 )
 from .episode_engine import EpisodeEngine
 from .episode_replay_source import build_source_replay_recipe
-from .episode_runner import (
-    EdgeRequested,
-    EpisodeRunner as CoreEpisodeRunner,
-    ForkRequested,
-    SeamlessRewindRequested,
-    ReplayPlan,
-)
-from .spr_recipe import (
-    ReplayControlPolicy,
-    ReplayPlacement,
-    compose_replay_plan,
-)
+from .spr_recipe import ReplayControlPolicy, ReplayPlacement, compose_replay_plan
 from .projector import (
     project_episode,
-    project_fork_map,
     project_lineage,
     project_procedure,
 )
 from .episode_store import EpisodeStore
-from .edge_status import sampler_summary
-from .fresh_episode import fresh_root_from
 from .controller_profiles import (
     explicit_option_dests,
     load_controller_profile,
     profile_arguments,
 )
 from .tui import TerminalIO
-from .terminal_contracts import EdgeViewState, PromptRequest
 from .ui_themes import LIVE_THEME_NAMES
 from .version import VERSION
 from .teacher_plan import TeacherTape, export_teacher_tape, load_teacher_tape_jsonl
@@ -233,7 +213,7 @@ def build_parser(
         "--workspace",
         type=Path,
         default=Path("episodes.sqlite3"),
-        help="compact episode workspace used for SPR and token evidence",
+        help="saved episodes used for SPR, resume, and explicit EDGE saves",
     )
     parser.add_argument(
         "--ephemeral", action="store_true",
@@ -266,7 +246,7 @@ def build_parser(
         "--continue-from",
         dest="resume",
         metavar="EPISODE_ID",
-        help="resume an unsealed/checkpointed episode in the same episode id",
+        help="continue an unsealed/checkpointed saved episode in a live session",
     )
     parser.add_argument(
         "--fixed-config", action="store_true",
@@ -415,244 +395,6 @@ def build_parser(
     return parser
 
 
-def _record_fork_edge_state(
-    store: EpisodeStore,
-    episode_id: str,
-    engine: EpisodeEngine,
-) -> None:
-    """Record the child's active controls at its root-relative fork edge."""
-    store.record_sampling_segment(
-        episode_id,
-        start_boundary=engine.boundary,
-        sampling=engine.sampling,
-        stream_fingerprint=engine.stream_fingerprint,
-    )
-    store.record_budget(
-        episode_id,
-        engine.boundary,
-        engine.max_tokens,
-        engine.checkpoint_boundary,
-    )
-
-
-def _live_edge_menu(
-    io: TerminalIO,
-    store: EpisodeStore,
-    episode_id: str,
-    engine: EpisodeEngine,
-    *,
-    sampling_factory=SamplerConfig.from_record,
-) -> tuple[str, Any]:
-    while True:
-        raw = io.read_edge(EdgeViewState(
-            episode_id=store.label(episode_id),
-            boundary=engine.boundary,
-            current_budget=engine.max_tokens,
-            remaining_tokens=engine.remaining,
-            sampler_summary=sampler_summary(engine.sampling),
-        ))
-        if raw is None:
-            return "quit", None
-        try:
-            command = edge_commands.parse_edge_command(raw)
-        except edge_commands.EdgeCommandParseError as exc:
-            io.write(str(exc))
-            continue
-        if isinstance(command, edge_commands.ListCommand):
-            selected = io.prompt(PromptRequest(
-                "Episode #number (Enter returns)> ",
-                body=store.workspace_list(
-                    include_finished=command.include_finished,
-                    current=episode_id,
-                ),
-            ))
-            if selected and selected.strip():
-                try:
-                    return "switch", store.resolve_id(selected.strip())
-                except EditorError as exc:
-                    io.write(str(exc))
-            continue
-        if isinstance(command, edge_commands.RenameCommand):
-            store.rename(episode_id, command.title)
-            continue
-        if isinstance(command, edge_commands.SwitchCommand):
-            try:
-                return "switch", store.resolve_id(command.reference)
-            except EditorError as exc:
-                io.write(str(exc))
-            continue
-        if isinstance(command, edge_commands.RewindCommand):
-            try:
-                target = command.boundary
-                _rewind_episode(
-                    store, episode_id, engine, target,
-                    sampling_factory=sampling_factory,
-                )
-                store.record_interaction(episode_id, target, "seamless-rewind", {"to_boundary": target})
-            except (ValueError, EditorError) as exc:
-                io.write(str(exc))
-            continue
-        if isinstance(command, edge_commands.QuitCommand):
-            return "quit", None
-        if isinstance(command, edge_commands.EndCommand):
-            return "end", None
-        if isinstance(command, edge_commands.ContinueCommand):
-            return "continue", "keep"
-        if isinstance(command, edge_commands.NewCommand):
-            prompt_text = command.prompt if command.prompt else episode_prompts.read_new_prompt(io)
-            if prompt_text is None:
-                continue
-            if not prompt_text:
-                io.write("New prompt must not be empty.")
-                continue
-            return "new", prompt_text
-        if isinstance(command, edge_commands.ProjectCommand):
-            io.page(
-                project_episode(
-                    store,
-                    episode_id,
-                    annotations="footnotes",
-                    full_evidence=True,
-                ).text
-            )
-            continue
-        if isinstance(command, edge_commands.ForkMapCommand):
-            fork_map = project_fork_map(store, episode_id)
-            while True:
-                entered = io.prompt(PromptRequest(
-                    f"Fork boundary (0..{engine.boundary}; blank cancels) > ",
-                    body=fork_map,
-                ))
-                if entered is None:
-                    return "quit", None
-                value = entered.strip()
-                if not value:
-                    break
-                try:
-                    target = int(value)
-                except ValueError:
-                    io.write("Fork boundary must be an integer.")
-                    continue
-                if not 0 <= target <= engine.boundary:
-                    io.write(f"Fork boundary must be 0..{engine.boundary}.")
-                    continue
-                return "fork", target
-            continue
-        if isinstance(command, edge_commands.BudgetCommand):
-            return "continue", command.tokens
-        if isinstance(command, edge_commands.SamplerCommand):
-            payload = command.text
-            if payload is None:
-                entered = io.read(
-                    "sampler key=value changes (blank cancels; e.g. top_k=20 temperature=.8)> "
-                )
-                payload = entered or ""
-            if not payload.strip():
-                continue
-            try:
-                updated = sampler_override(engine.sampling, payload)
-            except EditorError as exc:
-                io.write(f"[invalid sampler change] {exc}")
-                continue
-            engine.sampling = updated
-            store.record_sampling_segment(
-                episode_id,
-                start_boundary=engine.boundary,
-                sampling=updated,
-                stream_fingerprint=engine.stream_fingerprint,
-                    )
-            store.record_interaction(
-                episode_id,
-                engine.boundary,
-                "sampling-transition",
-                {"sampling": updated.to_dict()},
-            )
-            continue
-        if isinstance(command, edge_commands.ForkCommand):
-            target = command.boundary
-            if not 0 <= target <= engine.boundary:
-                io.write(f"Fork boundary must be 0..{engine.boundary}.")
-                continue
-            return "fork", target
-        if isinstance(command, edge_commands.ReplaySelectionCommand):
-            try:
-                source_id = store.resolve_id(command.source)
-                until = None
-                replay_map = (
-                    "Source replay map (recorded output; replay may differ).\n"
-                    "Source 0 inserts only the prompt; destination tokens remain individually indexed.\n"
-                    + project_fork_map(store, source_id)
-                )
-                while True:
-                    entered = io.prompt(PromptRequest(
-                        "Replay through source boundary (blank cancels) > ",
-                        body=replay_map,
-                    ))
-                    if entered is None or not entered.strip():
-                        break
-                    try:
-                        until = int(entered)
-                        build_source_replay_recipe(
-                            store,
-                            source_id,
-                            until,
-                            sampling_factory=sampling_factory,
-                        )
-                    except (ValueError, EditorError):
-                        until = None
-                        io.write("Choose a valid source token boundary.")
-                        continue
-                    break
-                if until is None:
-                    continue
-                build_source_replay_recipe(
-                    store,
-                    source_id,
-                    until,
-                    sampling_factory=sampling_factory,
-                )
-                return "spr", (source_id, until)
-            except EditorError as exc:
-                io.write(str(exc))
-            continue
-        if isinstance(command, edge_commands.ReplayCommand):
-            try:
-                source_id = store.resolve_id(command.source)
-                build_source_replay_recipe(
-                    store,
-                    source_id,
-                    command.until,
-                    sampling_factory=sampling_factory,
-                )
-                return "spr", (source_id, command.until)
-            except EditorError as exc:
-                io.write(str(exc))
-            continue
-        io.write("This command is not available at a durable EDGE.")
-
-
-def _seal(
-    store: EpisodeStore,
-    episode_id: str,
-    engine: EpisodeEngine,
-    *,
-    reason: str,
-    output: Path | None = None,
-) -> None:
-    engine.terminate(reason)
-    store.finish_episode(
-        episode_id,
-        visible_text=engine.backend.render(engine.visible_token_ids),
-        terminal_token_id=engine.terminal_token_id,
-        terminal_reason=engine.terminal_reason,
-    )
-    _print_final_text(engine, output=output)
-
-
-def _print_final_text(engine: EpisodeEngine, *, output: Path | None = None) -> None:
-    _write_text(engine.text, output=output)
-
-
 def _write_text(text: str, *, output: Path | None = None) -> None:
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -713,7 +455,7 @@ def main(
             io = TerminalIO(live_choices=not args.plain_ui, live_theme=args.theme)
             with io.session():
                 _collect_launch_prompt(args, selection, io)
-                return ephemeral_runtime.run_ephemeral(
+                return session_runtime.run_new_session(
                     args,
                     io=io,
                     teacher_tape=teacher_tape,
@@ -790,10 +532,14 @@ def main(
                     cfg_primary_backend = primary
                 return cfg_guidance_backend
 
+            from uuid import uuid4
+
+            from .episode_identity import backend_provenance_with_identity
+            from .episode_live_restore import model_change_session, new_live_session, restore_live_session
+            from .episode_session import BranchIdentity, LiveSession, LiveSessionRoster
+
             args._model_changed = model_changed
-            saved_tokenizer_id = (
-                source["backend"].get("tokenizer_id") if source is not None else None
-            )
+            saved_tokenizer_id = source["backend"].get("tokenizer_id") if source is not None else None
             destination_tokenizer_id = provenance.get("tokenizer_id")
             tokenizer_changed = model_changed and (
                 not isinstance(saved_tokenizer_id, str)
@@ -804,527 +550,231 @@ def main(
                 args.bias_rules = ()
                 args.bias_groups = ()
                 io.write("Tokenizer changed: token-ID biases reset; load a matching preset to apply biases.")
+
             activation_artifact = None
             if args.activation_strength is not None and args.activation_vector is None:
                 raise EditorError("--steering-strength requires --steering-vector")
             if args.activation_vector is not None:
                 from .activation_vectors import SteeringVectorArtifact
-
-                activation_artifact = SteeringVectorArtifact.from_path(
-                    args.activation_vector
-                )
+                activation_artifact = SteeringVectorArtifact.from_path(args.activation_vector)
                 activation_artifact.validate_against_backend(backend)
-            requested_id = args.episode_id
-            parent_id: str | None = None
-            fork_boundary: int | None = None
-            pending_tape: ReplayPlan | None = teacher_tape.plan if teacher_tape else None
+            provenance = backend_provenance_with_identity(backend, provenance)
+            backend_state = {"backend": backend, "provenance": provenance}
+            session = None
+            pending_tape = teacher_tape.plan if teacher_tape else None
+            default_save_id = args.episode_id
+
             if selection.kind == "resume":
-                # Only explicit CLI sampler flags override the stored segment.
-                explicit = sampler_overrides_present(args)
-                segment = store.current_sampling_state(args.resume)
+                episode_id = str(args.resume)
+                segment = store.current_sampling_state(episode_id)
                 source_sampling = sampling_factory(segment["sampling"])
-                sampling = (
-                    sampler_from_args(args, source_sampling)
-                    if explicit
-                    else source_sampling
-                )
+                explicit = sampler_overrides_present(args)
+                sampling = sampler_from_args(args, source_sampling) if explicit else source_sampling
                 sampling = apply_activation_artifact(sampling, activation_artifact, args)
                 explicit = sampling != source_sampling
                 io.write("Restoring saved context...")
+                visible = _visible_tokens(store, episode_id)
+                historical_sampling = tuple(
+                    sampling_factory(row["sampling"]) for row in store.sampler_segments(episode_id)
+                )
+                guidance = cfg_backend_for(sampling, historical_sampling=historical_sampling)
                 if model_changed:
-                    engine, episode_id = _model_continuation(
-                        store, args.resume, backend, provenance,
-                        guidance_backend=cfg_backend_for(sampling),
-                        current_sampling_state=segment,
-                        sampling_factory=sampling_factory,
+                    session = model_change_session(
+                        store, episode_id, backend, provenance,
+                        boundary=len(visible), sampling=sampling,
+                        max_tokens=args.max_tokens, guidance_backend=guidance,
                     )
-                    if args.max_tokens is not None:
-                        engine.resume(max_tokens=args.max_tokens)
-                    if explicit or activation_artifact is not None:
-                        engine.sampling = sampling
-                        store.record_sampling_segment(episode_id, start_boundary=0, sampling=sampling,
-                            stream_fingerprint=engine.stream_fingerprint)
                 else:
                     engine = _restore_engine(
-                        store, args.resume, backend, max_tokens=args.max_tokens,
+                        store, episode_id, backend, max_tokens=args.max_tokens,
                         sampling_override=sampling if explicit else None,
-                        guidance_backend=cfg_backend_for(sampling),
+                        guidance_backend=guidance,
                         sampling_factory=sampling_factory,
                         current_sampling_state=segment,
                     )
-                    episode_id = args.resume
+                    session = restore_live_session(
+                        store, episode_id, engine,
+                        branch_identity=BranchIdentity(
+                            f"live-resume-{uuid4().hex}", episode_id, len(visible)
+                        ),
+                    )
             elif selection.kind == "new":
-                initial_text = (
-                    args.new_prompt
-                    if args.new_prompt is not None
-                    else episode_prompts.read_prompt_file(args.new_prompt_file)
-                )
-                sampling = sampler_from_args(args)
-                sampling = apply_activation_artifact(sampling, activation_artifact, args)
+                initial_text = args.new_prompt if args.new_prompt is not None else episode_prompts.read_prompt_file(args.new_prompt_file)
+                sampling = apply_activation_artifact(sampler_from_args(args), activation_artifact, args)
                 engine = EpisodeEngine(
-                    backend,
-                    sampling=sampling,
-                    max_tokens=args.max_tokens,
+                    backend, sampling=sampling, max_tokens=args.max_tokens,
                     initial_text=initial_text,
-                    guidance_backend=cfg_backend_for(sampling),
+                    guidance_backend=cfg_backend_for(sampling, plan=pending_tape),
                 )
-                episode_id = _create_episode(
-                    store,
-                    engine,
-                    backend_provenance=provenance,
-                    requested_id=requested_id,
+                session = LiveSession(
+                    engine, prompt=initial_text,
+                    environment_stamp={"backend": provenance, "sampler": sampling.to_dict()},
                 )
             elif selection.kind == "replay":
                 recipe = build_source_replay_recipe(
-                    store,
-                    args.replay,
-                    args.until,
-                    sampling_factory=sampling_factory,
+                    store, str(args.replay), args.until, sampling_factory=sampling_factory
                 )
                 source_sampling = recipe.controls.effective_at(0).sampling
                 overrides = {
                     name: getattr(args, name) for name in CORE_SAMPLER_FIELDS
                     if getattr(args, name) is not None
                 }
-                sampling = sampler_from_args(args, source_sampling)
-                sampling = apply_activation_artifact(sampling, activation_artifact, args)
-                # Explicit steering imports apply to every replay segment, just
-                # like explicit sampler flags. Unspecified fields follow source.
+                sampling = apply_activation_artifact(
+                    sampler_from_args(args, source_sampling), activation_artifact, args
+                )
                 if activation_artifact is not None:
                     for name in POLICY_FIELDS:
                         overrides[name] = getattr(sampling, name)
-                replay_prefix = None
-                if model_changed:
-                    replay_prefix = backend.tokenize(
-                        recipe.source_prompt,
-                        add_bos=True,
-                        special=True,
-                    )
-                engine, pending_tape = _spr_engine_from_source(
-                    recipe,
-                    backend,
-                    sampling=sampling,
-                    max_tokens=args.max_tokens,
-                    control_policy=(
-                        ReplayControlPolicy.PRESERVE_DESTINATION
-                        if args.fixed_config
-                        else ReplayControlPolicy.FOLLOW_SOURCE
-                    ),
-                    sampling_overrides=overrides,
-                    initial_token_ids=(
-                        replay_prefix
-                        if replay_prefix is not None
-                        else list(source["initial_token_ids"])
-                    ),
-                    guidance_backend=cfg_backend_for(sampling),
+                replay_prefix = (
+                    backend.tokenize(recipe.source_prompt, add_bos=True, special=True)
+                    if model_changed else list(source["initial_token_ids"])
                 )
-                episode_id = _create_episode(
-                    store,
-                    engine,
-                    backend_provenance=provenance,
-                    requested_id=requested_id,
-                    parent_episode_id=args.replay,
-                    fork_boundary=0,
-                    mode="serial-policy-replay",
-                    metadata={"spr_source": args.replay},
+                replay_control_policy = (
+                    ReplayControlPolicy.PRESERVE_DESTINATION if args.fixed_config
+                    else ReplayControlPolicy.FOLLOW_SOURCE
+                )
+                pending_tape = compose_replay_plan(
+                    recipe,
+                    ReplayPlacement.SOURCE_ROOT,
+                    replay_control_policy,
+                    sampler_overrides=overrides,
+                )
+                engine, pending_tape = _spr_engine_from_source(
+                    recipe, backend, sampling=sampling, max_tokens=args.max_tokens,
+                    control_policy=replay_control_policy,
+                    sampling_overrides=overrides, initial_token_ids=replay_prefix,
+                    guidance_backend=cfg_backend_for(sampling, plan=pending_tape),
+                )
+                session = new_live_session(
+                    engine, prompt=recipe.source_prompt, provenance=provenance,
+                    branch_identity=BranchIdentity(
+                        f"live-replay-{uuid4().hex}", str(args.replay), 0
+                    ),
+                    source_episode_id=str(args.replay),
                 )
             else:
                 assert args.fork_from is not None
-                source = store.get_episode(args.fork_from)
-                visible = _visible_tokens(store, args.fork_from)
+                episode_id = str(args.fork_from)
+                source = store.get_episode(episode_id)
+                visible = _visible_tokens(store, episode_id)
                 target = len(visible) if args.at is None else args.at
                 if not 0 <= target <= len(visible):
                     raise EditorError(f"fork boundary must be 0..{len(visible)}")
-                segment = store.sampling_segment(args.fork_from, target)
+                segment = store.sampling_segment(episode_id, target)
                 source_sampling = sampling_factory(segment["sampling"])
-                explicit = sampler_overrides_present(args)
-                sampling = sampler_from_args(args, source_sampling)
-                sampling = apply_activation_artifact(sampling, activation_artifact, args)
+                sampling = apply_activation_artifact(
+                    sampler_from_args(args, source_sampling), activation_artifact, args
+                )
+                history = tuple(
+                    sampling_factory(row["sampling"])
+                    for row in store.sampler_segments(episode_id)
+                    if int(row["start_boundary"]) <= target
+                )
+                guidance = cfg_backend_for(sampling, historical_sampling=history)
                 if model_changed:
-                    engine, episode_id = _materialize_model_change_fork(
-                        store,
-                        args.fork_from,
-                        target,
-                        backend,
-                        provenance,
-                        sampling=sampling,
-                        max_tokens=(
-                            source["max_tokens"]
-                            if args.max_tokens is None
-                            else args.max_tokens
-                        ),
-                        requested_id=requested_id,
-                        guidance_backend=cfg_backend_for(sampling),
+                    session = model_change_session(
+                        store, episode_id, backend, provenance,
+                        boundary=target, sampling=sampling,
+                        max_tokens=args.max_tokens, guidance_backend=guidance,
                     )
-                    if activation_artifact is not None:
-                        engine.sampling = sampling
-                        store.record_sampling_segment(
-                            episode_id,
-                            start_boundary=engine.boundary,
-                            sampling=sampling,
-                            stream_fingerprint=engine.stream_fingerprint,
-                        )
                 else:
                     prefix = [*source["initial_token_ids"], *visible[:target]]
                     branch = getattr(backend, "branch_to_prefix", None)
-                    if callable(branch):
-                        branch(prefix)
-                    else:
-                        backend.reset(prefix)
+                    branch(prefix) if callable(branch) else backend.reset(prefix)
                     engine = EpisodeEngine(
-                        backend,
-                        sampling=sampling,
+                        backend, sampling=sampling,
                         max_tokens=source["max_tokens"] if args.max_tokens is None else args.max_tokens,
                         initial_text=str(source["initial_text"]),
                         initial_token_ids=source["initial_token_ids"],
                         stream_fingerprint=segment["stream_fingerprint"],
-                                                backend_positioned=True,
-                        guidance_backend=cfg_backend_for(sampling),
+                        backend_positioned=True, guidance_backend=guidance,
                     )
                     engine.visible_token_ids = list(visible[:target])
                     if args.max_tokens is None:
-                        _inherit_budget(store, args.fork_from, engine, target)
+                        _inherit_budget(store, episode_id, engine, target)
                     else:
                         engine.trajectory.set_budget(args.max_tokens, target + args.max_tokens)
-                    episode_id = _create_episode(
-                        store,
-                        engine,
-                        backend_provenance=provenance,
-                        requested_id=requested_id,
-                        parent_episode_id=args.fork_from,
-                        fork_boundary=target,
-                        mode="fork",
-                    )
-                    store.copy_prefix(
-                        args.fork_from,
-                        episode_id,
-                        target,
-                        visible_text=backend.render(engine.visible_token_ids),
-                        max_tokens=engine.max_tokens,
-                    )
-                    _record_fork_edge_state(store, episode_id, engine)
-
-            store.visit(episode_id)
-            enter_edge = False
-            while True:
-                if engine.guidance_backend is None:
-                    engine.guidance_backend = cfg_backend_for(
-                        engine.sampling, plan=pending_tape,
-                        historical_sampling=(
-                            sampling_factory(segment["sampling"])
-                            for segment in store.sampler_segments(episode_id)
+                    session = restore_live_session(
+                        store, episode_id, engine, boundary=target,
+                        branch_identity=BranchIdentity(
+                            f"live-fork-{uuid4().hex}", episode_id, target
                         ),
                     )
-                runner_options = {
-                    "divergence_policy": args.divergence_policy,
-                }
-                runner = CoreEpisodeRunner(
-                    engine,
-                    store,
-                    episode_id,
-                    **runner_options,
+
+            assert session is not None
+
+            def load_saved_session(episode_id: str) -> LiveSession:
+                target_episode = store.get_episode(episode_id)
+                new_backend, new_provenance, changed = episode_backend_loader.load_episode_backend(
+                    args, target_episode, io, use_saved=True,
+                    current_backend=backend_state["backend"],
+                    current_provenance=backend_state["provenance"],
                 )
-                try:
-                    if enter_edge:
-                        enter_edge = False
-                        raise EdgeRequested()
-                    result = runner.run(
-                        tape=pending_tape,
-                        live_policy=episode_policy_setup.durable_policy(
-                            args, store, episode_id, io
+                new_provenance = backend_provenance_with_identity(new_backend, new_provenance)
+                visible = _visible_tokens(store, episode_id)
+                boundary = len(visible)
+                state = store.current_sampling_state(episode_id)
+                sampling = sampling_factory(state["sampling"])
+                historical = tuple(
+                    sampling_factory(row["sampling"]) for row in store.sampler_segments(episode_id)
+                )
+                guidance = cfg_backend_for(
+                    sampling, primary=new_backend, model_provenance=new_provenance,
+                    historical_sampling=historical,
+                )
+                if changed:
+                    loaded = model_change_session(
+                        store, episode_id, new_backend, new_provenance,
+                        boundary=boundary, sampling=sampling, max_tokens=None,
+                        guidance_backend=guidance,
+                    )
+                elif target_episode["status"] in {"completed", "failed"}:
+                    saved_tokenizer = target_episode["backend"].get("tokenizer_id")
+                    if isinstance(saved_tokenizer, str) and saved_tokenizer != new_provenance.get("tokenizer_id"):
+                        raise EditorError(
+                            "episode tokenizer identity differs from the loaded backend; use a model-change continuation"
+                        )
+                    prefix = [*target_episode["initial_token_ids"], *visible]
+                    branch = getattr(new_backend, "branch_to_prefix", None)
+                    branch(prefix) if callable(branch) else new_backend.reset(prefix)
+                    engine = EpisodeEngine(
+                        new_backend, sampling=sampling,
+                        max_tokens=target_episode["max_tokens"] or None,
+                        initial_text=str(target_episode["initial_text"]),
+                        initial_token_ids=target_episode["initial_token_ids"],
+                        stream_fingerprint=state["stream_fingerprint"],
+                        backend_positioned=True, guidance_backend=guidance,
+                    )
+                    engine.visible_token_ids = list(visible)
+                    _inherit_budget(store, episode_id, engine, boundary)
+                    loaded = restore_live_session(
+                        store, episode_id, engine,
+                        branch_identity=BranchIdentity(
+                            f"live-resume-{uuid4().hex}", episode_id, boundary
                         ),
                     )
-                except EdgeRequested:
-                    pending_tape = None
-                    action, value = _live_edge_menu(
-                        io, store, episode_id, engine,
-                        sampling_factory=sampling_factory,
-                    )
-                except ChordRequested as request:
-                    pending_tape = None
-                    chord = Chord(engine, request.ranks)
-                    try:
-                        chord_action, actions = chord_menu(io, chord, promote_on_select=True)
-                    finally:
-                        chord.discard()
-                    if chord_action == "quit":
-                        store.update_episode(
-                            episode_id,
-                            visible_text=engine.backend.render(engine.visible_token_ids),
-                            max_tokens=engine.max_tokens,
-                            status="open",
-                        )
-                        return 0
-                    if chord_action == "select":
-                        assert actions is not None
-                        selected = runner.run(
-                            promoted_outcomes=chord.selected_outcomes,
-                        )
-                        if selected.handed_off:
-                            io.write(selected.handoff_reason or "Chord selection handed off.")
-                        if engine.ended:
-                            _print_final_text(engine, output=args.output)
-                            return 0
-                    continue
-                except SeamlessRewindRequested as request:
-                    from_boundary = engine.boundary
-                    io.write(f"Restoring context at boundary {request.boundary}...")
-                    details = _rewind_episode(
-                        store, episode_id, engine, request.boundary,
-                        sampling_factory=sampling_factory,
-                    )
-                    store.record_interaction(
-                        episode_id,
-                        request.boundary,
-                        "seamless-rewind",
-                        {
-                            "from_boundary": from_boundary,
-                            "to_boundary": request.boundary,
-                            "trimmed_action": details["trimmed_action"],
-                        },
-                    )
-                    pending_tape = None
-                    continue
-                except ForkRequested as request:
-                    action, value = "fork", request.boundary
                 else:
-                    if engine.ended:
-                        _print_final_text(engine, output=args.output)
-                        return 0
-                    if result.outcomes and result.outcomes[-1].stop_reason == "replay-eog":
-                        io.write("Replay encountered EOG; tape stopped, live edge reached.")
-                    elif result.handed_off:
-                        if result.handoff_reason:
-                            io.write(result.handoff_reason)
-                        io.write(
-                            f"Execution handed off at boundary {engine.boundary}; live edge reached."
-                        )
-                    elif result.replay_exhausted:
-                        io.write(
-                            f"SPR route exhausted at boundary {engine.boundary}; live edge reached."
-                        )
-                    elif engine.checkpointed:
-                        io.write(f"Checkpoint reached at boundary {engine.boundary}.")
-                    pending_tape = None
-                    action, value = _live_edge_menu(
-                        io, store, episode_id, engine,
-                        sampling_factory=sampling_factory,
+                    engine = _restore_engine(
+                        store, episode_id, new_backend, max_tokens=None,
+                        sampling_override=None, guidance_backend=guidance,
+                        sampling_factory=sampling_factory, current_sampling_state=state,
                     )
+                    loaded = restore_live_session(
+                        store, episode_id, engine,
+                        branch_identity=BranchIdentity(
+                            f"live-resume-{uuid4().hex}", episode_id, boundary
+                        ),
+                    )
+                backend_state.update(backend=new_backend, provenance=new_provenance)
+                return loaded
 
-                if action == "new":
-                    # Persist the current live edge before moving the shared
-                    # backend to an unrelated prompt root.  The factory keeps
-                    # only loaded backends, sampler settings, and the full
-                    # configured tranche allowance; the new episode is not a
-                    # fork or replay child.
-                    store.update_episode(
-                        episode_id,
-                        visible_text=engine.backend.render(engine.visible_token_ids),
-                        max_tokens=engine.max_tokens,
-                        status="open",
-                    )
-                    store.record_budget(
-                        episode_id,
-                        engine.boundary,
-                        engine.max_tokens,
-                        engine.checkpoint_boundary,
-                    )
-                    new_engine = fresh_root_from(engine, str(value))
-                    new_episode_id = _create_episode(
-                        store,
-                        new_engine,
-                        backend_provenance=provenance,
-                    )
-                    engine, episode_id = new_engine, new_episode_id
-                    store.visit(episode_id)
-                    pending_tape = None
-                    enter_edge = True
-                    continue
-                if action == "switch":
-                    destination = str(value)
-                    target_episode = store.get_episode(destination)
-                    sealed = target_episode["status"] in {"completed", "failed"}
-                    if sealed:
-                        io.page(project_episode(store, destination).text)
-                        reply = io.prompt(PromptRequest(
-                            "Finished episode. Continue from end? [y/N]> "
-                        ))
-                        if not reply or reply.strip().lower() not in {"y", "yes"}:
-                            enter_edge = True
-                            continue
-                    store.update_episode(episode_id, visible_text=engine.backend.render(engine.visible_token_ids),
-                                         max_tokens=engine.max_tokens, status="open")
-                    store.record_budget(episode_id, engine.boundary, engine.max_tokens, engine.checkpoint_boundary)
-                    try:
-                        target_episode = store.get_episode(destination)
-                        new_backend, new_provenance, changed = (
-                            episode_backend_loader.load_episode_backend(
-                                args,
-                                target_episode,
-                                io,
-                                use_saved=True,
-                                current_backend=backend,
-                                current_provenance=provenance,
-                            )
-                        )
-                        if changed:
-                            current_sampling_state = store.current_sampling_state(
-                                destination
-                            )
-                            current_sampling = sampling_factory(
-                                current_sampling_state["sampling"]
-                            )
-                            new_engine, destination = _model_continuation(
-                                store, destination, new_backend, new_provenance,
-                                guidance_backend=cfg_backend_for(
-                                    current_sampling,
-                                    primary=new_backend, model_provenance=new_provenance,
-                                ),
-                                current_sampling_state=current_sampling_state,
-                                sampling_factory=sampling_factory,
-                            )
-                        elif sealed:
-                            visible = _visible_tokens(store, destination)
-                            segment = store.sampling_segment(destination, len(visible))
-                            prefix = [*target_episode["initial_token_ids"], *visible]
-                            branch = getattr(new_backend, "branch_to_prefix", None)
-                            if callable(branch):
-                                branch(prefix)
-                            else:
-                                new_backend.reset(prefix)
-                            new_sampling = sampling_factory(segment["sampling"])
-                            new_engine = EpisodeEngine(
-                                new_backend,
-                                initial_token_ids=target_episode["initial_token_ids"],
-                                initial_text=str(target_episode["initial_text"]),
-                                sampling=new_sampling,
-                                stream_fingerprint=segment["stream_fingerprint"],
-                                                                max_tokens=target_episode["max_tokens"],
-                                backend_positioned=True,
-                                guidance_backend=cfg_backend_for(new_sampling),
-                            )
-                            new_engine.visible_token_ids = list(visible)
-                            _inherit_budget(store, destination, new_engine, len(visible))
-                            destination = _create_episode(store, new_engine, backend_provenance=new_provenance,
-                                parent_episode_id=destination, fork_boundary=len(visible), mode="fork")
-                            store.copy_prefix(
-                                target_episode["episode_id"],
-                                destination,
-                                len(visible),
-                                visible_text=new_backend.render(visible),
-                                max_tokens=new_engine.max_tokens,
-                            )
-                            _record_fork_edge_state(store, destination, new_engine)
-                        else:
-                            current_sampling_state = store.current_sampling_state(
-                                destination
-                            )
-                            new_engine = _restore_engine(
-                                store, destination, new_backend,
-                                max_tokens=None, sampling_override=None,
-                                guidance_backend=cfg_backend_for(
-                                    sampling_factory(
-                                        current_sampling_state["sampling"]
-                                    )
-                                ),
-                                sampling_factory=sampling_factory,
-                                current_sampling_state=current_sampling_state,
-                            )
-                    except (EditorError, OSError, RuntimeError) as exc:
-                        # A reused backend may already have been repositioned.
-                        engine.backend.reset(engine.token_ids)
-                        io.write(str(exc))
-                        enter_edge = True
-                        continue
-                    engine, backend, provenance, episode_id = new_engine, new_backend, new_provenance, destination
-                    store.visit(episode_id)
-                    pending_tape = None
-                    enter_edge = True
-                    continue
-                if action == "quit":
-                    store.update_episode(
-                        episode_id,
-                        visible_text=engine.backend.render(engine.visible_token_ids),
-                        max_tokens=engine.max_tokens,
-                        status="open",
-                    )
-                    print(
-                        f"Episode {store.label(episode_id)} remains unsealed. Resume with --resume '{store.label(episode_id).split()[0]}'",
-                        flush=True,
-                    )
-                    return 0
-                if action == "end":
-                    _seal(store, episode_id, engine, reason="menu-end", output=args.output)
-                    return 0
-                if action == "continue":
-                    checkpoint_transition = engine.checkpointed or value != "keep"
-                    engine.resume(max_tokens=value)
-                    store.record_budget(episode_id, engine.boundary, engine.max_tokens, engine.checkpoint_boundary)
-                    store.record_interaction(
-                        episode_id,
-                        engine.boundary,
-                        "checkpoint-resume" if checkpoint_transition else "edge-continue",
-                        {"next_max_tokens": engine.max_tokens},
-                    )
-                    pending_tape = None
-                    continue
-                if action == "fork":
-                    target = int(value)
-                    parent_id = episode_id
-                    parent_engine = engine
-                    engine = _fork_engine(
-                        store,
-                        parent_id,
-                        parent_engine,
-                        target,
-                        backend=backend,
-                        max_tokens=None,
-                        guidance_backend=cfg_backend_for(parent_engine.sampling),
-                        sampling_factory=sampling_factory,
-                    )
-                    episode_id = _create_episode(
-                        store,
-                        engine,
-                        backend_provenance=provenance,
-                        parent_episode_id=parent_id,
-                        fork_boundary=target,
-                        mode="fork",
-                    )
-                    store.copy_prefix(
-                        parent_id,
-                        episode_id,
-                        target,
-                        visible_text=backend.render(engine.visible_token_ids),
-                        max_tokens=engine.max_tokens,
-                    )
-                    _record_fork_edge_state(store, episode_id, engine)
-                    pending_tape = None
-                    continue
-                if action == "spr":
-                    source_id, until = value
-                    recipe = build_source_replay_recipe(
-                        store,
-                        source_id,
-                        until,
-                        sampling_factory=sampling_factory,
-                    )
-                    pending_tape = compose_replay_plan(
-                        recipe,
-                        ReplayPlacement.APPEND_TO_CURRENT_BRANCH,
-                        ReplayControlPolicy.PRESERVE_DESTINATION,
-                    )
-                    store.record_interaction(
-                        episode_id, engine.boundary, "replay-start",
-                        {
-                            "source_episode_id": source_id,
-                            "action_count": len(pending_tape),
-                            "until": until,
-                        },
-                    )
-                    # Keep the existing engine and ledger: boundary zero,
-                    # prefix, sampler stream, and remaining budget do not move.
-                    continue
-                raise AssertionError(f"unhandled live-edge action {action!r}")
+            return session_runtime.run_session_roster(
+                args, io=io, roster=LiveSessionRoster(session),
+                backend_provenance=provenance, teacher_tape=teacher_tape,
+                initial_tape=pending_tape,
+                store=store, load_saved_session=load_saved_session,
+                default_save_id=default_save_id,
+            )
     except (EditorError, OSError, RuntimeError, EOFError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

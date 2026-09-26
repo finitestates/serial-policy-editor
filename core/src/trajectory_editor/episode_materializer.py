@@ -109,8 +109,19 @@ def save_live_branch(
 
     state = session.branch_state()
     with EpisodeStore(workspace) as store:
+        parent_id = state.identity.parent_id
+        if parent_id is not None:
+            try:
+                store.get_episode(parent_id)
+            except EditorError:
+                parent_id = None
         return materialize_live_branch(
-            store, session, state, provenance, episode_id=episode_id
+            store,
+            session,
+            state,
+            provenance,
+            episode_id=episode_id,
+            parent_episode_id=parent_id,
         )
 
 
@@ -131,15 +142,21 @@ def save_live_family(
             progressed = False
             for branch_id, state in tuple(pending.items()):
                 parent = state.identity.parent_id
-                if parent is not None and parent not in identifiers:
+                if parent is not None and parent in states and parent not in identifiers:
                     continue
+                durable_parent = identifiers.get(parent) if parent in states else parent
+                if durable_parent is not None and parent not in states:
+                    try:
+                        store.get_episode(durable_parent)
+                    except EditorError:
+                        durable_parent = None
                 identifier = materialize_live_branch(
                     store,
                     session,
                     state,
                     provenance,
                     episode_id=root_episode_id if parent is None else None,
-                    parent_episode_id=identifiers.get(parent),
+                    parent_episode_id=durable_parent,
                     mode="ephemeral-family-save",
                 )
                 identifiers[branch_id] = identifier

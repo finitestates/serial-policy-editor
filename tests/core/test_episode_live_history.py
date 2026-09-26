@@ -12,7 +12,7 @@ from trajectory_editor.episode_live_history import (
     history_from_live,
     truncate_live_history,
 )
-from trajectory_editor.episode_runner import TapeStep
+from trajectory_editor.run_loop import TapeStep
 
 pytestmark = pytest.mark.invariant
 

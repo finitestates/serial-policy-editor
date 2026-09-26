@@ -15,7 +15,7 @@ from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_replay_source import replay_procedure
 from trajectory_editor.episode_session import LiveSession
 from trajectory_editor.episode_store import EpisodeStore
-from trajectory_editor.ephemeral_runtime import ephemeral_edge_menu
+from trajectory_editor.session_runtime import session_edge_menu
 from trajectory_editor.teacher_plan import load_teacher_tape_jsonl
 
 
@@ -133,7 +133,7 @@ def test_ephemeral_fork_map_uses_root_relative_boundaries():
     session.generate(Write(" A", mode="exact"))
     io = ScriptedIO(["fm", "", "q"])
 
-    action, value = ephemeral_edge_menu(io, session)
+    action, value = session_edge_menu(io, session)
 
     assert (action, value) == ("quit", None)
     assert any("P|0| A|1|" in item for item in io.output)
@@ -155,7 +155,7 @@ def test_ephemeral_branches_use_numeric_aliases_for_switching():
     session.activate(child.branch.branch_id)
     io = ScriptedIO(["branches", "switch 1"])
 
-    action, value = ephemeral_edge_menu(io, session)
+    action, value = session_edge_menu(io, session)
 
     assert action == "switch"
     assert value == next(iter(session.branch_tree.nodes))
@@ -248,15 +248,15 @@ def test_ephemeral_uses_live_ui_by_default_and_plain_ui_is_an_opt_out(tmp_path):
 
 
 @pytest.mark.current_workflow
-def test_ephemeral_live_policy_keeps_seamless_review_enabled():
+def test_interactive_policy_keeps_seamless_review_enabled():
     from trajectory_editor.episode_cli import build_parser
-    from trajectory_editor.episode_policy_setup import ephemeral_policy
+    from trajectory_editor.episode_policy_setup import interactive_policy
 
     live = _LiveContextIO([])
     args = build_parser(include_vector=False).parse_args([])
 
-    live_policy = ephemeral_policy(args, live)
-    plain_policy = ephemeral_policy(args, ScriptedIO([]))
+    live_policy = interactive_policy(args, live)
+    plain_policy = interactive_policy(args, ScriptedIO([]))
 
     assert live_policy.seamless is True
     assert plain_policy.seamless is False

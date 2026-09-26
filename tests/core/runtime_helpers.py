@@ -46,6 +46,13 @@ class NoEogBackend(ConformingFakeBackend):
         return logits
 
 
+class PhraseBackend(ConformingFakeBackend):
+    def tokenize(self, text, *, add_bos=False, special=False):
+        if not add_bos and text == "C!":
+            return [3, 5]
+        return super().tokenize(text, add_bos=add_bos, special=special)
+
+
 def engine(backend=None, *, max_tokens: int = 2) -> EpisodeEngine:
     return EpisodeEngine(
         backend or ConformingFakeBackend(),

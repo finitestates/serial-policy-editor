@@ -14,12 +14,8 @@ from trajectory_editor.episode_cli import main
 from trajectory_editor.episode_lifecycle import _restore_engine
 from trajectory_editor.episode_materializer import materialize_live_branch
 from trajectory_editor.episode_replay_source import build_source_replay_recipe, replay_procedure
-from trajectory_editor.episode_runner import (
-    EpisodeRunner,
-    LiveSessionRunner,
-    ReplayContext,
-    ReplayPlan,
-    TapeStep,
+from trajectory_editor.run_loop import (
+    ReplayContext, ReplayPlan, TapeStep, run_plan,
 )
 from trajectory_editor.episode_session import LiveSession
 from trajectory_editor.episode_store import EpisodeStore
@@ -30,7 +26,7 @@ from trajectory_editor.spr_recipe import (
     ReplayPlacement,
     compose_replay_plan,
 )
-from tests.core.test_lifecycle_contracts import PhraseBackend
+from tests.core.runtime_helpers import PhraseBackend
 
 pytestmark = pytest.mark.invariant
 
@@ -110,14 +106,14 @@ class NeverChoose:
         raise AssertionError("replay should reach the live edge before requesting input")
 
 
-def test_r00_ephemeral_runner_uses_the_same_execution_path_without_a_store():
+def test_live_session_executes_without_a_store():
     session = LiveSession(runtime([1, 3, 5]))
 
     class LiveWrite:
         def choose(self, *args):
             return Hold(1)
 
-    result = LiveSessionRunner(session).run(
+    result = run_plan(session, divergence_policy="handoff",
         live_policy=LiveWrite(),
         max_live_actions=1,
     )
@@ -129,7 +125,7 @@ def test_r00_ephemeral_runner_uses_the_same_execution_path_without_a_store():
 
 def test_interactive_bias_before_first_action_survives_save_and_replay(tmp_path):
     session = LiveSession(engine())
-    result = LiveSessionRunner(session).run(
+    result = run_plan(session, divergence_policy="handoff",
         live_policy=InteractivePolicy(io=ScriptedIO(["2+100", "h 1"]), menu_size=3),
         max_live_actions=1,
     )
@@ -150,147 +146,88 @@ def test_interactive_bias_before_first_action_survives_save_and_replay(tmp_path)
     plan = compose_replay_plan(
         recipe, ReplayPlacement.SOURCE_ROOT, ReplayControlPolicy.FOLLOW_SOURCE
     )
-    replay = LiveSessionRunner(LiveSession(engine())).run(tape=plan)
+    replay = run_plan(LiveSession(engine()), divergence_policy="handoff", tape=plan)
 
     assert replay.replayed_actions == 1
     assert replay.outcomes[0].visible_token_ids == (2,)
     assert not replay.handed_off
 
 
-@pytest.mark.parametrize("error_type", [KeyboardInterrupt, RuntimeError, EOFError])
-def test_aborted_run_leaves_recorded_durable_actions_resumable(tmp_path, error_type):
-    class AbortAfterOneAction:
-        def __init__(self):
-            self.choices = 0
+def test_execution_history_stays_in_memory_until_explicit_save(tmp_path):
+    session = LiveSession(runtime([1, 3, 5]))
 
+    class LiveWrite:
         def choose(self, *args):
-            self.choices += 1
-            if self.choices == 2:
-                raise error_type("run stopped")
             return Hold(1)
 
-    with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
-        first = runtime([1, 3, 5])
-        episode_id = create(store, "interrupted", first)
-        with pytest.raises(error_type):
-            EpisodeRunner(first, store, episode_id).run(
-                live_policy=AbortAfterOneAction()
-            )
-
-        episode = store.get_episode(episode_id)
-        assert episode["status"] == "running"
-        assert episode["finished_at"] is None
-        assert [token["token_id"] for token in store.tokens(episode_id)] == [1]
-
-        restored = _restore_engine(
-            store,
-            episode_id,
-            SequenceBackend([1, 3, 5]),
-            max_tokens=None,
-            sampling_override=None,
+    workspace = tmp_path / "episodes.sqlite3"
+    with EpisodeStore(workspace) as store:
+        result = run_plan(
+            session,
+            divergence_policy="handoff",
+            live_policy=LiveWrite(),
+            max_live_actions=1,
         )
-        assert restored.visible_token_ids == [1]
+        assert result.outcomes[0].visible_token_ids == (1,)
+        assert session.history_visible_token_ids == (1,)
+        assert store.workspace_list(include_finished=True) == "No open episodes."
 
-        class ContinueOneAction:
-            def choose(self, *args):
-                return Hold(1)
-
-        EpisodeRunner(restored, store, episode_id).run(
-            live_policy=ContinueOneAction(), max_live_actions=1
+        identifier = materialize_live_branch(
+            store, session, session.branch_state(), {}, episode_id="saved"
         )
-        assert restored.visible_token_ids == [1, 3]
-        assert len(store.actions(episode_id)) == 2
+        assert identifier == "saved"
+        assert [row["token_id"] for row in store.tokens(identifier)] == [1]
+        assert len(store.actions(identifier)) == 1
 
 
-def test_mid_action_error_resumes_from_last_recorded_boundary(tmp_path):
-    class FailingBackend(SequenceBackend):
-        def last_logits(self):
-            if len(self.tokens) > 1:
-                raise RuntimeError("model stopped mid-action")
-            return super().last_logits()
-
-    class HoldTwo:
-        def choose(self, *args):
-            return Hold(2)
-
-    with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
-        episode = EpisodeEngine(
-            FailingBackend([1, 3, 5]),
-            initial_token_ids=[7],
-            sampling=SamplerConfig(temperature=0.0),
+def test_teacher_input_eof_yields_to_an_unsealed_in_memory_edge():
+    session = LiveSession(runtime([1, 3, 5]))
+    with pytest.raises(EdgeRequested):
+        run_plan(
+            session,
+            divergence_policy="handoff",
+            live_policy=InteractivePolicy(io=ScriptedIO([None])),
         )
-        episode_id = create(store, "partial", episode)
-        with pytest.raises(RuntimeError, match="mid-action"):
-            EpisodeRunner(episode, store, episode_id).run(live_policy=HoldTwo())
-
-        assert episode.visible_token_ids == [1]
-        assert store.actions(episode_id) == []
-        assert store.tokens(episode_id) == []
-        assert store.get_episode(episode_id)["status"] == "running"
-
-        restored = _restore_engine(
-            store,
-            episode_id,
-            SequenceBackend([1, 3, 5]),
-            max_tokens=None,
-            sampling_override=None,
-        )
-        assert restored.visible_token_ids == []
-
-
-def test_teacher_input_eof_yields_to_an_unsealed_edge(tmp_path):
-    with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
-        episode = runtime([1, 3, 5])
-        episode_id = create(store, "input-eof", episode)
-
-        with pytest.raises(EdgeRequested):
-            EpisodeRunner(episode, store, episode_id).run(
-                live_policy=InteractivePolicy(io=ScriptedIO([None]))
-            )
-
-        saved = store.get_episode(episode_id)
-        assert saved["status"] == "open"
-        assert saved["finished_at"] is None
-        assert saved["terminal_reason"] is None
+    assert session.status == "open"
+    assert session.history_outcomes == ()
 
 
 @pytest.mark.parametrize(
     "action, reason",
     [(Accept(), "teacher-eog"), (Hold(1), "model-eog")],
 )
-def test_genuine_eog_completes_and_seals_durable_episode(tmp_path, action, reason):
+def test_genuine_eog_is_saved_only_after_explicit_materialization(
+    tmp_path, action, reason
+):
     class ChooseAction:
         def choose(self, *args):
             return action
 
-    with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
-        episode = runtime([0])
-        episode_id = create(store, "eog", episode)
-        EpisodeRunner(episode, store, episode_id).run(live_policy=ChooseAction())
+    session = LiveSession(runtime([0]))
+    result = run_plan(
+        session,
+        divergence_policy="handoff",
+        live_policy=ChooseAction(),
+    )
+    assert session.engine.ended
+    assert session.engine.terminal_reason == reason
 
-        saved = store.get_episode(episode_id)
+    with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
+        assert store.workspace_list(include_finished=True) == "No open episodes."
+        identifier = materialize_live_branch(
+            store, session, session.branch_state(), {}, episode_id="eog"
+        )
+        saved = store.get_episode(identifier)
         assert saved["status"] == "completed"
-        assert saved["finished_at"] is not None
         assert saved["terminal_reason"] == reason
 
 
-@pytest.mark.parametrize(
-    "commands, sequence, reason",
-    [(["q", "end"], [1], "menu-end"), (["h 1"], [0], "model-eog")],
-)
-def test_cli_completes_durable_episode_once(tmp_path, commands, sequence, reason):
-    finishes = []
-
-    class CountingStore(EpisodeStore):
-        def finish_episode(self, *args, **kwargs):
-            finishes.append(args[0])
-            return super().finish_episode(*args, **kwargs)
-
+def test_cli_persists_only_when_the_edge_save_command_is_used(tmp_path):
     workspace = tmp_path / "episodes.sqlite3"
-    io = ScriptedIO(commands)
-    with patch("trajectory_editor.episode_cli.EpisodeStore", CountingStore), patch(
+    io = ScriptedIO(["h 1", "q", f"save {workspace}", "q"])
+    with patch(
         "trajectory_editor.episode_backend_loader.load_backend",
-        side_effect=lambda _args: SequenceBackend(sequence),
+        side_effect=lambda _args: SequenceBackend([1]),
     ), patch("trajectory_editor.episode_cli.TerminalIO", return_value=io):
         assert main([
             "--workspace", str(workspace), "--model", "fake", "--plain-ui",
@@ -299,39 +236,12 @@ def test_cli_completes_durable_episode_once(tmp_path, commands, sequence, reason
 
     with EpisodeStore(workspace) as store:
         saved = store.get_episode("terminal")
-        assert saved["status"] == "completed"
-        assert saved["terminal_reason"] == reason
-    assert finishes == ["terminal"]
+        assert saved["status"] == "open"
+        assert saved["visible_text"] == "word"
+        assert len(store.actions("terminal")) == 1
 
 
-@pytest.mark.parametrize(
-    "raises_eof, expected_exit, expected_status",
-    [(False, 0, "open"), (True, 2, "running")],
-)
-def test_cli_input_eof_never_seals(tmp_path, raises_eof, expected_exit, expected_status):
-    class ClosedInput(ScriptedIO):
-        def read(self, prompt):
-            raise EOFError("terminal input closed")
-
-    workspace = tmp_path / "episodes.sqlite3"
-    io = ClosedInput([]) if raises_eof else ScriptedIO([None, None])
-    with patch(
-        "trajectory_editor.episode_backend_loader.load_backend",
-        side_effect=lambda _args: SequenceBackend([1]),
-    ), patch("trajectory_editor.episode_cli.TerminalIO", return_value=io):
-        assert main([
-            "--workspace", str(workspace), "--model", "fake", "--plain-ui",
-            "--new-prompt", "P", "--episode-id", "input-eof",
-        ]) == expected_exit
-
-    with EpisodeStore(workspace) as store:
-        saved = store.get_episode("input-eof")
-        assert saved["status"] == expected_status
-        assert saved["finished_at"] is None
-        assert saved["terminal_reason"] is None
-
-
-def test_ephemeral_replay_plan_uses_source_sampling_on_an_inactive_branch():
+def test_replay_plan_uses_source_sampling_on_an_inactive_branch():
     session = LiveSession(runtime([1, 3, 5]), branch_id="root")
     session.generate(Accept())
     child = session.fork(boundary=1, branch_id="child")
@@ -346,9 +256,8 @@ def test_ephemeral_replay_plan_uses_source_sampling_on_an_inactive_branch():
         final_sampling=final,
     )
 
-    result = LiveSessionRunner(child).run(tape=plan, live_policy=NeverChoose())
+    result = run_plan(child, divergence_policy="handoff", tape=plan, live_policy=NeverChoose())
 
-    assert result.episode_id == "child"
     assert result.replayed_actions == 2
     assert result.replay_exhausted
     assert len(result.outcomes) == 2
@@ -370,14 +279,11 @@ def test_r01_exact_replay_reproduces_the_recorded_visible_prefix(tmp_path):
         source_outcome = source.apply(Hold(2))
         store.record_action(source_id, 0, source_outcome)
 
-        target = runtime([1, 3, 5])
-        target_id = create(store, "target", target)
-        result = EpisodeRunner(target, store, target_id).run(
-            tape=tape(store, source_id)
-        )
+        target = LiveSession(runtime([1, 3, 5]))
+        result = run_plan(target, divergence_policy="handoff", tape=tape(store, source_id))
 
     assert result.replayed_actions == 1
-    assert target.visible_token_ids == [1, 3]
+    assert target.engine.visible_token_ids == [1, 3]
     assert result.outcomes[0].expectation() == source_outcome.expectation()
 
 
@@ -391,32 +297,29 @@ def test_r05_check_and_force_replay_as_recorded_writes(tmp_path):
         source_id = create(store, "source", source)
         outcome = source.apply(Phrase("C!", mode="exact", force=True, max_shift=0.5))
         store.record_action(source_id, 0, outcome)
-        target = EpisodeEngine(
+        target = LiveSession(EpisodeEngine(
             PhraseBackend(),
             initial_token_ids=[7],
             sampling=SamplerConfig(temperature=0.0),
-        )
-        target_id = create(store, "target", target)
-        result = EpisodeRunner(target, store, target_id).run(
-            tape=tape(store, source_id)
-        )
+        ))
+        result = run_plan(target, divergence_policy="handoff", tape=tape(store, source_id))
 
     assert result.outcomes[0].action.kind == "force-phrase"
-    assert target.visible_token_ids == [3, 5]
+    assert target.engine.visible_token_ids == [3, 5]
 
 
 def test_r06_replay_eog_reaches_the_live_edge_without_committing_terminal(tmp_path):
     with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
-        target = runtime([0])
-        target_id = create(store, "target", target)
-        result = EpisodeRunner(target, store, target_id).run(
+        target = LiveSession(runtime([0]))
+        result = run_plan(
+            target, divergence_policy="handoff",
             tape=[TapeStep(EndGeneration(), ReplayExpectation((), 0, "eog"))],
             live_policy=NeverChoose(),
         )
 
     assert result.handed_off
-    assert target.visible_token_ids == []
-    assert target.terminal_token_id is None
+    assert target.engine.visible_token_ids == []
+    assert target.engine.terminal_token_id is None
     assert result.outcomes[0].stop_reason == "replay-eog"
 
 
@@ -441,30 +344,30 @@ def test_r08_exhausted_replay_yields_to_a_usable_live_edge(tmp_path, as_plan):
         source = runtime([1, 3, 5])
         source_id = create(store, "source", source)
         store.record_action(source_id, 0, source.apply(Accept()))
-        target = runtime([1, 3, 5])
-        target_id = create(store, "target", target)
+        target = LiveSession(runtime([1, 3, 5]))
 
         class LiveWrite:
             def choose(self, *args):
                 return Write("hello", mode="exact")
 
         steps = tape(store, source_id)
-        result = EpisodeRunner(target, store, target_id).run(
+        result = run_plan(
+            target, divergence_policy="handoff",
             tape=ReplayPlan(tuple(steps)) if as_plan else steps,
             live_policy=NeverChoose(),
             max_live_actions=1,
         )
         assert result.replay_exhausted
-        assert target.visible_token_ids == [1]
+        assert target.engine.visible_token_ids == [1]
         assert len(result.outcomes) == 1
-        assert store.get_episode(target_id)["status"] == "replay-edge"
 
-        resumed = EpisodeRunner(target, store, target_id).run(
+        resumed = run_plan(
+            target, divergence_policy="handoff",
             live_policy=LiveWrite(), max_live_actions=1
         )
 
     assert not resumed.replay_exhausted
-    assert target.visible_token_ids == [1, 4]
+    assert target.engine.visible_token_ids == [1, 4]
     assert len(resumed.outcomes) == 1
 
 
@@ -475,12 +378,9 @@ def test_r09_replay_never_mutates_the_recorded_source_prefix(tmp_path):
         store.record_action(source_id, 0, source.apply(Accept()))
         before = store.tokens(source_id)
 
-        target = runtime([2, 3, 5])
-        target_id = create(store, "target", target)
-        result = EpisodeRunner(
-            target, store, target_id, divergence_policy="handoff"
-        ).run(
-            tape=tape(store, source_id),
+        target = LiveSession(runtime([2, 3, 5]))
+        result = run_plan(
+            target, divergence_policy="handoff", tape=tape(store, source_id)
         )
         after = store.tokens(source_id)
 

@@ -688,13 +688,12 @@ class EpisodeStore:
 
     def record_action(
         self, episode_id: str, ordinal: int, outcome: ActionOutcome,
-        *, replay_origin: Mapping[str, Any] | None = None,
     ) -> None:
         arguments = outcome.action.to_dict()
         if outcome.diagnostics is not None:
             arguments["diagnostics"] = dict(outcome.diagnostics)
-        if replay_origin is not None:
-            arguments["replay_origin"] = dict(replay_origin)
+        if outcome.replay_eog_token_id is not None:
+            arguments["replay_eog_token_id"] = outcome.replay_eog_token_id
         with self.transaction() as db:
             self._require_unsealed(db, episode_id)
             db.execute(

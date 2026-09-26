@@ -12,7 +12,7 @@ from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_materializer import save_live_family
 from trajectory_editor.episode_session import LiveSession, LiveSessionRoster
 from trajectory_editor.episode_store import EpisodeStore
-from trajectory_editor.ephemeral_runtime import ephemeral_edge_menu
+from trajectory_editor.session_runtime import session_edge_menu
 from trajectory_editor.fresh_episode import fresh_root_from
 
 
@@ -110,7 +110,7 @@ def test_ephemeral_help_and_bare_new_expose_the_polished_commands():
             return super().prompt(request)
 
     io = PromptIO()
-    action, value = ephemeral_edge_menu(io, _session())
+    action, value = session_edge_menu(io, _session())
     assert (action, value) == ("new", "Q")
     assert len(io.requests) == 1 and io.requests[0].multiline
 
@@ -133,13 +133,13 @@ def test_plain_bare_new_uses_line_prompt_without_cli_or_live_application(monkeyp
     monkeypatch.setattr("builtins.__import__", no_cli_import)
     terminal = TerminalIO(live_choices=False)
     with terminal.session():
-        assert ephemeral_edge_menu(terminal, _session()) == ("new", "Q")
+        assert session_edge_menu(terminal, _session()) == ("new", "Q")
 
 
 @pytest.mark.current_workflow
 def test_bare_new_cancellation_returns_to_ephemeral_edge():
     io = ScriptedIO(["new", None, "q"])
-    assert ephemeral_edge_menu(io, _session()) == ("quit", None)
+    assert session_edge_menu(io, _session()) == ("quit", None)
 
 
 @pytest.mark.current_workflow
@@ -166,7 +166,7 @@ def test_ephemeral_new_has_one_model_load_and_global_stable_addresses(tmp_path):
         loads.append(object())
         return backend
 
-    from trajectory_editor import ephemeral_runtime
+    from trajectory_editor import session_runtime
 
     class RecordingRoster(LiveSessionRoster):
         def new_root(self, prompt):
@@ -176,7 +176,7 @@ def test_ephemeral_new_has_one_model_load_and_global_stable_addresses(tmp_path):
 
     with patch("trajectory_editor.episode_backend_loader.load_backend", side_effect=load), patch(
         "trajectory_editor.episode_cli.TerminalIO", return_value=io
-    ), patch.object(ephemeral_runtime, "LiveSessionRoster", RecordingRoster):
+    ), patch.object(session_runtime, "LiveSessionRoster", RecordingRoster):
         assert main(
             [
                 "--ephemeral",
@@ -205,7 +205,16 @@ def test_ephemeral_new_has_one_model_load_and_global_stable_addresses(tmp_path):
 def test_durable_new_is_parentless_and_bare_number_returns_to_prior_episode(tmp_path):
     workspace = tmp_path / "episodes.sqlite3"
     backend = DurableFakeBackend()
-    io = ScriptedIO(["1", "s temperature=0.7", "new Q", "#1", "q"])
+    io = ScriptedIO([
+        "1",
+        f"save {workspace} original",
+        "s temperature=0.7",
+        "new Q",
+        "q",
+        f"save {workspace} fresh",
+        "#1",
+        "q",
+    ])
 
     with patch("trajectory_editor.episode_backend_loader.load_backend", return_value=backend), patch(
         "trajectory_editor.episode_cli.TerminalIO", return_value=io

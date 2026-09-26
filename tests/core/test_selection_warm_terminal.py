@@ -14,7 +14,7 @@ from prompt_toolkit.output.vt100 import Vt100_Output
 from tests.fakes import SpeculativeFakeBackend
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine
-from trajectory_editor.episode_runner import LiveSessionRunner
+from trajectory_editor.run_loop import run_plan
 from trajectory_editor.episode_session import LiveSession
 from trajectory_editor.episode_ui import InteractivePolicy
 from trajectory_editor.persistent_tui import PersistentTerminalSession
@@ -87,7 +87,7 @@ def test_run_plan_rank_navigation_does_not_speculate_before_commit():
 
             feeder = Thread(target=feed)
             feeder.start()
-            result = LiveSessionRunner(live_session).run(
+            result = run_plan(live_session, divergence_policy="handoff",
                 live_policy=policy, max_live_actions=2,
             )
             feeder.join(timeout=3)

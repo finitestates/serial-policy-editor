@@ -26,8 +26,7 @@ def _policy(
     args: argparse.Namespace,
     io: Any,
     *,
-    store: Any | None = None,
-    episode_id: str | None = None,
+    session: Any | None = None,
     seamless: bool,
 ) -> InteractivePolicy:
     return InteractivePolicy(
@@ -40,38 +39,25 @@ def _policy(
         context_characters=args.context_chars,
         manual_acceptance=args.manual_acceptance,
         view_preferences=_preferences(args),
-        store=store,
-        episode_id=episode_id,
+        session=session,
         seamless=seamless,
     )
 
 
-def durable_policy(
+def interactive_policy(
     args: argparse.Namespace,
-    store: Any,
-    episode_id: str,
     io: Any,
+    *,
+    session: Any | None = None,
 ) -> InteractivePolicy:
-    """Build the policy wired to one durable episode recorder."""
+    """Build the policy against the active in-memory session."""
 
     return _policy(
         args,
         io,
-        store=store,
-        episode_id=episode_id,
+        session=session,
         seamless=io.capabilities.seamless_review,
     )
 
 
-def ephemeral_policy(args: argparse.Namespace, io: Any) -> InteractivePolicy:
-    """Build the policy for a persistence-free live session."""
-
-    return _policy(
-        args,
-        io,
-        # LiveSession owns root-relative review semantics without a recorder.
-        seamless=io.capabilities.seamless_review,
-    )
-
-
-__all__ = ["durable_policy", "ephemeral_policy"]
+__all__ = ["interactive_policy"]

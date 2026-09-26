@@ -17,7 +17,7 @@ RENDERERS = {"plain_tui", "persistent_tui", "live_tui", "edge_tui"}
 PRESENTATION = RENDERERS | {"tui", "tui_views", "candidate_columns", "ui_themes"}
 PLAIN_FORBIDDEN = {
     "teacher_commands", "edge_commands", "episode_cli", "episode_ui",
-    "episode_store", "episode_engine", "episode_session", "ephemeral_runtime",
+    "episode_store", "episode_engine", "episode_session", "session_runtime",
     "episode_backend_loader", "run_loop",
 }
 

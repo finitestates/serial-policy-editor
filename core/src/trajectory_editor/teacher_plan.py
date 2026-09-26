@@ -17,7 +17,7 @@ from .core.actions import action_from_dict
 from .core.errors import EditorError
 from .core.results import ReplayExpectation
 from .episode_replay_source import replay_procedure
-from .episode_runner import ReplayPlan, TapeStep
+from .run_loop import ReplayPlan, TapeStep
 from .surviving_procedure import ProcedureRecord, project_surviving_procedure
 
 

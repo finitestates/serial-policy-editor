@@ -1,9 +1,4 @@
-"""Storage-neutral execution of replay plans and live teacher actions.
-
-The runner owns control flow only. Durable episodes and persistence-free live
-sessions provide small targets for state changes and recording; neither target
-is represented as a fake version of the other.
-"""
+"""Storage-neutral execution of replay plans and live teacher actions."""
 
 from __future__ import annotations
 
@@ -50,30 +45,15 @@ class TapeStep:
 
 
 @dataclass(frozen=True)
-class ReplayOrigin:
-    """Optional source label for a replay-plan item."""
-
-    source_episode_id: str | None = None
-    source_boundary: int | None = None
-    source_part: str | None = None
-
-
-@dataclass(frozen=True)
 class ReplayContext:
     """Auxiliary execution context aligned with a replay plan's steps."""
 
     sampling: tuple[SamplerConfig | None, ...] = ()
-    origins: tuple[ReplayOrigin | None, ...] = ()
 
     def sampling_at(self, index: int) -> SamplerConfig | None:
         if index >= len(self.sampling):
             return None
         return self.sampling[index]
-
-    def origin_at(self, index: int) -> ReplayOrigin | None:
-        if index >= len(self.origins):
-            return None
-        return self.origins[index]
 
 
 @dataclass(frozen=True)
@@ -87,14 +67,8 @@ class ReplayPlan(Sequence[TapeStep]):
     incomplete_handoff_reason: str | None = None
 
     def __post_init__(self) -> None:
-        for label, values in (
-            ("sampling", self.context.sampling),
-            ("origins", self.context.origins),
-        ):
-            if values and len(values) != len(self.steps):
-                raise ValueError(
-                    f"replay {label} context must align with replay steps"
-                )
+        if self.context.sampling and len(self.context.sampling) != len(self.steps):
+            raise ValueError("replay sampling context must align with replay steps")
 
     def __len__(self) -> int:
         return len(self.steps)
@@ -105,7 +79,6 @@ class ReplayPlan(Sequence[TapeStep]):
 
 @dataclass(frozen=True)
 class RunResult:
-    episode_id: str
     outcomes: tuple[ActionOutcome, ...]
     replayed_actions: int
     handed_off: bool
@@ -114,23 +87,14 @@ class RunResult:
 
 
 class RunTarget(Protocol):
-    """The state and recording surface required by :func:`run_plan`."""
-
-    @property
-    def identifier(self) -> str: ...
+    """The in-memory state surface required by :func:`run_plan`."""
 
     @property
     def engine(self): ...
 
-    def begin(self) -> int: ...
-
-    def adopt_promoted(self, outcomes: Sequence[ActionOutcome]) -> None: ...
-
     def set_sampler(self, sampling: SamplerConfig) -> None: ...
 
-    def observe(self) -> Observation: ...
-
-    def apply(
+    def generate(
         self,
         action: PolicyAction,
         *,
@@ -138,27 +102,6 @@ class RunTarget(Protocol):
         divergence_policy: str,
         replay: bool,
     ) -> ActionOutcome: ...
-
-    def record_replay(
-        self,
-        ordinal: int,
-        index: int,
-        step: TapeStep,
-        outcome: ActionOutcome,
-        origin: ReplayOrigin | None,
-    ) -> None: ...
-
-    def record_live(self, ordinal: int, outcome: ActionOutcome) -> None: ...
-
-    def record_phrase_rejected(self, action: Phrase, reason: str) -> None: ...
-
-    def record_instruction_rejected(
-        self, action: PolicyAction | None, reason: str, replay: bool
-    ) -> None: ...
-
-    def record_control_flow(self) -> None: ...
-
-    def complete(self, had_tape: bool) -> None: ...
 
 
 def run_plan(
@@ -168,30 +111,16 @@ def run_plan(
     tape: Sequence[TapeStep] | ReplayPlan | None = None,
     live_policy: LivePolicy | None = None,
     max_live_actions: int | None = None,
-    promoted_outcomes: Sequence[ActionOutcome] = (),
 ) -> RunResult:
-    """Run replay/live work, optionally committing already-applied previews."""
+    """Apply replay/live work to an in-memory execution target."""
 
-    promoted = tuple(promoted_outcomes)
-    if promoted and (tape is not None or live_policy is not None):
-        raise ValueError("promoted outcomes cannot be combined with replay or live actions")
-    if promoted:
-        target.adopt_promoted(promoted)
-
-    outcomes: list[ActionOutcome] = list(promoted)
+    outcomes: list[ActionOutcome] = []
     replayed = 0
     handed_off = False
     handoff_reason: str | None = None
     had_tape = tape is not None
     plan = tape if isinstance(tape, ReplayPlan) else ReplayPlan(tuple(tape or ()))
     replay_exhausted = False
-    ordinal = target.begin()
-    for outcome in promoted:
-        target.record_live(ordinal, outcome)
-        ordinal += 1
-    active_action: PolicyAction | None = None
-    executing_replay = False
-
     try:
         for index, step in enumerate(plan.steps):
             if target.engine.ended or target.engine.checkpointed:
@@ -203,18 +132,12 @@ def run_plan(
                 and target.engine.sampling != sampling
             ):
                 target.set_sampler(sampling)
-            active_action = step.action
-            executing_replay = True
-            outcome = target.apply(
+            outcome = target.generate(
                 step.action,
                 expectation=step.expectation,
                 divergence_policy=divergence_policy,
                 replay=True,
             )
-            target.record_replay(
-                ordinal, index, step, outcome, plan.context.origin_at(index)
-            )
-            ordinal += 1
             outcomes.append(outcome)
             if outcome.status == "handed-off":
                 handed_off = True
@@ -246,15 +169,13 @@ def run_plan(
             and not target.engine.checkpointed
             and live_policy is not None
         ):
-            observation = target.observe()
+            observation = target.engine.observe()
             action = live_policy.choose(target.engine, observation)
             # A policy may edit steering while choosing. Capture the actual
             # surface that the action will use.
-            target.observe()
-            active_action = action
-            executing_replay = False
+            target.engine.observe()
             try:
-                outcome = target.apply(
+                outcome = target.generate(
                     action,
                     divergence_policy=divergence_policy,
                     replay=False,
@@ -262,30 +183,23 @@ def run_plan(
             except InstructionRejected as exc:
                 if not isinstance(action, Phrase):
                     raise
-                target.record_phrase_rejected(action, str(exc))
                 rejected = getattr(live_policy, "action_rejected", None)
                 if callable(rejected):
                     rejected(action, str(exc))
                 live_actions += 1
                 continue
-            target.record_live(ordinal, outcome)
-            ordinal += 1
             outcomes.append(outcome)
             live_actions += 1
     except InstructionRejected as exc:
         handoff_reason = str(exc)
-        target.record_instruction_rejected(active_action, str(exc), executing_replay)
         handed_off = True
     except (
         EdgeRequested,
         ForkRequested,
         SeamlessRewindRequested,
     ):
-        target.record_control_flow()
         raise
-    target.complete(had_tape)
     return RunResult(
-        target.identifier,
         tuple(outcomes),
         replayed,
         handed_off,
@@ -299,7 +213,6 @@ __all__ = [
     "ForkRequested",
     "LivePolicy",
     "ReplayContext",
-    "ReplayOrigin",
     "ReplayPlan",
     "RunResult",
     "RunTarget",

@@ -11,7 +11,9 @@ import pytest
 
 from tests.fakes import ConformingFakeBackend, ScriptedIO
 from trajectory_editor.core.sampler_config import SamplerConfig
-from trajectory_editor.episode_cli import _live_edge_menu, main
+from trajectory_editor.episode_cli import main
+from trajectory_editor.session_runtime import session_edge_menu
+from trajectory_editor.episode_session import LiveSession
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_store import EpisodeStore
 
@@ -68,9 +70,8 @@ def test_interactive_launch_composes_inside_session_before_backend(tmp_path, eph
             *(["--ephemeral"] if ephemeral else []),
         ]) == 0
     assert events == ["session entered", "compose", "backend loaded", "session restored"]
-    if not ephemeral:
-        with EpisodeStore(tmp_path / "episodes.db") as store:
-            assert store.get_episode(store.resolve_id("#1"))["initial_text"] == "P"
+    with EpisodeStore(tmp_path / "episodes.db") as store:
+        assert store.workspace_list(include_finished=True) == "No open episodes."
 
 
 def test_launch_cancellation_restores_session_without_loading_backend(tmp_path, capsys):
@@ -128,20 +129,20 @@ def test_prompt_file_keeps_multiline_text_and_original_line_endings(tmp_path):
     path = tmp_path / "episodes.db"
     prompt_file = tmp_path / "prompt.txt"
     prompt_file.write_bytes(b"P\r\nQ\n")
-    io = ScriptedIO(["q", "q"])
+    io = ScriptedIO(["q", f"save {path} prompt-file", "q"])
     with patch("trajectory_editor.episode_backend_loader.load_backend",
                return_value=ConformingFakeBackend()), patch(
         "trajectory_editor.episode_cli.TerminalIO", return_value=io,
     ):
         assert main([
             "--workspace", str(path), "--model", "fake",
-            "--new-prompt-file", str(prompt_file),
+            "--new-prompt-file", str(prompt_file), "--episode-id", "prompt-file",
         ]) == 0
     with EpisodeStore(path) as store:
-        assert store.get_episode(store.resolve_id("#1"))["initial_text"] == "P\r\nQ\n"
+        assert store.get_episode("prompt-file")["initial_text"] == "P\r\nQ\n"
 
 
-def test_bare_new_cancellation_returns_to_durable_edge(tmp_path):
+def test_bare_new_cancellation_returns_to_the_session_edge(tmp_path):
     io = ScriptedIO(["new", None, "q"])
     engine = EpisodeEngine(
         ConformingFakeBackend(), sampling=SamplerConfig(),
@@ -153,5 +154,6 @@ def test_bare_new_cancellation_returns_to_durable_edge(tmp_path):
             sampling=engine.sampling, stream_fingerprint=engine.stream_fingerprint,
             max_tokens=None, backend={},
         )
-        assert _live_edge_menu(io, store, "source", engine) == ("quit", None)
+        session = LiveSession(engine)
+        assert session_edge_menu(io, session, store=store) == ("quit", None)
         assert store.workspace_list().count("#") == 1

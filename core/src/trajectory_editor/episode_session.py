@@ -1,6 +1,6 @@
 """Persistence-free live sessions and lightweight branch records.
 
-Live forks are session events.  The session owns one active engine/backend and
+Live forks form a branch tree.  The session owns one active engine/backend and
 keeps a compact, canonical record for every retained branch.  A cache snapshot
 is optional acceleration only; a branch's prefix and control history are its
 identity and always suffice for reconstruction.
@@ -8,10 +8,10 @@ identity and always suffice for reconstruction.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import Any
 from uuid import uuid4
 
 from .core.actions import Accept, PolicyAction
@@ -20,7 +20,7 @@ from .core.results import ActionOutcome, ReplayExpectation
 from .core.sampler_config import SamplerConfig
 from .episode_engine import EpisodeEngine
 from .episode_live_history import truncate_live_history
-from .episode_runner import TapeStep
+from .run_loop import TapeStep
 from .fresh_episode import fresh_root_from
 
 
@@ -181,22 +181,6 @@ class BranchState:
 
 
 @dataclass(frozen=True)
-class SessionEvent:
-    kind: str
-    branch: BranchIdentity
-    boundary: int
-    payload: Mapping[str, Any]
-
-
-class SessionRecorder(Protocol):
-    def record(self, event: SessionEvent) -> None: ...
-
-
-class SessionExportTarget(Protocol):
-    def export(self, session: "LiveBranch") -> Any: ...
-
-
-@dataclass(frozen=True)
 class RewindState:
     boundary: int
     discarded_tape: tuple[TapeStep, ...]
@@ -245,8 +229,7 @@ class LiveSession:
         sampler: SamplerConfig | None = None,
         environment_stamp: Mapping[str, Any] | None = None,
         branch_id: str | None = None,
-        recorder: SessionRecorder | Callable[[SessionEvent], Any] | None = None,
-        export_targets: Mapping[str, SessionExportTarget | Callable[["LiveBranch"], Any]] | None = None,
+        initial_state: BranchState | None = None,
     ) -> None:
         if not isinstance(engine, EpisodeEngine):
             raise TypeError("engine must be an EpisodeEngine")
@@ -259,27 +242,36 @@ class LiveSession:
         if not isinstance(self.prompt, str):
             raise EditorError("prompt must be a string")
         self.environment_stamp = MappingProxyType(dict(environment_stamp or {}))
-        self.recorder = recorder
-        self.export_targets = dict(export_targets or {})
         self.session_id = f"live-session-{uuid4().hex}"
-        identity = BranchIdentity(branch_id or self._new_branch_id())
-        root = BranchState(
-            identity=identity,
-            initial_token_ids=tuple(engine.initial_token_ids),
-            visible_token_ids=tuple(engine.visible_token_ids),
-            tape=(),
-            outcomes=(),
-            control_points=(replace(_engine_control(engine), boundary=0),),
-        )
+        if initial_state is None:
+            identity = BranchIdentity(branch_id or self._new_branch_id())
+            root = BranchState(
+                identity=identity,
+                initial_token_ids=tuple(engine.initial_token_ids),
+                visible_token_ids=tuple(engine.visible_token_ids),
+                tape=(),
+                outcomes=(),
+                control_points=(replace(_engine_control(engine), boundary=0),),
+            )
+        else:
+            if branch_id is not None:
+                raise ValueError("branch_id cannot be combined with initial_state")
+            if initial_state.initial_token_ids != tuple(engine.initial_token_ids):
+                raise ValueError("initial state token root does not match the engine")
+            if initial_state.visible_token_ids != tuple(engine.visible_token_ids):
+                raise ValueError("initial state visible prefix does not match the engine")
+            root = initial_state
+            identity = root.identity
         self._branches: dict[str, BranchState] = {identity.branch_id: root}
-        self._tree = BranchTree(BranchNode(identity))
+        self._tree = BranchTree(
+            BranchNode(identity, root.history_tape, root.history_outcomes)
+        )
         self._active_id = identity.branch_id
         self._active_identity = identity
         self._detached = False
         self._rewinds: dict[str, RewindState | None] = {identity.branch_id: None}
         self._forks: dict[str, ForkState | None] = {identity.branch_id: None}
         self._discarded = False
-        self._emit("created", identity, engine.boundary, {"prompt": self.prompt})
 
     @staticmethod
     def _new_branch_id() -> str:
@@ -420,7 +412,6 @@ class LiveSession:
         self._active_id = branch_id
         self._active_identity = state.identity
         self._detached = False
-        self._emit("branch-activated", state.identity, state.boundary, {})
         return engine
 
     def activate(self, branch_id: str) -> EpisodeEngine:
@@ -585,7 +576,6 @@ class LiveSession:
         if stream_fingerprint is not None:
             engine.stream_fingerprint = stream_fingerprint
         self._record_control(branch_id)
-        self._emit("sampler-changed", self._state(branch_id).identity, engine.boundary, {})
 
     def resume(
         self,
@@ -599,7 +589,6 @@ class LiveSession:
         engine = self._activate(branch_id)
         engine.resume(max_tokens=max_tokens, sampling=sampling)
         self._record_control(branch_id)
-        self._emit("resumed", self._state(branch_id).identity, engine.boundary, {})
 
     def generate(
         self,
@@ -639,10 +628,6 @@ class LiveSession:
             status=status,
             backend_cache_snapshot=None,
         )
-        self._emit("generated", self._state(branch_id).identity, outcome.boundary_after, {
-            "outcome": outcome,
-            "replay": replay,
-        })
         return outcome
 
     def adopt_promoted_outcomes(
@@ -686,12 +671,6 @@ class LiveSession:
             status="completed" if engine.ended else state.status,
             backend_cache_snapshot=None,
         )
-        for outcome in outcomes:
-            self._emit("generated", state.identity, outcome.boundary_after, {
-                "outcome": outcome,
-                "replay": False,
-                "promoted": True,
-            })
 
     def rewind(self, boundary: int, *, _branch_id: str | None = None) -> RewindState:
         branch_id = self._active_id if _branch_id is None else _branch_id
@@ -730,7 +709,6 @@ class LiveSession:
             backend_cache_snapshot=None,
         )
         self._rewinds[branch_id] = rewind
-        self._emit("rewound", self._state(branch_id).identity, boundary, {"rewind": rewind})
         return rewind
 
     def fork(
@@ -771,7 +749,6 @@ class LiveSession:
         fork = ForkState(source.identity, identity, target)
         self._forks[source_id] = fork
         self._forks[identity.branch_id] = fork
-        self._emit("forked", source.identity, target, {"fork": fork})
         return LiveBranch(self, identity)
 
     def quit(self, reason: str = "menu-end", *, _branch_id: str | None = None) -> None:
@@ -781,56 +758,16 @@ class LiveSession:
         engine.terminate(reason)
         state = self._capture_active()
         self._branches[branch_id] = replace(state, status="quit", backend_cache_snapshot=None)
-        self._emit("quit", self._state(branch_id).identity, engine.boundary, {"reason": reason})
 
     def discard(self) -> None:
         """Forget every branch and invalidate every outstanding branch handle."""
         if self._discarded:
             return
-        self._emit("discarded", self._active_identity, self._engine.boundary, {})
         self._branches.clear()
         self._rewinds.clear()
         self._forks.clear()
         self._discarded = True
 
-    def export(
-        self,
-        target: str | SessionExportTarget | Callable[["LiveBranch"], Any] | None = None,
-        *,
-        _branch_id: str | None = None,
-        _view: "LiveBranch | None" = None,
-    ) -> Any:
-        branch_id = self._active_id if _branch_id is None else _branch_id
-        state = self._state(branch_id)
-        view = _view or LiveBranch(self, state.identity)
-        if target is None:
-            return {
-                name: self.export(value, _branch_id=branch_id, _view=view)
-                for name, value in self.export_targets.items()
-            }
-        value = self.export_targets[target] if isinstance(target, str) else target
-        exporter = getattr(value, "export", None)
-        result = exporter(view) if callable(exporter) else value(view)
-        self._emit("exported", state.identity, state.boundary, {
-            "target": target if isinstance(target, str) else None,
-        })
-        return result
-
-    def _emit(
-        self,
-        kind: str,
-        branch: BranchIdentity,
-        boundary: int,
-        payload: Mapping[str, Any],
-    ) -> None:
-        if self.recorder is None:
-            return
-        event = SessionEvent(kind, branch, boundary, MappingProxyType(dict(payload)))
-        record = getattr(self.recorder, "record", None)
-        if callable(record):
-            record(event)
-        else:
-            self.recorder(event)
 
 
 class LiveBranch:
@@ -967,9 +904,6 @@ class LiveBranch:
     def discard(self) -> None:
         self._session.discard()
 
-    def export(self, target: str | SessionExportTarget | Callable[["LiveBranch"], Any] | None = None) -> Any:
-        return self._session.export(target, _branch_id=self._identity.branch_id, _view=self)
-
 
 @dataclass(frozen=True)
 class LiveRosterEntry:
@@ -1024,6 +958,16 @@ class LiveSessionRoster:
         self._addresses[number] = key
         return number
 
+    def add_session(self, session: LiveSession) -> int:
+        """Retain another in-memory root without changing the active one."""
+        if not isinstance(session, LiveSession):
+            raise TypeError("session must be a LiveSession")
+        existing = self._sessions.get(session.session_id)
+        if existing is not None and existing is not session:
+            raise EditorError("a different session already uses this session id")
+        self._sessions[session.session_id] = session
+        return self._register(session, session.branch.branch_id)
+
     def register_branch(self, branch: LiveBranch) -> int:
         return self._register(branch.session, branch.branch.branch_id)
 
@@ -1067,6 +1011,8 @@ class LiveSessionRoster:
         source = self.active_session
         source_engine = source.engine
         environment = dict(source.environment_stamp)
+        environment.pop("source_episode_id", None)
+        environment.pop("model_change_boundary", None)
         source.suspend()
         try:
             engine = fresh_root_from(source_engine, prompt)
@@ -1102,7 +1048,4 @@ __all__ = [
     "LiveSession",
     "LiveSessionRoster",
     "RewindState",
-    "SessionEvent",
-    "SessionExportTarget",
-    "SessionRecorder",
 ]

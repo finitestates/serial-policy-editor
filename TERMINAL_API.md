@@ -30,7 +30,7 @@ same request object through to the selected implementation.
   command in `episode_ui.py`. Update the short plain action line in
   `plain_tui.py` and any live key help in `live_tui.py`. Add EDGE syntax in
   `edge_commands.py`, dispatch it
-  in `episode_cli.py` and/or `ephemeral_runtime.py` as appropriate, and update
+  in `episode_cli.py` and/or `session_runtime.py` as appropriate, and update
   `edge_help.py`. Keep episode, store, and backend effects in those callers.
 - Add a decision field to `ChoiceViewState`, an EDGE field to `EdgeViewState`, or
   an input option to `PromptRequest` in `terminal_contracts.py`. Prepare its
@@ -65,7 +65,8 @@ EDGE command grammar. Presentation may differ in these ways:
 
 The choice request carries search results, errors, bias feedback, review
 position, and column preferences. Both EDGE renderers use the same command
-labels, with distinct durable episode and ephemeral session actions. Plain
+labels. Session actions can load saved episodes or explicitly save the current
+branch or branch family. Plain
 input preserves command meanings but has no cursor navigation or previews.
 Initial prompts and bare `new` use the same composition request. For exact
 multiline startup text in plain mode, use `--new-prompt-file FILE` (or

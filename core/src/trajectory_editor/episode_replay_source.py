@@ -19,7 +19,7 @@ from .core.errors import EditorError
 from .core.results import ReplayExpectation
 from .core.sampler_config import SamplerConfig
 from .episode_controls import ControlState, ControlTimeline, ControlTransition
-from .episode_runner import TapeStep
+from .run_loop import TapeStep
 from .spr_recipe import SourceReplayRecipe
 from .surviving_procedure import (
     ProcedureRecord,

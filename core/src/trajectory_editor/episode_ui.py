@@ -12,7 +12,6 @@ import math
 import sys
 from bisect import bisect_right
 from collections import OrderedDict
-from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -32,12 +31,7 @@ from .core.actions import (
     Write,
 )
 from .episode_engine import EpisodeEngine, Observation, TokenPrefixSnapshot
-from .episode_runner import (
-    EdgeRequested,
-    ForkRequested,
-    SeamlessRewindRequested,
-)
-from .episode_store import EpisodeStore
+from .run_loop import EdgeRequested, ForkRequested, SeamlessRewindRequested
 from .core.sampling import raw_rank
 from .teacher_commands import HELP_TEXT, CommandKind, CommandState, ForkAddressKind, interpret_command
 from .terminal_contracts import (
@@ -307,8 +301,7 @@ class InteractivePolicy:
         logit_view: str = "none",
         show_model_probabilities: bool = False,
         view_preferences: PolicyViewPreferences | None = None,
-        store: EpisodeStore | None = None,
-        episode_id: str | None = None,
+        session: Any | None = None,
         seamless: bool = False,
     ) -> None:
         if min(menu_size, search_radius, default_hold_tokens, phrase_max_tokens) < 1:
@@ -335,8 +328,7 @@ class InteractivePolicy:
                 show_model_probabilities=show_model_probabilities,
             )
         )
-        self.store = store
-        self.episode_id = episode_id
+        self.session = session
         self.seamless = bool(seamless)
         self._seamless_action_index: _SeamlessActionIndex | None = None
         self._context_cache: OrderedDict[int, tuple[str | ContextText, int]] = OrderedDict()
@@ -419,18 +411,26 @@ class InteractivePolicy:
         self._prepare_context_cache(engine, boundary)
         if not self.seamless:
             return
+        if self.session is None:
+            rows = []
+        else:
+            rows = [
+                {
+                    "ordinal": ordinal,
+                    "boundary_before": outcome.boundary_before,
+                    "boundary_after": outcome.boundary_after,
+                    "kind": outcome.action.kind,
+                }
+                for ordinal, outcome in enumerate(self.session.history_outcomes)
+                if ordinal > (
+                    self._seamless_action_index.last_ordinal
+                    if self._seamless_action_index is not None
+                    else -1
+                )
+            ]
         if self._seamless_action_index is None:
-            rows = (
-                self.store.action_boundaries(self.episode_id)
-                if self.store is not None and self.episode_id is not None
-                else []
-            )
             self._seamless_action_index = _SeamlessActionIndex(rows)
-        elif self.store is not None and self.episode_id is not None:
-            rows = self.store.action_boundaries(
-                self.episode_id,
-                after_ordinal=self._seamless_action_index.last_ordinal,
-            )
+        else:
             self._seamless_action_index.extend(rows)
         self._seamless_action_index.position(boundary)
 
@@ -448,12 +448,6 @@ class InteractivePolicy:
             overlays=self.view_preferences.overlays,
         ).plan
         return plan.policy_ordered() if self.view_preferences.sort_by_policy else plan
-
-    def _interaction(
-        self, boundary: int, kind: str, payload: Mapping[str, Any]
-    ) -> None:
-        if self.store is not None and self.episode_id is not None:
-            self.store.record_interaction(self.episode_id, boundary, kind, payload)
 
     def action_rejected(self, action: PolicyAction, reason: str) -> None:
         """Receive a live action rejection without leaving the current edge."""
@@ -499,18 +493,6 @@ class InteractivePolicy:
             suggestions = tuple(
                 "/" + json.dumps(text, ensure_ascii=False) for _, text in pieces
             )
-            self._interaction(
-                observation.boundary,
-                "vocabulary-search-multiple-tokens",
-                {
-                    "query": query,
-                    "invoked_as": invoked_as,
-                    "tokens": [
-                        {"token_id": token_id, "text": text}
-                        for token_id, text in pieces
-                    ],
-                },
-            )
             feedback = ChoiceFeedback(
                 category="search",
                 title=f"SEARCH · {query!r} returned {len(pieces)} tokens",
@@ -541,9 +523,6 @@ class InteractivePolicy:
             target_rank=rank,
             lower_rank=max(1, rank - self.search_radius),
             upper_rank=min(len(observation.logits), rank + self.search_radius),
-        )
-        self._record_search_view(
-            engine, observation, lens, invoked_as=invoked_as, invocation="search"
         )
         return lens, self._search_feedback(lens), (rank, token_id)
 
@@ -581,31 +560,6 @@ class InteractivePolicy:
             view=self._view_plan(engine),
         )
 
-    def _record_search_view(
-        self,
-        engine: EpisodeEngine,
-        observation: Observation,
-        lens: SearchLens,
-        *,
-        invoked_as: str | None,
-        invocation: str,
-    ) -> None:
-        candidates = self._lens_candidates(engine, observation, lens)
-        self._interaction(
-            observation.boundary,
-            "vocabulary-search-view",
-            {
-                "query": lens.query,
-                "invoked_as": invoked_as,
-                "invocation": invocation,
-                "target_token_id": lens.token_id,
-                "target_rank": lens.target_rank,
-                "lower_rank": lens.lower_rank,
-                "upper_rank": lens.upper_rank,
-                "vocabulary_size": len(observation.logits),
-                "candidates": [candidate.to_dict() for candidate in candidates],
-            },
-        )
 
     def _review(
         self,
@@ -858,21 +812,20 @@ class InteractivePolicy:
                     continue
                 if command.kind == CommandKind.FORK:
                     self._context_cursor.cancel_prewarm()
-                    self._interaction(
-                        observation.boundary,
-                        "fork-requested",
-                        {"boundary": review_boundary},
-                    )
                     raise ForkRequested(review_boundary)
                 self._context_cursor.cancel_prewarm()
                 review_boundary = None
                 continue
             if command.kind == CommandKind.BIAS:
                 from .bias_commands import apply_bias_command
+
                 if command.bias_status:
-                    lines = [f"{g.name}: shared amount {g.bias:+g}; {len(g.members)} terms; "
-                             f"{'enabled' if g.enabled else 'disabled'}"
-                             for g in engine.sampling.bias_groups]
+                    lines = [
+                        f"{group.name}: shared amount {group.bias:+g}; "
+                        f"{len(group.members)} terms; "
+                        f"{'enabled' if group.enabled else 'disabled'}"
+                        for group in engine.sampling.bias_groups
+                    ]
                     self.io.page("\n".join(lines) or "No active bias groups.")
                     continue
                 try:
@@ -883,15 +836,10 @@ class InteractivePolicy:
                 except EditorError as exc:
                     feedback = ChoiceFeedback("error", "INVALID BIAS", (str(exc),))
                     continue
-                if self.store is not None and self.episode_id is not None:
-                    with self.store.transaction():
-                        self.store.record_sampling_segment(
-                            self.episode_id, start_boundary=engine.boundary, sampling=updated,
-                            stream_fingerprint=engine.stream_fingerprint,
-                        )
-                        for kind, payload, _label, _value in updates:
-                            self._interaction(engine.boundary, kind, payload)
-                engine.sampling = updated
+                if self.session is not None:
+                    self.session.set_sampler(updated)
+                else:
+                    engine.sampling = updated
                 observation = engine.observe()
                 ranks = tuple(exposed)
                 exposed = {
@@ -904,15 +852,12 @@ class InteractivePolicy:
                     for rank in ranks
                 }
                 preview_candidates = dict(exposed)
-                candidates = tuple(resolve_candidate(c.rank) for c in choice.candidates)
+                candidates = tuple(resolve_candidate(candidate.rank) for candidate in choice.candidates)
                 choice = self._choice_for_observation(
-                    engine,
-                    observation,
-                    candidates,
-                    view=self._view_plan(engine),
+                    engine, observation, candidates, view=self._view_plan(engine)
                 )
                 choice_view = self._view_plan(engine)
-                lines = tuple(f"{label}: {value:+g}" for _kind, _payload, label, value in updates)
+                lines = tuple(f"{label}: {value:+g}" for label, value in updates)
                 feedback = ChoiceFeedback("status", "STEERING UPDATED", lines)
                 continue
             if command.kind == CommandKind.HELP:
@@ -976,11 +921,6 @@ class InteractivePolicy:
                 )
                 choice_view = view
                 exposed.update((candidate.rank, candidate) for candidate in candidates)
-                self._interaction(
-                    observation.boundary,
-                    "menu-expanded",
-                    {"visible_rows": len(candidates)},
-                )
                 continue
             if command.kind == CommandKind.MAIN_MENU:
                 search_lens_active = False
@@ -1059,14 +999,6 @@ class InteractivePolicy:
                 search_warm_commands = self._search_warm_commands(search.query)
                 rows = self._lens_candidates(engine, observation, search)
                 exposed.update((candidate.rank, candidate) for candidate in rows)
-                self._record_search_view(
-                    engine,
-                    observation,
-                    search,
-                    invoked_as=None,
-                    invocation=("rank" if command.search_rank is not None else
-                                "expanded" if command.search_direction else "redraw"),
-                )
                 feedback = self._search_feedback(search)
                 continue
             if command.kind == CommandKind.CONTEXT:
@@ -1074,24 +1006,13 @@ class InteractivePolicy:
                 text = observation.context_text
                 shown = text if extent == "all" else text[-int(extent or 2000) :]
                 self.io.page(shown)
-                self._interaction(
-                    observation.boundary,
-                    "context-viewed",
-                    {"characters": len(shown)},
-                )
                 continue
             if command.kind in {CommandKind.NOTE_BEFORE, CommandKind.NOTE_AFTER}:
                 note = command.note
                 if note is None:
                     note = self.io.prompt(PromptRequest("Note> "))
                 if note:
-                    self._interaction(
-                        observation.boundary,
-                        "note-before"
-                        if command.kind == CommandKind.NOTE_BEFORE
-                        else "note-after",
-                        {"text": note},
-                    )
+                    self.io.write(f"Note not retained by this session: {note}")
                 continue
             if command.kind == CommandKind.POLICY_VIEW:
                 policy_sort = not policy_sort
@@ -1195,7 +1116,4 @@ class InteractivePolicy:
                         (f"Boundary {target} is outside this episode.",),
                     )
                     continue
-                self._interaction(
-                    observation.boundary, "fork-requested", {"boundary": target}
-                )
                 raise ForkRequested(target)

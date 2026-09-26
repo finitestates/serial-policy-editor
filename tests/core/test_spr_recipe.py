@@ -14,11 +14,7 @@ from trajectory_editor.episode_controls import (
     ControlTimeline,
     SamplerState,
 )
-from trajectory_editor.episode_runner import (
-    LiveSessionRunner,
-    ReplayOrigin,
-    TapeStep,
-)
+from trajectory_editor.run_loop import TapeStep, run_plan
 from trajectory_editor.surviving_procedure import (
     ProcedureStep,
     SurvivingProcedure,
@@ -86,7 +82,7 @@ def recipe(
     )
 
 
-def test_source_root_has_no_prompt_step_and_origins_every_procedure_step():
+def test_source_root_has_no_prompt_step_and_keeps_procedure_order():
     plan = compose_replay_plan(
         recipe(
             steps=procedure(
@@ -107,10 +103,6 @@ def test_source_root_has_no_prompt_step_and_origins_every_procedure_step():
         Write(" A", mode="exact"),
         Write(" B", mode="exact"),
     ]
-    assert plan.context.origins == (
-        ReplayOrigin("source-1", 0),
-        ReplayOrigin("source-1", 1),
-    )
     assert len(plan.context.sampling) == len(plan.steps) == 2
     assert plan.final_sampling == SamplerConfig(temperature=0.2)
 
@@ -131,10 +123,6 @@ def test_append_prepends_one_exact_prompt_and_preserves_source_order():
         Write(" C", mode="exact"),
     ]
     assert plan.steps[0].expectation is None
-    assert plan.context.origins == (
-        ReplayOrigin("source-1", 0, "prompt"),
-        ReplayOrigin("source-1", 0),
-    )
     assert plan.follow_source_sampling is False
     assert plan.final_sampling is None
     assert plan.context.sampling == (None, None)
@@ -200,8 +188,8 @@ def test_empty_prompt_and_empty_procedure_produce_empty_aligned_plans():
     )
 
     assert root.steps == append.steps == ()
-    assert root.context.sampling == root.context.origins == ()
-    assert append.context.sampling == append.context.origins == ()
+    assert root.context.sampling == ()
+    assert append.context.sampling == ()
     assert root.final_sampling == SamplerConfig(temperature=0.1)
     assert append.final_sampling is None
 
@@ -289,7 +277,7 @@ def test_append_prompt_is_ordinary_rewindable_multi_token_destination_history():
         ReplayPlacement.APPEND_TO_CURRENT_BRANCH,
         ReplayControlPolicy.PRESERVE_DESTINATION,
     )
-    result = LiveSessionRunner(destination).run(tape=plan)
+    result = run_plan(destination, divergence_policy="handoff", tape=plan)
 
     assert result.replayed_actions == 2
     assert destination.engine.initial_token_ids == original_initial_ids == (7,)

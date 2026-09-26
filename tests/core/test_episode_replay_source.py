@@ -13,7 +13,7 @@ from trajectory_editor.episode_replay_source import (
     replay_procedure,
 )
 from trajectory_editor.episode_store import EpisodeStore
-from trajectory_editor.episode_runner import LiveSessionRunner
+from trajectory_editor.run_loop import run_plan
 from trajectory_editor.episode_session import LiveSession
 from trajectory_editor.spr_recipe import (
     ReplayControlPolicy, ReplayPlacement, compose_replay_plan,
@@ -206,7 +206,7 @@ def _run_reader(reader: MemoryReader, *, until: int | None = None):
         initial_text="P",
         initial_token_ids=[7],
     ))
-    result = LiveSessionRunner(session).run(tape=plan)
+    result = run_plan(session, divergence_policy="handoff", tape=plan)
     return recipe, plan, session, result
 
 

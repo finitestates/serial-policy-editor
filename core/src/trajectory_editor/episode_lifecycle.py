@@ -1,9 +1,11 @@
-"""Core episode lifecycle operations for the terminal runtime."""
+"""Restore stored episodes and prepare replay engines for the terminal runtime."""
+
 from __future__ import annotations
-from dataclasses import dataclass, fields, replace
+
+from dataclasses import fields, replace
 from typing import Any, Callable
+
 from .core.errors import EditorError
-from .core.actions import Write
 from .core.sampler_config import SamplerConfig
 from .episode_engine import EpisodeEngine
 from .spr_recipe import (
@@ -12,16 +14,16 @@ from .spr_recipe import (
     SourceReplayRecipe,
     compose_replay_plan,
 )
+from .episode_identity import tokenizer_id_for
 from .episode_store import EpisodeStore
-from .episode_runner import ReplayPlan
-from .episode_history import visible_text_prefix
-from .episode_identity import backend_provenance_with_identity, tokenizer_id_for
+from .run_loop import ReplayPlan
 
 SAMPLER_FIELDS = tuple(field.name for field in fields(SamplerConfig))
 POLICY_FIELDS = tuple(
     field.name for field in fields(SamplerConfig)
     if field.name.startswith("activation_")
 )
+
 
 def _inherit_budget(store, episode_id, engine, boundary, *, notice=print):
     state = store.budget_at(episode_id, boundary)
@@ -46,193 +48,6 @@ def _model_change_sampling(
         activation_vector_layer_start=None,
         activation_vector_layer_end=None,
         activation_vector_digest="",
-    )
-
-
-@dataclass(frozen=True)
-class _SourceEpisodeSnapshot:
-    episode: dict[str, Any]
-    token_rows: tuple[dict[str, Any], ...]
-    visible_token_ids: tuple[int, ...]
-    boundary: int
-    sampling_segment: dict[str, Any]
-
-
-def _source_episode_snapshot(
-    store: EpisodeStore,
-    source_id: str,
-    *,
-    boundary: int | None = None,
-    current_sampling_state: dict[str, Any] | None = None,
-) -> _SourceEpisodeSnapshot:
-    episode = store.get_episode(source_id)
-    token_rows = tuple(store.tokens(source_id))
-    visible = tuple(
-        int(row["token_id"])
-        for row in token_rows
-        if bool(row["realized_visible"])
-    )
-    visible_boundary = len(visible)
-    selected_boundary = visible_boundary if boundary is None else boundary
-    if (
-        type(selected_boundary) is not int
-        or not 0 <= selected_boundary <= visible_boundary
-    ):
-        raise EditorError(
-            f"fork boundary must be between 0 and {visible_boundary}"
-        )
-    if current_sampling_state is not None:
-        if (
-            selected_boundary != visible_boundary
-            or current_sampling_state.get("boundary") != visible_boundary
-        ):
-            raise EditorError("episode changed while preparing its current sampler state")
-        segment = current_sampling_state
-    else:
-        segment = store.sampling_segment(source_id, selected_boundary)
-    return _SourceEpisodeSnapshot(
-        episode=episode,
-        token_rows=token_rows,
-        visible_token_ids=visible,
-        boundary=selected_boundary,
-        sampling_segment=segment,
-    )
-
-
-def _materialize_model_change_fork(
-    store: EpisodeStore,
-    source_id: str,
-    boundary: int,
-    backend: Any,
-    provenance: dict[str, Any],
-    *,
-    sampling: SamplerConfig,
-    max_tokens: int | None,
-    requested_id: str | None = None,
-    guidance_backend: Any | None = None,
-    source_snapshot: _SourceEpisodeSnapshot | None = None,
-) -> tuple[EpisodeEngine, str]:
-    """Continue a model change while preserving tokenizer-safe lineage.
-
-    Matching tokenizers can reuse the source token ledger and remain a fork.
-    A different tokenizer gets a new token space and only keeps a separate
-    textual origin reference.
-    """
-    snapshot = source_snapshot or _source_episode_snapshot(
-        store, source_id, boundary=boundary
-    )
-    if snapshot.episode["episode_id"] != source_id or snapshot.boundary != boundary:
-        raise EditorError("source snapshot does not match the requested fork")
-    source = snapshot.episode
-    source_tokens = snapshot.token_rows
-    source_visible = snapshot.visible_token_ids
-    source_segment = snapshot.sampling_segment
-    root_text = str(source["initial_text"])
-    source_tokenizer_id = source["backend"].get("tokenizer_id")
-    destination_provenance = backend_provenance_with_identity(backend, provenance)
-    destination_tokenizer_id = destination_provenance["tokenizer_id"]
-    root_token_ids = backend.tokenize(root_text, add_bos=True, special=True)
-    same_tokenizer = (
-        isinstance(source_tokenizer_id, str)
-        and source_tokenizer_id == destination_tokenizer_id
-        and list(source["initial_token_ids"]) == root_token_ids
-    )
-    if same_tokenizer:
-        prefix = [*source["initial_token_ids"], *source_visible[:boundary]]
-        branch = getattr(backend, "branch_to_prefix", None)
-        if callable(branch):
-            branch(prefix)
-        else:
-            backend.reset(prefix)
-        runtime = EpisodeEngine(
-            backend,
-            sampling=_model_change_sampling(sampling, same_tokenizer=same_tokenizer),
-            max_tokens=None,
-            initial_text=root_text,
-            initial_token_ids=source["initial_token_ids"],
-            stream_fingerprint=source_segment["stream_fingerprint"],
-            backend_positioned=True,
-            guidance_backend=guidance_backend,
-        )
-        runtime.visible_token_ids = source_visible[:boundary]
-    else:
-        runtime = EpisodeEngine(
-            backend,
-            sampling=_model_change_sampling(sampling, same_tokenizer=same_tokenizer),
-            max_tokens=None,
-            initial_text=root_text,
-            initial_token_ids=root_token_ids,
-            guidance_backend=guidance_backend,
-        )
-    identifier = _create_episode(
-        store,
-        runtime,
-        backend_provenance=destination_provenance,
-        requested_id=requested_id,
-        parent_episode_id=source_id if same_tokenizer else None,
-        fork_boundary=boundary if same_tokenizer else None,
-        mode="model-change",
-        metadata={
-            "model_change_from": source_id,
-            "model_change_boundary": boundary,
-            "boundary_system": "root-relative",
-            "tokenizer_changed": not same_tokenizer,
-        },
-    )
-    if same_tokenizer:
-        store.copy_prefix(
-            source_id,
-            identifier,
-            boundary,
-            visible_text=backend.render(runtime.visible_token_ids),
-            max_tokens=runtime.max_tokens,
-        )
-    else:
-        retained_text = visible_text_prefix(source_tokens, boundary)
-        if retained_text:
-            outcome = runtime.apply(Write(retained_text, mode="exact"))
-            store.record_action(identifier, 0, outcome)
-
-    budget = store.budget_at(source_id, boundary)
-    allowance = max_tokens
-    if allowance is None and budget is not None:
-        allowance = budget["max_tokens"]
-    checkpoint = None if allowance is None else runtime.boundary + allowance
-    runtime.trajectory.set_budget(allowance, checkpoint)
-    store.record_sampling_segment(
-        identifier,
-        start_boundary=runtime.boundary,
-        sampling=runtime.sampling,
-        stream_fingerprint=runtime.stream_fingerprint,
-    )
-    store.record_budget(identifier, runtime.boundary, allowance, checkpoint)
-    store.update_episode(
-        identifier,
-        visible_text=backend.render(runtime.visible_token_ids),
-        max_tokens=allowance,
-    )
-    store.rename(identifier, store.label(source_id).split("  ", 1)[-1] + " · model change")
-    return runtime, identifier
-
-
-def _model_continuation(
-    store, source_id, backend, provenance, *, guidance_backend=None,
-    current_sampling_state: dict[str, Any] | None = None,
-    sampling_factory: Callable = SamplerConfig.from_record,
-):
-    snapshot = _source_episode_snapshot(
-        store, source_id, current_sampling_state=current_sampling_state
-    )
-    return _materialize_model_change_fork(
-        store,
-        source_id,
-        snapshot.boundary,
-        backend,
-        provenance,
-        sampling=sampling_factory(snapshot.sampling_segment["sampling"]),
-        max_tokens=snapshot.episode["max_tokens"],
-        guidance_backend=guidance_backend,
-        source_snapshot=snapshot,
     )
 
 
@@ -298,142 +113,7 @@ def _restore_engine(
         _inherit_budget(store, episode_id, runtime, len(visible), notice=notice)
     else:
         runtime.resume(max_tokens=max_tokens, sampling=sampling)
-    if sampling != source_sampling:
-        store.record_sampling_segment(
-            episode_id,
-            start_boundary=runtime.boundary,
-            sampling=sampling,
-            stream_fingerprint=runtime.stream_fingerprint,
-            )
     return runtime
-
-
-def _create_episode(
-    store: EpisodeStore,
-    engine: EpisodeEngine,
-    *,
-    backend_provenance: dict[str, Any],
-    requested_id: str | None = None,
-    parent_episode_id: str | None = None,
-    fork_boundary: int | None = None,
-    mode: str = "interactive",
-    metadata: dict[str, Any] | None = None,
-) -> str:
-    payload = {"mode": mode, **(metadata or {})}
-    backend_provenance = backend_provenance_with_identity(
-        engine.backend, backend_provenance
-    )
-    if mode == "fork":
-        # Ordinary forks retain the source prompt/context and copy their
-        # inherited actions into the child.  Keep this explicit in metadata so
-        # tooling can distinguish the canonical representation from old local
-        # boundary-indexed episodes without changing the compact schema.
-        payload.setdefault("boundary_system", "root-relative")
-    trajectory = engine.trajectory
-    return store.create_episode(
-        episode_id=requested_id,
-        parent_episode_id=parent_episode_id,
-        fork_boundary=fork_boundary,
-        initial_text=trajectory.initial_text,
-        initial_token_ids=trajectory.initial_token_ids,
-        sampling=engine.sampling,
-        stream_fingerprint=trajectory.stream_fingerprint,
-        max_tokens=trajectory.max_tokens,
-        backend=backend_provenance,
-        metadata=payload,
-        checkpoint_boundary=trajectory.checkpoint_boundary,
-    )
-
-
-def _rewind_episode(
-    store: EpisodeStore,
-    episode_id: str,
-    engine: EpisodeEngine,
-    boundary: int,
-    *, notice=print, sampling_factory: Callable = SamplerConfig.from_record,
-) -> dict[str, Any]:
-    """Restore the destination sampler as well as its retained token prefix."""
-    # Read before truncation removes the future sampler segments. This engine
-    # keeps its original root and boundary, so the retained boundary itself
-    # continues to identify the next sampling boundary.
-    segment = store.sampling_segment(episode_id, boundary)
-    sampling = sampling_factory(segment["sampling"])
-    engine.rewind_to(boundary)
-    _inherit_budget(store, episode_id, engine, boundary, notice=notice)
-    details = store.rewind_to(
-        episode_id,
-        boundary,
-        visible_text=engine.backend.render(engine.trajectory.visible_token_ids),
-        max_tokens=engine.trajectory.max_tokens,
-    )
-    store.record_budget(
-        episode_id,
-        boundary,
-        engine.trajectory.max_tokens,
-        engine.trajectory.checkpoint_boundary,
-    )
-    engine.sampling = sampling
-    engine.trajectory.set_stream_fingerprint(segment["stream_fingerprint"])
-    return details
-
-
-def _fork_engine(
-    store: EpisodeStore,
-    parent_id: str,
-    parent_engine: EpisodeEngine,
-    target: int,
-    *,
-    backend: Any,
-    max_tokens: int | None,
-    guidance_backend: Any | None = None,
-    sampling_factory: Callable = SamplerConfig.from_record,
-    notice=print,
-) -> EpisodeEngine:
-    if not 0 <= target <= parent_engine.boundary:
-        raise EditorError(f"fork boundary must be between 0 and {parent_engine.boundary}")
-    source = store.get_episode(parent_id)
-    saved_tokenizer_id = source["backend"].get("tokenizer_id")
-    if (
-        isinstance(saved_tokenizer_id, str)
-        and saved_tokenizer_id != tokenizer_id_for(backend)
-    ):
-        raise EditorError(
-            "cannot fork across tokenizer identities; use a model-change continuation"
-        )
-    prefix = [
-        *parent_engine.trajectory.initial_token_ids,
-        *parent_engine.trajectory.visible_token_ids[:target],
-    ]
-    branch = getattr(backend, "branch_to_prefix", None)
-    if callable(branch):
-        branch(prefix)
-    else:
-        backend.reset(prefix)
-    segment = store.sampling_segment(parent_id, target)
-    sampling = sampling_factory(segment["sampling"])
-    engine = EpisodeEngine(
-        backend,
-        sampling=sampling,
-        max_tokens=(
-            parent_engine.trajectory.max_tokens
-            if max_tokens is None
-            else max_tokens
-        ),
-        # Keep the original entrance and represent the retained parent
-        # actions as visible history.  Replacing initial_text with the fork
-        # prefix would silently rebase the child's public boundary zero.
-        initial_text=parent_engine.initial_text,
-        initial_token_ids=parent_engine.initial_token_ids,
-        stream_fingerprint=segment["stream_fingerprint"],
-        backend_positioned=True,
-        guidance_backend=guidance_backend,
-    )
-    engine.visible_token_ids = list(parent_engine.trajectory.visible_token_ids[:target])
-    if max_tokens is None:
-        _inherit_budget(store, parent_id, engine, target, notice=notice)
-    else:
-        engine.trajectory.set_budget(max_tokens, target + max_tokens)
-    return engine
 
 
 def _spr_engine_from_source(

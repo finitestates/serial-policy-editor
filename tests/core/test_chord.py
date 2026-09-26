@@ -479,7 +479,7 @@ def test_chord_cli_records_only_survivor_and_export(tmp_path, live, ephemeral):
     if ephemeral:
         commands += [f"export {export}", "q"]
     else:
-        commands += ["q"]
+        commands += [f"save {workspace} chord-save", "q"]
     io = LiveIO(commands) if live else ScriptedIO(commands)
     flags = ["--ephemeral"] if ephemeral else ["--workspace", str(workspace)]
     if not live:
@@ -501,7 +501,7 @@ def test_chord_cli_records_only_survivor_and_export(tmp_path, live, ephemeral):
         assert [step.action for step in tape.plan] == [SelectRawRank(1), Accept()]
     else:
         with EpisodeStore(workspace) as store:
-            episode_id = store.resolve_id("#1")
+            episode_id = "chord-save"
             assert [step["action"] for step in replay_procedure(store, episode_id)] == [SelectRawRank(1), Accept()]
             tokens = store.tokens(episode_id)
             assert [token["token_id"] for token in tokens] == [1, 2]
@@ -518,9 +518,7 @@ def test_chord_discard_cli_keeps_durable_actions_empty(tmp_path):
         assert main(["--model", "fake", "--plain-ui", "--new-prompt", "P",
                      "--workspace", str(workspace)]) == 0
     with EpisodeStore(workspace) as store:
-        episode_id = store.resolve_id("#1")
-        assert store.actions(episode_id) == []
-        assert store.get_episode(episode_id)["visible_text"] == ""
+        assert store.workspace_list(include_finished=True) == "No open episodes."
 
 
 @pytest.mark.parametrize("choice, expected", [("4", ["select-raw-rank"]),
@@ -531,7 +529,7 @@ def test_durable_chord_eog_selection_uses_ordinary_terminal_action(tmp_path, cho
     responses = ["chord 1 2 4"]
     if choice == "b":
         responses.append("")
-    responses.append(choice)
+    responses.extend([choice, f"save {workspace} chord-eog", "q"])
     io = ScriptedIO(responses)
     with patch("trajectory_editor.episode_backend_loader.load_backend", return_value=DurableFakeBackend()), patch(
         "trajectory_editor.episode_cli.TerminalIO", return_value=io
@@ -539,7 +537,7 @@ def test_durable_chord_eog_selection_uses_ordinary_terminal_action(tmp_path, cho
         assert main(["--model", "fake", "--plain-ui", "--new-prompt", "P",
                      "--workspace", str(workspace)]) == 0
     with EpisodeStore(workspace) as store:
-        episode_id = store.resolve_id("#1")
+        episode_id = "chord-eog"
         assert [row["kind"] for row in store.actions(episode_id)] == expected
         assert store.get_episode(episode_id)["terminal_reason"] == "teacher-eog"
 
@@ -559,5 +557,4 @@ def test_chord_budget_selection_stops_at_checkpoint(tmp_path, ephemeral):
     assert any("BUDGET REACHED" in item for item in io.output)
     if not ephemeral:
         with EpisodeStore(workspace) as store:
-            episode_id = store.resolve_id("#1")
-            assert [row["kind"] for row in store.actions(episode_id)] == ["select-raw-rank"]
+            assert store.workspace_list(include_finished=True) == "No open episodes."

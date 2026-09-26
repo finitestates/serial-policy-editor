@@ -10,7 +10,9 @@ from tests.core.runtime_helpers import NoEogBackend
 from tests.fakes import ScriptedIO
 from trajectory_editor.core.actions import Hold, Write
 from trajectory_editor.core.sampler_config import SamplerConfig
-from trajectory_editor.episode_cli import _live_edge_menu, main
+from trajectory_editor.episode_cli import main
+from trajectory_editor.session_runtime import session_edge_menu
+from trajectory_editor.episode_session import LiveSession
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.projector import project_fork_map
 from trajectory_editor.episode_replay_source import final_sampling
@@ -79,7 +81,7 @@ def test_cli_replay_until_returns_to_the_selected_live_edge(
 ):
     run_cli(
         source_workspace,
-        ["quit"],
+        [f"save {source_workspace} destination", "q"],
         "--replay", "#1",
         "--until", str(until),
         "--episode-id", "destination",
@@ -103,7 +105,7 @@ def test_cli_replay_until_invalid_or_cancelled_selection_does_not_insert(
 ):
     start(source_workspace, ["q", *commands])
     with EpisodeStore(source_workspace) as store:
-        assert store.tokens("destination") == []
+        assert "destination" not in store.workspace_list(include_finished=True)
 
 
 @pytest.mark.parametrize("until, seed", [(0, 999), (1, 999), (2, 123), (3, 123)])
@@ -123,7 +125,7 @@ def test_cli_replay_until_uses_sampler_state_at_the_selected_boundary(
 
     run_cli(
         source_workspace,
-        ["quit"],
+        [f"save {source_workspace} destination", "q"],
         "--replay", "#1",
         "--until", str(until),
         "--episode-id", "destination",
@@ -137,7 +139,10 @@ def test_cli_edge_replay_appends_live_text_without_mutating_the_source(source_wo
     with EpisodeStore(source_workspace) as store:
         source_tokens = store.tokens("source")
 
-    start(source_workspace, ["t hello", "q", "spr #1", "quit"])
+    start(source_workspace, [
+        "t hello", "q", "spr #1",
+        f"save {source_workspace} destination", "q",
+    ])
 
     with EpisodeStore(source_workspace) as store:
         destination = store.get_episode("destination")
@@ -153,7 +158,7 @@ def test_cli_edge_replay_appends_live_text_without_mutating_the_source(source_wo
 def test_cli_fork_from_persists_inherited_history_in_root_boundaries(source_workspace):
     run_cli(
         source_workspace,
-        ["q", "quit"],
+        ["q", f"save {source_workspace} child", "q"],
         "--fork-from", "#1",
         "--at", "1",
         "--episode-id", "child",
@@ -167,11 +172,16 @@ def test_cli_fork_from_persists_inherited_history_in_root_boundaries(source_work
         assert [row["boundary"] for row in store.tokens("child") if row["realized_visible"]] == [0]
         assert project_fork_map(store, "child") == "P|0| A|1|"
 
-    run_cli(source_workspace, ["q", "rewind 0", "quit"], "--resume", "child")
+    run_cli(
+        source_workspace,
+        ["q", "rewind 0", "q", f"save {source_workspace} rewound", "q"],
+        "--resume", "child",
+    )
 
     with EpisodeStore(source_workspace) as store:
-        assert store.actions("child") == []
-        assert project_fork_map(store, "child") == "P|0|"
+        assert store.get_episode("child")["visible_text"] == " A"
+        assert store.actions("rewound") == []
+        assert project_fork_map(store, "rewound") == "P|0|"
 
 
 @pytest.mark.parametrize("cfg_prefix_tokens", [3, 5])
@@ -222,7 +232,7 @@ def test_cli_cfg_fork_uses_inherited_tokens_once(tmp_path, cfg_prefix_tokens, ro
             )
         else:
             io = run_cli(
-                path, ["q", "#1", "y", "c", "q", "quit"],
+                path, ["q", "switch source", "y", "c", "q", "quit"],
                 "--new-prompt", "P", "--episode-id", "current",
             )
 
@@ -247,7 +257,10 @@ def test_cli_prompt_replay_uses_the_destination_tokenizer_and_remains_rewindable
     backend = NoEogBackend()
     with patch("trajectory_editor.episode_backend_loader.load_backend", return_value=backend), patch(
         "trajectory_editor.episode_cli.TerminalIO",
-        return_value=ScriptedIO(["t hello", "q", "spr #1", "rewind 2", "quit"]),
+        return_value=ScriptedIO([
+            "t hello", "q", "spr #1", "rewind 2", "q",
+            f"save {path} destination", "q",
+        ]),
     ):
         assert main([
             "--workspace", str(path), "--model", "fake", "--plain-ui",
@@ -262,7 +275,7 @@ def test_cli_prompt_replay_uses_the_destination_tokenizer_and_remains_rewindable
 
 
 @pytest.mark.current_workflow
-def test_durable_edge_bare_sampler_opens_the_existing_override_prompt(source_workspace):
+def test_session_edge_bare_sampler_opens_the_override_prompt(source_workspace):
     with EpisodeStore(source_workspace) as store:
         engine = EpisodeEngine(
             NoEogBackend(),
@@ -270,15 +283,13 @@ def test_durable_edge_bare_sampler_opens_the_existing_override_prompt(source_wor
             initial_text="P",
             initial_token_ids=[7],
         )
-        action, value = _live_edge_menu(
-            ScriptedIO(["s", "temperature=0.7", "q"]),
-            store,
-            "source",
-            engine,
+        session = LiveSession(engine)
+        action, value = session_edge_menu(
+            ScriptedIO(["s", "temperature=0.7", "q"]), session, store=store
         )
 
     assert (action, value) == ("quit", None)
-    assert engine.sampling.temperature == 0.7
+    assert session.sampler.temperature == 0.7
 
 
 @pytest.mark.parametrize("unsupported_ordinal, expected_text, expected_actions", [
@@ -309,16 +320,16 @@ def test_cli_historical_unknown_action_yields_to_operational_edge(
 
     io = run_cli(
         source_workspace,
-        ["quit"],
+        [f"save {source_workspace} destination", "q"],
         "--replay", "#1",
         "--episode-id", "destination",
     )
 
     output = "".join(io.output)
-    assert len(io.edge_requests) == 1
+    assert len(io.edge_requests) == 2
     assert f"source step {unsupported_ordinal + 1}" in output
     assert "unsupported policy action kind 'future-action'" in output
-    assert "Execution handed off" in output
+    assert "Warning: replay stopped before source step" in output
     assert "SPR route exhausted" not in output
     with EpisodeStore(source_workspace) as store:
         destination = store.get_episode("destination")

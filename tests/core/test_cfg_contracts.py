@@ -12,15 +12,11 @@ from trajectory_editor.core.actions import Accept, SelectRawRank, Write
 from trajectory_editor.core.errors import EditorError
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine
-from trajectory_editor.episode_lifecycle import (
-    _create_episode, _restore_engine, _fork_engine, _rewind_episode,
-    _materialize_model_change_fork,
-)
+from trajectory_editor.episode_lifecycle import _restore_engine
 from trajectory_editor.episode_session import LiveSession, LiveSessionRoster
-from trajectory_editor.episode_runner import LiveSessionRunner
+from trajectory_editor.run_loop import ReplayContext, ReplayPlan, TapeStep, run_plan
 from trajectory_editor.episode_store import EpisodeStore
 from trajectory_editor.fresh_episode import fresh_root_from
-from trajectory_editor.run_loop import ReplayContext, ReplayPlan, TapeStep
 
 
 class PrefixBackend(ConformingFakeBackend):
@@ -129,8 +125,16 @@ def raw_token(runtime, token=7):
 
 
 def save(store, runtime, name='source'):
-    return _create_episode(store, runtime, backend_provenance=runtime.backend.provenance(),
-                           requested_id=name)
+    return store.create_episode(
+        episode_id=name,
+        initial_text=runtime.initial_text,
+        initial_token_ids=list(runtime.initial_token_ids),
+        sampling=runtime.sampling,
+        stream_fingerprint=runtime.stream_fingerprint,
+        max_tokens=runtime.max_tokens,
+        backend=runtime.backend.provenance(),
+        checkpoint_boundary=runtime.checkpoint_boundary,
+    )
 
 
 @pytest.mark.parametrize('prompt,expected', [('U', (1, 5)), ('', (1,)), ('<BOS>U', (1, 1, 5))])
@@ -178,23 +182,18 @@ def test_s03_tokenless_guidance_and_missing_backend_fail_clearly(tmp_path):
 
 @pytest.mark.parametrize('boundary', [0, 1, 2])
 @pytest.mark.invariant
-def test_l04_live_and_durable_forks_keep_identical_cfg_window(tmp_path, boundary):
+def test_l04_live_forks_keep_the_cfg_window_at_each_boundary(boundary):
     live = LiveSession(engine(sampling=config(cfg_prefix_tokens=2)), prompt='conditional')
-    with EpisodeStore(tmp_path / 'episodes.db') as store:
-        identifier = save(store, live.engine)
-        # Include a token whose rendering cannot recover its exact ID.
-        for i, token in enumerate((7, 9)):
-            obs = live.engine.observe()
-            outcome = live.generate(SelectRawRank(obs.statistics.raw_rank(token)))
-            store.record_action(identifier, i, outcome)
-        durable = _fork_engine(store, identifier, live.engine, boundary, backend=PrefixBackend(),
-                               max_tokens=None, guidance_backend=PrefixBackend())
-        child = live.fork(boundary=boundary)
-        live.activate(child.branch.branch_id)
-        np.testing.assert_array_equal(assert_context(durable).logits,
-                                      assert_context(live.engine).logits)
-        assert durable.visible_token_ids == [7, 9][:boundary]
-        assert durable._cfg_active() == (boundary < 2)
+    for token in (7, 9):
+        observation = live.engine.observe()
+        live.generate(SelectRawRank(observation.statistics.raw_rank(token)))
+
+    child = live.fork(boundary=boundary)
+
+    child_engine = child.engine
+    assert_context(child_engine)
+    assert child_engine.visible_token_ids == [7, 9][:boundary]
+    assert child_engine._cfg_active() == (boundary < 2)
 
 
 @pytest.mark.current_workflow
@@ -309,7 +308,7 @@ def test_l01_fresh_root_never_inherits_guidance_continuation(tmp_path, resumed):
 
 
 @pytest.mark.invariant
-def test_r01_r08_l06_source_controls_and_historical_restoration(tmp_path):
+def test_r01_r08_l06_source_controls_follow_live_replay_and_rewind():
     unguided = config(cfg_unconditional_prompt=None)
     session = LiveSession(engine(sampling=unguided), prompt='conditional')
     a, b = config(), config(cfg_unconditional_prompt='B')
@@ -317,7 +316,7 @@ def test_r01_r08_l06_source_controls_and_historical_restoration(tmp_path):
         tuple(TapeStep(Write(text, mode='exact'), None) for text in ('x', 'y', 'z')),
         context=ReplayContext(sampling=(a, b, unguided)), final_sampling=b,
     )
-    result = LiveSessionRunner(session).run(tape=plan)
+    result = run_plan(session, divergence_policy="handoff", tape=plan)
     assert result.replay_exhausted
     assert_context(session.engine, (1, 6, 5))
     session.rewind(1)
@@ -326,37 +325,33 @@ def test_r01_r08_l06_source_controls_and_historical_restoration(tmp_path):
     session.rewind(0)
     assert session.sampler == a
     assert_context(session.engine)
-    with EpisodeStore(tmp_path / 'episodes.db') as store:
-        runtime = engine()
-        identifier = save(store, runtime)
-        store.record_action(identifier, 0, runtime.apply(Write('x', mode='exact')))
-        runtime.sampling = b
-        store.record_sampling_segment(identifier, start_boundary=1, sampling=b,
-                                      stream_fingerprint=runtime.stream_fingerprint)
-        store.record_action(identifier, 1, runtime.apply(Write('y', mode='exact')))
-        assert_context(runtime, (1, 6, 5))
-        _rewind_episode(store, identifier, runtime, 0)
-        assert_context(runtime)
 
 
 @pytest.mark.invariant
 def test_l08_destination_tokenizer_owns_both_contexts(tmp_path):
+    from trajectory_editor.episode_live_restore import model_change_session
+
     with EpisodeStore(tmp_path / 'episodes.db') as store:
         source = engine()
         identifier = save(store, source)
         store.record_action(identifier, 0, raw_token(source))
         destination = PrefixBackend(destination=True)
-        child, _ = _materialize_model_change_fork(
-            store, identifier, 1, destination, destination.provenance(),
-            sampling=source.sampling, max_tokens=None,
+        child = model_change_session(
+            store,
+            identifier,
+            destination,
+            destination.provenance(),
+            boundary=1,
+            sampling=source.sampling,
+            max_tokens=None,
             guidance_backend=PrefixBackend(destination=True),
         )
-        assert child.visible_token_ids == [10]
-        assert_context(child, (1, 11))
+        assert child.engine.visible_token_ids == [10]
+        assert_context(child.engine, (1, 11))
         fresh = EpisodeEngine(PrefixBackend(destination=True), initial_text='conditional',
                               sampling=config(), guidance_backend=PrefixBackend(destination=True))
         fresh.apply(Write('x', mode='exact'))
-        np.testing.assert_array_equal(child.observe().logits, fresh.observe().logits)
+        np.testing.assert_array_equal(child.engine.observe().logits, fresh.observe().logits)
 
 
 @pytest.mark.parametrize('scale', [0, 1, 1.7])
@@ -378,7 +373,7 @@ def test_s03_formula_and_conditional_only_hidden_controls(scale):
 @pytest.mark.invariant
 def test_r08_ephemeral_setup_provisions_future_cfg(final_only):
     from trajectory_editor.episode_cli import build_parser
-    from trajectory_editor.ephemeral_runtime import run_ephemeral
+    from trajectory_editor.session_runtime import run_new_session
     plan = ReplayPlan(
         (TapeStep(Write('x', mode='exact'), None),),
         context=ReplayContext(sampling=(None if final_only else config(),)),
@@ -389,7 +384,7 @@ def test_r08_ephemeral_setup_provisions_future_cfg(final_only):
     guidance = PrefixBackend()
     with patch('trajectory_editor.episode_backend_loader.load_backend', return_value=PrefixBackend()), \
          patch('trajectory_editor.episode_backend_loader.load_cfg_guidance_backend', return_value=guidance) as load:
-        assert run_ephemeral(args, io=ScriptedIO(['q']), teacher_tape=SimpleNamespace(plan=plan)) == 0
+        assert run_new_session(args, io=ScriptedIO(['q']), teacher_tape=SimpleNamespace(plan=plan)) == 0
     load.assert_called_once()
     if not final_only:
         assert guidance.work == [('reset', (1, 5))]
@@ -412,7 +407,10 @@ def test_r01_cli_replay_provisions_cfg_after_unguided_root(tmp_path, fixed):
     with patch('trajectory_editor.episode_backend_loader.load_episode_backend',
                return_value=(backend, backend.provenance(), False)), \
          patch('trajectory_editor.episode_backend_loader.load_cfg_guidance_backend', return_value=guidance) as load, \
-         patch('trajectory_editor.episode_cli.TerminalIO', return_value=ScriptedIO(['quit'])):
+         patch(
+             'trajectory_editor.episode_cli.TerminalIO',
+             return_value=ScriptedIO([f'save {path} replayed', 'q']),
+         ):
         assert main(['--workspace', str(path), '--replay', identifier, '--episode-id', 'replayed',
                      '--plain-ui', *(['--fixed-config'] if fixed else [])]) == 0
     assert load.call_count == (0 if fixed else 1)

@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from .core.actions import Hold, Phrase, PolicyAction, Write, action_from_dict
-from .core.results import ActionOutcome, ReplayExpectation, TokenEvidence
+from .core.results import ActionOutcome, Divergence, ReplayExpectation, TokenEvidence
 
 
 def _visible_evidence(outcome: ActionOutcome) -> tuple[TokenEvidence, ...]:
@@ -465,6 +465,59 @@ def _evidence_from_record(record: Mapping[str, Any]) -> TokenEvidence:
     )
 
 
+def outcome_from_stored_action(action: StoredHistoryAction) -> ActionOutcome:
+    """Rebuild one in-memory outcome from a saved action and token record."""
+
+    try:
+        arguments = dict(action.arguments)
+        policy_action = action_from_dict(arguments)
+        evidence = tuple(_evidence_from_record(token) for token in action.tokens)
+        mismatch = action.mismatch
+        divergence = (
+            Divergence(
+                boundary=int(mismatch["boundary"]),
+                action_kind=str(mismatch["action_kind"]),
+                reason=str(mismatch["reason"]),
+                expected_token_id=mismatch.get("expected_token_id"),
+                actual_token_id=mismatch.get("actual_token_id"),
+                expected_stop_reason=mismatch.get("expected_stop_reason"),
+                actual_stop_reason=mismatch.get("actual_stop_reason"),
+            )
+            if mismatch is not None else None
+        )
+        terminal = (
+            None
+            if action.stop_reason == "replay-eog"
+            else next((item.token_id for item in evidence if item.is_eog), None)
+        )
+        replay_eog_token_id = arguments.get("replay_eog_token_id")
+        if type(replay_eog_token_id) is not int:
+            replay_eog_token_id = None
+        return ActionOutcome(
+            action=policy_action,
+            boundary_before=action.boundary_before,
+            boundary_after=action.boundary_after,
+            resolved_text=action.resolved_text,
+            resolved_token_ids=tuple(item.token_id for item in evidence),
+            visible_token_ids=tuple(
+                item.token_id for item in evidence if item.realized_visible
+            ),
+            terminal_token_id=terminal,
+            stop_reason=action.stop_reason,
+            evidence=evidence,
+            status=action.status,
+            divergence=divergence,
+            replay_eog_token_id=replay_eog_token_id,
+            diagnostics=(
+                arguments.get("diagnostics")
+                if isinstance(arguments.get("diagnostics"), Mapping)
+                else None
+            ),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"stored action cannot be restored: {exc}") from exc
+
+
 def _stored_history_action(
     source: Mapping[str, Any],
     source_tokens: Sequence[Mapping[str, Any]],
@@ -539,5 +592,6 @@ __all__ = [
     "StoredHistoryAction",
     "StoredHistoryPrefix",
     "materialize_stored_prefix",
+    "outcome_from_stored_action",
     "visible_text_prefix",
 ]

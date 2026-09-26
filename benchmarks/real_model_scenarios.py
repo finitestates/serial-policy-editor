@@ -17,11 +17,10 @@ from unittest.mock import patch
 
 import numpy as np
 
-from trajectory_editor.chord import ActionSequencePolicy
 from trajectory_editor.core.actions import Accept, Hold, Write
 from trajectory_editor.episode_engine import EpisodeEngine
-from trajectory_editor.episode_runner import LiveSessionRunner
 from trajectory_editor.episode_session import LiveSession
+from trajectory_editor.run_loop import run_plan
 from trajectory_editor.teacher_plan import export_live_teacher_tape, load_teacher_tape_jsonl
 
 from benchmarks.real_model_metrics import Measurement
@@ -33,6 +32,16 @@ ACTION_RECORDS = (
     {"step": 1, "action": {"kind": "accept"}},
     {"step": 2, "action": {"kind": "hold", "limit": 2}},
 )
+
+
+class FixedActionPolicy:
+    """Small deterministic policy fixture for controlled benchmark actions."""
+
+    def __init__(self, actions):
+        self._actions = iter(actions)
+
+    def choose(self, _engine, _observation):
+        return next(self._actions)
 
 
 class ScenarioFailure(AssertionError):
@@ -116,8 +125,8 @@ def continuation(backend, sampling, *, rtol: float, atol: float, **_kwargs) -> d
         with meter.phase("initial_prompt"):
             session = _session(backend, sampling)
         with meter.phase("steady_continuation"):
-            result = LiveSessionRunner(session).run(
-                live_policy=ActionSequencePolicy([Accept(), Accept()]), max_live_actions=2
+            result = run_plan(session, divergence_policy="handoff",
+                live_policy=FixedActionPolicy([Accept(), Accept()]), max_live_actions=2
             )
         prefix = [*session.engine.initial_token_ids, *session.engine.visible_token_ids]
         logits = backend.last_logits().copy()
@@ -143,7 +152,7 @@ def controlled_write(backend, sampling, *, rtol: float, atol: float, **_kwargs) 
         with meter.phase("initial_prompt"):
             session = _session(backend, sampling)
         with meter.phase("controlled_actions"):
-            result = LiveSessionRunner(session, divergence_policy="ballistic").run(
+            result = run_plan(session, divergence_policy="ballistic",
                 tape=ReplayPlan(tuple(TapeStep(action, None) for action in actions))
             )
         ledger = tuple(session.engine.visible_token_ids)
@@ -164,8 +173,8 @@ def candidate_refresh(backend, sampling, *, rtol: float, atol: float, **_kwargs)
         with meter.phase("candidate_refresh"):
             initial = session.engine.observe()
             before = session.engine.candidates(initial, count=12)
-            result = LiveSessionRunner(session).run(
-                live_policy=ActionSequencePolicy([Accept()]), max_live_actions=1
+            result = run_plan(session, divergence_policy="handoff",
+                live_policy=FixedActionPolicy([Accept()]), max_live_actions=1
             )
             after = session.engine.candidates(session.engine.observe(), count=12)
         ledger = tuple(session.engine.visible_token_ids)
@@ -182,8 +191,8 @@ def instrumentation_parity(backend, sampling, *, rtol: float, atol: float, **_kw
     meter = Measurement()
     with meter.attach(backend), meter.active():
         measured = _session(backend, sampling)
-        measured_run = LiveSessionRunner(measured).run(
-            live_policy=ActionSequencePolicy([Accept(), Accept()]), max_live_actions=2
+        measured_run = run_plan(measured, divergence_policy="handoff",
+            live_policy=FixedActionPolicy([Accept(), Accept()]), max_live_actions=2
         )
         measured_tokens = tuple(measured.engine.visible_token_ids)
         measured_logits = backend.last_logits().copy()
@@ -191,8 +200,8 @@ def instrumentation_parity(backend, sampling, *, rtol: float, atol: float, **_kw
     metrics = meter.result(actions=2, committed_tokens=len(measured_tokens))
     start = perf_counter()
     ordinary = _session(backend, sampling)
-    ordinary_run = LiveSessionRunner(ordinary).run(
-        live_policy=ActionSequencePolicy([Accept(), Accept()]), max_live_actions=2
+    ordinary_run = run_plan(ordinary, divergence_policy="handoff",
+        live_policy=FixedActionPolicy([Accept(), Accept()]), max_live_actions=2
     )
     ordinary_tokens = tuple(ordinary.engine.visible_token_ids)
     ordinary_logits = backend.last_logits().copy()
@@ -219,7 +228,7 @@ def action_jsonl(backend, sampling, *, rtol: float, atol: float, **_kwargs) -> d
             with meter.phase("initial_prompt"):
                 session = _session(backend, sampling)
             with meter.phase("teacher_plan"):
-                result = LiveSessionRunner(session, divergence_policy="ballistic").run(tape=tape.plan)
+                result = run_plan(session, divergence_policy="ballistic", tape=tape.plan)
             ledger = tuple(session.engine.visible_token_ids)
             live_edge = not session.engine.ended and not session.engine.checkpointed
             with meter.phase("finalization"):
@@ -247,8 +256,8 @@ def observed_jsonl(backend, sampling, *, rtol: float, atol: float, **_kwargs) ->
             with meter.phase("initial_prompt"):
                 source = _session(backend, sampling)
             with meter.phase("source_generation"):
-                made = LiveSessionRunner(source).run(
-                    live_policy=ActionSequencePolicy([Write(" An apple", mode="exact"), Accept()]),
+                made = run_plan(source, divergence_policy="handoff",
+                    live_policy=FixedActionPolicy([Write(" An apple", mode="exact"), Accept()]),
                     max_live_actions=2,
                 )
             if len(made.outcomes) != 2:
@@ -261,7 +270,7 @@ def observed_jsonl(backend, sampling, *, rtol: float, atol: float, **_kwargs) ->
             with meter.phase("restore_prompt"):
                 dest = _session(backend, sampling)
             with meter.phase("teacher_plan"):
-                replay = LiveSessionRunner(dest, divergence_policy="handoff").run(tape=tape.plan)
+                replay = run_plan(dest, divergence_policy="handoff", tape=tape.plan)
             dest_ledger = tuple(dest.engine.visible_token_ids)
             live_edge = not dest.engine.ended and not dest.engine.checkpointed
             with meter.phase("finalization"):
@@ -282,7 +291,7 @@ def observed_jsonl(backend, sampling, *, rtol: float, atol: float, **_kwargs) ->
         )), *tape.plan.steps[1:]), follow_source_sampling=False)
         with _no_database():
             divergent = _session(backend, sampling)
-            handoff = LiveSessionRunner(divergent, divergence_policy="handoff").run(tape=altered)
+            handoff = run_plan(divergent, divergence_policy="handoff",tape=altered)
             usable = not divergent.engine.ended and not divergent.engine.checkpointed
             divergent.discard()
         if (not handoff.handed_off or handoff.replayed_actions != 0 or not usable
@@ -306,8 +315,8 @@ def rewind_replace(backend, sampling, *, rtol: float, atol: float, **_kwargs) ->
         with meter.phase("initial_prompt"):
             session = _session(backend, sampling)
         with meter.phase("steady_continuation"):
-            original = LiveSessionRunner(session).run(
-                live_policy=ActionSequencePolicy([Accept(), Accept()]), max_live_actions=2
+            original = run_plan(session, divergence_policy="handoff",
+                live_policy=FixedActionPolicy([Accept(), Accept()]), max_live_actions=2
             )
         if len(original.outcomes) != 2:
             raise AssertionError("initial continuation ended early")
@@ -363,9 +372,12 @@ def fork_switch(backend, sampling, *, rtol: float, atol: float, **_kwargs) -> di
 
 
 def save_resume(backend, sampling, *, rtol: float, atol: float, provenance: dict, **_kwargs) -> dict:
+    from uuid import uuid4
+
     from trajectory_editor.episode_lifecycle import _restore_engine
+    from trajectory_editor.episode_live_restore import restore_live_session
     from trajectory_editor.episode_materializer import materialize_live_branch
-    from trajectory_editor.episode_runner import EpisodeRunner
+    from trajectory_editor.episode_session import BranchIdentity
     from trajectory_editor.episode_store import EpisodeStore
 
     with TemporaryDirectory(prefix="spe-real-save-") as directory:
@@ -377,24 +389,67 @@ def save_resume(backend, sampling, *, rtol: float, atol: float, provenance: dict
             saved_ledger = tuple(source.engine.visible_token_ids)
             with EpisodeStore(Path(directory) / "episode.sqlite3") as store:
                 with meter.phase("persistence"):
-                    identifier = materialize_live_branch(store, source, source.branch_state(), provenance)
+                    identifier = materialize_live_branch(
+                        store, source, source.branch_state(), provenance
+                    )
                 source.discard()
                 with meter.phase("resume"):
-                    restored = _restore_engine(store, identifier, backend, max_tokens=None,
-                                               sampling_override=None, notice=lambda _message: None)
-                result = EpisodeRunner(restored, store, identifier).run(
-                    live_policy=ActionSequencePolicy([Accept()]), max_live_actions=1
+                    restored_engine = _restore_engine(
+                        store, identifier, backend, max_tokens=None,
+                        sampling_override=None, notice=lambda _message: None,
+                    )
+                    restored = restore_live_session(
+                        store,
+                        identifier,
+                        restored_engine,
+                        branch_identity=BranchIdentity(
+                            f"benchmark-resume-{uuid4().hex}",
+                            identifier,
+                            len(saved_ledger),
+                        ),
+                    )
+                result = run_plan(
+                    restored,
+                    divergence_policy="handoff",
+                    live_policy=FixedActionPolicy([Accept()]),
+                    max_live_actions=1,
                 )
-                ledger = tuple(restored.visible_token_ids)
-                prefix = [*restored.initial_token_ids, *ledger]
+                ledger = tuple(restored.engine.visible_token_ids)
+                prefix = [*restored.engine.initial_token_ids, *ledger]
                 logits = backend.last_logits().copy()
-                recorded = tuple(row["token_id"] for row in store.tokens(identifier)
-                                if row["realized_visible"])
-        if len(result.outcomes) != 1 or ledger[:len(saved_ledger)] != saved_ledger or recorded != ledger:
-            raise AssertionError("durable resume did not preserve and extend the recorded ledger")
-        return {"metrics": meter.result(actions=2, committed_tokens=len(ledger)),
-                "saved_visible_token_ids": saved_ledger, "resumed_visible_token_ids": ledger,
-                "oracle": _oracle(backend, prefix, logits, rtol=rtol, atol=atol)}
+                with meter.phase("explicit_save"):
+                    resumed_id = materialize_live_branch(
+                        store,
+                        restored,
+                        restored.branch_state(),
+                        provenance,
+                        parent_episode_id=identifier,
+                        mode="benchmark-explicit-save",
+                    )
+                original_recorded = tuple(
+                    row["token_id"] for row in store.tokens(identifier)
+                    if row["realized_visible"]
+                )
+                recorded = tuple(
+                    row["token_id"] for row in store.tokens(resumed_id)
+                    if row["realized_visible"]
+                )
+        if (
+            len(result.outcomes) != 1
+            or ledger[:len(saved_ledger)] != saved_ledger
+            or original_recorded != saved_ledger
+            or recorded != ledger
+        ):
+            raise AssertionError(
+                "restored session did not preserve the source or explicitly save its extension"
+            )
+        return {
+            "metrics": meter.result(actions=2, committed_tokens=len(ledger)),
+            "saved_visible_token_ids": saved_ledger,
+            "resumed_visible_token_ids": ledger,
+            "resumed_episode_id": resumed_id,
+            "oracle": _oracle(backend, prefix, logits, rtol=rtol, atol=atol),
+        }
 
 
 def long_context(backend, sampling, *, rtol: float, atol: float, **_kwargs) -> dict:
@@ -415,8 +470,8 @@ def long_context(backend, sampling, *, rtol: float, atol: float, **_kwargs) -> d
         captures.append((initial_prefix, backend.last_logits().copy(), None))
         with meter.phase("steady_continuation"):
             for _ in range(requested_actions):
-                result = LiveSessionRunner(session).run(
-                    live_policy=ActionSequencePolicy([Accept()]), max_live_actions=1
+                result = run_plan(session, divergence_policy="handoff",
+                    live_policy=FixedActionPolicy([Accept()]), max_live_actions=1
                 )
                 if len(result.outcomes) != 1:
                     stop_reason = result.handoff_reason or "no completed action"
@@ -482,8 +537,8 @@ def cache_compare(backend, sampling, *, profile, rtol: float, atol: float, **_kw
             meter = Measurement()
             with meter.attach(selected), meter.active():
                 session = _session(selected, sampling)
-                run = LiveSessionRunner(session).run(
-                    live_policy=ActionSequencePolicy([Accept(), Accept()]), max_live_actions=2
+                run = run_plan(session, divergence_policy="handoff",
+                    live_policy=FixedActionPolicy([Accept(), Accept()]), max_live_actions=2
                 )
                 ledger = tuple(session.engine.visible_token_ids)
                 logits = selected.last_logits().copy()
