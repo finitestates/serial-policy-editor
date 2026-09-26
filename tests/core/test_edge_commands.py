@@ -20,6 +20,7 @@ from trajectory_editor.edge_commands import (
     ReplayCommand,
     ReplaySelectionCommand,
     RenameCommand,
+    RerollCommand,
     RewindCommand,
     SamplerCommand,
     SaveCommand,
@@ -45,6 +46,9 @@ pytestmark = pytest.mark.current_workflow
         ("s temperature=.8 top_k=20", SamplerCommand("temperature=.8 top_k=20")),
         ("SAMPLER random-seed", SamplerCommand("random-seed")),
         ("rewind 12", RewindCommand(12)),
+        ("reroll", RerollCommand(None)),
+        ("REROLL 42", RerollCommand(42)),
+        ("reroll 0", RerollCommand(0)),
         ("f 0", ForkCommand(0)),
         ("FORK -2", ForkCommand(-2)),
         ("switch branch-abc", SwitchCommand("branch-abc")),
@@ -64,7 +68,10 @@ pytestmark = pytest.mark.current_workflow
         ("ls", ListCommand(False)),
         ("ls all", ListCommand(True)),
         ("name Episode Title", RenameCommand("Episode Title")),
-        ("export tape.jsonl", ExportCommand(Path("tape.jsonl"))),
+        ("export tape.jsonl", ExportCommand(Path.cwd() / "tape.jsonl")),
+        ("export myplan", ExportCommand(Path.cwd() / "myplan.jsonl")),
+        ("export sub/dir/tape.jsonl", ExportCommand(Path("sub/dir/tape.jsonl"))),
+        ("export /tmp/tape", ExportCommand(Path("/tmp/tape"))),
         ("save workspace.sqlite #7", SaveCommand(Path("workspace.sqlite"), "#7")),
         ("save-family workspace.sqlite", SaveFamilyCommand(Path("workspace.sqlite"))),
         (
@@ -81,7 +88,7 @@ def test_parse_edge_command_extracts_typed_values(raw, expected):
     assert parse_edge_command(raw) == expected
 
 
-@pytest.mark.parametrize("raw", ["rewind nope", "fork 1.5", "replay source --until later"])
+@pytest.mark.parametrize("raw", ["rewind nope", "fork 1.5", "reroll nope", "replay source --until later"])
 def test_malformed_numeric_boundaries_are_parse_errors(raw):
     with pytest.raises(EdgeCommandParseError):
         parse_edge_command(raw)
@@ -108,6 +115,7 @@ def test_malformed_budgets_are_parse_errors(raw):
         "spr",
         "spr source extra",
         "spr source until 3",
+        "reroll 1 2",
     ],
 )
 def test_malformed_save_and_replay_forms_are_parse_errors(raw):

@@ -16,6 +16,7 @@ from .core.actions import (
     Hold,
     Phrase,
     PolicyAction,
+    Reroll,
     SelectRawRank,
     Write,
 )
@@ -32,6 +33,7 @@ from .core.trajectory import TrajectoryState
 from .episode_hash import (
     token_prefix_sha256,
     validate_fingerprint,
+    validate_token_ids,
 )
 from .core.observation import ObservationStatistics
 from .core.sampling import (
@@ -202,7 +204,7 @@ class EpisodeEngine:
             tokens = backend.tokenize(initial_text, add_bos=add_bos, special=special)
         else:
             tokens = list(initial_token_ids)
-            token_prefix_sha256(tokens)  # Reject malformed IDs instead of coercing them.
+            validate_token_ids(tokens)  # Reject malformed IDs instead of coercing them.
         if not tokens:
             raise EditorError("the initial write produced no tokens")
         if any(value < 0 or value >= backend.vocabulary_size() for value in tokens):
@@ -679,11 +681,23 @@ class EpisodeEngine:
                 raise EditorError(
                     "the loaded backend does not expose output-head steering runtime support"
                 )
+            from .activation_vectors import _supported_kwargs
+
+            # Hand the backend the artifact digest the sampler config already
+            # carries, so the vector is not re-hashed on every observe().
+            # Backends without the keyword keep hashing.
+            adjustment_kwargs = _supported_kwargs(
+                provider,
+                {
+                    "layer": self.sampling.activation_vector_layer,
+                    "position": self.sampling.activation_vector_position,
+                    "digest": self.sampling.activation_vector_digest or None,
+                },
+            )
             try:
                 activation_logit_adjustments = provider(
                     self.sampling.activation_vector,
-                    layer=self.sampling.activation_vector_layer,
-                    position=self.sampling.activation_vector_position,
+                    **adjustment_kwargs,
                 )
             except (RuntimeError, TypeError, ValueError) as exc:
                 raise EditorError(f"could not apply output-head steering vector: {exc}") from exc
@@ -1055,6 +1069,27 @@ class EpisodeEngine:
             "within_bound": bool(required_shift <= 0.0),
         }
 
+    def _apply_reroll(self, action: Reroll) -> ActionOutcome:
+        """Replace the draw seed; the next proposal draws under the new seed.
+
+        Mirrors the reference kernel's ``reroll``: prefix, policy, and
+        boundary are untouched, so replaying the tape reproduces the same
+        draws.  The stale proposal is discarded, not committed.
+        """
+        self.sampling = replace(self.sampling, seed=action.seed)
+        self._invalidate_observation()
+        return ActionOutcome(
+            action=action,
+            boundary_before=self.boundary,
+            boundary_after=self.boundary,
+            resolved_text="",
+            resolved_token_ids=(),
+            visible_token_ids=(),
+            terminal_token_id=None,
+            stop_reason="reroll",
+            evidence=(),
+        )
+
     def _apply_phrase(
         self,
         action: Phrase,
@@ -1225,6 +1260,8 @@ class EpisodeEngine:
                 expectation=expectation,
                 divergence_policy=divergence_policy,
             )
+        if isinstance(action, Reroll):
+            return self._apply_reroll(action)
         before = self.boundary
         evidence: list[TokenEvidence] = []
         visible: list[int] = []

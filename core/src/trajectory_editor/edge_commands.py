@@ -43,6 +43,13 @@ class RewindCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class RerollCommand:
+    """Replace the draw seed; ``None`` means pick a fresh random seed."""
+
+    seed: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ForkCommand:
     boundary: int
 
@@ -135,6 +142,7 @@ EdgeCommand: TypeAlias = (
     | BudgetCommand
     | SamplerCommand
     | RewindCommand
+    | RerollCommand
     | ForkCommand
     | SwitchCommand
     | NewCommand
@@ -167,6 +175,21 @@ def _integer(value: str, *, label: str) -> int:
 def _require_arity(parts: list[str], expected: int | range, *, usage: str) -> None:
     if len(parts) not in (expected if isinstance(expected, range) else {expected}):
         _parse_error(f"use {usage}")
+
+
+def _resolve_export_path(raw: str) -> Path:
+    """Resolve an export target: a bare name lands in the current directory.
+
+    ``export NAME`` writes ``./NAME.jsonl``; anything with a directory
+    component is used verbatim, preserving the previous ``export FILE``
+    behavior.
+    """
+
+    candidate = Path(raw)
+    if len(candidate.parts) == 1:
+        name = raw if raw.endswith(".jsonl") else f"{raw}.jsonl"
+        return Path.cwd() / name
+    return candidate
 
 
 def parse_edge_command(raw: str) -> EdgeCommand:
@@ -205,6 +228,11 @@ def parse_edge_command(raw: str) -> EdgeCommand:
     if command in {"s", "sampler"}:
         payload = text[len(parts[0]) :].strip()
         return SamplerCommand(payload or None)
+
+    if command == "reroll":
+        _require_arity(parts, range(1, 3), usage="reroll [SEED]")
+        seed = _integer(parts[1], label="reroll seed") if len(parts) == 2 else None
+        return RerollCommand(seed)
 
     if command == "rewind":
         _require_arity(parts, 2, usage="rewind N")
@@ -262,7 +290,7 @@ def parse_edge_command(raw: str) -> EdgeCommand:
 
     if command == "export":
         _require_arity(parts, 2, usage="export FILE")
-        return ExportCommand(Path(parts[1]))
+        return ExportCommand(_resolve_export_path(parts[1]))
 
     if command in {"save-family", "savefamily"}:
         _require_arity(parts, range(2, 4), usage="save-family WORKSPACE [ROOT_ID]")
@@ -318,6 +346,7 @@ __all__ = [
     "ReplayCommand",
     "ReplaySelectionCommand",
     "RenameCommand",
+    "RerollCommand",
     "RewindCommand",
     "SamplerCommand",
     "SaveCommand",

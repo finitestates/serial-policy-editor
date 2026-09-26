@@ -15,7 +15,7 @@ _COMMON_START = (
     EdgeHelpItem("c / continue", "resume the current tranche"),
     EdgeHelpItem("n N / n off", "set an allowance or remove the budget"),
     EdgeHelpItem("s key=value", "change sampler settings"),
-    EdgeHelpItem("s random-seed", "choose and record a new random seed"),
+    EdgeHelpItem("reroll [SEED]", "replace the draw seed; recorded on the tape"),
     EdgeHelpItem("f N", "fork at boundary N"),
 )
 
@@ -42,7 +42,7 @@ _EPHEMERAL = (
     EdgeHelpItem("rewind N", "trim this branch back to token N"),
     *_COMMON_START,
     EdgeHelpItem("fm", "show the fork map and choose a boundary"),
-    EdgeHelpItem("export FILE", "write the selected portable tape"),
+    EdgeHelpItem("export FILE", "write the portable tape (bare NAME → ./NAME.jsonl)"),
     EdgeHelpItem("save", "WORKSPACE [ID] · materialize this branch"),
     EdgeHelpItem("save-family", "WORKSPACE [ROOT_ID] · materialize this live family"),
     EdgeHelpItem("e / end", "end this branch and show its text"),

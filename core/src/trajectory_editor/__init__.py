@@ -5,6 +5,7 @@ from .core.actions import (
     EndGeneration,
     Hold,
     Phrase,
+    Reroll,
     SelectRawRank,
     Write,
 )
@@ -49,6 +50,7 @@ __all__ = [
     "LiveSessionRoster",
     "Phrase",
     "ReplayExpectation",
+    "Reroll",
     "RunResult",
     "SamplerConfig",
     "SelectRawRank",

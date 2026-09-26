@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from .core.actions import Accept, EndGeneration, Hold, Phrase, SelectRawRank, Write
+from .core.actions import Accept, EndGeneration, Hold, Phrase, Reroll, SelectRawRank, Write
 from .core.errors import EditorError
 from .episode_lineage import EpisodeRelation, LineageNode, LineageView
 from .episode_lineage_source import EpisodeLineageReader, build_lineage_view
@@ -646,6 +646,11 @@ def project_procedure(store: EpisodeStore, episode_id: str) -> str:
             command = f"h {marker}{action.limit}"
         elif isinstance(action, EndGeneration):
             command = "e!"
+        elif isinstance(action, Reroll):
+            # No menu command produces a reroll yet; render it as a comment so
+            # procedure transcripts stay complete and replayable by tape.
+            command = f"# Reroll draw seed to {action.seed}"
+            comment = None
         else:
             raise EditorError(f"cannot render procedure action {action!r}")
         rows.append((boundary, command, comment))

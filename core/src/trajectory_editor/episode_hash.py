@@ -20,12 +20,18 @@ def validate_fingerprint(value: str) -> str:
     return value
 
 
-def token_prefix_sha256(token_ids: list[int] | tuple[int, ...]) -> str:
+def validate_token_ids(token_ids: list[int] | tuple[int, ...]) -> None:
+    """Reject malformed token IDs without hashing them."""
     if not isinstance(token_ids, (list, tuple)):
         raise EditorError("token IDs must be a list or tuple of integers")
-    digest = hashlib.sha256()
     for token_id in token_ids:
         if type(token_id) is not int or not 0 <= token_id < (1 << 63):
             raise EditorError("token IDs must be nonnegative signed-64-bit integers")
+
+
+def token_prefix_sha256(token_ids: list[int] | tuple[int, ...]) -> str:
+    validate_token_ids(token_ids)
+    digest = hashlib.sha256()
+    for token_id in token_ids:
         digest.update(token_id.to_bytes(8, "little", signed=True))
     return digest.hexdigest()
