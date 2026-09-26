@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from typing import Any
 
 from . import edge_commands, episode_backend_loader, episode_policy_setup
@@ -31,6 +32,8 @@ from .episode_session import LiveSession, LiveSessionRoster
 from .projector import project_live_fork_map
 from .teacher_plan import export_live_teacher_tape
 from .terminal_contracts import EdgeViewState, PromptRequest, TerminalProtocol
+
+_DEFAULT_WORKSPACE = Path("episodes.sqlite3")
 
 
 def session_edge_menu(
@@ -146,6 +149,9 @@ def session_edge_menu(
                     return "switch-saved", store.resolve_id(selected.strip())
                 except EditorError as exc:
                     io.write(str(exc))
+            continue
+        if isinstance(command, edge_commands.ListCommand) and command.include_finished:
+            io.write("Listing saved episodes requires --workspace.")
             continue
         if (
             isinstance(command, edge_commands.BranchesCommand)
@@ -484,6 +490,11 @@ def run_session_roster(
         if action == "save":
             session = roster.active_session
             workspace, requested_id = value
+            workspace = (
+                workspace
+                or getattr(args, "workspace", None)
+                or _DEFAULT_WORKSPACE
+            )
             requested_id = requested_id or default_save_id
             try:
                 from .episode_materializer import save_live_branch
@@ -505,6 +516,11 @@ def run_session_roster(
         if action == "save-family":
             session = roster.active_session
             workspace, requested_root_id = value
+            workspace = (
+                workspace
+                or getattr(args, "workspace", None)
+                or _DEFAULT_WORKSPACE
+            )
             requested_root_id = requested_root_id or default_save_id
             try:
                 from .episode_materializer import save_live_family
@@ -564,7 +580,7 @@ def run_new_session(
 
     if args.new_prompt is None and args.new_prompt_file is None:
         raise EditorError(
-            "--ephemeral requires --new-prompt, --new-prompt-file, or a "
+            "a new session requires --new-prompt, --new-prompt-file, or a "
             "teacher-plan envelope prompt"
         )
     initial_text = (

@@ -611,14 +611,13 @@ def cli_jsonl(backend, sampling, *, profile, model_path: Path, timeout_s: int, *
             "Path(os.environ['SPE_BENCH_AUDIT_MARKER']).write_text('loaded')\n"
             "def audit(event, args):\n"
             "    if event == 'sqlite3.connect':\n"
-            "        raise RuntimeError('SQLite connection attempted in ephemeral CLI')\n"
+            "        raise RuntimeError('SQLite connection attempted in workspace-free CLI')\n"
             "    if event == 'open':\n"
             "        try: path = os.path.abspath(os.fspath(args[0]))\n"
             "        except TypeError: return\n"
-            "        for key in ('SPE_BENCH_SELECTED_WORKSPACE', 'SPE_BENCH_DEFAULT_WORKSPACE'):\n"
-            "            target = os.environ[key]\n"
-            "            if path == target or path.startswith(target + '-'):\n"
-            "                raise RuntimeError('workspace opened in ephemeral CLI: ' + path)\n"
+            "        target = os.environ['SPE_BENCH_DEFAULT_WORKSPACE']\n"
+            "        if path == target or path.startswith(target + '-'):\n"
+            "            raise RuntimeError('workspace opened in workspace-free CLI: ' + path)\n"
             "sys.addaudithook(audit)\n", encoding="utf-8"
         )
         elapsed = {}
@@ -627,16 +626,15 @@ def cli_jsonl(backend, sampling, *, profile, model_path: Path, timeout_s: int, *
         for variant in ("action-only", "embedded", "sidecar"):
             plan = folder / f"{variant}.jsonl"
             output = folder / f"{variant}.txt"
-            workspace = folder / f"never-open-{variant}.sqlite3"
             envelope = {"type": "serial-policy-tape", "version": 1, "prompt": PROMPT,
                         "environment": {"backend": {"model_path": "/missing/source/model.gguf"},
                                         "source_episode_id": "absent-source"}}
             lines = ([json.dumps(envelope)] if variant == "embedded" else []) + [json.dumps(row) for row in ACTION_RECORDS]
             plan.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            command = [sys.executable, "-m", "trajectory_editor", "--ephemeral", "--plain-ui",
+            command = [sys.executable, "-m", "trajectory_editor", "--plain-ui",
                        "--teacher-plan", str(plan), "--divergence-policy", "ballistic",
                        "--model", str(model_path), "--backend", profile["backend"],
-                       "--workspace", str(workspace), "--output", str(output),
+                       "--output", str(output),
                        *profile["launch_tokens"]]
             if variant == "action-only":
                 command += ["--new-prompt", PROMPT]
@@ -648,7 +646,6 @@ def cli_jsonl(backend, sampling, *, profile, model_path: Path, timeout_s: int, *
             environment = os.environ.copy()
             environment["PYTHONPATH"] = str(folder) + os.pathsep + environment.get("PYTHONPATH", "")
             environment["SPE_BENCH_AUDIT_MARKER"] = str(marker)
-            environment["SPE_BENCH_SELECTED_WORKSPACE"] = str(workspace)
             environment["SPE_BENCH_DEFAULT_WORKSPACE"] = str(folder / "episodes.sqlite3")
             start = perf_counter()
             completed = subprocess.run(command, input="end\n", text=True, cwd=folder,
@@ -665,7 +662,7 @@ def cli_jsonl(backend, sampling, *, profile, model_path: Path, timeout_s: int, *
                 raise AssertionError(f"{variant} CLI final text omitted handwritten write action")
             lengths[variant] = len(final_text)
             hashes[variant] = hashlib.sha256(final_text.encode("utf-8")).hexdigest()
-        if any(folder.glob("*.sqlite3*")) or workspace.exists():
+        if any(folder.glob("*.sqlite3*")):
             raise AssertionError("CLI created a database, journal, or WAL")
         return {"outer_subprocess_wall_s": elapsed, "replayed_actions": len(ACTION_RECORDS),
                 "final_text_characters": lengths, "final_text_sha256": hashes,

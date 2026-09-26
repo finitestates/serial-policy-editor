@@ -31,17 +31,26 @@ def _run(
         "trajectory_editor.episode_backend_loader.load_backend",
         side_effect=lambda _args: ConformingFakeBackend(),
     ), patch("trajectory_editor.episode_cli.TerminalIO", return_value=io):
-        assert main(["--ephemeral", "--model", "fake", *ui_flag, *flags]) == 0
+        assert main(["--model", "fake", *ui_flag, *flags]) == 0
     return io
 
 
 @pytest.mark.current_workflow
-def test_ephemeral_quit_never_opens_the_default_or_selected_workspace(tmp_path):
-    workspace = tmp_path / "should-not-exist.sqlite3"
+def test_default_live_quit_does_not_create_a_workspace(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
 
-    _run(tmp_path, ["q", "q"], "--workspace", str(workspace), "--new-prompt", "P")
+    _run(tmp_path, ["q", "q"], "--new-prompt", "P")
 
-    assert not workspace.exists()
+    assert not (tmp_path / "episodes.sqlite3").exists()
+
+
+@pytest.mark.current_workflow
+def test_bare_workspace_flag_opens_default_workspace(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    _run(tmp_path, ["q", "q"], "--workspace", "--new-prompt", "P")
+
+    assert (tmp_path / "episodes.sqlite3").exists()
 
 
 @pytest.mark.current_workflow
@@ -78,14 +87,17 @@ def test_ephemeral_bare_reroll_picks_a_fresh_seed(tmp_path):
 
 
 @pytest.mark.invariant
-def test_ephemeral_export_and_save_materialize_only_the_selected_branch(tmp_path):
+def test_live_export_and_default_save_materialize_only_the_selected_branch(
+    tmp_path, monkeypatch,
+):
     exported = tmp_path / "branch.jsonl"
-    workspace = tmp_path / "saved.sqlite3"
+    workspace = tmp_path / "episodes.sqlite3"
+    monkeypatch.chdir(tmp_path)
 
     _run(
         tmp_path,
-        ["1", "q", f"export {exported}", f"save {workspace} selected", "q"],
-        "--new-prompt", "P",
+        ["1", "q", f"export {exported}", "save", "q"],
+        "--new-prompt", "P", "--episode-id", "selected",
     )
 
     tape = load_teacher_tape_jsonl(exported)
@@ -97,16 +109,16 @@ def test_ephemeral_export_and_save_materialize_only_the_selected_branch(tmp_path
 
 
 @pytest.mark.invariant
-def test_ephemeral_fork_selects_a_new_live_branch_without_a_workspace(tmp_path):
-    workspace = tmp_path / "should-not-exist.sqlite3"
+def test_fork_selects_a_new_live_branch_without_a_workspace(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
 
     io = _run(
         tmp_path,
         ["1", "q", "fork 1", "q", "branches", "q"],
-        "--workspace", str(workspace), "--new-prompt", "P",
+        "--new-prompt", "P",
     )
 
-    assert not workspace.exists()
+    assert not (tmp_path / "episodes.sqlite3").exists()
     assert any("Forked live branch" in item for item in io.output)
     assert any("Live branches:" in item for item in io.output)
 
@@ -256,7 +268,7 @@ def test_ephemeral_uses_live_ui_by_default_and_plain_ui_is_an_opt_out(tmp_path):
         "trajectory_editor.episode_backend_loader.load_backend",
         side_effect=lambda _args: ConformingFakeBackend(),
     ), patch("trajectory_editor.episode_cli.TerminalIO", side_effect=terminal_io):
-        assert main(["--ephemeral", "--model", "fake", "--new-prompt", "P"]) == 0
+        assert main(["--model", "fake", "--new-prompt", "P"]) == 0
 
     assert captured == [True]
     assert io.entered == 1
@@ -274,7 +286,7 @@ def test_ephemeral_uses_live_ui_by_default_and_plain_ui_is_an_opt_out(tmp_path):
         ),
     ):
         assert main([
-            "--ephemeral", "--model", "fake", "--plain-ui", "--new-prompt", "P",
+            "--model", "fake", "--plain-ui", "--new-prompt", "P",
         ]) == 0
 
     assert captured == [False]

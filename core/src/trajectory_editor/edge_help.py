@@ -34,7 +34,7 @@ _DURABLE = (
     EdgeHelpItem("q / quit", "leave without sealing"),
 )
 
-_EPHEMERAL = (
+_SESSION = (
     EdgeHelpItem("branches", "show retained live branches"),
     EdgeHelpItem("#N", "switch to any retained root or branch"),
     EdgeHelpItem("switch N", "compatible branch-switch alias"),
@@ -43,12 +43,18 @@ _EPHEMERAL = (
     *_COMMON_START,
     EdgeHelpItem("fm", "show the fork map and choose a boundary"),
     EdgeHelpItem("export FILE", "write the portable tape (bare NAME → ./NAME.jsonl)"),
-    EdgeHelpItem("save", "WORKSPACE [ID] · materialize this branch"),
-    EdgeHelpItem("save-family", "WORKSPACE [ROOT_ID] · materialize this live family"),
+    EdgeHelpItem(
+        "save [WORKSPACE [ID]]",
+        "materialize this branch (default: current workspace or episodes.sqlite3)",
+    ),
+    EdgeHelpItem(
+        "save-family [WORKSPACE [ROOT_ID]]",
+        "materialize this family (same workspace default)",
+    ),
     EdgeHelpItem("e / end", "end this branch and show its text"),
     EdgeHelpItem("q / quit", "discard the whole live session"),
 )
 
 
 def edge_help(mode: str) -> tuple[EdgeHelpItem, ...]:
-    return _EPHEMERAL if mode == "session" else _DURABLE
+    return _SESSION if mode == "session" else _DURABLE

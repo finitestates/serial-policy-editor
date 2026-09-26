@@ -75,7 +75,7 @@ def load_profile(path: Path, model_root: Path | None, model_override: str | None
     if importlib.util.find_spec(dependency) is None or (backend == "transformers" and importlib.util.find_spec("torch") is None):
         raise ProfileError(f"missing {backend} dependency; install the matching ./core extra")
     launch = _mapping(payload.get("launch", {}), "launch")
-    forbidden = {"model", "backend", "profile", "teacher-plan", "workspace", "ephemeral", "new-prompt", "output"}
+    forbidden = {"model", "backend", "profile", "teacher-plan", "workspace", "new-prompt", "output"}
     if forbidden & set(launch):
         raise ProfileError(f"launch contains harness-owned option: {sorted(forbidden & set(launch))}")
     parser = build_parser(include_vector=False)

@@ -39,7 +39,6 @@ def test_visible_negated_flags_are_presence_booleans(tmp_path):
     parser = build_parser(include_vector=False)
     path = tmp_path / "profile.yaml"
     path.write_text(
-        "ephemeral: true\n"
         "no-flash-attn: true\n"
         "no-policy-view: true\n"
         "temperature: 0.8\n",
@@ -50,14 +49,12 @@ def test_visible_negated_flags_are_presence_booleans(tmp_path):
     tokens, applied = profile_arguments(parser, values)
     args = parser.parse_args(tokens)
 
-    assert values["ephemeral"] is True
     assert values["no-flash-attn"] is True
     assert values["no-policy-view"] is True
-    assert args.ephemeral is True
     assert args.no_flash_attn is True
     assert args.show_policy_rank is False
     assert args.temperature == 0.8
-    assert {"ephemeral", "no_flash_attn", "show_policy_rank"} <= applied
+    assert {"no_flash_attn", "show_policy_rank"} <= applied
 
 
 def test_false_profile_flags_are_omitted(tmp_path):

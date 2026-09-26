@@ -371,7 +371,7 @@ def test_s03_formula_and_conditional_only_hidden_controls(scale):
 
 @pytest.mark.parametrize('final_only', [False, True])
 @pytest.mark.invariant
-def test_r08_ephemeral_setup_provisions_future_cfg(final_only):
+def test_r08_default_session_setup_provisions_future_cfg(final_only):
     from trajectory_editor.episode_cli import build_parser
     from trajectory_editor.session_runtime import run_new_session
     plan = ReplayPlan(
@@ -379,7 +379,7 @@ def test_r08_ephemeral_setup_provisions_future_cfg(final_only):
         context=ReplayContext(sampling=(None if final_only else config(),)),
         final_sampling=config(),
     )
-    args = build_parser().parse_args(['--ephemeral', '--model', 'fake', '--new-prompt',
+    args = build_parser().parse_args(['--model', 'fake', '--new-prompt',
                                      'conditional', '--plain-ui'])
     guidance = PrefixBackend()
     with patch('trajectory_editor.episode_backend_loader.load_backend', return_value=PrefixBackend()), \

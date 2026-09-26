@@ -143,8 +143,11 @@ def test_bare_new_cancellation_returns_to_ephemeral_edge():
 
 
 @pytest.mark.current_workflow
-def test_ephemeral_new_has_one_model_load_and_global_stable_addresses(tmp_path):
-    workspace = tmp_path / "must-not-exist.sqlite3"
+def test_default_live_new_has_one_model_load_and_global_stable_addresses(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    workspace = tmp_path / "episodes.sqlite3"
     backend = ConformingFakeBackend()
     loads: list[object] = []
     new_root_samplers: list[SamplerConfig] = []
@@ -179,14 +182,11 @@ def test_ephemeral_new_has_one_model_load_and_global_stable_addresses(tmp_path):
     ), patch.object(session_runtime, "LiveSessionRoster", RecordingRoster):
         assert main(
             [
-                "--ephemeral",
                 "--plain-ui",
                 "--model",
                 "fake",
                 "--max-tokens",
                 "1",
-                "--workspace",
-                str(workspace),
                 "--new-prompt",
                 "P",
             ]

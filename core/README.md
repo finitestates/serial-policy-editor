@@ -35,19 +35,24 @@ reconstructible token prefix and reactivates on the one loaded backend. An
 optional backend cache snapshot can make that faster, but is never branch
 identity. Use `LiveSession.branch_handle(...)` for a branch-bound view.
 
-The terminal editor exposes the same lifecycle with `--ephemeral`; it does
-not open the default workspace (or create one) during a normal run:
+The terminal editor runs new sessions in memory by default and does not create
+a workspace during a normal run. Pass `--workspace` to open or create the
+default `episodes.sqlite3`, or pass `--workspace PATH` to choose another file.
+Saved-episode operations such as resume, replay, fork-from, and listing require
+a workspace:
 
 ```bash
-policy-editor --ephemeral --model model.gguf --new-prompt 'Tell a story'
-policy-editor --ephemeral --model model.gguf --teacher-plan plan.jsonl --new-prompt 'Tell a story'
+policy-editor --model model.gguf --new-prompt 'Tell a story'
+policy-editor --model model.gguf --teacher-plan plan.jsonl --new-prompt 'Tell a story'
+policy-editor --workspace --model model.gguf --new-prompt 'Tell a story'
 ```
 
 At EDGE, `fork N` creates and selects a live branch, `rewind N` changes the
 selected branch, and `branches`/`switch ID` navigate retained branches.
 `export FILE` writes the selected portable teacher tape without opening a
-workspace. `save WORKSPACE [ID]` materializes just that branch as one durable
-episode; `save-family WORKSPACE [ROOT_ID]` materializes all retained branches
-and their lineage. `quit` discards the entire in-memory session. Unless
-`--plain-ui` is passed, `--ephemeral` uses the same live terminal interface as
-ordinary episodes.
+workspace. `save [WORKSPACE [ID]]` materializes just that branch as one durable
+episode; without a workspace argument it uses the `--workspace` selection or
+defaults to `episodes.sqlite3`. `save-family [WORKSPACE [ROOT_ID]]` materializes
+all retained branches and their lineage using the same workspace selection.
+`quit` discards the entire in-memory session. The live terminal interface is
+the same whether or not a workspace is open.

@@ -112,13 +112,13 @@ class ExportCommand:
 
 @dataclass(frozen=True, slots=True)
 class SaveCommand:
-    workspace: Path
+    workspace: Path | None
     reference: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class SaveFamilyCommand:
-    workspace: Path
+    workspace: Path | None
     root_reference: str | None = None
 
 
@@ -293,23 +293,23 @@ def parse_edge_command(raw: str) -> EdgeCommand:
         return ExportCommand(_resolve_export_path(parts[1]))
 
     if command in {"save-family", "savefamily"}:
-        _require_arity(parts, range(2, 4), usage="save-family WORKSPACE [ROOT_ID]")
+        _require_arity(parts, range(1, 4), usage="save-family [WORKSPACE [ROOT_ID]]")
         return SaveFamilyCommand(
-            Path(parts[1]),
+            Path(parts[1]) if len(parts) >= 2 else None,
             parts[2] if len(parts) == 3 else None,
         )
 
     if command == "save" and len(parts) >= 2 and parts[1].lower() == "family":
-        _require_arity(parts, range(3, 5), usage="save family WORKSPACE [ROOT_ID]")
+        _require_arity(parts, range(2, 5), usage="save family [WORKSPACE [ROOT_ID]]")
         return SaveFamilyCommand(
-            Path(parts[2]),
+            Path(parts[2]) if len(parts) >= 3 else None,
             parts[3] if len(parts) == 4 else None,
         )
 
     if command == "save":
-        _require_arity(parts, range(2, 4), usage="save WORKSPACE [ID]")
+        _require_arity(parts, range(1, 4), usage="save [WORKSPACE [ID]]")
         return SaveCommand(
-            Path(parts[1]),
+            Path(parts[1]) if len(parts) >= 2 else None,
             parts[2] if len(parts) == 3 else None,
         )
 

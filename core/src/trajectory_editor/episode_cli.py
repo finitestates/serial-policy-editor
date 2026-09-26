@@ -102,18 +102,10 @@ def _select_launch_source(args: argparse.Namespace) -> LaunchSource:
                 raise EditorError("--teacher-plan requires --new-prompt, --new-prompt-file, or an envelope prompt")
             args.new_prompt = prompt_text
 
-    if args.ephemeral:
-        incompatible = {
-            "--resume": args.resume, "--replay": args.replay,
-            "--fork-from": args.fork_from, "--projector": args.projector,
-            "--export-teacher-plan": args.export_teacher_plan,
-            "--list": args.list_episodes, "--lineage": args.lineage,
-        }
-        requested = next((flag for flag, value in incompatible.items() if value), None)
-        if requested is not None:
-            raise EditorError(f"--ephemeral cannot be combined with {requested}")
-        if args.at is not None or args.until is not None or args.fixed_config or args.procedure:
-            raise EditorError("--ephemeral accepts a new prompt and optional --teacher-plan only")
+    if args.at is not None and args.fork_from is None:
+        raise EditorError("--at is only valid with --fork-from")
+    if args.procedure and not args.projector:
+        raise EditorError("--procedure requires --projector EPISODE_ID")
 
     if args.resume is not None:
         return LaunchSource("resume", args.resume, teacher_tape)
@@ -135,10 +127,6 @@ def _resolve_launch_source(
         value = getattr(args, field)
         if value:
             setattr(args, field, store.resolve_id(value))
-    if args.at is not None and args.fork_from is None:
-        raise EditorError("--at is only valid with --fork-from")
-    if args.procedure and not args.projector:
-        raise EditorError("--procedure requires --projector EPISODE_ID")
     # Backend provenance historically prefers resume, then fork, then replay
     # even when a prompt is also supplied. Keep that lookup independent of the
     # execution branch chosen below.
@@ -211,13 +199,12 @@ def build_parser(
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     parser.add_argument(
         "--workspace",
+        nargs="?",
+        const=Path("episodes.sqlite3"),
+        default=None,
         type=Path,
-        default=Path("episodes.sqlite3"),
-        help="saved episodes used for SPR, resume, and explicit EDGE saves",
-    )
-    parser.add_argument(
-        "--ephemeral", action="store_true",
-        help="run a non-durable live session; export or save a branch explicitly",
+        metavar="PATH",
+        help="open/create a workspace (omitting PATH selects episodes.sqlite3)",
     )
     parser.add_argument(
         "--teacher-plan", type=Path, metavar="FILE",
@@ -448,7 +435,23 @@ def main(
         selection = _select_launch_source(args)
         _validate_prompt_source(args, selection)
         teacher_tape = selection.teacher_tape
-        if args.ephemeral:
+        workspace_required = {
+            "--resume": args.resume,
+            "--replay": args.replay,
+            "--fork-from": args.fork_from,
+            "--projector": args.projector,
+            "--list": args.list_episodes,
+            "--lineage": args.lineage,
+            "--export-teacher-plan": args.export_teacher_plan,
+        }
+        required_flag = next(
+            (flag for flag, value in workspace_required.items() if value), None
+        )
+        if args.workspace is None and required_flag is not None:
+            raise EditorError(
+                f"{required_flag} requires a workspace; pass --workspace [PATH]"
+            )
+        if args.workspace is None:
             if args.random_seed:
                 args.seed = random_seed()
                 print(f"Random seed: {args.seed}", flush=True)

@@ -42,8 +42,10 @@ class StartupIO(ScriptedIO):
         return super().prompt(request)
 
 
-@pytest.mark.parametrize("ephemeral", [False, True])
-def test_interactive_launch_composes_inside_session_before_backend(tmp_path, ephemeral):
+@pytest.mark.parametrize("workspace_enabled", [False, True])
+def test_interactive_launch_composes_inside_session_before_backend(
+    tmp_path, workspace_enabled,
+):
     events = []
     io = StartupIO(["P", "q", "q"], events)
     tty_sys = SimpleNamespace(
@@ -51,27 +53,32 @@ def test_interactive_launch_composes_inside_session_before_backend(tmp_path, eph
         stdout=SimpleNamespace(isatty=lambda: True),
         stderr=sys.stderr,
     )
+    workspace = tmp_path / "episodes.db"
 
     def load_backend(args, *unused):
         assert io.active and args.new_prompt == "P"
         events.append("backend loaded")
         backend = ConformingFakeBackend()
-        return backend if ephemeral else (backend, backend.provenance(), False)
+        return backend if not workspace_enabled else (backend, backend.provenance(), False)
 
+    loader = (
+        "trajectory_editor.episode_backend_loader.load_episode_backend"
+        if workspace_enabled
+        else "trajectory_editor.episode_backend_loader.load_backend"
+    )
     with patch("trajectory_editor.episode_cli.sys", tty_sys), patch(
         "trajectory_editor.episode_cli.TerminalIO", return_value=io,
-    ), patch(
-        "trajectory_editor.episode_backend_loader.load_backend" if ephemeral
-        else "trajectory_editor.episode_backend_loader.load_episode_backend",
-        side_effect=load_backend,
-    ):
-        assert main([
-            "--workspace", str(tmp_path / "episodes.db"), "--model", "fake",
-            *(["--ephemeral"] if ephemeral else []),
-        ]) == 0
+    ), patch(loader, side_effect=load_backend):
+        args = ["--model", "fake"]
+        if workspace_enabled:
+            args.extend(["--workspace", str(workspace)])
+        assert main(args) == 0
     assert events == ["session entered", "compose", "backend loaded", "session restored"]
-    with EpisodeStore(tmp_path / "episodes.db") as store:
-        assert store.workspace_list(include_finished=True) == "No open episodes."
+    if workspace_enabled:
+        with EpisodeStore(workspace) as store:
+            assert store.workspace_list(include_finished=True) == "No open episodes."
+    else:
+        assert not workspace.exists()
 
 
 def test_launch_cancellation_restores_session_without_loading_backend(tmp_path, capsys):

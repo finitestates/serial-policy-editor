@@ -1,4 +1,4 @@
-"""The same command flow reaches durable and ephemeral owners through either terminal."""
+"""The same command flow reaches live and workspace-backed sessions through either terminal."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from trajectory_editor.teacher_plan import load_teacher_tape_jsonl
 
 pytestmark = pytest.mark.current_workflow
 
-@pytest.mark.parametrize("ephemeral", [False, True])
-def test_shared_command_scenario_through_live_and_plain_adapters(tmp_path, ephemeral):
+@pytest.mark.parametrize("workspace_enabled", [False, True])
+def test_shared_command_scenario_through_live_and_plain_adapters(tmp_path, workspace_enabled):
     records = []
     for live in (False, True):
         suffix = "live" if live else "plain"
@@ -24,11 +24,11 @@ def test_shared_command_scenario_through_live_and_plain_adapters(tmp_path, ephem
         export = tmp_path / f"{suffix}.jsonl"
         commands = ["1", "q"]
         commands += (
-            [f"export {export}", "q"] if ephemeral
+            [f"export {export}", "q"] if not workspace_enabled
             else [f"save {workspace} saved", "q"]
         )
         terminal = LiveScriptedIO(commands) if live else ScriptedIO(commands)
-        flags = ["--ephemeral"] if ephemeral else ["--workspace", str(workspace)]
+        flags = ["--workspace", str(workspace)] if workspace_enabled else []
         if not live:
             flags.append("--plain-ui")
         with patch(
@@ -44,7 +44,7 @@ def test_shared_command_scenario_through_live_and_plain_adapters(tmp_path, ephem
         assert not terminal.responses
         if live:
             assert terminal.entered == 1
-        if ephemeral:
+        if not workspace_enabled:
             assert not workspace.exists()
             actions = [step.action.kind for step in load_teacher_tape_jsonl(export).plan]
         else:

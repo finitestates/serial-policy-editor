@@ -72,8 +72,11 @@ pytestmark = pytest.mark.current_workflow
         ("export myplan", ExportCommand(Path.cwd() / "myplan.jsonl")),
         ("export sub/dir/tape.jsonl", ExportCommand(Path("sub/dir/tape.jsonl"))),
         ("export /tmp/tape", ExportCommand(Path("/tmp/tape"))),
+        ("save", SaveCommand(None)),
         ("save workspace.sqlite #7", SaveCommand(Path("workspace.sqlite"), "#7")),
+        ("save-family", SaveFamilyCommand(None)),
         ("save-family workspace.sqlite", SaveFamilyCommand(Path("workspace.sqlite"))),
+        ("save family", SaveFamilyCommand(None)),
         (
             "save family workspace.sqlite root-abc",
             SaveFamilyCommand(Path("workspace.sqlite"), "root-abc"),
@@ -105,11 +108,8 @@ def test_malformed_budgets_are_parse_errors(raw):
     [
         "export",
         "export a b",
-        "save",
         "save workspace a b",
-        "save-family",
         "save-family workspace a b",
-        "save family",
         "save family workspace a b c",
         "name",
         "spr",

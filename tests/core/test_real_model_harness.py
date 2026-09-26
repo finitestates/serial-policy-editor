@@ -113,7 +113,7 @@ def test_invalid_teacher_plan_fails_before_backend_load(tmp_path, content, reaso
     plan = tmp_path / "bad.jsonl"
     plan.write_text(content, encoding="utf-8")
     with patch("trajectory_editor.episode_backend_loader.load_backend", side_effect=AssertionError("backend loaded")):
-        status = main(["--ephemeral", "--model", "nonexistent.gguf", "--new-prompt", "P",
+        status = main(["--model", "nonexistent.gguf", "--new-prompt", "P",
                        "--teacher-plan", str(plan)])
     assert status == 2
     assert reason in capsys.readouterr().err

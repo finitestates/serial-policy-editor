@@ -470,22 +470,22 @@ class LiveIO(ScriptedIO):
 
 
 @pytest.mark.parametrize("live", [False, True])
-@pytest.mark.parametrize("ephemeral", [False, True])
+@pytest.mark.parametrize("workspace_enabled", [False, True])
 @pytest.mark.invariant
-def test_chord_cli_records_only_survivor_and_export(tmp_path, live, ephemeral):
+def test_chord_cli_records_only_survivor_and_export(tmp_path, live, workspace_enabled):
     workspace = tmp_path / "episode.sqlite3"
     export = tmp_path / "selected.jsonl"
     commands = ["chord 1 2 4", "", "q", "s temperature=0.7", "c", "a", "q"]
-    if ephemeral:
+    if not workspace_enabled:
         commands += [f"export {export}", "q"]
     else:
         commands += [f"save {workspace} chord-save", "q"]
     io = LiveIO(commands) if live else ScriptedIO(commands)
-    flags = ["--ephemeral"] if ephemeral else ["--workspace", str(workspace)]
+    flags = ["--workspace", str(workspace)] if workspace_enabled else []
     if not live:
         flags.append("--plain-ui")
     with patch("trajectory_editor.episode_backend_loader.load_backend",
-               side_effect=lambda _args: ConformingFakeBackend() if ephemeral else DurableFakeBackend()), patch(
+               side_effect=lambda _args: ConformingFakeBackend() if not workspace_enabled else DurableFakeBackend()), patch(
         "trajectory_editor.episode_cli.TerminalIO", return_value=io
     ):
         assert main(["--model", "fake", "--new-prompt", "P", *flags]) == 0
@@ -496,7 +496,7 @@ def test_chord_cli_records_only_survivor_and_export(tmp_path, live, ephemeral):
         for request in io.prompt_requests
     )
     assert any("Resolve the chord before changing the episode" in item for item in io.output)
-    if ephemeral:
+    if not workspace_enabled:
         tape = load_teacher_tape_jsonl(export)
         assert [step.action for step in tape.plan] == [SelectRawRank(1), Accept()]
     else:
@@ -542,19 +542,19 @@ def test_durable_chord_eog_selection_uses_ordinary_terminal_action(tmp_path, cho
         assert store.get_episode(episode_id)["terminal_reason"] == "teacher-eog"
 
 
-@pytest.mark.parametrize("ephemeral", [False, True])
+@pytest.mark.parametrize("workspace_enabled", [False, True])
 @pytest.mark.invariant
-def test_chord_budget_selection_stops_at_checkpoint(tmp_path, ephemeral):
+def test_chord_budget_selection_stops_at_checkpoint(tmp_path, workspace_enabled):
     workspace = tmp_path / "episode.sqlite3"
     io = ScriptedIO(["chord 1 2", "", "a", "q"])
-    flags = ["--ephemeral"] if ephemeral else ["--workspace", str(workspace)]
+    flags = ["--workspace", str(workspace)] if workspace_enabled else []
     with patch("trajectory_editor.episode_backend_loader.load_backend",
-               return_value=ConformingFakeBackend() if ephemeral else DurableFakeBackend()), patch(
+               return_value=ConformingFakeBackend() if not workspace_enabled else DurableFakeBackend()), patch(
         "trajectory_editor.episode_cli.TerminalIO", return_value=io
     ):
         assert main(["--model", "fake", "--plain-ui", "--new-prompt", "P",
                      "--max-tokens", "1", *flags]) == 0
     assert any("BUDGET REACHED" in item for item in io.output)
-    if not ephemeral:
+    if workspace_enabled:
         with EpisodeStore(workspace) as store:
             assert store.workspace_list(include_finished=True) == "No open episodes."
