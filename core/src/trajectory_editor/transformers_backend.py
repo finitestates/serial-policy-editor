@@ -123,6 +123,58 @@ def _as_token_id_set(value: Any) -> set[int]:
     return set()
 
 
+def _transformers_tokenizer_id(tokenizer: Any) -> str:
+    backend_tokenizer = getattr(tokenizer, "backend_tokenizer", None)
+    if backend_tokenizer is None:
+        backend_tokenizer = getattr(tokenizer, "_tokenizer", None)
+    serialized = None
+    to_str = getattr(backend_tokenizer, "to_str", None)
+    if callable(to_str):
+        serialized = to_str()
+    if serialized is None:
+        vocabulary = tokenizer.get_vocab()
+        serialized = json.dumps(
+            {
+                "vocabulary": sorted(
+                    (str(token), int(token_id))
+                    for token, token_id in vocabulary.items()
+                ),
+                "added_vocabulary": sorted(
+                    (str(token), int(token_id))
+                    for token, token_id in (
+                        getattr(tokenizer, "get_added_vocab", lambda: {})()
+                    ).items()
+                ),
+                "tokenizer_class": type(tokenizer).__qualname__,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    special_ids = sorted(
+        int(value)
+        for value in (getattr(tokenizer, "all_special_ids", None) or [])
+        if type(value) is int and value >= 0
+    )
+    special_tokens = getattr(tokenizer, "special_tokens_map_extended", None)
+    return hashlib.sha256(
+        b"serial-policy-editor-transformers-tokenizer-v1\0"
+        + json.dumps(
+            {
+                "serialization": serialized,
+                "special_ids": special_ids,
+                "special_tokens": special_tokens,
+                "bos_token_id": getattr(tokenizer, "bos_token_id", None),
+                "eos_token_id": getattr(tokenizer, "eos_token_id", None),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _infer_context_limit(model_config: Any, tokenizer: Any) -> int | None:
     for name in (
         "max_position_embeddings",
@@ -372,7 +424,7 @@ class TransformersBackend:
         self._hidden_state_control_handles: list[Any] = []
         self._hidden_state_control_key: tuple[Any, ...] | None = None
         self._model_sha256_cache: str | None = None
-        self._tokenizer_id_cache: str | None = None
+        self._tokenizer_id_cache = _transformers_tokenizer_id(self._tokenizer)
 
     def _apply_execution_controls(self) -> None:
         if self.settings.torch_num_threads is not None:
@@ -1146,59 +1198,8 @@ class TransformersBackend:
         return tuple(sorted(self._eog_ids))
 
     def tokenizer_id(self) -> str:
-        """Fingerprint tokenization rules, token IDs, and special-token IDs."""
+        """Return the tokenizer identity computed during backend setup."""
 
-        if self._tokenizer_id_cache is None:
-            tokenizer = self._tokenizer
-            backend_tokenizer = getattr(tokenizer, "backend_tokenizer", None)
-            if backend_tokenizer is None:
-                backend_tokenizer = getattr(tokenizer, "_tokenizer", None)
-            serialized = None
-            to_str = getattr(backend_tokenizer, "to_str", None)
-            if callable(to_str):
-                serialized = to_str()
-            if serialized is None:
-                vocabulary = tokenizer.get_vocab()
-                serialized = json.dumps(
-                    {
-                        "vocabulary": sorted(
-                            (str(token), int(token_id))
-                            for token, token_id in vocabulary.items()
-                        ),
-                        "added_vocabulary": sorted(
-                            (str(token), int(token_id))
-                            for token, token_id in (
-                                getattr(tokenizer, "get_added_vocab", lambda: {})()
-                            ).items()
-                        ),
-                        "tokenizer_class": type(tokenizer).__qualname__,
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-            special_ids = sorted(
-                int(value)
-                for value in (getattr(tokenizer, "all_special_ids", None) or [])
-                if type(value) is int and value >= 0
-            )
-            special_tokens = getattr(tokenizer, "special_tokens_map_extended", None)
-            self._tokenizer_id_cache = hashlib.sha256(
-                b"serial-policy-editor-transformers-tokenizer-v1\0"
-                + json.dumps(
-                    {
-                        "serialization": serialized,
-                        "special_ids": special_ids,
-                        "special_tokens": special_tokens,
-                        "bos_token_id": getattr(tokenizer, "bos_token_id", None),
-                        "eos_token_id": getattr(tokenizer, "eos_token_id", None),
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    default=str,
-                ).encode("utf-8")
-            ).hexdigest()
         return self._tokenizer_id_cache
 
     def model_id(self) -> str:

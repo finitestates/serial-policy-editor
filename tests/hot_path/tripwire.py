@@ -147,6 +147,9 @@ class CountingBackend:
         self._pre_speculation_logits = None
         self._restored_logits = None
 
+    def tokenizer_id(self) -> str:
+        return "hot-path-counting-tokenizer-v1"
+
     # --- accounting ---------------------------------------------------------
     def mark(self) -> tuple[Counter, int, int]:
         return Counter(self.calls), self.positions, self.full_prefills

@@ -25,6 +25,9 @@ from trajectory_editor.run_loop import ReplayContext, ReplayPlan, TapeStep
 
 class PrefixBackend(ConformingFakeBackend):
     """BOS and non-round-tripping IDs; logits depend on ordered full context."""
+
+    def tokenizer_id(self):
+        return "prefix-destination" if self.destination else "prefix-source"
     pieces = {0: '<EOG>', 1: '<BOS>', 2: 'c', 3: 'o', 4: 'n', 5: 'u',
               6: 'v', 7: 'x', 8: 'x', 9: 'y', 10: 'z', 11: 'q'}
 

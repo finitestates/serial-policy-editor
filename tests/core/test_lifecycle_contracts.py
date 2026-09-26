@@ -345,6 +345,9 @@ def test_l07_budget_state_follows_the_retained_boundary(tmp_path, target, expect
 
 def test_l08_model_continuation_preserves_visible_text_and_sampler_state(tmp_path):
     class NewTokenizer(NoEogBackend):
+        def tokenizer_id(self):
+            return "new-tokenizer-v1"
+
         def tokenize(self, text, **kwargs):
             self.received_text = text
             if kwargs.get("add_bos"):
@@ -363,8 +366,12 @@ def test_l08_model_continuation_preserves_visible_text_and_sampler_state(tmp_pat
         child = store.get_episode(child_id)
         assert child["initial_text"] == "P"
         assert child["initial_token_ids"] == [7]
+        assert child["parent_episode_id"] is None
+        assert child["metadata"]["tokenizer_changed"] is True
         assert len(store.actions(child_id)) == 1
 
+    assert child["backend"]["tokenizer_id"] == "new-tokenizer-v1"
+    assert continued.stream_fingerprint == source.stream_fingerprint
     assert backend.received_text == " A"
     assert continued.initial_text == "P"
     assert continued.initial_token_ids == (7,)

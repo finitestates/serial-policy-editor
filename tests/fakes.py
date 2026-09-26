@@ -74,6 +74,9 @@ class ConformingFakeBackend:
     def eog_token_ids(self) -> tuple[int, ...]:
         return (0,)
 
+    def tokenizer_id(self) -> str:
+        return "conforming-fake-tokenizer-v1"
+
     def provenance(self, *, include_model_sha256: bool = True) -> dict[str, Any]:
         del include_model_sha256
         return {"backend": "fake", "vocabulary_size": self.vocabulary_size()}
