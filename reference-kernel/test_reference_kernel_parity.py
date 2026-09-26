@@ -62,11 +62,8 @@ class ProductionScriptedBackend(ScriptedBackend):
 
 
 @pytest.mark.parametrize("prefix", [(), (0,), (1, 2, 3), ((1 << 63) - 1,)])
-@pytest.mark.parametrize("tokenizer_id", [None, SCRIPTED_TOKENIZER_ID])
-def test_token_prefix_hash_matches_production(prefix, tokenizer_id):
-    assert token_prefix_sha256(
-        prefix, tokenizer_id=tokenizer_id
-    ) == production_sha256(prefix, tokenizer_id=tokenizer_id)
+def test_token_prefix_hash_matches_production(prefix):
+    assert token_prefix_sha256(prefix) == production_sha256(prefix)
 
 
 @pytest.mark.parametrize("seed", [-(1 << 63), -5, 0, 17, (1 << 63) - 1])
@@ -99,11 +96,7 @@ def test_fixed_distribution_draws_match_production(kernel):
 @pytest.mark.parametrize("seed", [12345, 67890])
 def test_production_sampling_boundaries_observations_holds_and_rewind(seed, kernel):
     reference_backend = ScriptedBackend()
-    reference = start(
-        seed,
-        policy=Policy(top_k=6, draw_kernel=kernel),
-        tokenizer_id=SCRIPTED_TOKENIZER_ID,
-    )
+    reference = start(seed, policy=Policy(top_k=6, draw_kernel=kernel))
     production = EpisodeEngine(
         ProductionScriptedBackend(), initial_token_ids=[1, 2, 3],
         sampling=SamplerConfig(seed=seed, temperature=1.0, top_k=6, top_p=1.0,

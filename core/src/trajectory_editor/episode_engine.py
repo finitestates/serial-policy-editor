@@ -33,7 +33,6 @@ from .episode_hash import (
     token_prefix_sha256,
     validate_fingerprint,
 )
-from .episode_identity import tokenizer_id_for
 from .core.observation import ObservationStatistics
 from .core.sampling import (
     SparseDistribution,
@@ -187,7 +186,6 @@ class EpisodeEngine:
         add_bos: bool = True,
         special: bool = True,
         stream_fingerprint: str | None = None,
-        tokenizer_id: str | None = None,
         backend_positioned: bool = False,
         guidance_backend: InferenceBackend | None = None,
     ) -> None:
@@ -211,13 +209,8 @@ class EpisodeEngine:
             raise EditorError("the initial token ledger contains an invalid token id")
         if backend.is_eog(tokens[-1]):
             raise EditorError("the initial write ends with an EOG token")
-        if tokenizer_id is not None and (
-            not isinstance(tokenizer_id, str) or not tokenizer_id
-        ):
-            raise EditorError("tokenizer_id must be nonempty text")
-        self.tokenizer_id = tokenizer_id or tokenizer_id_for(backend)
         fingerprint = (
-            token_prefix_sha256(tokens, tokenizer_id=self.tokenizer_id)
+            token_prefix_sha256(tokens)
             if stream_fingerprint is None
             else validate_fingerprint(stream_fingerprint)
         )

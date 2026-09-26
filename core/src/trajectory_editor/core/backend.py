@@ -49,6 +49,8 @@ class InferenceBackend(Protocol):
 
     def eog_token_ids(self) -> tuple[int, ...]: ...
 
+    def tokenizer_id(self) -> str: ...
+
     def provenance(self, *, include_model_sha256: bool = True) -> Mapping[str, Any]: ...
 
 
@@ -106,3 +108,5 @@ def require_inference_backend(backend: InferenceBackend) -> None:
         raise RuntimeError("backend reported an empty vocabulary")
     if not callable(backend.last_logits):
         raise TypeError("backend does not expose full-vocabulary logits")
+    if not callable(getattr(backend, "tokenizer_id", None)):
+        raise TypeError("backend does not expose tokenizer_id()")

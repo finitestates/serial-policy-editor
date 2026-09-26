@@ -107,6 +107,9 @@ class Backend:
     def eog_token_ids(self):
         return (0,)
 
+    def tokenizer_id(self):
+        return "install-surface-tokenizer-v1"
+
     def provenance(self, *, include_model_sha256=True):
         del include_model_sha256
         return {"backend": "smoke", "vocabulary_size": 3}
