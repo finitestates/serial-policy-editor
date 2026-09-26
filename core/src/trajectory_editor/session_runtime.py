@@ -6,8 +6,10 @@ import argparse
 from typing import Any
 
 from . import edge_commands, episode_backend_loader, episode_policy_setup
+from .core.actions import Reroll
 from .core.cli_config import (
     apply_activation_artifact,
+    random_seed,
     sampler_from_args,
     sampler_override,
 )
@@ -300,6 +302,8 @@ def session_edge_menu(
             except EditorError as exc:
                 io.write(f"[invalid sampler change] {exc}")
             continue
+        if isinstance(command, edge_commands.RerollCommand):
+            return "reroll", command.seed
         io.write("This command is not available in this session.")
 
 
@@ -418,6 +422,15 @@ def run_session_roster(
                 session.rewind(int(value))
             except EditorError as exc:
                 io.write(str(exc))
+            continue
+        if action == "reroll":
+            seed = value if value is not None else random_seed()
+            try:
+                session.generate(Reroll(seed))
+            except EditorError as exc:
+                io.write(f"[invalid reroll] {exc}")
+                continue
+            io.write(f"Rerolled draw seed to {seed}.")
             continue
         if action == "fork":
             target = int(value)

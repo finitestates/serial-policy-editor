@@ -44,6 +44,39 @@ def test_ephemeral_quit_never_opens_the_default_or_selected_workspace(tmp_path):
     assert not workspace.exists()
 
 
+@pytest.mark.current_workflow
+def test_ephemeral_reroll_records_a_tape_action(tmp_path):
+    exported = tmp_path / "reroll.jsonl"
+
+    _run(
+        tmp_path,
+        ["1", "q", "reroll 42", "q", f"export {exported}", "q"],
+        "--new-prompt", "P",
+    )
+
+    tape = load_teacher_tape_jsonl(exported)
+    reroll_steps = [step for step in tape.plan if step.action.kind == "reroll"]
+    assert len(reroll_steps) == 1
+    assert reroll_steps[0].action.seed == 42
+
+
+@pytest.mark.current_workflow
+def test_ephemeral_bare_reroll_picks_a_fresh_seed(tmp_path):
+    exported = tmp_path / "reroll-random.jsonl"
+
+    with patch("trajectory_editor.session_runtime.random_seed", return_value=99):
+        _run(
+            tmp_path,
+            ["1", "q", "reroll", "q", f"export {exported}", "q"],
+            "--new-prompt", "P",
+        )
+
+    tape = load_teacher_tape_jsonl(exported)
+    reroll_steps = [step for step in tape.plan if step.action.kind == "reroll"]
+    assert len(reroll_steps) == 1
+    assert reroll_steps[0].action.seed == 99
+
+
 @pytest.mark.invariant
 def test_ephemeral_export_and_save_materialize_only_the_selected_branch(tmp_path):
     exported = tmp_path / "branch.jsonl"

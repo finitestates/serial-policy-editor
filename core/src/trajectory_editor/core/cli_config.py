@@ -160,27 +160,28 @@ def sampler_overrides_present(args: argparse.Namespace) -> bool:
     )
 
 
-def sampler_override(
-    current: SamplerConfig, raw: str, *, seed_factory=random_seed
-) -> SamplerConfig:
-    """Apply live core sampler edits without reconstructing discarded fields."""
+def sampler_override(current: SamplerConfig, raw: str) -> SamplerConfig:
+    """Apply live core sampler edits without reconstructing discarded fields.
+
+    The draw seed is not adjustable here: use ``reroll [SEED]`` so seed
+    changes are recorded on the tape and survive export/replay.
+    """
 
     values = {name: getattr(current, name) for name in CORE_SAMPLER_FIELDS}
     pieces = raw.replace(",", " ").split()
     if not pieces:
         return current
-    if len(pieces) == 1 and pieces[0].lower() in {"random", "random-seed"}:
-        values["seed"] = seed_factory()
-        return replace(current, **values)
     for piece in pieces:
         if "=" not in piece:
             raise EditorError("sampler changes use key=value (for example top_k=20)")
         key, value = piece.split("=", 1)
         key = SAMPLER_ALIASES.get(key.strip().lower(), key.strip().lower())
+        if key == "seed":
+            raise EditorError("use reroll [SEED] to change the draw seed")
         if key not in values or key in {"bias_rules", "bias_groups"}:
             raise EditorError(f"unknown sampler field {key!r}")
         try:
-            if key in {"top_k", "repeat_last_n", "seed", "cfg_prefix_tokens"}:
+            if key in {"top_k", "repeat_last_n", "cfg_prefix_tokens"}:
                 values[key] = int(value)
             elif key == "draw_kernel":
                 if value not in {"categorical", "gumbel-max"}:
