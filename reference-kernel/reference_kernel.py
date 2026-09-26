@@ -1,4 +1,4 @@
-"""A small executable model of coordinate-addressed token editing.
+"""A small executable model of boundary-addressed token editing.
 
 For a fixed (state, policy, world), observation is deterministic. Repeatedly
 accepting proposals reveals an *immutable continuation*: the token trajectory
@@ -41,11 +41,10 @@ def token_prefix_sha256(ids: Sequence[int]) -> str:
 
 @dataclass(frozen=True)
 class World:
-    """The stochastic identity and the offset of visible boundary zero."""
+    """The stochastic identity for one root prompt."""
 
     seed: int
     stream_fingerprint: str
-    coordinate_offset: int = 0
 
     def __post_init__(self) -> None:
         if type(self.seed) is not int or not MIN_SEED <= self.seed <= MAX_SEED:
@@ -54,35 +53,32 @@ class World:
             r"[0-9a-f]{64}", self.stream_fingerprint
         ):
             raise ValueError("stream fingerprint must be a lowercase SHA-256 digest")
-        if type(self.coordinate_offset) is not int or self.coordinate_offset < 0:
-            raise ValueError("coordinate offset must be a nonnegative integer")
-
     @classmethod
-    def for_prefix(cls, seed: int, initial_token_ids: Sequence[int], offset: int = 0) -> World:
-        return cls(seed, token_prefix_sha256(initial_token_ids), offset)
+    def for_prefix(cls, seed: int, initial_token_ids: Sequence[int]) -> World:
+        return cls(seed, token_prefix_sha256(initial_token_ids))
 
 
-def _uniform(world: World, coordinate: int, token_id: int | None = None) -> float:
-    if type(coordinate) is not int or coordinate < 0:
-        raise ValueError("sampling coordinate must be a nonnegative integer")
+def _uniform(world: World, boundary: int, token_id: int | None = None) -> float:
+    if type(boundary) is not int or boundary < 0:
+        raise ValueError("sampling boundary must be a nonnegative integer")
     if token_id is not None and (type(token_id) is not int or token_id < 0):
         raise ValueError("token ID must be a nonnegative integer")
     prefix = f"{RNG_SCHEME}:"
     if token_id is not None:
         prefix += "gumbel-max:"
-    payload = f"{prefix}{world.seed}:{world.stream_fingerprint}:{coordinate}"
+    payload = f"{prefix}{world.seed}:{world.stream_fingerprint}:{boundary}"
     if token_id is not None:
         payload += f":{token_id}"
     value = int.from_bytes(hashlib.blake2b(payload.encode(), digest_size=8).digest(), "big")
     return (value + 0.5) / float(1 << 64)
 
 
-def position_uniform(world: World, coordinate: int) -> float:
-    return _uniform(world, coordinate)
+def position_uniform(world: World, boundary: int) -> float:
+    return _uniform(world, boundary)
 
 
-def position_uniform_token(world: World, coordinate: int, token_id: int) -> float:
-    return _uniform(world, coordinate, token_id)
+def position_uniform_token(world: World, boundary: int, token_id: int) -> float:
+    return _uniform(world, boundary, token_id)
 
 
 class Backend(Protocol):
@@ -163,9 +159,9 @@ class Distribution:
             raise ValueError("scores must be finite")
 
 
-def draw(distribution: Distribution, world: World, coordinate: int, kernel: str) -> int:
+def draw(distribution: Distribution, world: World, boundary: int, kernel: str) -> int:
     if kernel == "categorical":
-        u = position_uniform(world, coordinate)
+        u = position_uniform(world, boundary)
         cumulative = 0.0
         for token_id, p in zip(distribution.ids, distribution.probabilities):
             cumulative += p
@@ -175,7 +171,7 @@ def draw(distribution: Distribution, world: World, coordinate: int, kernel: str)
     if kernel == "gumbel-max":
         def rank(index: int) -> tuple[float, int]:
             token_id = distribution.ids[index]
-            u = position_uniform_token(world, coordinate, token_id)
+            u = position_uniform_token(world, boundary, token_id)
             # Rounding the 64-bit quantile to float64 can produce 1.0.
             noise = math.inf if u == 1.0 else -math.log(-math.log(u))
             return distribution.scores[index] + noise, -token_id
@@ -223,7 +219,7 @@ class Branch:
 @dataclass(frozen=True)
 class Observation:
     boundary: int
-    sampling_coordinate: int
+    sampling_boundary: int
     prefix_token_ids: tuple[int, ...]
     distribution: Distribution
     proposal_token_id: int
@@ -234,9 +230,9 @@ def observe(backend: Backend, branch: Branch) -> Observation:
         raise ValueError("no live boundary after termination")
     prefix = branch.state.token_ids
     distribution = branch.policy.distribution(backend.logits(prefix), prefix)
-    coordinate = branch.world.coordinate_offset + branch.state.boundary
-    return Observation(branch.state.boundary, coordinate, prefix, distribution,
-                       draw(distribution, branch.world, coordinate, branch.policy.draw_kernel))
+    boundary = branch.state.boundary
+    return Observation(branch.state.boundary, boundary, prefix, distribution,
+                       draw(distribution, branch.world, boundary, branch.policy.draw_kernel))
 
 
 def rewind(branch: Branch, boundary: int) -> Branch:
@@ -253,7 +249,7 @@ def fork(branch: Branch, boundary: int | None = None) -> Branch:
 
 
 def reroll(branch: Branch, new_seed: int) -> Branch:
-    """Replace the exact seed, leaving prefix, policy, and coordinate intact."""
+    """Replace the exact seed, leaving prefix, policy, and boundary intact."""
     return replace(branch, world=replace(branch.world, seed=new_seed))
 
 

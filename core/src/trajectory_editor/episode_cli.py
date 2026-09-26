@@ -426,7 +426,6 @@ def _record_fork_edge_state(
         start_boundary=engine.boundary,
         sampling=engine.sampling,
         stream_fingerprint=engine.stream_fingerprint,
-        coordinate_offset=engine.coordinate_offset,
     )
     store.record_budget(
         episode_id,
@@ -561,8 +560,7 @@ def _live_edge_menu(
                 start_boundary=engine.boundary,
                 sampling=updated,
                 stream_fingerprint=engine.stream_fingerprint,
-                coordinate_offset=engine.coordinate_offset,
-            )
+                    )
             store.record_interaction(
                 episode_id,
                 engine.boundary,
@@ -837,7 +835,7 @@ def main(
                     if explicit or activation_artifact is not None:
                         engine.sampling = sampling
                         store.record_sampling_segment(episode_id, start_boundary=0, sampling=sampling,
-                            stream_fingerprint=engine.stream_fingerprint, coordinate_offset=0)
+                            stream_fingerprint=engine.stream_fingerprint)
                 else:
                     engine = _restore_engine(
                         store, args.resume, backend, max_tokens=args.max_tokens,
@@ -963,8 +961,7 @@ def main(
                         initial_text=str(source["initial_text"]),
                         initial_token_ids=source["initial_token_ids"],
                         stream_fingerprint=segment["stream_fingerprint"],
-                        coordinate_offset=segment["coordinate_offset"],
-                        backend_positioned=True,
+                                                backend_positioned=True,
                         guidance_backend=cfg_backend_for(sampling),
                     )
                     engine.visible_token_ids = list(visible[:target])
@@ -1182,8 +1179,7 @@ def main(
                                 initial_text=str(target_episode["initial_text"]),
                                 sampling=new_sampling,
                                 stream_fingerprint=segment["stream_fingerprint"],
-                                coordinate_offset=segment["coordinate_offset"],
-                                max_tokens=target_episode["max_tokens"],
+                                                                max_tokens=target_episode["max_tokens"],
                                 backend_positioned=True,
                                 guidance_backend=cfg_backend_for(new_sampling),
                             )

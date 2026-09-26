@@ -12,27 +12,24 @@ from dataclasses import dataclass
 
 from .core.errors import EditorError
 from .core.sampler_config import SamplerConfig
-from .episode_hash import validate_coordinate, validate_fingerprint
+from .episode_hash import validate_boundary, validate_fingerprint
 
 
 @dataclass(frozen=True, init=False)
 class SamplerState:
-    """Sampler and root-relative sampling-coordinate state.
+    """Sampler and root stream identity state.
 
     ``stream_fingerprint`` is nullable so an in-memory adapter can represent
-    a coordinate that has not yet been assigned a stream identity.  When it
+    sampler settings whose stream identity has not yet been assigned.  When it
     is present, it is always a lowercase SHA-256 digest.
     """
 
     sampling: SamplerConfig
     stream_fingerprint: str | None
-    coordinate_offset: int
-
     def __init__(
         self,
         sampling: SamplerConfig | None = None,
         stream_fingerprint: str | None = None,
-        coordinate_offset: int = 0,
         *,
         sampler: SamplerConfig | None = None,
     ) -> None:
@@ -43,14 +40,12 @@ class SamplerState:
             raise EditorError("sampler state requires a SamplerConfig")
         if stream_fingerprint is not None:
             validate_fingerprint(stream_fingerprint)
-        validate_coordinate(coordinate_offset, "coordinate_offset")
         object.__setattr__(self, "sampling", selected)
         object.__setattr__(self, "stream_fingerprint", stream_fingerprint)
-        object.__setattr__(self, "coordinate_offset", coordinate_offset)
 
     @property
     def sampler(self) -> SamplerConfig:
-        """Alias matching the conceptual sampler/coordinate state name."""
+        """Alias matching the conceptual sampler state name."""
 
         return self.sampling
 
@@ -80,7 +75,7 @@ class BudgetState:
         if selected is not None and (type(selected) is not int or selected < 1):
             raise EditorError("allowance must be a positive integer or null")
         if checkpoint_boundary is not None:
-            validate_coordinate(checkpoint_boundary, "checkpoint_boundary")
+            validate_boundary(checkpoint_boundary, "checkpoint_boundary")
         if (selected is None) != (checkpoint_boundary is None):
             raise EditorError("allowance and checkpoint boundary must both be set or null")
         object.__setattr__(self, "allowance", selected)
@@ -99,7 +94,7 @@ class BudgetState:
     def valid_at(self, boundary: int) -> "BudgetState":
         """Validate this budget as the state beginning at ``boundary``."""
 
-        validate_coordinate(boundary, "boundary")
+        validate_boundary(boundary, "boundary")
         if (
             self.checkpoint_boundary is not None
             and self.checkpoint_boundary < boundary
@@ -128,14 +123,13 @@ class ControlState:
         cls,
         sampling: SamplerConfig,
         stream_fingerprint: str | None,
-        coordinate_offset: int,
         allowance: int | None,
         checkpoint_boundary: int | None,
     ) -> "ControlState":
         """Build a state directly from adapter-friendly scalar fields."""
 
         return cls(
-            SamplerState(sampling, stream_fingerprint, coordinate_offset),
+            SamplerState(sampling, stream_fingerprint),
             BudgetState(allowance, checkpoint_boundary),
         )
 
@@ -146,10 +140,6 @@ class ControlState:
     @property
     def stream_fingerprint(self) -> str | None:
         return self.sampler.stream_fingerprint
-
-    @property
-    def coordinate_offset(self) -> int:
-        return self.sampler.coordinate_offset
 
     @property
     def allowance(self) -> int | None:
@@ -164,7 +154,7 @@ class ControlState:
         return self.budget.checkpoint_boundary
 
     def with_sampler(self, sampler: SamplerState) -> "ControlState":
-        """Return this state with only its sampler-coordinate part changed."""
+        """Return this state with only its sampler part changed."""
 
         if not isinstance(sampler, SamplerState):
             raise EditorError("control state requires a SamplerState")
@@ -186,7 +176,7 @@ class ControlTransition:
     state: ControlState
 
     def __post_init__(self) -> None:
-        validate_coordinate(self.start_boundary, "start_boundary")
+        validate_boundary(self.start_boundary, "start_boundary")
         if not isinstance(self.state, ControlState):
             raise EditorError("control transition requires a ControlState")
         self.state.budget.valid_at(self.start_boundary)
@@ -204,7 +194,7 @@ class ControlTransition:
 
 @dataclass(frozen=True)
 class ControlTimeline:
-    """Ordered, immutable control transitions in root-relative coordinates."""
+    """Ordered, immutable control transitions in root-relative boundaries."""
 
     transitions: tuple[ControlTransition, ...] = ()
 
@@ -244,7 +234,7 @@ class ControlTimeline:
         boundary match selects that transition rather than the prior one.
         """
 
-        validate_coordinate(boundary, "boundary")
+        validate_boundary(boundary, "boundary")
         effective: ControlState | None = None
         for transition in self.transitions:
             if transition.start_boundary > boundary:
@@ -263,7 +253,7 @@ class ControlTimeline:
 
         Repeating the effective state is a no-op.  A changed state recorded at
         the last transition boundary replaces that transition, which keeps a
-        same-boundary update canonical without changing any root coordinate.
+        same-boundary update canonical without changing any root boundary.
         Earlier boundaries must be truncated explicitly before new future
         history can be appended.
         """
@@ -289,7 +279,7 @@ class ControlTimeline:
         start_boundary: int,
         sampler: SamplerState,
     ) -> "ControlTimeline":
-        """Append a sampler-coordinate change, carrying forward the budget."""
+        """Append a sampler or stream-identity change, carrying forward the budget."""
 
         if not self.transitions:
             raise EditorError("a sampler transition needs an initial control state")
@@ -303,7 +293,7 @@ class ControlTimeline:
         start_boundary: int,
         budget: BudgetState,
     ) -> "ControlTimeline":
-        """Append a budget change, carrying forward sampler coordinates."""
+        """Append a budget change, carrying forward sampler settings and identity."""
 
         if not self.transitions:
             raise EditorError("a budget transition needs an initial control state")
@@ -318,12 +308,11 @@ class ControlTimeline:
     def truncate_after(self, retained_boundary: int) -> "ControlTimeline":
         """Drop transitions after a retained root-visible boundary.
 
-        The retained transition and all state values, especially coordinate
-        offsets, are copied unchanged.  No local or branch-relative rebasing
-        is performed.
+        Retained transitions keep their root-relative boundaries and values.
+        No local or branch-relative rebasing is performed.
         """
 
-        validate_coordinate(retained_boundary, "retained_boundary")
+        validate_boundary(retained_boundary, "retained_boundary")
         kept = tuple(
             transition
             for transition in self.transitions
@@ -335,7 +324,6 @@ class ControlTimeline:
 
 
 # Names that make adapter code read naturally without creating a second model.
-SamplerCoordinateState = SamplerState
 ControlSegment = ControlTransition
 EpisodeControlState = ControlState
 
@@ -347,6 +335,5 @@ __all__ = [
     "ControlTimeline",
     "ControlTransition",
     "EpisodeControlState",
-    "SamplerCoordinateState",
     "SamplerState",
 ]

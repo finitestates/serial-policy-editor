@@ -20,9 +20,9 @@ from .core.errors import EditorError
 from .core.results import ActionOutcome
 from .core.sampler_config import SamplerConfig
 from .episode_history import StoredHistoryPrefix, materialize_stored_prefix
-from .episode_hash import token_prefix_sha256, validate_coordinate, validate_fingerprint
+from .episode_hash import token_prefix_sha256, validate_boundary, validate_fingerprint
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 1
 
 
 def _core_sampling_record(sampling: SamplerConfig) -> dict[str, Any]:
@@ -64,7 +64,11 @@ class EpisodeStore:
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("PRAGMA journal_mode = WAL")
         self.connection.execute("PRAGMA synchronous = NORMAL")
-        self._create_schema()
+        try:
+            self._create_schema()
+        except Exception:
+            self.connection.close()
+            raise
 
     def __enter__(self) -> EpisodeStore:  # noqa: PYI034 - Python 3.10 support
         return self
@@ -121,7 +125,6 @@ class EpisodeStore:
                     start_boundary INTEGER NOT NULL,
                     sampling_json TEXT NOT NULL,
                     stream_fingerprint TEXT NOT NULL,
-                    coordinate_offset INTEGER NOT NULL,
                     PRIMARY KEY (episode_id, start_boundary)
                 );
 
@@ -148,7 +151,7 @@ class EpisodeStore:
                     text TEXT NOT NULL,
                     realized_visible INTEGER NOT NULL,
                     is_eog INTEGER NOT NULL,
-                    sampling_coordinate INTEGER NOT NULL,
+                    sampling_boundary INTEGER NOT NULL,
                     proposal_token_id INTEGER NOT NULL,
                     raw_model_nll REAL,
                     raw_rank INTEGER,
@@ -190,7 +193,7 @@ class EpisodeStore:
                         text TEXT NOT NULL,
                         realized_visible INTEGER NOT NULL,
                         is_eog INTEGER NOT NULL,
-                        sampling_coordinate INTEGER NOT NULL,
+                        sampling_boundary INTEGER NOT NULL,
                         proposal_token_id INTEGER NOT NULL,
                         raw_model_nll REAL,
                         raw_rank INTEGER,
@@ -215,13 +218,13 @@ class EpisodeStore:
             row = db.execute("SELECT version FROM schema_info").fetchone()
             if row is None:
                 db.execute(
-                    "INSERT INTO schema_info(version) VALUES (?)", (SCHEMA_VERSION,)
+                    "INSERT INTO schema_info(version) VALUES (?)",
+                    (SCHEMA_VERSION,),
                 )
-            elif int(row["version"]) == 1:
-                db.execute("UPDATE schema_info SET version = ?", (SCHEMA_VERSION,))
-            elif int(row["version"]) != SCHEMA_VERSION:
-                raise EditorError(
-                    f"unsupported episode database schema {row['version']}"
+            else:
+                db.execute(
+                    "UPDATE schema_info SET version = ?",
+                    (SCHEMA_VERSION,),
                 )
 
     def create_episode(
@@ -231,7 +234,6 @@ class EpisodeStore:
         initial_token_ids: Sequence[int],
         sampling: SamplerConfig,
         stream_fingerprint: str,
-        coordinate_offset: int,
         max_tokens: int | None,
         backend: Mapping[str, Any],
         episode_id: str | None = None,
@@ -244,7 +246,6 @@ class EpisodeStore:
             checkpoint_boundary = max_tokens
         token_prefix_sha256(list(initial_token_ids))
         validate_fingerprint(stream_fingerprint)
-        validate_coordinate(coordinate_offset, "coordinate_offset")
         identifier = episode_id or uuid.uuid4().hex
         if not identifier or any(character.isspace() for character in identifier):
             raise EditorError("episode id must be nonempty and contain no whitespace")
@@ -279,15 +280,13 @@ class EpisodeStore:
                 db.execute(
                     """
                     INSERT INTO sampler_segments(
-                        episode_id, start_boundary, sampling_json,
-                        stream_fingerprint, coordinate_offset
-                    ) VALUES (?, 0, ?, ?, ?)
+                        episode_id, start_boundary, sampling_json, stream_fingerprint
+                    ) VALUES (?, 0, ?, ?)
                     """,
                     (
                         identifier,
                         _json(_core_sampling_record(sampling)),
                         stream_fingerprint,
-                        coordinate_offset,
                     ),
                 )
             except sqlite3.IntegrityError as exc:
@@ -505,31 +504,26 @@ class EpisodeStore:
         start_boundary: int,
         sampling: SamplerConfig,
         stream_fingerprint: str,
-        coordinate_offset: int,
     ) -> None:
         """Record a sampler-policy transition at a live token boundary."""
-        validate_coordinate(start_boundary, "start_boundary")
-        validate_coordinate(coordinate_offset, "coordinate_offset")
+        validate_boundary(start_boundary, "start_boundary")
         validate_fingerprint(stream_fingerprint)
         with self.transaction() as db:
             self._require_unsealed(db, episode_id)
             db.execute(
                 """
                 INSERT INTO sampler_segments(
-                    episode_id, start_boundary, sampling_json,
-                    stream_fingerprint, coordinate_offset
-                ) VALUES (?, ?, ?, ?, ?)
+                    episode_id, start_boundary, sampling_json, stream_fingerprint
+                ) VALUES (?, ?, ?, ?)
                 ON CONFLICT(episode_id, start_boundary) DO UPDATE SET
                     sampling_json = excluded.sampling_json,
-                    stream_fingerprint = excluded.stream_fingerprint,
-                    coordinate_offset = excluded.coordinate_offset
+                    stream_fingerprint = excluded.stream_fingerprint
                 """,
                 (
                     episode_id,
                     int(start_boundary),
                     _json(_core_sampling_record(sampling)),
                     stream_fingerprint,
-                    int(coordinate_offset),
                 ),
             )
 
@@ -596,16 +590,14 @@ class EpisodeStore:
                 db.execute(
                     """
                     INSERT OR REPLACE INTO sampler_segments(
-                        episode_id, start_boundary, sampling_json,
-                        stream_fingerprint, coordinate_offset
-                    ) VALUES (?, ?, ?, ?, ?)
+                        episode_id, start_boundary, sampling_json, stream_fingerprint
+                    ) VALUES (?, ?, ?, ?)
                     """,
                     (
                         destination_episode_id,
                         int(segment["start_boundary"]),
                         str(segment["sampling_json"]),
                         str(segment["stream_fingerprint"]),
-                        int(segment["coordinate_offset"]),
                     ),
                 )
             for budget in materialized.budget_segments:
@@ -693,7 +685,7 @@ class EpisodeStore:
                     INSERT INTO tokens(
                         episode_id, action_ordinal, action_token_index,
                         boundary, token_id, text, realized_visible, is_eog,
-                        sampling_coordinate, proposal_token_id,
+                        sampling_boundary, proposal_token_id,
                         raw_model_nll, raw_rank, policy_rank,
                         decoder_probability, proposal_agreement
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -707,7 +699,7 @@ class EpisodeStore:
                         str(token["text"]),
                         int(token["realized_visible"]),
                         int(token["is_eog"]),
-                        int(token["sampling_coordinate"]),
+                        int(token["sampling_boundary"]),
                         int(token["proposal_token_id"]),
                         float(token["raw_model_nll"]) if token.get("raw_model_nll") is not None else None,
                         int(token["raw_rank"]) if token.get("raw_rank") is not None else None,
@@ -757,7 +749,7 @@ class EpisodeStore:
                     INSERT INTO tokens(
                         episode_id, action_ordinal, action_token_index, boundary,
                         token_id, text, realized_visible, is_eog,
-                        sampling_coordinate, proposal_token_id, raw_model_nll,
+                        sampling_boundary, proposal_token_id, raw_model_nll,
                         raw_rank, policy_rank, decoder_probability,
                         proposal_agreement
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -771,7 +763,7 @@ class EpisodeStore:
                         evidence.text,
                         int(evidence.realized_visible),
                         int(evidence.is_eog),
-                        evidence.sampling_coordinate,
+                        evidence.sampling_boundary,
                         evidence.proposal_token_id,
                         evidence.raw_model_nll,
                         evidence.raw_rank,
@@ -930,10 +922,11 @@ class EpisodeStore:
         return result
 
     def sampler_segments(self, episode_id: str) -> list[dict[str, Any]]:
-        """Return decoded sampler-coordinate records in root-boundary order."""
+        """Return decoded sampler-control records in root-boundary order."""
         self.get_episode(episode_id)
         rows = self.connection.execute(
-            "SELECT * FROM sampler_segments WHERE episode_id = ? ORDER BY start_boundary",
+            "SELECT episode_id, start_boundary, sampling_json, stream_fingerprint "
+            "FROM sampler_segments WHERE episode_id = ? ORDER BY start_boundary",
             (episode_id,),
         ).fetchall()
         result: list[dict[str, Any]] = []
@@ -943,8 +936,7 @@ class EpisodeStore:
             if not isinstance(item["sampling"], dict):
                 raise EditorError("saved sampler settings must be an object")
             SamplerConfig.from_record(item["sampling"])
-            validate_coordinate(item["start_boundary"], "start_boundary")
-            validate_coordinate(item["coordinate_offset"], "coordinate_offset")
+            validate_boundary(item["start_boundary"], "start_boundary")
             validate_fingerprint(item["stream_fingerprint"])
             result.append(item)
         return result
@@ -958,11 +950,11 @@ class EpisodeStore:
         ).fetchall()
         result = [dict(row) for row in rows]
         for item in result:
-            validate_coordinate(item["start_boundary"], "start_boundary")
+            validate_boundary(item["start_boundary"], "start_boundary")
         return result
 
     def sampling_segment(self, episode_id: str, boundary: int = 0) -> dict[str, Any]:
-        validate_coordinate(boundary, "boundary")
+        validate_boundary(boundary, "boundary")
         matches = [
             segment
             for segment in self.sampler_segments(episode_id)

@@ -40,12 +40,12 @@ def control_timeline(
     transitions: tuple[tuple[int, SamplerConfig], ...] = (),
 ) -> ControlTimeline:
     timeline = ControlTimeline.from_state(
-        ControlState(SamplerState(initial, FINGERPRINT, 0), BudgetState())
+        ControlState(SamplerState(initial, FINGERPRINT), BudgetState())
     )
     for boundary, sampler in transitions:
         timeline = timeline.append_sampler_transition(
             boundary,
-            SamplerState(sampler, FINGERPRINT, 0),
+            SamplerState(sampler, FINGERPRINT),
         )
     return timeline
 

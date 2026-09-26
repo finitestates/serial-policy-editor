@@ -26,7 +26,6 @@ def source_workspace(tmp_path):
             sampling=SamplerConfig(temperature=0, seed=999),
             initial_text="P",
             initial_token_ids=[7],
-            coordinate_offset=40,
         )
         store.create_episode(
             episode_id="source",
@@ -34,7 +33,6 @@ def source_workspace(tmp_path):
             initial_token_ids=source.initial_token_ids,
             sampling=source.sampling,
             stream_fingerprint=source.stream_fingerprint,
-            coordinate_offset=40,
             max_tokens=None,
             backend={},
         )
@@ -121,7 +119,6 @@ def test_cli_replay_until_uses_sampler_state_at_the_selected_boundary(
                 start_boundary=boundary,
                 sampling=replace(SamplerConfig.from_record(segment["sampling"]), seed=next_seed),
                 stream_fingerprint=segment["stream_fingerprint"],
-                coordinate_offset=40,
             )
 
     run_cli(
@@ -153,7 +150,7 @@ def test_cli_edge_replay_appends_live_text_without_mutating_the_source(source_wo
 
 
 @pytest.mark.invariant
-def test_cli_fork_from_persists_inherited_history_in_root_coordinates(source_workspace):
+def test_cli_fork_from_persists_inherited_history_in_root_boundaries(source_workspace):
     run_cli(
         source_workspace,
         ["q", "quit"],
@@ -202,7 +199,6 @@ def test_cli_cfg_fork_uses_inherited_tokens_once(tmp_path, cfg_prefix_tokens, ro
             initial_token_ids=[7],
             sampling=sampling,
             stream_fingerprint=source.stream_fingerprint,
-            coordinate_offset=0,
             max_tokens=None,
             backend={"backend": "llama.cpp", "model_path": str(Path("fake").resolve())},
         )
@@ -244,7 +240,6 @@ def test_cli_prompt_replay_uses_the_destination_tokenizer_and_remains_rewindable
             initial_token_ids=[7],
             sampling=source.sampling,
             stream_fingerprint=source.stream_fingerprint,
-            coordinate_offset=0,
             max_tokens=None,
             backend={},
         )
@@ -310,7 +305,6 @@ def test_cli_historical_unknown_action_yields_to_operational_edge(
                     SamplerConfig.from_record(segment["sampling"]), seed=123
                 ),
                 stream_fingerprint=segment["stream_fingerprint"],
-                coordinate_offset=40,
             )
 
     io = run_cli(

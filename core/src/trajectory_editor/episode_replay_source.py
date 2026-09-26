@@ -117,7 +117,6 @@ def _controls(
                 ControlState.from_parts(
                     sampling_factory(sampling_record),
                     fingerprint,
-                    _required_int(sampler, "coordinate_offset"),
                     budget.get("max_tokens"),
                     budget.get("checkpoint_boundary"),
                 ),
@@ -222,7 +221,7 @@ def _select_through(
     *,
     full_source: bool,
 ) -> SurvivingProcedure:
-    """Select a procedure prefix without rebasing its source coordinates."""
+    """Select a procedure prefix without rebasing its source boundaries."""
 
     selected: list[ProcedureStep] = []
     partial = set(source.procedure.partial_source_indices)

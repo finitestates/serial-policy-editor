@@ -223,7 +223,6 @@ with EpisodeStore(workspace) as store:
         initial_token_ids=[1],
         sampling=source_engine.sampling,
         stream_fingerprint=source_engine.stream_fingerprint,
-        coordinate_offset=source_engine.coordinate_offset,
         max_tokens=None,
         backend=backend.provenance(),
     )
@@ -253,7 +252,6 @@ with EpisodeStore(workspace) as store:
         initial_token_ids=[1],
         sampling=handoff_engine.sampling,
         stream_fingerprint=handoff_engine.stream_fingerprint,
-        coordinate_offset=handoff_engine.coordinate_offset,
         max_tokens=None,
         backend=handoff_backend.provenance(),
     )
@@ -271,7 +269,6 @@ with EpisodeStore(workspace) as store:
         initial_token_ids=[1],
         sampling=target_engine.sampling,
         stream_fingerprint=target_engine.stream_fingerprint,
-        coordinate_offset=target_engine.coordinate_offset,
         max_tokens=None,
         backend=target_backend.provenance(),
     )

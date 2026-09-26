@@ -37,7 +37,6 @@ def create(store, episode_id, episode, *, parent=None, boundary=None, metadata=N
         initial_token_ids=list(episode.initial_token_ids),
         sampling=episode.sampling,
         stream_fingerprint=episode.stream_fingerprint,
-        coordinate_offset=episode.coordinate_offset,
         max_tokens=episode.max_tokens,
         backend=episode.backend.provenance(),
         parent_episode_id=parent,
@@ -186,7 +185,6 @@ def test_p05_failed_initial_budget_rolls_back_episode_creation(tmp_path, failure
                 initial_token_ids=episode.initial_token_ids,
                 sampling=episode.sampling,
                 stream_fingerprint=episode.stream_fingerprint,
-                coordinate_offset=episode.coordinate_offset,
                 max_tokens=0 if failure == "invalid allowance" else 5,
                 backend=episode.backend.provenance(),
             )

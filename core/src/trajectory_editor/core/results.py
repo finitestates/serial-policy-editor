@@ -69,7 +69,7 @@ class Divergence:
 @dataclass(frozen=True)
 class TokenEvidence:
     boundary: int
-    sampling_coordinate: int
+    sampling_boundary: int
     token_id: int
     text: str
     proposal_token_id: int

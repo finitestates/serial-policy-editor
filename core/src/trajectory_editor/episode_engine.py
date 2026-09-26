@@ -129,7 +129,7 @@ class TokenPrefixSnapshot(Sequence[int]):
 @dataclass(frozen=True)
 class Observation:
     boundary: int
-    sampling_coordinate: int
+    sampling_boundary: int
     prefix_token_ids: Sequence[int] = field(repr=False)
     _render_context: Callable[..., str] = field(repr=False, compare=False)
     logits: np.ndarray = field(repr=False, compare=False)
@@ -165,11 +165,11 @@ class _PreparedAccept:
 
 
 class EpisodeEngine:
-    """Own token state, sampler coordinates, and all action resolution.
+    """Own token state, sampling controls, and all action resolution.
 
     The backend owns its private evaluation state. The engine's complete
-    semantic state is the token ledger plus the sampler configuration and
-    coordinate.
+    semantic state is the token ledger plus the sampler configuration,
+    stream identity, and current boundary.
     """
 
     def __init__(
@@ -183,14 +183,11 @@ class EpisodeEngine:
         add_bos: bool = True,
         special: bool = True,
         stream_fingerprint: str | None = None,
-        coordinate_offset: int = 0,
         backend_positioned: bool = False,
         guidance_backend: InferenceBackend | None = None,
     ) -> None:
         if max_tokens is not None and (type(max_tokens) is not int or max_tokens < 1):
             raise EditorError("max_tokens must be a positive integer")
-        if type(coordinate_offset) is not int or coordinate_offset < 0:
-            raise EditorError("coordinate_offset must be a nonnegative integer")
         require_inference_backend(backend)
         if guidance_backend is not None:
             require_inference_backend(guidance_backend)
@@ -225,7 +222,6 @@ class EpisodeEngine:
             initial_text=initial_text_value,
             max_tokens=max_tokens,
             checkpoint_boundary=max_tokens,
-            coordinate_offset=coordinate_offset,
             stream_fingerprint=fingerprint,
         )
         self._prefix_snapshot = TokenPrefixSnapshot.root(tokens)
@@ -282,14 +278,6 @@ class EpisodeEngine:
     @terminal_reason.setter
     def terminal_reason(self, value: str | None) -> None:
         self.trajectory.terminal_reason = value
-
-    @property
-    def coordinate_offset(self) -> int:
-        return self.trajectory.coordinate_offset
-
-    @coordinate_offset.setter
-    def coordinate_offset(self, value: int) -> None:
-        self.trajectory.coordinate_offset = value
 
     @property
     def stream_fingerprint(self) -> str | None:
@@ -392,8 +380,9 @@ class EpisodeEngine:
         """Discard visible state after a token boundary and reposition the backend.
 
         The checkpoint boundary is kept intact. The caller restores historical
-        sampler settings and stream coordinates from the episode store; this
-        method only repositions token/backend state and clears cached evidence.
+        sampler settings and stream identity from the episode store; the retained
+        visible-token boundary determines the next sampling boundary.
+        This method only repositions token/backend state and clears cached evidence.
         """
         if type(boundary) is not int or boundary < 0 or boundary > self.boundary:
             raise EditorError(
@@ -446,6 +435,7 @@ class EpisodeEngine:
         return self._prefix_snapshot
 
     def _invalidate_observation(self) -> None:
+        self._rollback_speculative_accept()
         self._observation = None
         self._observation_key = None
         self._prepared_accept = None
@@ -466,11 +456,12 @@ class EpisodeEngine:
         self._backend_positioned = True
 
     def discard_speculative_accept(self) -> None:
-        """Drop a prepared continuation without backend work."""
-        self._prepared_accept = None
+        """Drop a prepared continuation and restore the committed backend prefix."""
+        self._rollback_speculative_accept()
 
     def _rollback_speculative_accept(self) -> None:
-        if self._speculative_accept_prefix is None:
+        if getattr(self, "_speculative_accept_prefix", None) is None:
+            self._prepared_accept = None
             return
         self.backend.rollback_speculation()
         self._speculative_accept_prefix = None
@@ -538,7 +529,6 @@ class EpisodeEngine:
         ):
             return True
         self.discard_speculative_accept()
-        self._rollback_speculative_accept()
         if (
             self.backend.is_eog(token_id)
             or (self.remaining is not None and self.remaining <= 1)
@@ -665,7 +655,7 @@ class EpisodeEngine:
 
     def _decision_key(self) -> tuple:
         return (
-            tuple(self.token_ids), self.sampling, self.coordinate_offset,
+            tuple(self.token_ids), self.sampling,
             self.stream_fingerprint,
             tuple(sorted(self._ephemeral_logit_biases.items())),
         )
@@ -766,17 +756,17 @@ class EpisodeEngine:
         )
         logits = statistics.logits
         distribution = statistics.distribution
-        coordinate = self.coordinate_offset + self.boundary
+        sampling_boundary = self.boundary
         proposal = draw_token(
             distribution,
             seed=self.sampling.seed,
             stream_fingerprint=self.stream_fingerprint,
-            aligned_step=coordinate,
+            aligned_step=sampling_boundary,
             kernel=self.sampling.draw_kernel,
         )
         observation = Observation(
             boundary=self.boundary,
-            sampling_coordinate=coordinate,
+            sampling_boundary=sampling_boundary,
             prefix_token_ids=self._observation_prefix_snapshot(),
             _render_context=self.backend.render,
             logits=logits,
@@ -1039,7 +1029,7 @@ class EpisodeEngine:
             self._metric_sink(observation, token_id)
         return TokenEvidence(
             boundary=self.boundary,
-            sampling_coordinate=observation.sampling_coordinate,
+            sampling_boundary=observation.sampling_boundary,
             token_id=token_id,
             text=self.backend.token_text(token_id),
             proposal_token_id=observation.proposal_token_id,
@@ -1065,18 +1055,19 @@ class EpisodeEngine:
             and prepared.prefix_token_ids == tuple(self.token_ids)
             and self._speculative_accept_prefix == prepared.prefix_token_ids
         )
-        self._prepared_accept = None
+        if promoted:
+            self.backend.commit_speculation()
+            self._speculative_accept_prefix = None
+            self._backend_positioned = True
+        else:
+            self.discard_speculative_accept()
         self._invalidate_observation()
         if evidence.is_eog:
             if not promoted:
                 self._ensure_backend_positioned()
             self.terminal_token_id = token_id
         else:
-            if promoted:
-                self.backend.commit_speculation()
-                self._speculative_accept_prefix = None
-                self._backend_positioned = True
-            else:
+            if not promoted:
                 self._ensure_backend_positioned()
                 self.backend.eval([token_id])
                 self._backend_positioned = True
@@ -1100,7 +1091,7 @@ class EpisodeEngine:
         statistics = observation.statistics
         return {
             "boundary": observation.boundary,
-            "sampling_coordinate": observation.sampling_coordinate,
+            "sampling_boundary": observation.sampling_boundary,
             "token_id": int(token_id),
             "text": self.backend.token_text(token_id),
             "model_rank": int(statistics.model_rank(token_id)),

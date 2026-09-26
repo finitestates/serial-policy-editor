@@ -1,4 +1,4 @@
-"""Stable sampler stream identities with explicit input validation."""
+"""Stable sampler stream identities and boundary validation."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import re
 from .core.errors import EditorError
 
 
-def validate_coordinate(value: int, name: str = "coordinate") -> int:
+def validate_boundary(value: int, name: str = "boundary") -> int:
     if type(value) is not int or value < 0:
         raise EditorError(f"{name} must be a nonnegative integer")
     return value

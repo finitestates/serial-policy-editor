@@ -25,7 +25,12 @@ def _episode() -> EpisodeEngine:
 
 
 def _create(store: EpisodeStore, engine: EpisodeEngine) -> str:
-    return store.create_episode(episode_id="source", initial_text=engine.initial_text, initial_token_ids=engine.initial_token_ids, sampling=engine.sampling, stream_fingerprint=engine.stream_fingerprint, coordinate_offset=engine.coordinate_offset, max_tokens=engine.max_tokens, backend=engine.backend.provenance())
+    return store.create_episode(
+        episode_id="source", initial_text=engine.initial_text,
+        initial_token_ids=engine.initial_token_ids, sampling=engine.sampling,
+        stream_fingerprint=engine.stream_fingerprint, max_tokens=engine.max_tokens,
+        backend=engine.backend.provenance(),
+    )
 
 
 def test_exported_teacher_tape_loads_with_its_embedded_envelope(tmp_path):

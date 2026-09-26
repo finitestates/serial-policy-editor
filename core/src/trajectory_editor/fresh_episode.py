@@ -14,7 +14,7 @@ def fresh_root_from(engine: EpisodeEngine, prompt: str) -> EpisodeEngine:
     The source engine contributes only the loaded primary/guidance backends,
     sampler configuration, and configured tranche allowance.  The new engine
     tokenizes ``prompt`` itself, which gives it a new stream fingerprint and a
-    zero coordinate without carrying any source episode state across.
+    zero boundary without carrying any source episode state across.
     """
 
     if not isinstance(engine, EpisodeEngine):
@@ -27,7 +27,6 @@ def fresh_root_from(engine: EpisodeEngine, prompt: str) -> EpisodeEngine:
         sampling=replace(engine.sampling),
         max_tokens=engine.max_tokens,
         initial_text=prompt,
-        coordinate_offset=0,
         guidance_backend=engine.guidance_backend,
     )
 

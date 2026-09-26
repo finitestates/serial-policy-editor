@@ -46,7 +46,7 @@ def truncate_live_history(
     outcomes: Sequence[ActionOutcome],
     boundary: int,
 ) -> LiveHistoryTruncation:
-    """Retain one live root-relative prefix without rebasing coordinates."""
+    """Retain one live root-relative prefix without rebasing boundaries."""
 
     history = history_from_live(tape, outcomes)
     try:

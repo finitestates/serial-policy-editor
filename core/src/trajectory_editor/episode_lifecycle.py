@@ -61,7 +61,7 @@ def _materialize_model_change_fork(
 ) -> tuple[EpisodeEngine, str]:
     """Materialize a fork whose destination backend has a new tokenizer.
 
-    The source boundary selects text from the source coordinate space.  The
+    The source boundary selects text from the source token sequence.  The
     destination then starts at its own root prompt and records that retained
     text as an exact write, so the child still has boundary zero immediately
     after its root prompt.
@@ -79,7 +79,6 @@ def _materialize_model_change_fork(
         max_tokens=None,
         initial_text=root_text,
         initial_token_ids=root_token_ids,
-        coordinate_offset=0,
         guidance_backend=guidance_backend,
     )
     identifier = _create_episode(
@@ -92,7 +91,7 @@ def _materialize_model_change_fork(
         mode="model-change",
         metadata={
             "model_change_from": source_id,
-            "coordinate_system": "root-relative",
+            "boundary_system": "root-relative",
         },
     )
     retained_text = visible_text_prefix(source_tokens, boundary)
@@ -111,7 +110,6 @@ def _materialize_model_change_fork(
         start_boundary=runtime.boundary,
         sampling=runtime.sampling,
         stream_fingerprint=runtime.stream_fingerprint,
-        coordinate_offset=runtime.coordinate_offset,
     )
     store.record_budget(identifier, runtime.boundary, allowance, checkpoint)
     store.update_episode(
@@ -178,7 +176,6 @@ def _restore_engine(
         initial_text=str(episode["initial_text"]),
         initial_token_ids=episode["initial_token_ids"],
         stream_fingerprint=segment["stream_fingerprint"],
-        coordinate_offset=segment["coordinate_offset"],
         guidance_backend=guidance_backend,
     )
     # These tokens are already known; only the final-position logits are needed.
@@ -196,8 +193,7 @@ def _restore_engine(
             start_boundary=runtime.boundary,
             sampling=sampling,
             stream_fingerprint=runtime.stream_fingerprint,
-            coordinate_offset=runtime.coordinate_offset,
-        )
+            )
     return runtime
 
 
@@ -217,8 +213,8 @@ def _create_episode(
         # Ordinary forks retain the source prompt/context and copy their
         # inherited actions into the child.  Keep this explicit in metadata so
         # tooling can distinguish the canonical representation from old local
-        # coordinate episodes without changing the compact schema.
-        payload.setdefault("coordinate_system", "root-relative")
+        # boundary-indexed episodes without changing the compact schema.
+        payload.setdefault("boundary_system", "root-relative")
     trajectory = engine.trajectory
     return store.create_episode(
         episode_id=requested_id,
@@ -228,7 +224,6 @@ def _create_episode(
         initial_token_ids=trajectory.initial_token_ids,
         sampling=engine.sampling,
         stream_fingerprint=trajectory.stream_fingerprint,
-        coordinate_offset=trajectory.coordinate_offset,
         max_tokens=trajectory.max_tokens,
         backend=backend_provenance,
         metadata=payload,
@@ -244,9 +239,9 @@ def _rewind_episode(
     *, notice=print, sampling_factory: Callable = SamplerConfig.from_record,
 ) -> dict[str, Any]:
     """Restore the destination sampler as well as its retained token prefix."""
-    # Read before truncation removes the future sampler segments. Unlike a
-    # fork, this engine keeps its original prefix and absolute boundaries, so
-    # the stored coordinate offset must not have the boundary added to it.
+    # Read before truncation removes the future sampler segments. This engine
+    # keeps its original root and boundary, so the retained boundary itself
+    # continues to identify the next sampling boundary.
     segment = store.sampling_segment(episode_id, boundary)
     sampling = sampling_factory(segment["sampling"])
     engine.rewind_to(boundary)
@@ -264,10 +259,7 @@ def _rewind_episode(
         engine.trajectory.checkpoint_boundary,
     )
     engine.sampling = sampling
-    engine.trajectory.set_coordinates(
-        stream_fingerprint=segment["stream_fingerprint"],
-        coordinate_offset=segment["coordinate_offset"],
-    )
+    engine.trajectory.set_stream_fingerprint(segment["stream_fingerprint"])
     return details
 
 
@@ -310,7 +302,6 @@ def _fork_engine(
         initial_text=parent_engine.initial_text,
         initial_token_ids=parent_engine.initial_token_ids,
         stream_fingerprint=segment["stream_fingerprint"],
-        coordinate_offset=segment["coordinate_offset"],
         backend_positioned=True,
         guidance_backend=guidance_backend,
     )
@@ -332,7 +323,6 @@ def _spr_engine_from_source(
     sampling_overrides: dict[str, Any] | None = None,
     initial_token_ids: list[int],
     stream_fingerprint: str | None = None,
-    coordinate_offset: int | None = None,
     guidance_backend: Any | None = None,
 ) -> tuple[EpisodeEngine, ReplayPlan]:
     """Build a root-entered runtime and plan from a semantic replay recipe."""
@@ -344,8 +334,6 @@ def _spr_engine_from_source(
     root_controls = recipe.controls.effective_at(0)
     if stream_fingerprint is None:
         stream_fingerprint = root_controls.stream_fingerprint
-    if coordinate_offset is None:
-        coordinate_offset = root_controls.coordinate_offset
     if stream_fingerprint is None:
         raise EditorError("source replay requires a sampler stream fingerprint")
     plan = compose_replay_plan(
@@ -361,7 +349,6 @@ def _spr_engine_from_source(
         initial_text=recipe.source_prompt,
         initial_token_ids=initial_token_ids,
         stream_fingerprint=stream_fingerprint,
-        coordinate_offset=coordinate_offset,
         guidance_backend=guidance_backend,
     )
     return runtime, plan

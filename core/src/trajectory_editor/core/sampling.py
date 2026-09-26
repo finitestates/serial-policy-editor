@@ -1,7 +1,7 @@
 """Dependency-light sampling kernels used by the episode editor.
 
 This module contains the numeric sampling kernels: candidate filtering, rank
-calculations, stable coordinate-derived quantiles, and the final token draw.
+calculations, stable quantiles derived from draw coordinates, and the final token draw.
 The core observer in observation.py assembles policy surfaces and controller
 traces. Research-only policy surfaces live in the separate archive/research
 package.
@@ -241,7 +241,7 @@ def _validate_fingerprint(value: str) -> str:
     return value
 
 
-def _validate_coordinate(value: int, name: str = "coordinate") -> int:
+def _validate_boundary(value: int, name: str = "boundary") -> int:
     if type(value) is not int or value < 0:
         raise EditorError(f"{name} must be a nonnegative integer")
     return value
@@ -251,7 +251,7 @@ def position_uniform(seed: int, stream_fingerprint: str, aligned_step: int) -> f
     if type(seed) is not int or not MIN_SEED <= seed <= MAX_SEED:
         raise EditorError("seed must be a signed-64-bit integer")
     _validate_fingerprint(stream_fingerprint)
-    _validate_coordinate(aligned_step, "sampling position")
+    _validate_boundary(aligned_step, "sampling boundary")
     payload = f"{RNG_SCHEME}:{seed}:{stream_fingerprint}:{aligned_step}".encode()
     value = int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big")
     return (value + 0.5) / float(1 << 64)
@@ -270,7 +270,7 @@ def position_uniform_token(
     if type(seed) is not int or not MIN_SEED <= seed <= MAX_SEED:
         raise EditorError("seed must be a signed-64-bit integer")
     _validate_fingerprint(stream_fingerprint)
-    _validate_coordinate(aligned_step, "sampling position")
+    _validate_boundary(aligned_step, "sampling boundary")
     payload = (
         f"{RNG_SCHEME}:gumbel-max:{seed}:{stream_fingerprint}:"
         f"{aligned_step}:{token_id}"

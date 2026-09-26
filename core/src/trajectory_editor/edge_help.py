@@ -15,6 +15,7 @@ _COMMON_START = (
     EdgeHelpItem("c / continue", "resume the current tranche"),
     EdgeHelpItem("n N / n off", "set an allowance or remove the budget"),
     EdgeHelpItem("s key=value", "change sampler settings"),
+    EdgeHelpItem("s random-seed", "choose and record a new random seed"),
     EdgeHelpItem("f N", "fork at boundary N"),
 )
 
@@ -25,10 +26,9 @@ _DURABLE = (
     EdgeHelpItem("name TITLE", "rename this episode"),
     EdgeHelpItem("rewind N", "delete continuation from token N"),
     *_COMMON_START[:3],
-    EdgeHelpItem("s random-seed", "choose and record a new random seed"),
     *_COMMON_START[3:],
     EdgeHelpItem("fm", "show the fork map and choose a boundary"),
-    EdgeHelpItem("spr ID [--until N | m]", "replay from another episode"),
+    EdgeHelpItem("spr", "ID [--until N | m] · replay from another episode"),
     EdgeHelpItem("p / project", "view the episode record"),
     EdgeHelpItem("e / end", "end and seal the episode"),
     EdgeHelpItem("q / quit", "leave without sealing"),
@@ -43,8 +43,8 @@ _EPHEMERAL = (
     *_COMMON_START,
     EdgeHelpItem("fm", "show the fork map and choose a boundary"),
     EdgeHelpItem("export FILE", "write the selected portable tape"),
-    EdgeHelpItem("save WORKSPACE [ID]", "materialize this branch"),
-    EdgeHelpItem("save-family WORKSPACE [ROOT_ID]", "materialize this live family"),
+    EdgeHelpItem("save", "WORKSPACE [ID] · materialize this branch"),
+    EdgeHelpItem("save-family", "WORKSPACE [ROOT_ID] · materialize this live family"),
     EdgeHelpItem("e / end", "end this branch and show its text"),
     EdgeHelpItem("q / quit", "discard the whole live session"),
 )

@@ -107,7 +107,6 @@ def _recompute_missing_metrics(
             initial_token_ids=episode["initial_token_ids"],
             max_tokens=first_budget["max_tokens"],
             stream_fingerprint=initial["stream_fingerprint"],
-            coordinate_offset=int(initial["coordinate_offset"]),
             guidance_backend=guidance_backend,
         )
         engine.checkpoint_boundary = first_budget["checkpoint_boundary"]

@@ -22,7 +22,6 @@ FINGERPRINT = "a" * 64
 def _state(
     *,
     temperature: float = 1.0,
-    coordinate_offset: int = 0,
     allowance: int | None = 8,
     checkpoint_boundary: int | None = 8,
 ) -> ControlState:
@@ -30,7 +29,6 @@ def _state(
         SamplerState(
             SamplerConfig(temperature=temperature),
             FINGERPRINT,
-            coordinate_offset,
         ),
         BudgetState(allowance, checkpoint_boundary),
     )
@@ -84,10 +82,10 @@ def test_sampler_and_budget_transitions_can_change_at_different_boundaries():
     assert timeline.effective_at(5).allowance == 3
 
 
-def test_truncation_keeps_retained_boundary_and_root_relative_coordinate():
-    initial = _state(coordinate_offset=40)
-    changed = _state(temperature=0.5, coordinate_offset=47)
-    future = _state(temperature=0.2, coordinate_offset=99)
+def test_truncation_keeps_the_control_state_at_the_retained_boundary():
+    initial = _state()
+    changed = _state(temperature=0.5)
+    future = _state(temperature=0.2)
     timeline = (
         ControlTimeline.from_state(initial)
         .append_transition(3, changed)
@@ -97,8 +95,8 @@ def test_truncation_keeps_retained_boundary_and_root_relative_coordinate():
     truncated = timeline.truncate_after(3)
 
     assert [item.start_boundary for item in truncated.transitions] == [0, 3]
-    assert truncated.effective_at(3).coordinate_offset == 47
-    assert truncated.effective_at(100).coordinate_offset == 47
+    assert truncated.effective_at(3).sampling.temperature == 0.5
+    assert truncated.effective_at(100).sampling.temperature == 0.5
 
 
 def test_unlimited_budget_is_an_explicit_valid_state():
@@ -143,11 +141,9 @@ def test_checkpoint_must_not_precede_the_transition_boundary():
         )
 
 
-def test_fingerprint_coordinate_and_boundary_inputs_are_validated():
+def test_fingerprint_and_boundary_inputs_are_validated():
     with pytest.raises(EditorError):
-        SamplerState(SamplerConfig(), "not-a-fingerprint", 0)
-    with pytest.raises(EditorError):
-        SamplerState(SamplerConfig(), FINGERPRINT, -1)
+        SamplerState(SamplerConfig(), "not-a-fingerprint")
     with pytest.raises(EditorError):
         ControlTimeline.from_state(_state()).append_transition(-1, _state())
     with pytest.raises(EditorError):

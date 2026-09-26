@@ -73,7 +73,6 @@ def create(store, episode_id, episode):
         initial_token_ids=list(episode.initial_token_ids),
         sampling=episode.sampling,
         stream_fingerprint=episode.stream_fingerprint,
-        coordinate_offset=episode.coordinate_offset,
         max_tokens=episode.max_tokens,
         backend=episode.backend.provenance(),
     )
@@ -94,7 +93,6 @@ def create_legacy(store, episode, identifier="test"):
         initial_token_ids=list(episode.initial_token_ids),
         sampling=episode.sampling,
         stream_fingerprint=episode.stream_fingerprint,
-        coordinate_offset=0,
         max_tokens=None,
         backend={},
     )
@@ -137,7 +135,7 @@ def test_interactive_bias_before_first_action_survives_save_and_replay(tmp_path)
     )
 
     assert result.outcomes[0].visible_token_ids == (2,)
-    assert [(boundary, sampling.bias_rules) for boundary, sampling, _, _ in session.sampler_states] == [
+    assert [(boundary, sampling.bias_rules) for boundary, sampling, _ in session.sampler_states] == [
         (0, session.sampler.bias_rules),
     ]
 
@@ -355,7 +353,7 @@ def test_ephemeral_replay_plan_uses_source_sampling_on_an_inactive_branch():
     assert result.replay_exhausted
     assert len(result.outcomes) == 2
     assert child.history_visible_token_ids == (1, 3, 5)
-    assert [(boundary, sampling) for boundary, sampling, _, _ in child.sampler_states] == [
+    assert [(boundary, sampling) for boundary, sampling, _ in child.sampler_states] == [
         (0, SamplerConfig(temperature=0.0)),
         (1, first),
         (2, second),

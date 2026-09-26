@@ -319,7 +319,7 @@ learning are all explicitly enabled features.
   the source-initial configuration plus explicit overrides during replay.
   User changes at EDGE remain authoritative after replay yields.
 
-- Validate saved sampler configurations and stream coordinates without silent
+- Validate saved sampler configurations and stream fingerprints without silent
   defaults or coercion. Recoverable records require a preview and confirmation;
   recovery creates a separate copy with provenance, leaving the source intact.
   Unsupported explicit RNG/policy schemes are rejected.
@@ -335,8 +335,8 @@ learning are all explicitly enabled features.
   into a linked episode, retaining the source evidence.
 - In-session forks inherit current allowances rather than stale CLI budgets.
 
-- Seamless rewind restores the sampler settings, seed, and stream coordinates
-  at the destination boundary, so subsequent holds agree with a fork there.
+- Seamless rewind restores the sampler settings, seed, and stream fingerprint
+  at the destination boundary, so subsequent draws use that boundary.
   Both rewind entry points share restoration logic; token budgets are unchanged.
 
 - Rewind now reuses the backend's existing fork-positioning path, falling back

@@ -115,7 +115,6 @@ class EpisodeRunner(_RunnerTarget):
             start_boundary=self.engine.boundary,
             sampling=self.engine.sampling,
             stream_fingerprint=self.engine.stream_fingerprint,
-            coordinate_offset=self.engine.coordinate_offset,
         )
 
     def observe(self) -> Observation:

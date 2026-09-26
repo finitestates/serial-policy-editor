@@ -65,13 +65,11 @@ class MemoryReader:
                 "start_boundary": 0,
                 "sampling": root.to_dict(),
                 "stream_fingerprint": "a" * 64,
-                "coordinate_offset": 11,
             },
             {
                 "start_boundary": 1,
                 "sampling": changed.to_dict(),
                 "stream_fingerprint": "a" * 64,
-                "coordinate_offset": 11,
             },
         ]
         self._budgets = [
@@ -111,7 +109,6 @@ def test_reader_adapter_builds_a_root_relative_recipe_without_a_store():
     assert recipe.source_end_boundary == 1
     assert recipe.procedure.steps[0].action == Write(" A", mode="exact")
     assert recipe.procedure.steps[0].expectation.token_ids == (1,)
-    assert recipe.controls.effective_at(0).coordinate_offset == 11
     assert recipe.controls.effective_at(0).sampling.seed == 3
 
 
@@ -141,7 +138,6 @@ def test_completed_holds_replay_across_source_checkpoints_with_unlimited_budget(
             initial_token_ids=source.initial_token_ids,
             sampling=source.sampling,
             stream_fingerprint=source.stream_fingerprint,
-            coordinate_offset=source.coordinate_offset,
             max_tokens=1,
             backend={},
         )
@@ -325,7 +321,7 @@ def test_source_sampler_transitions_within_supported_prefix_still_apply():
     assert result.handed_off and not result.replay_exhausted
     assert session.engine.visible_token_ids == [1, 2]
     assert session.engine.sampling.seed == 5
-    assert [state.seed for _, state, _, _ in session.sampler_states] == [3, 5]
+    assert [state.seed for _, state, _ in session.sampler_states] == [3, 5]
 
 
 def test_supported_action_without_any_recorded_result_runs_at_full_endpoint():
