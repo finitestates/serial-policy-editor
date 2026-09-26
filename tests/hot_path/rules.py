@@ -241,6 +241,7 @@ COLD = {  # baseline classification; the owner adds new entries
     "decoder:LlamaCppDecoder.hidden_state_layer_types",
     "decoder:LlamaCppDecoder.hidden_state_snapshot",
     "decoder:LlamaCppDecoder.hidden_state_snapshots",
+    "decoder:LlamaCppDecoder.model_id",
     "episode_engine:EpisodeEngine.resume",
     "episode_engine:EpisodeEngine.terminal_reason",
     "episode_engine:EpisodeEngine.terminate",
@@ -270,4 +271,5 @@ COLD = {  # baseline classification; the owner adds new entries
     "transformers_backend:TransformersBackend.hidden_state_capabilities",
     "transformers_backend:TransformersBackend.hidden_state_runtime_layer_range",
     "transformers_backend:TransformersBackend.hidden_state_snapshot",
+    "transformers_backend:TransformersBackend.model_id",
 }
