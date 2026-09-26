@@ -289,3 +289,101 @@ def test_e10_rejected_actions_leave_token_state_unchanged(action):
         runtime.apply(action)
 
     assert (runtime.token_ids, runtime.boundary) == original
+
+
+class CountingBackend(ConformingFakeBackend):
+    def __init__(self):
+        super().__init__()
+        self.eval_calls: list[list[int]] = []
+
+    def eval(self, token_ids):
+        self.eval_calls.append([int(value) for value in token_ids])
+        super().eval(token_ids)
+
+
+class EogWriteBackend(CountingBackend):
+    def tokenize(self, text, *, add_bos=False, special=False):
+        if not add_bos and text == "STOP":
+            return [1, 0, 2]
+        return super().tokenize(text, add_bos=add_bos, special=special)
+
+
+def test_e11_write_batch_commits_all_tokens_with_a_single_backend_eval():
+    backend = CountingBackend()
+    runtime = engine(backend)
+    backend.eval_calls.clear()
+
+    outcome = runtime.apply(Write(" A B", mode="exact"))
+
+    assert outcome.resolved_token_ids == (1, 2)
+    assert outcome.visible_token_ids == (1, 2)
+    assert runtime.boundary == 2
+    assert backend.eval_calls == [[1, 2]]
+
+
+def test_e12_write_batch_evidence_has_one_record_per_token_with_exact_boundaries():
+    runtime = engine()
+
+    outcome = runtime.apply(Write(" A B", mode="exact"))
+
+    assert outcome.stop_reason == "completed"
+    assert len(outcome.evidence) == 2
+    assert [item.boundary for item in outcome.evidence] == [0, 1]
+    assert [item.sampling_boundary for item in outcome.evidence] == [0, 1]
+    assert [item.token_id for item in outcome.evidence] == [1, 2]
+    assert [item.text for item in outcome.evidence] == [" A", " B"]
+    assert all(item.realized_visible for item in outcome.evidence)
+    assert not any(item.is_eog for item in outcome.evidence)
+    # Inserts deliberately record no per-token model probabilities; the
+    # history adapter already treats these as the "unknown" defaults.
+    assert all(item.decoder_probability == 0.0 for item in outcome.evidence)
+    assert all(not item.proposal_agreement for item in outcome.evidence)
+    assert all(item.raw_rank is None for item in outcome.evidence)
+
+
+def test_e13_write_batch_stops_at_first_eog_token():
+    backend = EogWriteBackend()
+    runtime = engine(backend)
+    backend.eval_calls.clear()
+
+    outcome = runtime.apply(Write("STOP", mode="exact"))
+
+    assert outcome.resolved_token_ids == (1, 0)
+    assert outcome.visible_token_ids == (1,)
+    assert runtime.boundary == 1
+    assert outcome.stop_reason == "eog"
+    assert outcome.terminal_token_id == 0
+    assert runtime.terminal_reason == "teacher-eog"
+    assert len(outcome.evidence) == 2
+    assert outcome.evidence[-1].is_eog
+    assert not outcome.evidence[-1].realized_visible
+    # The EOG token rides the same single eval; it is resolved but never visible.
+    assert backend.eval_calls == [[1, 0]]
+
+
+def test_e14_write_batch_matches_replay_path_outcome():
+    live = engine(EogWriteBackend())
+    live_outcome = live.apply(Write(" A B", mode="exact"))
+    replayed = engine(EogWriteBackend())
+    replay_outcome = replayed.apply(Write(" A B", mode="exact"), replay=True)
+
+    assert live_outcome.resolved_token_ids == replay_outcome.resolved_token_ids
+    assert live_outcome.visible_token_ids == replay_outcome.visible_token_ids
+    assert live_outcome.stop_reason == replay_outcome.stop_reason
+    assert len(live_outcome.evidence) == len(replay_outcome.evidence)
+    for live_item, replay_item in zip(live_outcome.evidence, replay_outcome.evidence):
+        assert (
+            live_item.boundary,
+            live_item.sampling_boundary,
+            live_item.token_id,
+            live_item.text,
+            live_item.is_eog,
+            live_item.realized_visible,
+        ) == (
+            replay_item.boundary,
+            replay_item.sampling_boundary,
+            replay_item.token_id,
+            replay_item.text,
+            replay_item.is_eog,
+            replay_item.realized_visible,
+        )
