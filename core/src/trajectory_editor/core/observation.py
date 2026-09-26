@@ -50,20 +50,28 @@ def _history_penalty_surface(
         considered = history
     else:
         considered = history[-config.repeat_last_n :]
-    counts = np.bincount(considered, minlength=len(values)).astype(np.int64, copy=False)
+    frequency_penalty = float(config.frequency_penalty)
+    counts = None
+    if frequency_penalty != 0.0:
+        counts = np.bincount(considered, minlength=len(values)).astype(
+            np.int64, copy=False
+        )
+        present_ids = np.flatnonzero(counts)
+    else:
+        present_ids = np.unique(considered)
+
     adjusted = values.copy()
-    present = counts > 0
-    if float(config.repeat_penalty) != 1.0 and np.any(present):
-        selected = adjusted[present]
-        adjusted[present] = np.where(
+    if float(config.repeat_penalty) != 1.0 and len(present_ids):
+        selected = adjusted[present_ids]
+        adjusted[present_ids] = np.where(
             selected < 0.0,
             selected * float(config.repeat_penalty),
             selected / float(config.repeat_penalty),
         )
-    if float(config.presence_penalty) != 0.0:
-        adjusted[present] -= float(config.presence_penalty)
-    if float(config.frequency_penalty) != 0.0:
-        adjusted -= counts * float(config.frequency_penalty)
+    if float(config.presence_penalty) != 0.0 and len(present_ids):
+        adjusted[present_ids] -= float(config.presence_penalty)
+    if counts is not None:
+        adjusted -= counts * frequency_penalty
     if not np.all(np.isfinite(adjusted)):
         raise ValueError("history penalties produced non-finite policy logits")
     return adjusted

@@ -129,13 +129,22 @@ class StandardCandidateFilter:
             }
             return CandidateFilterResult(adjusted, stages, {"filter": cls.name, "greedy": True})
 
-        scaled = adjusted / float(config.temperature)
+        temperature = float(config.temperature)
+        scaled = adjusted if temperature == 1.0 else adjusted / temperature
         if not np.all(np.isfinite(scaled)):
             raise ValueError("temperature produced non-finite scaled logits")
         after_top_k = _top_ids(scaled, min(config.top_k, len(scaled)))
-        after_typical = cls._typical(after_top_k, scaled, float(config.typical_p))
-        after_tail_free = cls._tail_free(after_typical, scaled, float(config.tail_free_z))
-        after_top_p = cls._sorted(after_tail_free, scaled)
+        typical_p = float(config.typical_p)
+        if typical_p >= 1.0:
+            after_typical = after_top_k
+        else:
+            after_typical = cls._typical(after_top_k, scaled, typical_p)
+        tail_free_z = float(config.tail_free_z)
+        if typical_p >= 1.0 and tail_free_z >= 1.0:
+            after_tail_free = after_top_k
+        else:
+            after_tail_free = cls._tail_free(after_typical, scaled, tail_free_z)
+        after_top_p = after_tail_free
         if config.top_p < 1.0:
             probabilities = _softmax(scaled[after_top_p])
             keep_count = int(

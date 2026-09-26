@@ -630,7 +630,7 @@ class EpisodeEngine:
 
     def _decision_key(self) -> tuple:
         return (
-            tuple(self.token_ids), self.sampling,
+            self._observation_prefix_snapshot(), self.sampling,
             self.stream_fingerprint,
             tuple(sorted(self._ephemeral_logit_biases.items())),
         )
