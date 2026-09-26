@@ -106,7 +106,7 @@ class ChoiceSet:
     choice_set_id: str
     prompt_id: str
     aligned_step: int
-    sampling_coordinate: int
+    sampling_boundary: int
     context_token_sha256: str
     context_text_tail: str | ContextText
     proposal_token_id: int

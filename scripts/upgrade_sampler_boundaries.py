@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""One-time SQLite upgrade that removes the legacy sampler offset field.
+"""One-time SQLite upgrade for sampler boundaries.
 
-Usage: python scripts/upgrade_boundary_coordinates.py PATH/TO/episodes.sqlite3
+Usage: python scripts/upgrade_sampler_boundaries.py PATH/TO/episodes.sqlite3
 
-The upgrader is intentionally standalone and is not invoked by EpisodeStore.
-It preserves the old database as a SQLite backup before changing its schema.
+The standalone utility removes the old sampler offset column and renames the
+stored draw-position evidence field. EpisodeStore never runs it automatically.
+A SQLite backup is saved beside the database before the schema changes.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class UpgradeError(RuntimeError):
@@ -23,11 +24,13 @@ class UpgradeError(RuntimeError):
 
 def _backup(source: sqlite3.Connection, database: Path) -> Path:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    backup = database.with_name(f"{database.name}.before-boundary-upgrade-{stamp}.bak")
+    backup = database.with_name(
+        f"{database.name}.before-sampler-boundary-upgrade-{stamp}.bak"
+    )
     suffix = 1
     while backup.exists():
         backup = database.with_name(
-            f"{database.name}.before-boundary-upgrade-{stamp}-{suffix}.bak"
+            f"{database.name}.before-sampler-boundary-upgrade-{stamp}-{suffix}.bak"
         )
         suffix += 1
     target = sqlite3.connect(backup)
@@ -38,8 +41,15 @@ def _backup(source: sqlite3.Connection, database: Path) -> Path:
     return backup
 
 
+def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {
+        row["name"]
+        for row in connection.execute(f"PRAGMA table_info({table})")
+    }
+
+
 def upgrade_database(database: Path) -> Path | None:
-    """Drop the legacy sampler offset column and return the safety-copy path."""
+    """Upgrade sampler storage and return the safety-copy path, if needed."""
 
     database = database.expanduser().resolve()
     if not database.is_file():
@@ -56,7 +66,7 @@ def upgrade_database(database: Path) -> Path | None:
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
-        if "schema_info" not in tables or "sampler_segments" not in tables:
+        if not {"schema_info", "sampler_segments", "tokens"}.issubset(tables):
             raise UpgradeError("file is not a recognized episode database")
 
         version_row = connection.execute(
@@ -65,29 +75,33 @@ def upgrade_database(database: Path) -> Path | None:
         if version_row is None:
             raise UpgradeError("episode database has no schema version")
         version = int(version_row["version"])
-        if version not in {2, SCHEMA_VERSION}:
+        if version not in {2, 3, SCHEMA_VERSION}:
             raise UpgradeError(
                 f"schema version {version} is not supported by this one-time upgrader; "
                 "open the database with the previous release first"
             )
 
-        columns = {
-            row["name"]
-            for row in connection.execute("PRAGMA table_info(sampler_segments)")
-        }
-        has_offset = "coordinate_offset" in columns
-        if version == SCHEMA_VERSION and not has_offset:
+        sampler_columns = _columns(connection, "sampler_segments")
+        token_columns = _columns(connection, "tokens")
+        if "sampling_coordinate" in token_columns and "sampling_boundary" in token_columns:
+            raise UpgradeError(
+                "token table contains both old and new sampling-position fields"
+            )
+        has_offset = "coordinate_offset" in sampler_columns
+        has_old_sampling_position = "sampling_coordinate" in token_columns
+        has_new_sampling_position = "sampling_boundary" in token_columns
+        if not has_old_sampling_position and not has_new_sampling_position:
+            raise UpgradeError("token table has no recognized sampling-position field")
+        if version == SCHEMA_VERSION and not has_offset and not has_old_sampling_position:
             return None
 
         backup = _backup(connection, database)
         connection.execute("BEGIN IMMEDIATE")
         # Recheck after acquiring the write lock in case another process changed
         # the file between the initial inspection and this transaction.
-        columns = {
-            row["name"]
-            for row in connection.execute("PRAGMA table_info(sampler_segments)")
-        }
-        if "coordinate_offset" in columns:
+        sampler_columns = _columns(connection, "sampler_segments")
+        token_columns = _columns(connection, "tokens")
+        if "coordinate_offset" in sampler_columns:
             connection.execute(
                 "ALTER TABLE sampler_segments RENAME TO sampler_segments_with_offset"
             )
@@ -107,6 +121,16 @@ def upgrade_database(database: Path) -> Path | None:
                   FROM sampler_segments_with_offset"""
             )
             connection.execute("DROP TABLE sampler_segments_with_offset")
+        if "sampling_coordinate" in token_columns:
+            if "sampling_boundary" in token_columns:
+                raise UpgradeError(
+                "token table contains both old and new sampling-position fields"
+            )
+            connection.execute(
+                "ALTER TABLE tokens RENAME COLUMN sampling_coordinate TO sampling_boundary"
+            )
+        elif "sampling_boundary" not in token_columns:
+            raise UpgradeError("token table has no recognized sampling-position field")
         connection.execute("UPDATE schema_info SET version = ?", (SCHEMA_VERSION,))
         connection.commit()
 
@@ -136,10 +160,10 @@ def main() -> int:
     except (UpgradeError, sqlite3.Error) as exc:
         parser.error(str(exc))
     if backup is None:
-        print("Episode database is already on the boundary-coordinate schema.")
+        print("Episode database is already on the sampler-boundary schema.")
     else:
         print(f"Saved backup: {backup}")
-        print("Upgraded sampler coordinates to use visible-token boundaries directly.")
+        print("Upgraded sampler evidence and controls to boundary terminology.")
     return 0
 
 

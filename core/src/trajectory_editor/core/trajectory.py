@@ -2,7 +2,7 @@
 
 This object deliberately knows nothing about model backends, persistence, or
 terminal UI. It owns the token ledger and the small amount of state needed to
-describe the current live branch and replay coordinate.
+describe the current live branch and replay boundary.
 """
 
 from __future__ import annotations

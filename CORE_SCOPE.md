@@ -3,9 +3,9 @@
 This project is an interactive episode runtime: a menu-driven environment
 for selecting tokens sequentially. This environment also has the capacity for rewinding, forking, speculative decoding, as well as replaying episodes.
 
-The engine's complete semantic state is the token ledger, sampler configuration, and sampler stream identity. At each decision, the visible-token boundary is the sampling coordinate: boundary 0 uses coordinate 0, boundary 1 uses coordinate 1, and so on. The deterministic draw is addressed by the root prefix fingerprint, the configured seed, and that boundary.
+The engine's complete semantic state is the token ledger, sampler configuration, and sampler stream identity. At each decision, the observing engine's visible-token boundary is the sampling boundary: boundary 0 uses step 0, boundary 1 uses step 1, and so on. The seed, root-prefix fingerprint, and aligned step together form the draw coordinates. Gumbel-Max adds the candidate token ID as another coordinate.
 
-The deterministic sampler state makes forking, chording, rewinding, and replaying comparatively easy to do. Assuming you know the step, seed number, and prefix, you can calculate the sampler coordinates at a given step exactly.
+The deterministic sampler state makes forking, chording, rewinding, and replaying comparatively easy to do. Assuming you know the step, seed number, and prefix, you can calculate the draw coordinates at a given step exactly.
 
 Even though the sampler state is deterministic, it doesn't feel that way unless you do a lot of episodes with the exact same prefix, model, and teacher decisions. The editor gives the user the freedom to intervene basically whenever, so no trajectory is "set in stone," unless the user wants it to be.
 
@@ -49,7 +49,7 @@ Replay executes supported teacher actions in order. At the first action it canno
 Source-derived plans follow the source sampler schedule by default. A caller can instead preserve the destination sampler or supply a different schedule; fixed or counterfactual plans can omit the source schedule.
 
 ### Serial policy replay
-`spr SOURCE [until]` appends the source episode's surviving teacher procedure to the currently selected episode, leaving the destination root intact. The source prompt, if present, is replayed as an exact write, followed by the selected source actions and their recorded expectations. until is measured in the source's root-relative visible-token coordinates; the resulting history is recorded at the destination's coordinates. SPR preserves the destination's sampler context instead of applying the source sampler schedule, while the selected divergence policy controls whether replay hands off on divergence or continues.
+`spr SOURCE [until]` appends the source episode's surviving teacher procedure to the currently selected episode, leaving the destination root intact. The source prompt, if present, is replayed as an exact write, followed by the selected source actions and their recorded expectations. until is measured in the source's root-relative visible-token boundaries; the resulting history is recorded at the destination's boundaries. SPR preserves the destination's sampler context instead of applying the source sampler schedule, while the selected divergence policy controls whether replay hands off on divergence or continues.
 
 ## Rewind contract
 
@@ -61,8 +61,8 @@ evidence such as EOG does not advance it.
 Rewind truncates the selected open episode or branch in place through that
 boundary. It removes later history, repositions the runtime to the retained
 prefix, clears terminal state, and restores the sampler, stream fingerprint,
-and budget state for the selected boundary. The next draw uses that boundary
-as its coordinate. Rewind does not create a child branch; fork first when both
+and budget state for the selected boundary. The next draw uses the retained
+boundary. Rewind does not create a child branch; fork first when both
 paths should be kept.
 
 Completed or failed durable
@@ -81,7 +81,7 @@ Nested ordinary forks keep the same root-relative history frame. Parent identity
 child may rewind or fork. A child may rewind before its original fork boundary. If the fork boundary cuts through an action, materialize the retained prefix
 using the same partial-action rules as rewind. 
 
-A model-change fork is a separate case: select the prefix in the source's coordinates, then materialize its text under the destination tokenizer. The
+A model-change fork is a separate case: select the prefix at the source boundary, then materialize its text under the destination tokenizer. The
 child's runtime boundaries follow that destination representation, while
 `fork_boundary` remains provenance for the source boundary. Forking actions do not become part of a replay plan derived from an episode.
 
@@ -91,7 +91,7 @@ Existing SQLite workspaces need a one-time manual update before use with this
 boundary-based sampler format. Run:
 
 ```sh
-python scripts/upgrade_boundary_coordinates.py PATH/TO/episodes.sqlite3
+python scripts/upgrade_sampler_boundaries.py PATH/TO/episodes.sqlite3
 ```
 
 The utility saves a backup beside the database and does not run automatically

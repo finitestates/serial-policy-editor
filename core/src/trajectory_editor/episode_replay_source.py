@@ -221,7 +221,7 @@ def _select_through(
     *,
     full_source: bool,
 ) -> SurvivingProcedure:
-    """Select a procedure prefix without rebasing its source coordinates."""
+    """Select a procedure prefix without rebasing its source boundaries."""
 
     selected: list[ProcedureStep] = []
     partial = set(source.procedure.partial_source_indices)

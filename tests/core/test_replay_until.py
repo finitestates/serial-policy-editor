@@ -150,7 +150,7 @@ def test_cli_edge_replay_appends_live_text_without_mutating_the_source(source_wo
 
 
 @pytest.mark.invariant
-def test_cli_fork_from_persists_inherited_history_in_root_coordinates(source_workspace):
+def test_cli_fork_from_persists_inherited_history_in_root_boundaries(source_workspace):
     run_cli(
         source_workspace,
         ["q", "quit"],

@@ -255,7 +255,7 @@ def _choice_from_observation(
         choice_set_id=f"episode-choice-{serial:06d}",
         prompt_id="episode",
         aligned_step=observation.boundary,
-        sampling_coordinate=observation.sampling_coordinate,
+        sampling_boundary=observation.sampling_boundary,
         context_token_sha256=context_token_sha256,
         context_text_tail=context_text_tail,
         proposal_token_id=observation.proposal_token_id,

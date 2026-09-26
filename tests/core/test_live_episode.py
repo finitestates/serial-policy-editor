@@ -123,7 +123,7 @@ def test_fork_creates_an_independent_child_with_lineage_and_inherited_history():
 
     assert child.branch.parent_id == "root"
     assert child.branch.fork_boundary == 1
-    # A session keeps root-relative coordinates for every branch.  The child
+    # A session keeps root-relative boundaries for every branch.  The child
     # resumes on the one shared backend instead of receiving a new model.
     assert child.engine.initial_token_ids == (7,)
     assert child.engine.visible_token_ids == [1]
@@ -155,7 +155,7 @@ def test_live_session_reactivates_branch_records_on_one_backend():
 
 
 @pytest.mark.invariant
-def test_nested_fork_truncates_a_partial_action_in_root_coordinates():
+def test_nested_fork_truncates_a_partial_action_in_root_boundaries():
     session = LiveSession(engine(), branch_id="root")
     session.generate(Accept())
     child = session.fork(boundary=1, branch_id="child")

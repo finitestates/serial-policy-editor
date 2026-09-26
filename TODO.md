@@ -10,7 +10,7 @@ Working backlog from a read-only review and our follow-up discussion. The projec
 
 ## Replay authoring and independent correctness
 
-- [ ] Build a minimal `reference-kernel-oracle` that invokes llama.cpp directly and stays independent of `episode_engine` and its sampling path. Limit its actions to accepting the proposal and `hold X`. Compare its token sequences with the editor under matching inputs, and include a small reproducible demonstration of how deterministic sampler coordinates can produce different behavior.
+- [ ] Build a minimal `reference-kernel-oracle` that invokes llama.cpp directly and stays independent of `episode_engine` and its sampling path. Limit its actions to accepting the proposal and `hold X`. Compare its token sequences with the editor under matching inputs, and include a small reproducible demonstration of how deterministic sampler draw coordinates can produce different behavior.
 - [ ] Define a plain-text teacher-plan format modeled on `--procedure`, then add a parser with useful line-numbered errors. Check whether the current procedure view includes everything replay needs; decide what grammar and expected-result details the format must add. Keep JSONL plans usable.
 
 ## Tokenizer identity and streaming

@@ -208,7 +208,7 @@ def test_l04a_persisted_fork_keeps_root_relative_history_and_can_rewind_to_zero(
         assert project_fork_map(store, child_id) == "P|0|"
 
 
-def test_l04b_nested_persisted_forks_keep_the_same_root_coordinates(tmp_path):
+def test_l04b_nested_persisted_forks_keep_the_same_root_boundaries(tmp_path):
     with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
         parent = runtime()
         parent_id = create(store, "parent", parent)

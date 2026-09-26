@@ -17,7 +17,7 @@ from trajectory_editor.episode_store import EpisodeStore
 
 
 @pytest.mark.invariant
-def test_legacy_workspace_upgrade_drops_sampler_offset_and_preserves_history(tmp_path):
+def test_legacy_workspace_upgrade_renames_sampler_position_and_preserves_history(tmp_path):
     path = tmp_path / "legacy.db"
     with EpisodeStore(path) as store:
         engine = EpisodeEngine(
@@ -31,7 +31,9 @@ def test_legacy_workspace_upgrade_drops_sampler_offset_and_preserves_history(tmp
         )
         store.record_action(episode_id, 0, engine.apply(Accept()))
         db = store.connection
-        db.execute("UPDATE tokens SET raw_model_nll = 1.5, raw_rank = 2, policy_rank = 3")
+        db.execute(
+            "UPDATE tokens SET raw_model_nll = 1.5, raw_rank = 2, policy_rank = 3"
+        )
         db.execute("ALTER TABLE tokens RENAME TO tokens_old")
         db.execute("""CREATE TABLE tokens (
             episode_id TEXT NOT NULL, action_ordinal INTEGER NOT NULL,
@@ -46,6 +48,7 @@ def test_legacy_workspace_upgrade_drops_sampler_offset_and_preserves_history(tmp
             FOREIGN KEY (episode_id, action_ordinal) REFERENCES actions(episode_id, ordinal)
         )""")
         db.execute("INSERT INTO tokens SELECT * FROM tokens_old")
+        db.execute("UPDATE tokens SET sampling_coordinate = 29")
         db.execute("DROP TABLE tokens_old")
         db.execute("ALTER TABLE sampler_segments RENAME TO sampler_segments_current")
         db.execute("""CREATE TABLE sampler_segments (
@@ -62,10 +65,10 @@ def test_legacy_workspace_upgrade_drops_sampler_offset_and_preserves_history(tmp
         db.execute("UPDATE schema_info SET version = 1")
         db.commit()
 
-    with pytest.raises(EditorError, match="one-time boundary-coordinate upgrade"):
+    with pytest.raises(EditorError, match="one-time sampler-boundary upgrade"):
         EpisodeStore(path)
 
-    script = Path(__file__).resolve().parents[2] / "scripts" / "upgrade_boundary_coordinates.py"
+    script = Path(__file__).resolve().parents[2] / "scripts" / "upgrade_sampler_boundaries.py"
     upgraded = subprocess.run(
         [sys.executable, str(script), str(path)],
         check=True,
@@ -77,6 +80,15 @@ def test_legacy_workspace_upgrade_drops_sampler_offset_and_preserves_history(tmp
 
     with EpisodeStore(path) as store:
         assert store.tokens(episode_id)[0]["raw_model_nll"] == 1.5
-        assert store.connection.execute("SELECT version FROM schema_info").fetchone()[0] == 3
+        token = store.tokens(episode_id)[0]
+        assert token["sampling_boundary"] == 29
+        assert token["boundary"] == 0
+        assert store.connection.execute("SELECT version FROM schema_info").fetchone()[0] == 4
         assert store.connection.execute("PRAGMA table_info(tokens)").fetchall()[10][3] == 0
         assert store.sampler_segments(episode_id)[0]["stream_fingerprint"] == engine.stream_fingerprint
+        token_columns = {
+            row["name"]
+            for row in store.connection.execute("PRAGMA table_info(tokens)")
+        }
+        assert "sampling_coordinate" not in token_columns
+        assert "sampling_boundary" in token_columns

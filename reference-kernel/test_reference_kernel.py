@@ -40,13 +40,13 @@ def test_observe_is_pure_and_directly_addressed(kernel):
     first = observe(backend, branch)
     for _ in range(1000):
         assert observe(backend, branch) == first
-    assert first.sampling_coordinate == 0
+    assert first.sampling_boundary == 0
     later = position_uniform(branch.world, 500)
-    for coordinate in range(500):
-        position_uniform(branch.world, coordinate)
+    for boundary in range(500):
+        position_uniform(branch.world, boundary)
     assert position_uniform(branch.world, 500) == later
     advanced, _ = apply(backend, branch, Accept())
-    assert observe(backend, advanced).sampling_coordinate == 1
+    assert observe(backend, advanced).sampling_boundary == 1
 
 
 @pytest.mark.parametrize("kernel", ["categorical", "gumbel-max"])
@@ -64,7 +64,7 @@ def test_immutable_continuation_rewind_and_fork(seed, kernel):
     assert (forked, fork_result) == (continuation, first_result)
     assert first_result.stop_reason == "requested-length"
     assert rewind(continuation, 7).world == original.world
-    assert observe(backend, rewind(continuation, 7)).sampling_coordinate == 7
+    assert observe(backend, rewind(continuation, 7)).sampling_boundary == 7
 
 
 def test_interventions_and_conditional_hold_keep_the_same_world():
@@ -77,8 +77,8 @@ def test_interventions_and_conditional_hold_keep_the_same_world():
     altered, _ = apply(backend, altered, Hold(11))
     assert altered.state.token_ids != natural.state.token_ids
     assert altered.world == natural.world
-    for coordinate in range(12):
-        assert position_uniform(altered.world, coordinate) == position_uniform(natural.world, coordinate)
+    for boundary in range(12):
+        assert position_uniform(altered.world, boundary) == position_uniform(natural.world, boundary)
 
     # A conditional hold has a fixed stopping token and boundary as well.
     stop = result.visible_token_ids[3]
@@ -105,7 +105,7 @@ def test_policy_truncation_remaps_one_fixed_categorical_quantile():
     b = observe(backend, branch)
     branch, _ = apply(backend, branch, SetPolicy(Policy(top_k=2)))
     assert (a.proposal_token_id, b.proposal_token_id, observe(backend, branch).proposal_token_id) == (0, 1, 0)
-    assert a.sampling_coordinate == b.sampling_coordinate == 0
+    assert a.sampling_boundary == b.sampling_boundary == 0
     assert a.distribution.ids != b.distribution.ids
 
 
@@ -113,8 +113,8 @@ def test_gumbel_candidate_order_and_exclusions_preserve_noise():
     world = start().world
     original = Distribution((5, 3, 8), (0.4, 0.3, 0.3), (1.0, 0.5, 0.0))
     reordered = Distribution((8, 5, 3), (0.3, 0.4, 0.3), (0.0, 1.0, 0.5))
-    for coordinate in range(40):
-        assert draw(original, world, coordinate, "gumbel-max") == draw(reordered, world, coordinate, "gumbel-max")
+    for boundary in range(40):
+        assert draw(original, world, boundary, "gumbel-max") == draw(reordered, world, boundary, "gumbel-max")
 
     class Constant:
         def logits(self, prefix):
@@ -177,7 +177,7 @@ def test_entropy_is_resolved_before_a_reroll_enters_the_tape(monkeypatch):
     assert replay(ScriptedBackend(), restored) == replay(ScriptedBackend(), tape)
 
 
-def test_eog_is_terminal_evidence_and_rewind_restores_the_coordinate():
+def test_eog_is_terminal_evidence_and_rewind_restores_the_boundary():
     class Finite(ScriptedBackend):
         def logits(self, prefix):
             if len(prefix) >= 5:

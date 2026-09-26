@@ -61,7 +61,7 @@ def _materialize_model_change_fork(
 ) -> tuple[EpisodeEngine, str]:
     """Materialize a fork whose destination backend has a new tokenizer.
 
-    The source boundary selects text from the source coordinate space.  The
+    The source boundary selects text from the source token sequence.  The
     destination then starts at its own root prompt and records that retained
     text as an exact write, so the child still has boundary zero immediately
     after its root prompt.
@@ -91,7 +91,7 @@ def _materialize_model_change_fork(
         mode="model-change",
         metadata={
             "model_change_from": source_id,
-            "coordinate_system": "root-relative",
+            "boundary_system": "root-relative",
         },
     )
     retained_text = visible_text_prefix(source_tokens, boundary)
@@ -213,8 +213,8 @@ def _create_episode(
         # Ordinary forks retain the source prompt/context and copy their
         # inherited actions into the child.  Keep this explicit in metadata so
         # tooling can distinguish the canonical representation from old local
-        # coordinate episodes without changing the compact schema.
-        payload.setdefault("coordinate_system", "root-relative")
+        # boundary-indexed episodes without changing the compact schema.
+        payload.setdefault("boundary_system", "root-relative")
     trajectory = engine.trajectory
     return store.create_episode(
         episode_id=requested_id,
@@ -241,7 +241,7 @@ def _rewind_episode(
     """Restore the destination sampler as well as its retained token prefix."""
     # Read before truncation removes the future sampler segments. This engine
     # keeps its original root and boundary, so the retained boundary itself
-    # continues to identify the next sampling coordinate.
+    # continues to identify the next sampling boundary.
     segment = store.sampling_segment(episode_id, boundary)
     sampling = sampling_factory(segment["sampling"])
     engine.rewind_to(boundary)

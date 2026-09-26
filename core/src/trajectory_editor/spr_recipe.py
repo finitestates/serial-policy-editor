@@ -132,7 +132,7 @@ def compose_replay_plan(
     ``SOURCE_ROOT`` leaves the source prompt out of the tape because lifecycle
     code uses it as the engine entrance.  ``APPEND_TO_CURRENT_BRANCH`` makes
     that prompt an ordinary exact write, preserving all destination root and
-    coordinate state.  The control policy is intentionally required at every
+    boundary state.  The control policy is intentionally required at every
     call site: following source controls and preserving destination controls
     are different placement semantics.
     """

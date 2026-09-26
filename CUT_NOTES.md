@@ -10,7 +10,7 @@ historical schema obligations.
 - Plain and prompt-toolkit terminal interfaces.
 - llama.cpp and Hugging Face Transformers backends.
 - The sampler pipeline: temperature, top-k/top-p/min-p, repetition, presence,
-  and frequency penalties, deterministic seed/coordinate behavior.
+  and frequency penalties, deterministic seed/boundary behavior.
 - Per-token editorial evidence including proposal token, proposal agreement,
   raw-model NLL, raw rank, policy rank, and decoder probability.
 - A compact SQLite episode workspace used for persistence, resumption, evidence,

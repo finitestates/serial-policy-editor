@@ -447,11 +447,11 @@ def _evidence_from_record(record: Mapping[str, Any]) -> TokenEvidence:
 
     boundary = int(record["boundary"])
     # Lightweight adapters that only need boundary/text projection may omit a
-    # token id; use the distinct root coordinate as a harmless placeholder.
+    # token id; use the distinct root boundary as a harmless placeholder.
     token_id = int(record.get("token_id", boundary))
     return TokenEvidence(
         boundary=boundary,
-        sampling_coordinate=int(record.get("sampling_coordinate", boundary)),
+        sampling_boundary=int(record.get("sampling_boundary", boundary)),
         token_id=token_id,
         text=str(record["text"]),
         proposal_token_id=int(record.get("proposal_token_id", token_id)),

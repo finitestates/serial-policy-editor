@@ -129,7 +129,7 @@ class TokenPrefixSnapshot(Sequence[int]):
 @dataclass(frozen=True)
 class Observation:
     boundary: int
-    sampling_coordinate: int
+    sampling_boundary: int
     prefix_token_ids: Sequence[int] = field(repr=False)
     _render_context: Callable[..., str] = field(repr=False, compare=False)
     logits: np.ndarray = field(repr=False, compare=False)
@@ -165,11 +165,11 @@ class _PreparedAccept:
 
 
 class EpisodeEngine:
-    """Own token state, sampler coordinates, and all action resolution.
+    """Own token state, sampling controls, and all action resolution.
 
     The backend owns its private evaluation state. The engine's complete
-    semantic state is the token ledger plus the sampler configuration and
-    coordinate.
+    semantic state is the token ledger plus the sampler configuration,
+    stream identity, and current boundary.
     """
 
     def __init__(
@@ -381,7 +381,7 @@ class EpisodeEngine:
 
         The checkpoint boundary is kept intact. The caller restores historical
         sampler settings and stream identity from the episode store; the retained
-        visible-token boundary determines the next sampling coordinate.
+        visible-token boundary determines the next sampling boundary.
         This method only repositions token/backend state and clears cached evidence.
         """
         if type(boundary) is not int or boundary < 0 or boundary > self.boundary:
@@ -756,17 +756,17 @@ class EpisodeEngine:
         )
         logits = statistics.logits
         distribution = statistics.distribution
-        coordinate = self.boundary
+        sampling_boundary = self.boundary
         proposal = draw_token(
             distribution,
             seed=self.sampling.seed,
             stream_fingerprint=self.stream_fingerprint,
-            aligned_step=coordinate,
+            aligned_step=sampling_boundary,
             kernel=self.sampling.draw_kernel,
         )
         observation = Observation(
             boundary=self.boundary,
-            sampling_coordinate=coordinate,
+            sampling_boundary=sampling_boundary,
             prefix_token_ids=self._observation_prefix_snapshot(),
             _render_context=self.backend.render,
             logits=logits,
@@ -1029,7 +1029,7 @@ class EpisodeEngine:
             self._metric_sink(observation, token_id)
         return TokenEvidence(
             boundary=self.boundary,
-            sampling_coordinate=observation.sampling_coordinate,
+            sampling_boundary=observation.sampling_boundary,
             token_id=token_id,
             text=self.backend.token_text(token_id),
             proposal_token_id=observation.proposal_token_id,
@@ -1091,7 +1091,7 @@ class EpisodeEngine:
         statistics = observation.statistics
         return {
             "boundary": observation.boundary,
-            "sampling_coordinate": observation.sampling_coordinate,
+            "sampling_boundary": observation.sampling_boundary,
             "token_id": int(token_id),
             "text": self.backend.token_text(token_id),
             "model_rank": int(statistics.model_rank(token_id)),

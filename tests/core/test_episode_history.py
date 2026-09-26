@@ -18,7 +18,7 @@ pytestmark = pytest.mark.invariant
 def evidence(boundary: int, token_id: int, text: str) -> TokenEvidence:
     return TokenEvidence(
         boundary=boundary,
-        sampling_coordinate=boundary,
+        sampling_boundary=boundary,
         token_id=token_id,
         text=text,
         proposal_token_id=token_id,
