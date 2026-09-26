@@ -307,15 +307,6 @@ class Chord:
         return f"Shared context (last 4 lines):\n{context}\n\nPaths:\n" + "\n".join(rows)
 
 
-class ActionSequencePolicy:
-    def __init__(self, actions: tuple[PolicyAction, ...]) -> None:
-        self.actions = iter(actions)
-
-    def choose(self, engine, observation) -> PolicyAction:
-        del engine, observation
-        return next(self.actions)
-
-
 def chord_menu(
     io, chord: Chord, *, at_edge: bool = False, promote_on_select: bool = False
 ) -> tuple[str, tuple[PolicyAction, ...] | None]:

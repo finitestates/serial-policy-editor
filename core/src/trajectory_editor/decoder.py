@@ -21,9 +21,6 @@ from .core.backend import CacheMode, InferenceBackend, validate_cache_mode
 from .model_hash import sha256_path
 
 
-# Public spelling retained because backend_factory and a few user scripts used it.
-Decoder = InferenceBackend
-
 KV_CACHE_TYPES = ("f16", "q8_0", "q4_0")
 
 

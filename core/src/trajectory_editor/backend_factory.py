@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .decoder import Decoder, LlamaCppDecoder, LlamaCppSettings
+from .decoder import LlamaCppDecoder, LlamaCppSettings
 from .core.errors import EditorError
-from .core.backend import CacheMode, validate_cache_mode
+from .core.backend import CacheMode, InferenceBackend, validate_cache_mode
 from .transformers_backend import TransformersBackend, TransformersSettings
 
 
@@ -41,7 +41,7 @@ def create_backend(
     llama_settings: LlamaCppSettings | None = None,
     transformers_settings: TransformersSettings | None = None,
     cache_mode: CacheMode = "auto",
-) -> Decoder:
+) -> InferenceBackend:
     backend = normalize_backend_name(backend)
     cache_mode = validate_cache_mode(cache_mode)
     if backend == "llama.cpp":

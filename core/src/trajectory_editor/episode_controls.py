@@ -181,16 +181,6 @@ class ControlTransition:
             raise EditorError("control transition requires a ControlState")
         self.state.budget.valid_at(self.start_boundary)
 
-    @property
-    def boundary(self) -> int:
-        """Adapter-friendly alias for ``start_boundary``."""
-
-        return self.start_boundary
-
-    @property
-    def control(self) -> ControlState:
-        return self.state
-
 
 @dataclass(frozen=True)
 class ControlTimeline:
@@ -320,20 +310,10 @@ class ControlTimeline:
         )
         return self if len(kept) == len(self.transitions) else ControlTimeline(kept)
 
-    truncate = truncate_after
-
-
-# Names that make adapter code read naturally without creating a second model.
-ControlSegment = ControlTransition
-EpisodeControlState = ControlState
-
-
 __all__ = [
     "BudgetState",
-    "ControlSegment",
     "ControlState",
     "ControlTimeline",
     "ControlTransition",
-    "EpisodeControlState",
     "SamplerState",
 ]

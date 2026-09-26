@@ -153,34 +153,6 @@ EdgeCommand: TypeAlias = (
 )
 
 
-# Short names mirror the command vocabulary while the ``*Command`` names make
-# the public type union self-documenting.
-Continue = ContinueCommand
-Budget = BudgetCommand
-Sampler = SamplerCommand
-Rewind = RewindCommand
-Fork = ForkCommand
-Switch = SwitchCommand
-New = NewCommand
-End = EndCommand
-Quit = QuitCommand
-Project = ProjectCommand
-ForkMap = ForkMapCommand
-Branches = BranchesCommand
-List = ListCommand
-Rename = RenameCommand
-Export = ExportCommand
-Save = SaveCommand
-SaveFamily = SaveFamilyCommand
-Replay = ReplayCommand
-ReplaySelection = ReplaySelectionCommand
-
-# Descriptive aliases for callers that refer to the ``m`` form as a replay
-# map command, while keeping one concrete tagged variant in the union.
-NameCommand = RenameCommand
-ReplayMapCommand = ReplaySelectionCommand
-
-
 def _parse_error(message: str) -> NoReturn:
     raise EdgeCommandParseError(message)
 
@@ -330,47 +302,26 @@ def parse_edge_command(raw: str) -> EdgeCommand:
 
 
 __all__ = [
-    "Branches",
     "BranchesCommand",
-    "Budget",
     "BudgetCommand",
-    "Continue",
     "ContinueCommand",
     "EdgeCommand",
     "EdgeCommandParseError",
-    "End",
     "EndCommand",
-    "Export",
     "ExportCommand",
-    "Fork",
     "ForkCommand",
-    "ForkMap",
     "ForkMapCommand",
-    "List",
     "ListCommand",
-    "NameCommand",
-    "New",
     "NewCommand",
-    "Project",
     "ProjectCommand",
-    "Quit",
     "QuitCommand",
-    "Replay",
-    "ReplayMapCommand",
     "ReplayCommand",
-    "ReplaySelection",
     "ReplaySelectionCommand",
-    "Rename",
     "RenameCommand",
-    "Rewind",
     "RewindCommand",
-    "Sampler",
     "SamplerCommand",
-    "Save",
     "SaveCommand",
-    "SaveFamily",
     "SaveFamilyCommand",
-    "Switch",
     "SwitchCommand",
     "parse_edge_command",
 ]
