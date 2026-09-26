@@ -1038,6 +1038,69 @@ class EpisodeEngine:
             self.visible_token_ids.append(token_id)
         return evidence
 
+    def _commit_write_batch(
+        self,
+        token_ids: list[int],
+        evidence: list[TokenEvidence],
+        resolved: list[int],
+        visible: list[int],
+    ) -> None:
+        """Commit resolved insert tokens with a single backend eval.
+
+        Plain inserts carry no sampling decisions: every token is already
+        known, so the per-token observe/eval loop is pure overhead. One
+        parallel ``backend.eval`` advances the backend past all tokens and
+        the usual invalidation leaves a trailing ``observe()`` to the next
+        reader. Per-token model probabilities are deliberately not recorded
+        for inserts (``check``/``force`` cover probability diagnostics);
+        evidence keeps one record per token with exact boundaries and the
+        same "unknown" defaults the history adapter already uses for
+        lightweight records.
+        """
+        vocabulary_size = self.backend.vocabulary_size()
+        for token_id in token_ids:
+            if not 0 <= token_id < vocabulary_size:
+                raise EditorError("action resolved outside the vocabulary")
+        # Mirror _commit_token's EOG handling: the first EOG token ends the
+        # write; it is resolved and evidenced but never visible.
+        limit = len(token_ids)
+        for index, token_id in enumerate(token_ids):
+            if self.backend.is_eog(token_id):
+                limit = index + 1
+                break
+        committed = token_ids[:limit]
+        if not committed:
+            return
+        self._ensure_backend_positioned()
+        self.backend.eval(committed)
+        self._backend_positioned = True
+        self._invalidate_observation()
+        base = self.boundary
+        for offset, token_id in enumerate(committed):
+            is_eog = self.backend.is_eog(token_id)
+            if is_eog:
+                self.terminal_token_id = token_id
+            else:
+                self.visible_token_ids.append(token_id)
+                visible.append(token_id)
+            evidence.append(
+                TokenEvidence(
+                    boundary=base + offset,
+                    sampling_boundary=base + offset,
+                    token_id=token_id,
+                    text=self.backend.token_text(token_id),
+                    proposal_token_id=token_id,
+                    raw_model_nll=None,
+                    raw_rank=None,
+                    policy_rank=None,
+                    decoder_probability=0.0,
+                    proposal_agreement=False,
+                    is_eog=is_eog,
+                    realized_visible=not is_eog,
+                )
+            )
+            resolved.append(token_id)
+
     @staticmethod
     def _phrase_required_shift(observation: Observation, token_id: int) -> float:
         """Return the additive policy shift needed to make ``token_id`` rank 1."""
@@ -1360,34 +1423,44 @@ class EpisodeEngine:
                             "handed-off",
                             divergence,
                         )
-            for index, token_id in enumerate(planned):
-                if replay and self.backend.is_eog(token_id):
-                    return eog_handoff(token_id)
-                if not isinstance(action, Write) and not check(token_id, index):
-                    return ActionOutcome(
-                        action,
-                        before,
-                        self.boundary,
-                        resolved_text,
-                        tuple(resolved),
-                        tuple(visible),
-                        self.terminal_token_id,
-                        "divergence",
-                        tuple(evidence),
-                        "handed-off",
-                        divergence,
-                    )
-                observation = self.observe()
-                item = self._commit_token(observation, token_id)
-                evidence.append(item)
-                resolved.append(token_id)
-                if item.realized_visible:
-                    visible.append(token_id)
-                else:
+            if isinstance(action, Write) and not replay:
+                # Inserts carry no sampling decisions: the tokens are already
+                # known, so commit them with one parallel backend eval instead
+                # of the per-token observe/eval loop. Replay keeps the proven
+                # per-token path.
+                self._commit_write_batch(planned, evidence, resolved, visible)
+                if evidence and not evidence[-1].realized_visible:
                     self.terminal_reason = "teacher-eog"
                     stop_reason = "eog"
-                if not item.realized_visible:
-                    break
+            else:
+                for index, token_id in enumerate(planned):
+                    if replay and self.backend.is_eog(token_id):
+                        return eog_handoff(token_id)
+                    if not isinstance(action, Write) and not check(token_id, index):
+                        return ActionOutcome(
+                            action,
+                            before,
+                            self.boundary,
+                            resolved_text,
+                            tuple(resolved),
+                            tuple(visible),
+                            self.terminal_token_id,
+                            "divergence",
+                            tuple(evidence),
+                            "handed-off",
+                            divergence,
+                        )
+                    observation = self.observe()
+                    item = self._commit_token(observation, token_id)
+                    evidence.append(item)
+                    resolved.append(token_id)
+                    if item.realized_visible:
+                        visible.append(token_id)
+                    else:
+                        self.terminal_reason = "teacher-eog"
+                        stop_reason = "eog"
+                    if not item.realized_visible:
+                        break
         else:
             assert isinstance(action, Hold)
             limit = action.limit
