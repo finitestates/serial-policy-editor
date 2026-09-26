@@ -85,18 +85,6 @@ A model-change fork is a separate case: select the prefix at the source boundary
 child's runtime boundaries follow that destination representation, while
 `fork_boundary` remains provenance for the source boundary. Forking actions do not become part of a replay plan derived from an episode.
 
-## Existing workspace update
-
-Existing SQLite workspaces need a one-time manual update before use with this
-boundary-based sampler format. Run:
-
-```sh
-python scripts/upgrade_sampler_boundaries.py PATH/TO/episodes.sqlite3
-```
-
-The utility saves a backup beside the database and does not run automatically
-when the editor opens a workspace.
-
 ## Core-only acceptance gate
 
 The core distribution must be independently buildable and runnable without

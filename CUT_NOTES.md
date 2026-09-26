@@ -1,8 +1,7 @@
 # Serial Policy Editor — scope notes
 
 This build deliberately reduces SPE to the parts that serve the editor itself.
-It is not intended to preserve the 0.2.x forensic/recovery architecture or its
-historical schema obligations.
+It is not intended to preserve any historical obligations.
 
 ## Kept
 
@@ -13,12 +12,11 @@ historical schema obligations.
   and frequency penalties, deterministic seed/boundary behavior.
 - Per-token editorial evidence including proposal token, proposal agreement,
   raw-model NLL, raw rank, policy rank, and decoder probability.
-- A compact SQLite episode workspace used for persistence, resumption, evidence,
+- A compact episode workspace used for persistence, resumption, evidence,
   and Serial Policy Replay.
 - Serial Policy Replay over current-format stored episodes, with `handoff` and
   `ballistic` divergence modes.
-- A deliberately small projector sufficient for basic text/evidence inspection.
-- Optional raw-text export on sealing an episode.
+- A projector that can be used to view saved episodes or export data in various formats.
 
 ## Lifecycle semantics
 
@@ -55,24 +53,6 @@ Backend evaluation state, including any cache supplied by the backend library,
 is an implementation detail rather than durable episode state. Backends use
 incremental evaluation where supported and complete-prefix evaluation as the
 fallback; replay remains the equivalence check for recorded behavior.
-
-## Deliberately not restored yet
-
-- Old 0.2.x report/schema ingestion.
-- Automatic traversal of old report lineage during SPR.
-- Crash salvage from old JSONL journals.
-
-## Restored in the trimmed line
-
-- A compact Projector `--full-evidence` presentation built directly from the
-  current token/action ledger. It restores teacher-token proposal agreement,
-  NLL, raw rank, and policy rank without reviving the old report subsystem.
-- Optional `--with-model-probs` / `--with-model` projector footnotes for raw
-  model probability and decoder probability. Rejected proposal text remains
-  intentionally out of scope.
-
-If one of these becomes useful again, port the user-visible behavior into the
-current episode model rather than importing the old subsystem wholesale.
 
 ## Maintenance rule
 

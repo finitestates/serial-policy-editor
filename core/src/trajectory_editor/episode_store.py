@@ -22,7 +22,7 @@ from .core.sampler_config import SamplerConfig
 from .episode_history import StoredHistoryPrefix, materialize_stored_prefix
 from .episode_hash import token_prefix_sha256, validate_boundary, validate_fingerprint
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 1
 
 
 def _core_sampling_record(sampling: SamplerConfig) -> dict[str, Any]:
@@ -193,7 +193,7 @@ class EpisodeStore:
                         text TEXT NOT NULL,
                         realized_visible INTEGER NOT NULL,
                         is_eog INTEGER NOT NULL,
-                        sampling_coordinate INTEGER NOT NULL,
+                        sampling_boundary INTEGER NOT NULL,
                         proposal_token_id INTEGER NOT NULL,
                         raw_model_nll REAL,
                         raw_rank INTEGER,
@@ -217,26 +217,15 @@ class EpisodeStore:
                            (episode["episode_id"], " ".join(episode["initial_text"].split())[:60] or "Untitled", episode["created_at"]))
             row = db.execute("SELECT version FROM schema_info").fetchone()
             if row is None:
-                version = SCHEMA_VERSION
-                db.execute("INSERT INTO schema_info(version) VALUES (?)", (version,))
+                db.execute(
+                    "INSERT INTO schema_info(version) VALUES (?)",
+                    (SCHEMA_VERSION,),
+                )
             else:
-                version = int(row["version"])
-                if version == 1:
-                    # Preserve the existing v1-to-v2 schema repairs. The
-                    # current storage-format change is handled by a separate
-                    # one-time upgrader, never while opening a workspace.
-                    version = 2
-                    db.execute("UPDATE schema_info SET version = ?", (version,))
-                elif version not in {2, 3, SCHEMA_VERSION}:
-                    raise EditorError(
-                        f"unsupported episode database schema {row['version']}"
-                    )
-            needs_one_time_upgrade = version != SCHEMA_VERSION
-        if needs_one_time_upgrade:
-            raise EditorError(
-                "this episode database needs the one-time sampler-boundary upgrade; "
-                "run scripts/upgrade_sampler_boundaries.py with the database path"
-            )
+                db.execute(
+                    "UPDATE schema_info SET version = ?",
+                    (SCHEMA_VERSION,),
+                )
 
     def create_episode(
         self,
