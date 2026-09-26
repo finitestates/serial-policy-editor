@@ -169,3 +169,39 @@ def test_v05_output_vector_uses_backend_math_without_model_label_checks():
 
     assert _supports_logits_to_keep(SupportsFinalLogits())
     assert not _supports_logits_to_keep(UsesFullOutput())
+
+
+def test_observe_hands_the_stored_digest_to_the_output_head_backend():
+    """The engine passes the artifact digest through; no per-observe re-hash."""
+    from trajectory_editor.episode_engine import EpisodeEngine
+
+    class DigestRecordingBackend(ConformingFakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.seen_digests = []
+
+        def activation_width(self):
+            return 3
+
+        def activation_logit_adjustments(self, vector, *, layer, position, digest=None):
+            assert layer == "output"
+            assert position == "current"
+            self.seen_digests.append(digest)
+            return np.zeros(self.vocabulary_size(), dtype=np.float32)
+
+    digest = "ab" * 32
+    backend = DigestRecordingBackend()
+    engine = EpisodeEngine(
+        backend,
+        initial_token_ids=[1, 2],
+        sampling=SamplerConfig(
+            seed=7,
+            activation_vector=(0.25, -0.5, 1.0),
+            activation_vector_layer="output",
+            activation_vector_position="current",
+            activation_vector_strength=1.0,
+            activation_vector_digest=digest,
+        ),
+    )
+    engine.observe()
+    assert backend.seen_digests == [digest]

@@ -1098,8 +1098,15 @@ class TransformersBackend:
         *,
         layer: str = "output",
         position: str = "current",
+        digest: str | None = None,
     ) -> np.ndarray:
-        """Project a final-hidden activation delta through the output head."""
+        """Project a final-hidden activation delta through the output head.
+
+        ``digest`` is the caller-known content digest of ``vector`` (the
+        steering artifact digest the sampler config already carries).  When it
+        is supplied the vector is not re-hashed on the interactive path; when
+        it is absent the digest is derived from the vector bytes as before.
+        """
         if layer != "output":
             raise RuntimeError("Transformers activation runtime currently supports layer=output only")
         if position != "current":
@@ -1109,8 +1116,8 @@ class TransformersBackend:
             raise RuntimeError("output-head steering vector does not match the output-head width")
         if not np.all(np.isfinite(values)):
             raise RuntimeError("output-head steering vector is not finite")
-        digest = hashlib.sha256(np.ascontiguousarray(values).tobytes()).hexdigest()
-        key = (layer, position, digest)
+        cache_digest = digest or hashlib.sha256(np.ascontiguousarray(values).tobytes()).hexdigest()
+        key = (layer, position, cache_digest)
         cached = self._activation_logit_cache.get(key)
         if cached is not None:
             return cached.copy()

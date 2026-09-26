@@ -468,7 +468,7 @@ class SteeringVectorArtifact:
                 np.asarray(self.vector, dtype=np.float32),
                 **_supported_kwargs(
                     adjustment,
-                    {"layer": self.layer, "position": self.position},
+                    {"layer": self.layer, "position": self.position, "digest": self.digest},
                 ),
             )
         except (RuntimeError, TypeError, ValueError) as exc:

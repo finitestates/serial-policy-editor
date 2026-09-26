@@ -8,6 +8,9 @@ import pytest
 from test_reference_kernel import ScriptedBackend, start
 from trajectory_editor.core.actions import Accept as ProductionAccept
 from trajectory_editor.core.actions import Hold as ProductionHold
+from trajectory_editor.core.actions import Reroll as ProductionReroll
+from trajectory_editor.core.actions import action_from_dict
+from trajectory_editor.core.errors import EditorError
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.core.sampling import (
     SparseDistribution, draw_token, position_uniform as production_uniform,
@@ -16,7 +19,7 @@ from trajectory_editor.core.sampling import (
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_hash import token_prefix_sha256 as production_sha256
 from reference_kernel import (
-    Accept, Branch, Distribution, Hold, Policy, State, World, apply, draw, observe,
+    Accept, Branch, Distribution, Hold, Policy, Reroll, State, World, apply, draw, observe,
     position_uniform, position_uniform_token, rewind, token_prefix_sha256,
 )
 
@@ -166,3 +169,47 @@ def test_top_k_policy_remaps_same_quantile_in_production():
     branch = replace(branch, policy=Policy(top_k=2))
     production.sampling = replace(production.sampling, top_k=2)
     assert observe(reference_backend, branch).proposal_token_id == production.observe().proposal_token_id == a
+
+
+@pytest.mark.parametrize("kernel", ["categorical", "gumbel-max"])
+@pytest.mark.parametrize("seed,new_seed", [(12345, 999), (67890, -42)])
+def test_reroll_matches_reference_kernel(kernel, seed, new_seed):
+    reference_backend = ScriptedBackend()
+    reference = start(seed, policy=Policy(top_k=6, draw_kernel=kernel))
+    production = EpisodeEngine(
+        ProductionScriptedBackend(), initial_token_ids=[1, 2, 3],
+        sampling=SamplerConfig(seed=seed, temperature=1.0, top_k=6, top_p=1.0,
+                               min_p=0.0, draw_kernel=kernel),
+    )
+    # Draw once under the original seed so a stale proposal exists to discard.
+    before = observe(reference_backend, reference).proposal_token_id
+    assert before == production.observe().proposal_token_id
+
+    reference, kernel_result = apply(reference_backend, reference, Reroll(new_seed))
+    outcome = production.apply(ProductionReroll(new_seed))
+
+    assert kernel_result.resolved_token_ids == outcome.resolved_token_ids == ()
+    assert kernel_result.visible_token_ids == outcome.visible_token_ids == ()
+    assert production.sampling.seed == new_seed
+    assert production.boundary == 0
+    assert production.sampling.top_k == 6  # policy untouched
+
+    expected = observe(reference_backend, reference)
+    actual = production.observe()
+    assert expected.proposal_token_id == actual.proposal_token_id
+    assert expected.distribution.ids == tuple(actual.distribution.ids)
+    assert expected.distribution.probabilities == pytest.approx(actual.distribution.probabilities)
+
+
+def test_reroll_round_trips_through_action_dict():
+    action = ProductionReroll(4242)
+    assert action.to_dict() == {"kind": "reroll", "seed": 4242}
+    assert action_from_dict(action.to_dict()) == action
+
+
+@pytest.mark.parametrize("seed", ["7", 7.0, None, 1 << 63, -(1 << 63) - 1])
+def test_reroll_rejects_bad_seeds(seed):
+    with pytest.raises(EditorError):
+        ProductionReroll(seed)
+    with pytest.raises(EditorError):
+        action_from_dict({"kind": "reroll", "seed": seed})

@@ -13,6 +13,7 @@ import math
 from typing import Any, TypeAlias
 
 from .errors import EditorError
+from .sampling import MAX_SEED, MIN_SEED
 
 
 @dataclass(frozen=True)
@@ -124,8 +125,31 @@ class EndGeneration:
         return {"kind": self.kind}
 
 
+@dataclass(frozen=True)
+class Reroll:
+    """Replace the draw seed, leaving prefix, policy, and boundary intact.
+
+    The next proposal is drawn under the new seed at the same coordinates,
+    mirroring the reference kernel's ``Reroll`` event so replay reproduces
+    the same draws.  ``seed`` is a resolved integer, never an instruction
+    to obtain entropy.
+    """
+
+    seed: int
+    kind: str = "reroll"
+
+    def __post_init__(self) -> None:
+        if type(self.seed) is not int:
+            raise EditorError("reroll seed must be an integer")
+        if not MIN_SEED <= self.seed <= MAX_SEED:
+            raise EditorError(f"reroll seed must be between {MIN_SEED} and {MAX_SEED} inclusive")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"kind": self.kind, "seed": self.seed}
+
+
 PolicyAction: TypeAlias = (
-    Accept | SelectRawRank | Write | Phrase | Hold | EndGeneration
+    Accept | SelectRawRank | Write | Phrase | Hold | EndGeneration | Reroll
 )
 
 
@@ -170,4 +194,9 @@ def action_from_dict(raw: Mapping[str, Any]) -> PolicyAction:
         return Hold(limit, str(boundary) if boundary is not None else None)
     if kind in {"teacher-eog", "end-generation"}:
         return EndGeneration()
+    if kind == "reroll":
+        seed = raw.get("seed")
+        if type(seed) is not int:
+            raise EditorError("reroll action has no valid seed")
+        return Reroll(seed)
     raise UnsupportedPolicyActionKind(f"unsupported policy action kind {kind!r}")
