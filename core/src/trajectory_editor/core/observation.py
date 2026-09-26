@@ -80,8 +80,16 @@ class ObservationStatistics:
         *,
         activation_logit_adjustments=None,
         ephemeral_logit_biases=None,
+        take_logits_ownership: bool = False,
     ) -> None:
-        self.logits = _validated_logits(logits).copy()
+        # Direct callers retain copy semantics; EpisodeEngine transfers its
+        # owned snapshot so validation and freezing need no second copy.
+        validated_logits = _validated_logits(logits)
+        self.logits = (
+            validated_logits
+            if take_logits_ownership and validated_logits.flags.owndata
+            else validated_logits.copy()
+        )
         if config.history_penalties_active:
             self.adjusted = _history_penalty_surface(
                 self.logits, config, history_token_ids

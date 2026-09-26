@@ -655,7 +655,9 @@ class EpisodeEngine:
             return self._observation
         self._ensure_backend_positioned()
         self._prepare_activation_runtime()
-        logits = np.asarray(self.backend.last_logits(), dtype=np.float64)
+        # Make one owned float64 snapshot here. ObservationStatistics validates
+        # and freezes this same array instead of copying the full vocabulary again.
+        logits = np.array(self.backend.last_logits(), dtype=np.float64, copy=True)
         if logits.ndim != 1 or len(logits) != self.backend.vocabulary_size():
             raise RuntimeError("backend logits do not match its vocabulary")
         if self._cfg_active():
@@ -700,6 +702,7 @@ class EpisodeEngine:
             key[0],
             activation_logit_adjustments=activation_logit_adjustments,
             ephemeral_logit_biases=self._ephemeral_logit_biases,
+            take_logits_ownership=True,
         )
         logits = statistics.logits
         distribution = statistics.distribution
