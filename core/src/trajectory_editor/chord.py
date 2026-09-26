@@ -116,6 +116,7 @@ class Chord:
                     initial_text=engine.initial_text,
                     initial_token_ids=engine.initial_token_ids,
                     stream_fingerprint=engine.stream_fingerprint,
+                    tokenizer_id=engine.tokenizer_id,
                     backend_positioned=True,
                     guidance_backend=engine.guidance_backend,
                 )

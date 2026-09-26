@@ -20,10 +20,18 @@ def validate_fingerprint(value: str) -> str:
     return value
 
 
-def token_prefix_sha256(token_ids: list[int] | tuple[int, ...]) -> str:
+def token_prefix_sha256(
+    token_ids: list[int] | tuple[int, ...], *, tokenizer_id: str | None = None
+) -> str:
     if not isinstance(token_ids, (list, tuple)):
         raise EditorError("token IDs must be a list or tuple of integers")
     digest = hashlib.sha256()
+    if tokenizer_id is not None:
+        if not isinstance(tokenizer_id, str) or not tokenizer_id:
+            raise EditorError("tokenizer_id must be nonempty text")
+        digest.update(b"serial-policy-editor-stream-v2\0")
+        digest.update(tokenizer_id.encode("utf-8"))
+        digest.update(b"\0")
     for token_id in token_ids:
         if type(token_id) is not int or not 0 <= token_id < (1 << 63):
             raise EditorError("token IDs must be nonnegative signed-64-bit integers")

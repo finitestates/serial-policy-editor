@@ -70,13 +70,22 @@ class EpisodeRelation:
     creation_key: Any = 0
     terminal_reason: str | None = None
     visible_token_count: int = 0
+    model_change_source_id: str | None = None
+    model_change_boundary: int | None = None
 
     def __post_init__(self) -> None:
         _validate_relation_id(self.episode_id, "episode_id")
         _validate_relation_id(self.parent_id, "parent_id", optional=True)
         _validate_relation_id(self.spr_source_id, "spr_source_id", optional=True)
+        _validate_relation_id(
+            self.model_change_source_id, "model_change_source_id", optional=True
+        )
         if self.fork_boundary is not None:
             _validate_nonnegative_int(self.fork_boundary, "fork_boundary")
+        if self.model_change_boundary is not None:
+            _validate_nonnegative_int(
+                self.model_change_boundary, "model_change_boundary"
+            )
         _validate_label(self.mode, "mode")
         _validate_label(self.status, "status")
         _validate_nonnegative_int(self.visible_token_count, "visible_token_count")
@@ -114,6 +123,7 @@ class LineageView:
     ordinary_fork_tree: LineageNode | None
     related_replays: tuple[EpisodeRelation, ...]
     replay_derived_forks: tuple[EpisodeRelation, ...]
+    model_change_related: tuple[EpisodeRelation, ...] = ()
 
     @property
     def ordinary_family_root_id(self) -> str | None:
@@ -305,12 +315,31 @@ def build_lineage(
         )
     )
 
+    model_change_context_ids = family_ids | {selected_episode_id}
+    model_change_related = tuple(
+        sorted(
+            (
+                record
+                for record in indexed.values()
+                if record.mode == "model-change"
+                and record.model_change_source_id is not None
+                and record.parent_id != record.model_change_source_id
+                and (
+                    record.episode_id in model_change_context_ids
+                    or record.model_change_source_id in model_change_context_ids
+                )
+            ),
+            key=_record_order,
+        )
+    )
+
     return LineageView(
         selected_record=selected,
         ordinary_family_root=family_root,
         ordinary_fork_tree=tree,
         related_replays=related_replays,
         replay_derived_forks=replay_derived_forks,
+        model_change_related=model_change_related,
     )
 
 

@@ -15,6 +15,7 @@ from .spr_recipe import (
 from .episode_store import EpisodeStore
 from .episode_runner import ReplayPlan
 from .episode_history import visible_text_prefix
+from .episode_identity import backend_provenance_with_identity, tokenizer_id_for
 
 SAMPLER_FIELDS = tuple(field.name for field in fields(SamplerConfig))
 POLICY_FIELDS = tuple(
@@ -32,12 +33,14 @@ def _inherit_budget(store, episode_id, engine, boundary, *, notice=print):
     engine.trajectory.set_budget(state["max_tokens"], state["checkpoint_boundary"])
 
 
-def _model_change_sampling(sampling: SamplerConfig) -> SamplerConfig:
-    """Remove controls whose token IDs belong to the old backend."""
+def _model_change_sampling(
+    sampling: SamplerConfig, *, same_tokenizer: bool
+) -> SamplerConfig:
+    """Retain token-ID controls only when their tokenizer identity is unchanged."""
     return replace(
         sampling,
-        bias_rules=(),
-        bias_groups=(),
+        bias_rules=sampling.bias_rules if same_tokenizer else (),
+        bias_groups=sampling.bias_groups if same_tokenizer else (),
         activation_vector=(),
         activation_vector_strength=0.0,
         activation_vector_layer_start=None,
@@ -59,12 +62,11 @@ def _materialize_model_change_fork(
     requested_id: str | None = None,
     guidance_backend: Any | None = None,
 ) -> tuple[EpisodeEngine, str]:
-    """Materialize a fork whose destination backend has a new tokenizer.
+    """Continue a model change while preserving tokenizer-safe lineage.
 
-    The source boundary selects text from the source token sequence.  The
-    destination then starts at its own root prompt and records that retained
-    text as an exact write, so the child still has boundary zero immediately
-    after its root prompt.
+    Matching tokenizers can reuse the source token ledger and remain a fork.
+    A different tokenizer gets a new token space and only keeps a separate
+    textual origin reference.
     """
     source = store.get_episode(source_id)
     source_tokens = store.tokens(source_id)
@@ -72,32 +74,76 @@ def _materialize_model_change_fork(
     if type(boundary) is not int or not 0 <= boundary <= visible_count:
         raise EditorError(f"fork boundary must be between 0 and {visible_count}")
     root_text = str(source["initial_text"])
+    source_tokenizer_id = source["backend"].get("tokenizer_id")
+    destination_provenance = backend_provenance_with_identity(backend, provenance)
+    destination_tokenizer_id = destination_provenance["tokenizer_id"]
     root_token_ids = backend.tokenize(root_text, add_bos=True, special=True)
-    runtime = EpisodeEngine(
-        backend,
-        sampling=_model_change_sampling(sampling),
-        max_tokens=None,
-        initial_text=root_text,
-        initial_token_ids=root_token_ids,
-        guidance_backend=guidance_backend,
+    same_tokenizer = (
+        isinstance(source_tokenizer_id, str)
+        and source_tokenizer_id == destination_tokenizer_id
+        and list(source["initial_token_ids"]) == root_token_ids
     )
+    source_visible = [
+        int(row["token_id"])
+        for row in source_tokens
+        if bool(row["realized_visible"])
+    ]
+    source_segment = store.sampling_segment(source_id, boundary)
+    if same_tokenizer:
+        prefix = [*source["initial_token_ids"], *source_visible[:boundary]]
+        branch = getattr(backend, "branch_to_prefix", None)
+        if callable(branch):
+            branch(prefix)
+        else:
+            backend.reset(prefix)
+        runtime = EpisodeEngine(
+            backend,
+            sampling=_model_change_sampling(sampling, same_tokenizer=same_tokenizer),
+            max_tokens=None,
+            initial_text=root_text,
+            initial_token_ids=source["initial_token_ids"],
+            stream_fingerprint=source_segment["stream_fingerprint"],
+            backend_positioned=True,
+            guidance_backend=guidance_backend,
+        )
+        runtime.visible_token_ids = source_visible[:boundary]
+    else:
+        runtime = EpisodeEngine(
+            backend,
+            sampling=_model_change_sampling(sampling, same_tokenizer=same_tokenizer),
+            max_tokens=None,
+            initial_text=root_text,
+            initial_token_ids=root_token_ids,
+            guidance_backend=guidance_backend,
+        )
     identifier = _create_episode(
         store,
         runtime,
-        backend_provenance=provenance,
+        backend_provenance=destination_provenance,
         requested_id=requested_id,
-        parent_episode_id=source_id,
-        fork_boundary=boundary,
+        parent_episode_id=source_id if same_tokenizer else None,
+        fork_boundary=boundary if same_tokenizer else None,
         mode="model-change",
         metadata={
             "model_change_from": source_id,
+            "model_change_boundary": boundary,
             "boundary_system": "root-relative",
+            "tokenizer_changed": not same_tokenizer,
         },
     )
-    retained_text = visible_text_prefix(source_tokens, boundary)
-    if retained_text:
-        outcome = runtime.apply(Write(retained_text, mode="exact"))
-        store.record_action(identifier, 0, outcome)
+    if same_tokenizer:
+        store.copy_prefix(
+            source_id,
+            identifier,
+            boundary,
+            visible_text=backend.render(runtime.visible_token_ids),
+            max_tokens=runtime.max_tokens,
+        )
+    else:
+        retained_text = visible_text_prefix(source_tokens, boundary)
+        if retained_text:
+            outcome = runtime.apply(Write(retained_text, mode="exact"))
+            store.record_action(identifier, 0, outcome)
 
     budget = store.budget_at(source_id, boundary)
     allowance = max_tokens
@@ -160,6 +206,15 @@ def _restore_engine(
     notice=print,
 ) -> EpisodeEngine:
     episode = store.get_episode(episode_id)
+    saved_tokenizer_id = episode["backend"].get("tokenizer_id")
+    if (
+        isinstance(saved_tokenizer_id, str)
+        and saved_tokenizer_id != tokenizer_id_for(backend)
+    ):
+        raise EditorError(
+            "episode tokenizer identity differs from the loaded backend; "
+            "use a model-change continuation"
+        )
     if episode["status"] in {"completed", "failed"}:
         raise EditorError(
             f"episode {episode_id!r} is sealed; use --replay or --fork-from instead"
@@ -209,6 +264,9 @@ def _create_episode(
     metadata: dict[str, Any] | None = None,
 ) -> str:
     payload = {"mode": mode, **(metadata or {})}
+    backend_provenance = backend_provenance_with_identity(
+        engine.backend, backend_provenance
+    )
     if mode == "fork":
         # Ordinary forks retain the source prompt/context and copy their
         # inherited actions into the child.  Keep this explicit in metadata so
@@ -277,6 +335,15 @@ def _fork_engine(
 ) -> EpisodeEngine:
     if not 0 <= target <= parent_engine.boundary:
         raise EditorError(f"fork boundary must be between 0 and {parent_engine.boundary}")
+    source = store.get_episode(parent_id)
+    saved_tokenizer_id = source["backend"].get("tokenizer_id")
+    if (
+        isinstance(saved_tokenizer_id, str)
+        and saved_tokenizer_id != tokenizer_id_for(backend)
+    ):
+        raise EditorError(
+            "cannot fork across tokenizer identities; use a model-change continuation"
+        )
     prefix = [
         *parent_engine.trajectory.initial_token_ids,
         *parent_engine.trajectory.visible_token_ids[:target],

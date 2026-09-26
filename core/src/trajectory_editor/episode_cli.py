@@ -791,10 +791,19 @@ def main(
                 return cfg_guidance_backend
 
             args._model_changed = model_changed
-            if model_changed:
+            saved_tokenizer_id = (
+                source["backend"].get("tokenizer_id") if source is not None else None
+            )
+            destination_tokenizer_id = provenance.get("tokenizer_id")
+            tokenizer_changed = model_changed and (
+                not isinstance(saved_tokenizer_id, str)
+                or not isinstance(destination_tokenizer_id, str)
+                or saved_tokenizer_id != destination_tokenizer_id
+            )
+            if tokenizer_changed:
                 args.bias_rules = ()
                 args.bias_groups = ()
-                io.write("Model changed: token-ID biases reset; load a matching preset to apply biases.")
+                io.write("Tokenizer changed: token-ID biases reset; load a matching preset to apply biases.")
             activation_artifact = None
             if args.activation_strength is not None and args.activation_vector is None:
                 raise EditorError("--steering-strength requires --steering-vector")
@@ -947,6 +956,14 @@ def main(
                         requested_id=requested_id,
                         guidance_backend=cfg_backend_for(sampling),
                     )
+                    if activation_artifact is not None:
+                        engine.sampling = sampling
+                        store.record_sampling_segment(
+                            episode_id,
+                            start_boundary=engine.boundary,
+                            sampling=sampling,
+                            stream_fingerprint=engine.stream_fingerprint,
+                        )
                 else:
                     prefix = [*source["initial_token_ids"], *visible[:target]]
                     branch = getattr(backend, "branch_to_prefix", None)
@@ -1130,7 +1147,7 @@ def main(
                     if sealed:
                         io.page(project_episode(store, destination).text)
                         reply = io.prompt(PromptRequest(
-                            "Finished episode. Fork from end? [y/N]> "
+                            "Finished episode. Continue from end? [y/N]> "
                         ))
                         if not reply or reply.strip().lower() not in {"y", "yes"}:
                             enter_edge = True

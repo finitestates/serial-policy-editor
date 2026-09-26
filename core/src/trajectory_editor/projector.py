@@ -370,6 +370,45 @@ def render_lineage(view: LineageView) -> str:
                 )
             )
 
+    model_change_source = view.selected_record.model_change_source_id
+    if (
+        model_change_source is not None
+        and model_change_source != view.selected_record.parent_id
+    ):
+        boundary = view.selected_record.model_change_boundary
+        relation = f"source={model_change_source}"
+        if boundary is not None:
+            relation += f" · source-boundary={boundary}"
+        lines.append("model-change origin:")
+        lines.append(
+            "  "
+            + _lineage_label(
+                view.selected_record,
+                selected_episode_id=selected_episode_id,
+                relation=relation,
+            )
+        )
+
+    model_change_contexts = tuple(
+        record
+        for record in view.model_change_related
+        if record.episode_id != selected_episode_id
+    )
+    if model_change_contexts:
+        lines.append("model-change contexts:")
+        for context in model_change_contexts:
+            relation = f"source={context.model_change_source_id or '-'}"
+            if context.model_change_boundary is not None:
+                relation += f" · source-boundary={context.model_change_boundary}"
+            lines.append(
+                "  "
+                + _lineage_label(
+                    context,
+                    selected_episode_id=selected_episode_id,
+                    relation=relation,
+                )
+            )
+
     replay_derived_forks = view.replay_derived_forks
     if replay_derived_forks:
         lines.append("forks from replay contexts:")

@@ -54,6 +54,19 @@ def _relation(row: Mapping[str, Any]) -> EpisodeRelation:
             fork_boundary=row.get("fork_boundary"),
             mode=mode,
             spr_source_id=source,
+            model_change_source_id=(
+                metadata.get("model_change_from")
+                if isinstance(metadata.get("model_change_from"), str)
+                and metadata.get("model_change_from")
+                and not any(char.isspace() for char in metadata["model_change_from"])
+                else None
+            ),
+            model_change_boundary=(
+                metadata.get("model_change_boundary")
+                if type(metadata.get("model_change_boundary")) is int
+                and metadata.get("model_change_boundary") >= 0
+                else None
+            ),
             status=row.get("status"),
             creation_key=creation_key,
             terminal_reason=row.get("terminal_reason"),

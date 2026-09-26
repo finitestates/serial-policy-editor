@@ -7,6 +7,7 @@ from contextlib import nullcontext
 import codecs
 import ctypes
 import hashlib
+import json
 import platform
 import sys
 from dataclasses import asdict, dataclass
@@ -203,6 +204,7 @@ class LlamaCppDecoder:
         self._activation_model: Any | None = None
         self._activation_logit_cache: dict[tuple[str, str, str], np.ndarray] = {}
         self._model_sha256_cache: str | None = None
+        self._tokenizer_id_cache: str | None = None
         # Set only by the optional real-model harness. Normal inference has no
         # measurement object or extra synchronization.
         self._real_model_probe = None
@@ -840,6 +842,56 @@ class LlamaCppDecoder:
     def eog_token_ids(self) -> tuple[int, ...]:
         return tuple(sorted(self._fallback_eog_ids))
 
+    def tokenizer_id(self) -> str:
+        """Fingerprint the ordered vocabulary and GGUF tokenizer metadata."""
+
+        if self._tokenizer_id_cache is None:
+            digest = hashlib.sha256()
+            digest.update(b"serial-policy-editor-llama-tokenizer-v1\0")
+            metadata = getattr(self._model, "metadata", None)
+            if callable(metadata):
+                try:
+                    metadata = metadata()
+                except (TypeError, RuntimeError):
+                    metadata = None
+            tokenizer_metadata = {}
+            if isinstance(metadata, dict):
+                tokenizer_metadata = {
+                    str(key): value
+                    for key, value in metadata.items()
+                    if str(key).startswith("tokenizer.")
+                }
+            pieces = tokenizer_metadata.get("tokenizer.ggml.tokens")
+            if isinstance(pieces, (list, tuple)) and len(pieces) == self._vocabulary_size:
+                encoded_pieces = (str(piece).encode("utf-8") for piece in pieces)
+            else:
+                encoded_pieces = (
+                    bytes(self._model.detokenize([token_id], special=True))
+                    for token_id in range(self._vocabulary_size)
+                )
+            for token_id, piece in enumerate(encoded_pieces):
+                digest.update(token_id.to_bytes(8, "little", signed=False))
+                digest.update(len(piece).to_bytes(8, "little", signed=False))
+                digest.update(piece)
+            if tokenizer_metadata:
+                digest.update(
+                    json.dumps(
+                        tokenizer_metadata,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        default=str,
+                    ).encode("utf-8")
+                )
+            digest.update(
+                json.dumps(self.eog_token_ids(), separators=(",", ":")).encode()
+            )
+            self._tokenizer_id_cache = digest.hexdigest()
+        return self._tokenizer_id_cache
+
+    def model_id(self) -> str:
+        return self._model_sha256()
+
     def _model_sha256(self) -> str:
         if self._model_sha256_cache is None:
             try:
@@ -880,8 +932,10 @@ class LlamaCppDecoder:
             "numpy_version": np.__version__,
             "python_version": sys.version,
             "platform": platform.platform(),
+            "tokenizer_id": self.tokenizer_id(),
             "runtime_configuration": requested,
         }
         if include_model_sha256:
             result["model_sha256"] = self._model_sha256()
+            result["model_id"] = result["model_sha256"]
         return result

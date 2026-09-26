@@ -12,7 +12,43 @@ from .backend_factory import BACKEND_NAMES, create_backend
 from .core.errors import EditorError
 from .decoder import LlamaCppSettings
 from .transformers_backend import TransformersSettings
+from .episode_identity import recorded_model_id
 from .terminal_contracts import PromptRequest
+
+
+class _ModelChangeDeclined(EditorError):
+    pass
+
+
+def _identity_difference(
+    saved: Mapping[str, Any], current: Mapping[str, Any]
+) -> bool | None:
+    """Compare persisted model and tokenizer IDs, or return None if unknown."""
+
+    saved_model = recorded_model_id(saved)
+    current_model = recorded_model_id(current)
+    saved_tokenizer = saved.get("tokenizer_id")
+    current_tokenizer = current.get("tokenizer_id")
+    if (
+        saved_model is not None
+        and current_model is not None
+        and saved_model != current_model
+    ):
+        return True
+    if (
+        isinstance(saved_tokenizer, str)
+        and isinstance(current_tokenizer, str)
+        and saved_tokenizer != current_tokenizer
+    ):
+        return True
+    if (
+        saved_model is not None
+        and current_model is not None
+        and isinstance(saved_tokenizer, str)
+        and isinstance(current_tokenizer, str)
+    ):
+        return False
+    return None
 
 
 class BackendLoadIO(Protocol):
@@ -112,17 +148,17 @@ def load_episode_backend(
             if not path:
                 raise EditorError("model loading cancelled")
             selected.model = Path(path).expanduser()
-        changed = bool(source and old_path and (
+        path_changed = bool(source and old_path and (
             Path(old_path).resolve() != selected.model.resolve()
             or (
                 saved.get("backend") in BACKEND_NAMES
                 and saved.get("backend") != selected.backend
             )
         ))
-        if changed:
+        if path_changed:
             answer = io.prompt(PromptRequest(
                 f"Previously used {old_path} ({saved.get('backend')}). Continue with "
-                f"{selected.model} ({selected.backend}) in a new linked episode? [y/N]> "
+                f"{selected.model} ({selected.backend}) in a new model-change context? [y/N]> "
             ))
             if not answer or answer.strip().lower() not in {"y", "yes"}:
                 raise EditorError("model change cancelled")
@@ -133,12 +169,25 @@ def load_episode_backend(
                 and current_provenance.get("model_path")
                 == str(selected.model.resolve())
                 and current_provenance.get("backend") == selected.backend
+                and (
+                    recorded_model_id(saved) is None
+                    or recorded_model_id(saved)
+                    == recorded_model_id(current_provenance)
+                )
+                and (
+                    not isinstance(saved.get("tokenizer_id"), str)
+                    or saved.get("tokenizer_id")
+                    == current_provenance.get("tokenizer_id")
+                )
                 and all(
                     getattr(selected, key, None) == value
                     for key, value in current_provenance.get("load_options", {}).items()
                 )
             ):
-                return current_backend, dict(current_provenance), changed
+                difference = _identity_difference(saved, current_provenance)
+                return current_backend, dict(current_provenance), (
+                    path_changed if difference is None else difference
+                )
             backend = load_backend(selected)
             provenance = dict(backend.provenance(include_model_sha256=True))
             provenance["model_path"] = str(selected.model.resolve())
@@ -162,7 +211,18 @@ def load_episode_backend(
                     "type_v",
                 }
             }
+            difference = _identity_difference(saved, provenance) if source else None
+            changed = path_changed if difference is None else difference
+            if changed and not path_changed:
+                answer = io.prompt(PromptRequest(
+                    "The saved model or tokenizer identity differs from the loaded "
+                    "backend. Continue in a model-change context? [y/N]> "
+                ))
+                if not answer or answer.strip().lower() not in {"y", "yes"}:
+                    raise _ModelChangeDeclined("model change cancelled")
             return backend, provenance, changed
+        except _ModelChangeDeclined:
+            raise
         except (EditorError, OSError, RuntimeError) as exc:
             if not source:
                 raise

@@ -6,6 +6,7 @@ from contextlib import nullcontext
 import importlib.util
 import hashlib
 import inspect
+import json
 import platform
 import sys
 from dataclasses import asdict, dataclass
@@ -371,6 +372,7 @@ class TransformersBackend:
         self._hidden_state_control_handles: list[Any] = []
         self._hidden_state_control_key: tuple[Any, ...] | None = None
         self._model_sha256_cache: str | None = None
+        self._tokenizer_id_cache: str | None = None
 
     def _apply_execution_controls(self) -> None:
         if self.settings.torch_num_threads is not None:
@@ -1143,6 +1145,65 @@ class TransformersBackend:
     def eog_token_ids(self) -> tuple[int, ...]:
         return tuple(sorted(self._eog_ids))
 
+    def tokenizer_id(self) -> str:
+        """Fingerprint tokenization rules, token IDs, and special-token IDs."""
+
+        if self._tokenizer_id_cache is None:
+            tokenizer = self._tokenizer
+            backend_tokenizer = getattr(tokenizer, "backend_tokenizer", None)
+            if backend_tokenizer is None:
+                backend_tokenizer = getattr(tokenizer, "_tokenizer", None)
+            serialized = None
+            to_str = getattr(backend_tokenizer, "to_str", None)
+            if callable(to_str):
+                serialized = to_str()
+            if serialized is None:
+                vocabulary = tokenizer.get_vocab()
+                serialized = json.dumps(
+                    {
+                        "vocabulary": sorted(
+                            (str(token), int(token_id))
+                            for token, token_id in vocabulary.items()
+                        ),
+                        "added_vocabulary": sorted(
+                            (str(token), int(token_id))
+                            for token, token_id in (
+                                getattr(tokenizer, "get_added_vocab", lambda: {})()
+                            ).items()
+                        ),
+                        "tokenizer_class": type(tokenizer).__qualname__,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            special_ids = sorted(
+                int(value)
+                for value in (getattr(tokenizer, "all_special_ids", None) or [])
+                if type(value) is int and value >= 0
+            )
+            special_tokens = getattr(tokenizer, "special_tokens_map_extended", None)
+            self._tokenizer_id_cache = hashlib.sha256(
+                b"serial-policy-editor-transformers-tokenizer-v1\0"
+                + json.dumps(
+                    {
+                        "serialization": serialized,
+                        "special_ids": special_ids,
+                        "special_tokens": special_tokens,
+                        "bos_token_id": getattr(tokenizer, "bos_token_id", None),
+                        "eos_token_id": getattr(tokenizer, "eos_token_id", None),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()
+        return self._tokenizer_id_cache
+
+    def model_id(self) -> str:
+        return self._model_sha256()
+
     def _model_sha256(self) -> str:
         if self._model_sha256_cache is None:
             try:
@@ -1176,6 +1237,7 @@ class TransformersBackend:
             "numpy_version": np.__version__,
             "python_version": sys.version,
             "platform": platform.platform(),
+            "tokenizer_id": self.tokenizer_id(),
             "runtime_configuration": {
                 **asdict(self.settings),
                 "effective_device": str(self._input_device),
@@ -1189,4 +1251,5 @@ class TransformersBackend:
             result["modalities"] = ["text"]
         if include_model_sha256:
             result["model_sha256"] = self._model_sha256()
+            result["model_id"] = result["model_sha256"]
         return result
