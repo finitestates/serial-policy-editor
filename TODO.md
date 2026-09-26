@@ -1,12 +1,11 @@
 # TODO for 1.0.0
 
-Working backlog from a read-only review and our follow-up discussion. The project already has a substantial foundation; 1.0 can focus on clear promises, dependable release steps, and a few targeted polish items. Contribution and dependency maintenance are optional choices.
-
 ## Product polish
 
 - [ ] Decide whether speculative execution for token selection earns its complexity. Measure its latency benefit on supported backends and weigh it against the warmup, cancellation, and promotion logic. If the benefit is small or inconsistent, remove that path and keep selection on the ordinary commit flow.
 - [ ] Bring non-runtime menus into line with the main runtime menu’s visual conventions. Review screens such as EDGE, search/review, and setup; make selection, context, status, and available commands easy to read in the same way.
-- [ ] Add an end-to-end regression for Tab/Enter through `run_plan()`, checking the recorded action and next view. If speculative execution stays, check that the warmed target matches the committed selection; if it goes, check the ordinary selection flow. The current [selection warm test](tests/core/test_selection_warm_terminal.py#L65) stops at applying the action directly to the engine. The [interaction notes](RUNTIME_MENU_ENTER_CYCLE.md#L82) describe the mixed Tab cycle and target invariant.
+- [x] Add an end-to-end regression for Tab/Enter through `run_plan()`, checking the recorded action and next view. If speculative execution stays, check that the warmed target matches the committed selection; if it goes, check the ordinary selection flow. The current [selection warm test](tests/core/test_selection_warm_terminal.py#L65) stops at applying the action directly to the engine. The [interaction notes](RUNTIME_MENU_ENTER_CYCLE.md#L82) describe the mixed Tab cycle and target invariant.
+- [ ] Remove stale functions/data fields/tests/aliases; cut-down on processes that make reads/writes/copies for no obvious purpose.
 
 ## Replay authoring and independent correctness
 
@@ -15,13 +14,13 @@ Working backlog from a read-only review and our follow-up discussion. The projec
 
 ## Tokenizer identity and streaming
 
-- [ ] Decide how model-change forks define sampler identity. The current fork path re-tokenizes the root prompt with the destination tokenizer, and those root token IDs affect the sampler fingerprint. Decide whether to preserve the source fingerprint across tokenizer changes or keep the destination prefix fingerprint.
+- [ ] Change how mixed-model forks are handled. If a model has a different tokenizer than the episode it is forking from, it will have different sampler coordinates. As such, it's really not a fork. A different model with the same tokenizer could be considered a fork assuming the token IDs of the prompt/prefix match. In order to enforce this, we need to have better provenance data about model & tokenizer (currently, the system resolves "same model" by evaluating absolute path, which is stupid).
 - [ ] Audit and test how streamed partial UTF-8 sequences affect token-step accounting and saved text. Token boundaries advance by token IDs, while a live stream may buffer bytes until a character is complete. Cover display, rewind, partial-write replay, procedure export, and cross-tokenizer forks; keep token IDs authoritative where decoded text cannot faithfully represent a retained prefix. The review identified this as a code-path risk to investigate, not a demonstrated failure.
 
 ## Decide what 1.0 promises
 
 - [ ] Document supported Python versions, operating systems, model backends, and artifact formats. Say which Python API and CLI behavior users can rely on.
-- [ ] Set a policy for saved workspaces and exported files: supported upgrade paths, behavior when a migration is unsupported, and how users should back up their work. The database is at schema version 2 and rejects unsupported versions; importing the old 0.2.x report format is deliberately out of scope. See [episode_store.py](core/src/trajectory_editor/episode_store.py#L25) and [CUT_NOTES.md](CUT_NOTES.md#L59).
+- [ ] Set a policy for saved workspaces and exported files.
 
 ## Documentation and release readiness
 
