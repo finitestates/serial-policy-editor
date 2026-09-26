@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 from trajectory_editor.activation_vectors import SteeringVectorArtifact
-from trajectory_editor.backend_factory import BACKEND_NAMES, create_backend
+from trajectory_editor.backend_factory import create_backend
 from trajectory_editor.core.errors import EditorError
 from trajectory_editor.steering_vector_production import create_hidden_state_prompt_pair
 
@@ -21,7 +21,7 @@ from trajectory_editor.steering_vector_production import create_hidden_state_pro
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="policy-editor-vector",
-        description="Create and inspect conventional hidden-state steering vectors.",
+        description="Create Transformers-based prompt-pair vectors and inspect artifacts.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -40,10 +40,9 @@ def _parser() -> argparse.ArgumentParser:
 
     create = commands.add_parser(
         "create",
-        help="create a hidden-state steering vector from a prompt pair",
+        help="create a hidden-state steering vector from a Transformers prompt pair",
     )
     create.add_argument("--model", type=Path, required=True)
-    create.add_argument("--backend", choices=BACKEND_NAMES, default="llama.cpp")
     create.add_argument("--prompt-a", required=True)
     create.add_argument("--prompt-b", required=True)
     create.add_argument("--layer-start", type=int, required=True)
@@ -84,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
             artifact.write(args.output)
             return 0
         if args.command == "create":
-            backend = create_backend(args.backend, args.model)
+            backend = create_backend("transformers", args.model)
             try:
                 artifact = create_hidden_state_prompt_pair(
                     backend,

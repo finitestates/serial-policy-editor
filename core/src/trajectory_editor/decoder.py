@@ -87,10 +87,8 @@ def _llama_options(
     llama_cpp: Any,
     model_path: Path,
     settings: LlamaCppSettings,
-    *,
-    embedding: bool = False,
 ) -> dict[str, Any]:
-    """Build shared options for inference and the auxiliary embedding context."""
+    """Build options for the inference context."""
     options = {
         "model_path": str(model_path),
         "n_ctx": settings.n_ctx,
@@ -99,7 +97,6 @@ def _llama_options(
         "use_mmap": settings.use_mmap,
         "use_mlock": settings.use_mlock,
         "logits_all": False,
-        "embedding": embedding,
         "verbose": False,
         "n_ubatch": settings.n_ubatch,
         "n_threads": settings.n_threads,
@@ -245,7 +242,6 @@ class LlamaCppDecoder:
         self._speculation_prefix: tuple[int, ...] | None = None
         self._speculation_logits: np.ndarray | None = None
         self._token_embedding_matrix_cache: np.ndarray | None = None
-        self._activation_model: Any | None = None
         self._activation_logit_cache: dict[tuple[str, str, str], np.ndarray] = {}
         self._model_sha256_cache: str | None = None
         self._tokenizer_id_cache = _llama_tokenizer_id(
@@ -452,221 +448,6 @@ class LlamaCppDecoder:
         """Return the number of canonical one-based decoder block outputs."""
         return self._model_layer_count()
 
-    def hidden_state_width(self) -> int:
-        """Return the residual-stream width used by native control vectors."""
-        return self.activation_width()
-
-    def hidden_state_layer_count(self) -> int:
-        """Return the number of canonical decoder block-output coordinates."""
-        return self._control_vector_layer_count()
-
-    def hidden_state_capture_layer_range(self) -> tuple[int, int]:
-        """Return the block outputs exposed by llama.cpp's layer taps."""
-        return 1, max(1, self._model_layer_count() - 1)
-
-    def hidden_state_runtime_layer_range(self) -> tuple[int, int]:
-        """Return canonical block-output layers supported by native injection."""
-        layer_count = self.hidden_state_layer_count()
-        if layer_count < 2:
-            raise RuntimeError(
-                "llama.cpp control vectors expose no canonical block-output runtime layer"
-            )
-        return 2, layer_count
-
-    def hidden_state_layer_types(self) -> tuple[str, ...]:
-        return tuple("decoder" for _ in range(self.hidden_state_layer_count()))
-
-    def hidden_state_capabilities(self) -> dict[str, Any]:
-        """Describe llama.cpp's native residual-stream capture coordinate."""
-        return {
-            "site": "decoder-block-output-residual",
-            "layer_numbering": "one-based",
-            "layer_count": self.hidden_state_layer_count(),
-            "width": self.hidden_state_width(),
-            "position_policies": ["first", "last", "current", "all"],
-            "layer_types": list(self.hidden_state_layer_types()),
-            "native_module_path": "llama.cpp layer input tap N",
-            "capture_coordinate": "canonical block-output N <- native input tap N",
-            "injection_coordinate": "canonical block-output N -> native cvector slot N-1",
-            "capture_layer_range": list(self.hidden_state_capture_layer_range()),
-            "runtime_layer_range": list(self.hidden_state_runtime_layer_range()),
-            "modality": "text",
-            "final_layer_policy": "worker-graph-output-callback",
-        }
-
-    def _hidden_state_capture_symbols(self):
-        """Resolve llama.cpp's internal per-layer extraction extension.
-
-        These functions are currently exported by llama.cpp's extension header
-        rather than the stable public header. The local build exposes their
-        C++ symbols; accepting public names as well keeps this compatible with
-        a future C-ABI promotion.
-        """
-        binding = getattr(self._llama_cpp, "llama_cpp", self._llama_cpp)
-        library = getattr(binding, "_lib", None)
-        if library is None:
-            raise RuntimeError(
-                "installed llama-cpp-python does not expose the native layer-capture library"
-            )
-
-        def resolve(public_name: str, mangled_name: str, restype, argtypes):
-            function = getattr(self._llama_cpp, public_name, None)
-            if not callable(function):
-                function = getattr(library, public_name, None)
-            if function is None:
-                function = getattr(library, mangled_name, None)
-            if function is None:
-                raise RuntimeError(
-                    "installed llama.cpp build does not expose " + public_name
-                )
-            function.argtypes = argtypes
-            function.restype = restype
-            return function
-
-        context_type = ctypes.c_void_p
-        setter = resolve(
-            "llama_set_embeddings_layer_inp",
-            "_Z30llama_set_embeddings_layer_inpP13llama_contextjb",
-            None,
-            [context_type, ctypes.c_uint32, ctypes.c_bool],
-        )
-        getter = resolve(
-            "llama_get_embeddings_layer_inp",
-            "_Z30llama_get_embeddings_layer_inpP13llama_contextj",
-            ctypes.POINTER(ctypes.c_float),
-            [context_type, ctypes.c_uint32],
-        )
-        return setter, getter
-
-    def _capture_hidden_state_rows(
-        self, text: str, layers: tuple[int, ...]
-    ) -> dict[int, np.ndarray]:
-        """Capture all token rows for selected residual layers in an isolated context."""
-        if not layers:
-            raise RuntimeError("at least one hidden-state layer must be selected")
-        capture_start, capture_end = self.hidden_state_capture_layer_range()
-        if any(
-            type(layer) is not int or layer < capture_start or layer > capture_end
-            for layer in layers
-        ):
-            raise RuntimeError(
-                f"hidden-state layer must be between {capture_start} and {capture_end}"
-            )
-        if not isinstance(text, str) or not text:
-            raise RuntimeError("hidden-state snapshot prompt must be nonempty")
-
-        setter, getter = self._hidden_state_capture_symbols()
-        model = self._activation_embedding_model()
-        tokens = model.tokenize(text.encode("utf-8"), add_bos=True, special=False)
-        if not tokens:
-            raise RuntimeError("hidden-state snapshot prompt produced no tokens")
-        if len(tokens) > int(model.n_batch):
-            raise RuntimeError(
-                f"hidden-state snapshot has {len(tokens)} tokens; "
-                f"the capture batch supports {int(model.n_batch)}"
-            )
-
-        context = model._ctx.ctx if hasattr(model, "_ctx") else model.ctx
-        width = int(model.n_embd())
-        enabled: list[int] = []
-        try:
-            for layer in layers:
-                setter(context, layer, True)
-                enabled.append(layer)
-
-            model._batch.reset()
-            model._ctx.kv_cache_clear()
-            model._batch.add_sequence(tokens, 0, True)
-            result = model._ctx.decode(model._batch)
-            if result not in (None, 0):
-                raise RuntimeError(
-                    f"llama.cpp hidden-state capture failed (error {result})"
-                )
-
-            captured: dict[int, np.ndarray] = {}
-            for layer in layers:
-                pointer = getter(context, layer)
-                if not pointer:
-                    raise RuntimeError(
-                        f"llama.cpp returned no hidden-state capture for layer {layer}"
-                    )
-                values = np.ctypeslib.as_array(
-                    pointer, shape=(len(tokens) * width,)
-                ).astype(np.float32, copy=True)
-                values = values.reshape(len(tokens), width)
-                if not np.all(np.isfinite(values)):
-                    raise RuntimeError(
-                        f"llama.cpp hidden-state capture for layer {layer} is not finite"
-                    )
-                captured[layer] = values
-            return captured
-        finally:
-            for layer in enabled:
-                try:
-                    setter(context, layer, False)
-                except (OSError, RuntimeError, TypeError):
-                    pass
-            try:
-                model._batch.reset()
-                model._ctx.kv_cache_clear()
-                model.reset()
-            except (AttributeError, RuntimeError, TypeError):
-                pass
-
-    def hidden_state_snapshot(
-        self,
-        text: str,
-        *,
-        layer: int,
-        position: str = "last",
-    ) -> np.ndarray:
-        """Capture a residual-stream state at a native llama.cpp layer."""
-        if position not in {"first", "last", "current", "all"}:
-            raise RuntimeError(
-                "hidden-state snapshot position must be first, last, current, or all"
-            )
-        states = self._capture_hidden_state_rows(text, (layer,))[layer]
-        if position == "all":
-            return states
-        return np.asarray(
-            states[0 if position == "first" else -1], dtype=np.float32
-        ).copy()
-
-    def hidden_state_snapshots(
-        self,
-        text: str,
-        *,
-        layer_start: int,
-        layer_end: int,
-        position: str = "last",
-    ) -> dict[int, np.ndarray]:
-        """Capture selected residual layers with one llama.cpp evaluation."""
-        if position not in {"first", "last", "current", "all"}:
-            raise RuntimeError(
-                "hidden-state snapshot position must be first, last, current, or all"
-            )
-        capture_start, capture_end = self.hidden_state_capture_layer_range()
-        if (
-            type(layer_start) is not int
-            or type(layer_end) is not int
-            or layer_start < capture_start
-            or layer_end < layer_start
-            or layer_end > capture_end
-        ):
-            raise RuntimeError(
-                f"hidden-state layer range must be between {capture_start} and {capture_end}"
-            )
-        rows = self._capture_hidden_state_rows(
-            text, tuple(range(layer_start, layer_end + 1))
-        )
-        if position == "all":
-            return rows
-        index = 0 if position == "first" else -1
-        return {
-            layer: np.asarray(values[index], dtype=np.float32).copy()
-            for layer, values in rows.items()
-        }
-
     def set_activation_control_vector(
         self,
         vector,
@@ -679,8 +460,8 @@ class LlamaCppDecoder:
 
         llama.cpp applies native slot ``s`` after zero-based decoder block
         ``s``.  Consequently canonical one-based block output ``N`` maps to
-        native slot ``N - 1``.  Canonical layer 1 remains capture-only because
-        the upstream native adapter reserves no slot 0; canonical layer N is
+        native slot ``N - 1``.  Canonical layer 1 is unaddressable because the
+        upstream native adapter reserves no slot 0; canonical layer N is
         fully steerable before final output normalization.
         """
         setter = getattr(self._llama_cpp, "llama_set_adapter_cvec", None)
@@ -688,7 +469,11 @@ class LlamaCppDecoder:
             raise RuntimeError("installed llama.cpp binding does not expose control vectors")
         width = self.activation_control_vector_width()
         layer_count = self.activation_control_vector_layer_count()
-        runtime_start, runtime_end = self.hidden_state_runtime_layer_range()
+        if layer_count < 2:
+            raise RuntimeError(
+                "llama.cpp control vectors expose no canonical block-output runtime layer"
+            )
+        runtime_start, runtime_end = 2, layer_count
         if (
             type(layer_start) is not int
             or type(layer_end) is not int
@@ -706,8 +491,8 @@ class LlamaCppDecoder:
         if not np.all(np.isfinite(values)):
             raise RuntimeError("control-vector data is not finite")
         # The canonical vector has one chunk for every decoder block output.
-        # Native llama.cpp cvector data begins at slot 1, so discard the
-        # capture-only canonical layer 1 chunk and pass canonical layers 2..N
+        # Native llama.cpp cvector data begins at slot 1, so skip the
+        # unaddressable canonical layer 1 chunk and pass layers 2..N
         # directly to native slots 1..N-1.  This preserves the final block's
         # pre-normalization injection point.
         native_values = np.ascontiguousarray(values[width:], dtype=np.float32)
@@ -735,50 +520,6 @@ class LlamaCppDecoder:
         result = setter(context, None, 0, width, 1, max(1, layer_count - 1))
         if int(result) != 0:
             raise RuntimeError(f"llama.cpp rejected clearing the control vector (error {result})")
-
-    def _activation_embedding_model(self) -> Any:
-        if self._activation_model is None:
-            self._activation_model = self._model.__class__(
-                **_llama_options(
-                    self._llama_cpp,
-                    self.model_path,
-                    self.settings,
-                    embedding=True,
-                )
-            )
-        return self._activation_model
-
-    def activation_snapshot(
-        self,
-        text: str,
-        *,
-        layer: str = "output",
-        position: str = "last",
-    ) -> np.ndarray:
-        """Capture one final hidden-state position for a prompt.
-
-        llama.cpp exposes the final representation through its embedding
-        context. Internal residual capture is provided separately by
-        ``hidden_state_snapshot``.
-        """
-        if layer != "output":
-            raise RuntimeError("llama.cpp activation snapshots currently support layer=output only")
-        if position not in {"first", "last"}:
-            raise RuntimeError("activation snapshot position must be first or last")
-        if not isinstance(text, str) or not text:
-            raise RuntimeError("activation snapshot prompt must be nonempty")
-        model = self._activation_embedding_model()
-        values = np.asarray(
-            model.embed(text, normalize=False, truncate=False), dtype=np.float32
-        )
-        if values.ndim != 2 or values.shape[0] < 1:
-            raise RuntimeError("llama.cpp returned no per-token activation snapshot")
-        row = values[0 if position == "first" else -1].copy()
-        if row.ndim != 1 or row.shape[0] != self.activation_width():
-            raise RuntimeError("llama.cpp activation snapshot has the wrong width")
-        if not np.all(np.isfinite(row)):
-            raise RuntimeError("llama.cpp activation snapshot is not finite")
-        return row
 
     def _token_embedding_matrix(self) -> np.ndarray:
         if self._token_embedding_matrix_cache is not None:
@@ -842,14 +583,11 @@ class LlamaCppDecoder:
         return result
 
     def close(self) -> None:
-        """Release both the normal and auxiliary activation contexts."""
-        for name in ("_activation_model", "_model"):
-            model = getattr(self, name, None)
-            if model is not None:
-                close = getattr(model, "close", None)
-                if callable(close):
-                    close()
-                setattr(self, name, None)
+        """Release the inference context."""
+        close = getattr(self._model, "close", None)
+        if callable(close):
+            close()
+        self._model = None
 
     def tokenize(
         self, text: str, *, add_bos: bool = False, special: bool = False
@@ -930,8 +668,8 @@ class LlamaCppDecoder:
             "model_type": model_type,
             "activation_width": self.activation_width(),
             "activation_layer_count": self.activation_control_vector_layer_count(),
-            "hidden_state_width": self.hidden_state_width(),
-            "hidden_state_layer_count": self.hidden_state_layer_count(),
+            "hidden_state_width": self.activation_control_vector_width(),
+            "hidden_state_layer_count": self.activation_control_vector_layer_count(),
             "llama_cpp_python_version": getattr(self._llama_cpp, "__version__", None),
             "numpy_version": np.__version__,
             "python_version": sys.version,

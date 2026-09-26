@@ -80,9 +80,7 @@ safe for its production/analysis workflows.
 | --- | --- | --- |
 | `test_activation_vectors.py` | split | core permissive loading; optional-vector production/inspection and strict artifact policy |
 | `test_vector_loading.py` | deleted | its cvector loader case is now V02 |
-| `test_llama_hidden_state.py` | move/rewrite | `vectors` backend production tests |
-| `test_llama_worker.py` | move/rewrite | `vectors` worker/production tests |
-| `test_transformers_worker_interop.py` | move/rewrite | `vectors` opt-in conformance tests |
+| `test_llama_control_vectors.py` | retain | cvector runtime layer mapping and rejection boundary |
 | `test_vector_command_boundary.py` | move/rewrite | core/vector command boundary, with vector-only strictness |
 
 ## Duplicate or obsolete material
@@ -93,8 +91,7 @@ The following are the first known obsolete or replacement targets:
 - extension CLI-flag assertions embedded in `test_commands.py` and
   `test_controller_profiles.py`;
 - core construction calls for removed prompt-pair/vector helpers in
-  `test_activation_vectors.py`, `test_llama_worker.py`, and
-  `test_transformers_hidden_state.py`;
+  `test_activation_vectors.py` and `test_transformers_hidden_state.py`;
 - root vector-CLI forwarding assumptions in `test_vector_command_boundary.py`;
 - learner/controller internals that are already covered by the archived
   adapter or are no longer part of the supported runtime;
@@ -145,6 +142,5 @@ The existing hand-written cvector fixture is already close to this design: its
 distinct `(1, 2, 3)` and `(4, 5, 6)` directions catch ordering mistakes. It
 should be extracted from the mixed legacy vector test and extended with the
 recording-backend assertion, which makes an off-by-one or reordered layer
-interpretation fail directly. The real Transformers/Accelerate test remains a
-slow, opt-in cross-backend conformance test rather than a prerequisite for
-ordinary vector-package correctness.
+interpretation fail directly. Transformers-based vector creation remains an
+optional production path.

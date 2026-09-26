@@ -10,13 +10,15 @@ Install it after `policy-editor-core` when you want `policy-editor-vector`.
 The core runtime can load a compatible artifact without this package; this
 package adds production and inspection commands only.
 
+Prompt-pair creation uses a local Transformers model. Install the Transformers
+backend with the vector package:
+
 ```bash
-python -m pip install './core[llama]' ./vector
+python -m pip install './core[transformers]' ./vector
 ```
 
-For Transformers-backed vector production, install either
-`./core[transformers]` or the explicit `./core[transformers-accelerate]` extra
-before installing this package.
+Cvector import does not need Transformers. Install `./core[llama]` as well when
+you want to apply an imported cvector artifact with the llama.cpp editor.
 
 Post-output vectors, including pre-normalization output-head directions, are
 not part of the conventional vector package.

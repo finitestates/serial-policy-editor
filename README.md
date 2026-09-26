@@ -134,10 +134,9 @@ Install the optional vector package when you want to create or inspect
 conventional hidden-state steering vectors:
 
 ```bash
-python -m pip install './core[llama]' ./vector
+python -m pip install './core[transformers]' ./vector
 policy-editor-vector create \
-  --model /path/to/model.gguf \
-  --backend llama.cpp \
+  --model /path/to/model-directory \
   --prompt-a 'I am calm.' \
   --prompt-b 'I am angry.' \
   --layer-start 2 \
@@ -192,21 +191,10 @@ python -m pytest -q tests/vectors
 
 Core tests cover the 55 contract slots for sampling, actions, replay,
 lifecycle, menus, vector loading, persistence, and generated cases. Vector
-tests cover artifact interpretation, hidden-state capture, worker protocol,
-and optional production behavior. Real-model backend checks are opt-in and
-skip when their local model or worker is absent. The heavyweight cross-backend
-worker check is documented separately under [optional cross-backend vector
-conformance](#optional-cross-backend-vector-conformance).
-
-### Optional cross-backend vector conformance
-
-`tests/vectors/test_transformers_worker_interop.py` is intentionally not part
-of the ordinary Transformers install or the default test run. It is an opt-in
-check for people who want to compare a Transformers worker with a llama.cpp
-GGUF worker. It requires a local model and worker command, plus the heavier
-`./core[transformers-gguf]` extra, which includes GGUF support and Accelerate.
-The normal `./core[transformers]` path does not install Accelerate and does not
-need this test.
+tests cover artifact interpretation, Transformers-based vector creation,
+cvector import, portable artifact application, and optional production
+behavior. Real-model backend checks are opt-in and skip when their local model
+is absent.
 
 Historical tests and experimental material are retained under `archive/` and
 are not collected by these commands.

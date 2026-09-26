@@ -231,16 +231,7 @@ WATCHED_CLASSES = [
 ]
 COLD = {  # baseline classification; the owner adds new entries
     "decoder:LlamaCppDecoder.__init__",
-    "decoder:LlamaCppDecoder._activation_embedding_model",
-    "decoder:LlamaCppDecoder._capture_hidden_state_rows",
-    "decoder:LlamaCppDecoder._hidden_state_capture_symbols",
-    "decoder:LlamaCppDecoder.activation_snapshot",
     "decoder:LlamaCppDecoder.close",
-    "decoder:LlamaCppDecoder.hidden_state_capabilities",
-    "decoder:LlamaCppDecoder.hidden_state_capture_layer_range",
-    "decoder:LlamaCppDecoder.hidden_state_layer_types",
-    "decoder:LlamaCppDecoder.hidden_state_snapshot",
-    "decoder:LlamaCppDecoder.hidden_state_snapshots",
     "decoder:LlamaCppDecoder.model_id",
     "episode_engine:EpisodeEngine.resume",
     "episode_engine:EpisodeEngine.terminal_reason",
