@@ -446,6 +446,7 @@ class EpisodeEngine:
         return self._prefix_snapshot
 
     def _invalidate_observation(self) -> None:
+        self._rollback_speculative_accept()
         self._observation = None
         self._observation_key = None
         self._prepared_accept = None
@@ -466,11 +467,12 @@ class EpisodeEngine:
         self._backend_positioned = True
 
     def discard_speculative_accept(self) -> None:
-        """Drop a prepared continuation without backend work."""
-        self._prepared_accept = None
+        """Drop a prepared continuation and restore the committed backend prefix."""
+        self._rollback_speculative_accept()
 
     def _rollback_speculative_accept(self) -> None:
-        if self._speculative_accept_prefix is None:
+        if getattr(self, "_speculative_accept_prefix", None) is None:
+            self._prepared_accept = None
             return
         self.backend.rollback_speculation()
         self._speculative_accept_prefix = None
@@ -538,7 +540,6 @@ class EpisodeEngine:
         ):
             return True
         self.discard_speculative_accept()
-        self._rollback_speculative_accept()
         if (
             self.backend.is_eog(token_id)
             or (self.remaining is not None and self.remaining <= 1)
@@ -1065,18 +1066,19 @@ class EpisodeEngine:
             and prepared.prefix_token_ids == tuple(self.token_ids)
             and self._speculative_accept_prefix == prepared.prefix_token_ids
         )
-        self._prepared_accept = None
+        if promoted:
+            self.backend.commit_speculation()
+            self._speculative_accept_prefix = None
+            self._backend_positioned = True
+        else:
+            self.discard_speculative_accept()
         self._invalidate_observation()
         if evidence.is_eog:
             if not promoted:
                 self._ensure_backend_positioned()
             self.terminal_token_id = token_id
         else:
-            if promoted:
-                self.backend.commit_speculation()
-                self._speculative_accept_prefix = None
-                self._backend_positioned = True
-            else:
+            if not promoted:
                 self._ensure_backend_positioned()
                 self.backend.eval([token_id])
                 self._backend_positioned = True

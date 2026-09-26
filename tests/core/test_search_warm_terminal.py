@@ -1,4 +1,4 @@
-"""Search-priority speculative warms carry only into matching selections."""
+"""Search-target speculation stays warm until the user changes targets."""
 
 from __future__ import annotations
 
@@ -19,10 +19,6 @@ from trajectory_editor.episode_ui import InteractivePolicy, _choice_from_observa
 from trajectory_editor.episode_hash import token_prefix_sha256
 from trajectory_editor.persistent_tui import PersistentTerminalSession
 from trajectory_editor.terminal_contracts import ChoiceFeedback, ChoiceViewState
-
-
-TEST_WARM_DELAY = 0.22
-TIMER_TOLERANCE = 0.04
 
 
 def _until(predicate, timeout: float = 3.0) -> bool:
@@ -118,8 +114,8 @@ def _search_state(
         target_token_id=token_id if search_lens_active else None,
         feedback=feedback,
         search_lens_active=search_lens_active,
-        warm_selection=warm,
-        cancel_warm_selection=engine.discard_speculative_accept,
+        warm_search_token=warm,
+        cancel_search_warm=engine.discard_speculative_accept,
         search_warm_target=target,
         search_warm_commands=suggestions,
         search_warm_prepared=engine.has_prepared_accept(observation, rank, token_id),
@@ -148,7 +144,6 @@ def test_exact_search_warms_before_tab_and_rank_commit_promotes_it():
     with create_pipe_input() as pipe:
         with PersistentTerminalSession(
             input_device=pipe, output_device=_terminal(),
-            warm_debounce_mode="fixed", fixed_delay=TEST_WARM_DELAY,
         ) as session:
             policy = InteractivePolicy(io=session, search_radius=1)
 
@@ -203,7 +198,6 @@ def test_multi_token_search_warms_first_result_and_preserves_it_through_suggesti
     with create_pipe_input() as pipe:
         with PersistentTerminalSession(
             input_device=pipe, output_device=_terminal(),
-            warm_debounce_mode="fixed", fixed_delay=TEST_WARM_DELAY,
         ) as session:
             policy = InteractivePolicy(io=session, search_radius=1)
 
@@ -256,57 +250,42 @@ def test_multi_token_search_warms_first_result_and_preserves_it_through_suggesti
 
 
 @pytest.mark.invariant
-def test_moving_off_blocked_search_warm_debounces_only_final_neighbor():
-    started = Event()
-    release = Event()
-    first_eval = True
-
-    def block_first_eval():
-        nonlocal first_eval
-        if first_eval:
-            first_eval = False
-            started.set()
-            assert release.wait(3)
-
-    backend = SearchBackend(on_eval=block_first_eval)
+def test_search_warm_stays_ready_while_navigating_then_rolls_back_other_commit():
+    backend = SearchBackend()
     engine = _engine(backend)
     observation = engine.observe()
     calls = []
-    completed = {}
-    _, state = _search_state(
-        engine, observation, token_id=1, calls=calls, completed=completed,
+    rank, state = _search_state(engine, observation, token_id=3, calls=calls)
+    other_rank = next(
+        candidate.rank
+        for candidate in engine.candidates(observation, count=len(observation.logits))
+        if candidate.rank != rank and not backend.is_eog(candidate.token_id)
     )
+    other_token_id = engine.candidates(
+        observation, start_rank=other_rank, count=1,
+    )[0].token_id
     errors = []
-    selected_final_at = []
 
     with create_pipe_input() as pipe:
         with PersistentTerminalSession(
             input_device=pipe, output_device=_terminal(),
-            warm_debounce_mode="fixed", fixed_delay=TEST_WARM_DELAY,
         ) as session:
             def feed():
                 try:
                     assert _until(lambda: session._current is not None
                                   and session._current.state is state
                                   and session.accepting_input)
-                    assert started.wait(3)
-                    pipe.send_text("\t")
-                    assert _until(lambda: session.choice_view.command_buffer.text == "1")
-                    pipe.send_text("\t")
-                    assert _until(lambda: session.choice_view.command_buffer.text == "2")
-                    pipe.send_text("\t")
-                    assert _until(lambda: session.choice_view.command_buffer.text == "3")
-                    selected_final_at.append(monotonic())
-                    release.set()
-                    assert completed.setdefault(3, Event()).wait(3)
-                    assert _until(lambda: engine.has_prepared_accept(observation, 3, 3))
-                    assert calls[-1][:2] == (3, 3)
-                    assert calls[-1][2] - selected_final_at[0] >= TEST_WARM_DELAY - TIMER_TOLERANCE
-                    assert not any(call[:2] == (3, 2) for call in calls[1:])
+                    assert _until(lambda: _request_warm_done(session, state))
+                    assert engine.has_prepared_accept(observation, rank, 3)
+                    pipe.send_text(str(other_rank))
+                    assert _until(lambda: session.choice_view.command_buffer.text == str(other_rank))
+                    # Editing the candidate keeps the search target ready until commit.
+                    assert engine.has_prepared_accept(observation, rank, 3)
+                    assert backend.tokens == [7, 3]
+                    assert [(call[0], call[1]) for call in calls] == [(rank, 3)]
                     pipe.send_text("\r")
                 except BaseException as exc:
                     errors.append(exc)
-                    release.set()
                     pipe.close()
 
             feeder = Thread(target=feed)
@@ -315,13 +294,66 @@ def test_moving_off_blocked_search_warm_debounces_only_final_neighbor():
             feeder.join(timeout=3)
             assert not feeder.is_alive() and not errors
 
-    assert raw == "3"
-    assert calls[0][:2] == (1, 1)
-    assert calls[-1][:2] == (3, 3)
-    assert not any(call[:2] == (2, 2) for call in calls)
-    engine.apply(SelectRawRank(3))
-    assert backend.eval_calls == [(1,), (3,)]
-    assert backend.tokens == [7, 3]
+    assert raw == str(other_rank)
+    assert not engine.has_prepared_accept(observation, rank, 3)
+    assert backend.tokens == [7]
+    engine.apply(SelectRawRank(other_rank))
+    assert backend.eval_calls == [(3,), (other_token_id,)]
+    assert backend.tokens == [7, other_token_id]
+
+
+@pytest.mark.invariant
+def test_new_search_replaces_the_previous_search_warm():
+    backend = SearchBackend()
+    engine = _engine(backend)
+    observation = engine.observe()
+    first_rank = observation.statistics.raw_rank(3)
+    second_rank = observation.statistics.raw_rank(4)
+    errors = []
+
+    with create_pipe_input() as pipe:
+        with PersistentTerminalSession(
+            input_device=pipe, output_device=_terminal(),
+        ) as session:
+            policy = InteractivePolicy(io=session, search_radius=1)
+
+            def feed():
+                try:
+                    assert _until(lambda: session._current is not None and session.accepting_input)
+                    pipe.send_text("/TERM\r")
+                    assert _until(lambda: (
+                        session._current is not None
+                        and isinstance(session._current.state, ChoiceViewState)
+                        and session._current.state.search_warm_target == (first_rank, 3)
+                        and _request_warm_done(session, session._current.state)
+                    ))
+                    assert backend.tokens == [7, 3]
+                    pipe.send_text("/SECOND\r")
+                    assert _until(lambda: (
+                        session._current is not None
+                        and isinstance(session._current.state, ChoiceViewState)
+                        and session._current.state.search_warm_target == (second_rank, 4)
+                        and _request_warm_done(session, session._current.state)
+                    ))
+                    assert backend.eval_calls == [(3,), (4,)]
+                    assert backend.tokens == [7, 4]
+                    pipe.send_text(str(second_rank) + "\r")
+                except BaseException as exc:
+                    errors.append(exc)
+                    pipe.close()
+
+            feeder = Thread(target=feed)
+            feeder.start()
+            action = policy.choose(engine, observation)
+            feeder.join(timeout=3)
+            assert not feeder.is_alive() and not errors
+
+    assert isinstance(action, SelectRawRank)
+    assert action.rank == second_rank
+    engine.apply(action)
+    assert backend.eval_calls == [(3,), (4,)]
+    assert backend.tokens == [7, 4]
+    assert session.stats["promotions"] == 1
 
 
 @pytest.mark.invariant
@@ -332,19 +364,18 @@ def test_blank_enter_keeps_accept_semantics_without_false_search_promotion():
     _, state = _search_state(engine, observation, token_id=3)
     warmed = Event()
     errors = []
-    original_warm = state.warm_selection
+    original_warm = state.warm_search_token
 
     def warm(rank, token_id, generation, cancelled):
         result = original_warm(rank, token_id, generation, cancelled)
         warmed.set()
         return result
 
-    object.__setattr__(state, "warm_selection", warm)
+    object.__setattr__(state, "warm_search_token", warm)
 
     with create_pipe_input() as pipe:
         with PersistentTerminalSession(
             input_device=pipe, output_device=_terminal(),
-            warm_debounce_mode="fixed", fixed_delay=TEST_WARM_DELAY,
         ) as session:
             def feed():
                 try:

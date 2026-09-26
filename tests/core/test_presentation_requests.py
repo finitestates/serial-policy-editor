@@ -222,7 +222,7 @@ def test_edge_help_is_shared_by_plain_and_live_with_mode_specific_actions():
 
 
 @pytest.mark.parametrize("submitted_rank", (1, 2))
-def test_choice_warm_callback_resolves_selected_rank_through_policy(submitted_rank):
+def test_ordinary_choice_has_no_speculative_warm_callback(submitted_rank):
     class WarmCapture(LiveScriptedIO):
         def __init__(self):
             super().__init__([])
@@ -231,10 +231,8 @@ def test_choice_warm_callback_resolves_selected_rank_through_policy(submitted_ra
         def read_choice(self, state):
             candidate = state.resolve_candidate(2)
             self.target = (candidate.rank, candidate.token_id)
-            assert state.warm_selection is not None
-            assert state.warm_selection(
-                candidate.rank, candidate.token_id, 1, lambda: False,
-            )
+            assert state.warm_search_token is None
+            assert state.cancel_search_warm is None
             return str(submitted_rank)
 
     terminal = WarmCapture()
@@ -247,8 +245,8 @@ def test_choice_warm_callback_resolves_selected_rank_through_policy(submitted_ra
     action = InteractivePolicy(io=terminal, menu_size=1).choose(engine, observation)
     assert terminal.target == (2, 2)
     assert action.rank == submitted_rank
-    assert backend.eval_calls == [(2,)]
+    assert backend.eval_calls == []
 
     engine.apply(action)
     assert backend.tokens == [7, submitted_rank]
-    assert backend.eval_calls == ([(2,)] if submitted_rank == 2 else [(2,), (1,)])
+    assert backend.eval_calls == [(submitted_rank,)]

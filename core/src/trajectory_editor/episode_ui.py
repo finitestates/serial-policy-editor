@@ -783,7 +783,7 @@ class InteractivePolicy:
                 overlays=self.view_preferences.overlays,
                 default_hold_tokens=self.default_hold_tokens,
                 default_search_radius=self.search_radius,
-                warm_selection=(
+                warm_search_token=(
                     (lambda rank, token_id, generation, cancelled: engine.speculate_accept(
                         observation,
                         raw_rank=rank,
@@ -791,11 +791,13 @@ class InteractivePolicy:
                         generation=generation,
                         cancelled=cancelled,
                     ))
-                    if review_boundary is None else None
+                    if review_boundary is None and search_warm_target is not None
+                    else None
                 ),
-                cancel_warm_selection=(
+                cancel_search_warm=(
                     engine.discard_speculative_accept
-                    if review_boundary is None else None
+                    if review_boundary is None and search_warm_target is not None
+                    else None
                 ),
                 search_warm_target=search_warm_target,
                 search_warm_commands=search_warm_commands,
@@ -983,26 +985,32 @@ class InteractivePolicy:
                 continue
             if command.kind == CommandKind.MAIN_MENU:
                 search_lens_active = False
-                search_warm_target = None
-                search_warm_commands = ()
                 feedback = None
                 continue
             if command.kind == CommandKind.TOKEN_SEARCH:
                 assert command.search_query is not None
                 try:
-                    found, feedback, search_warm_target = self._search(
+                    found, feedback, next_warm_target = self._search(
                         engine,
                         observation,
                         command.search_query,
                         command.invoked_as or raw,
                     )
-                    search_warm_commands = (
-                        feedback.completion_commands[:1]
-                        if found is None else self._search_warm_commands(found.query)
-                    )
                 except EditorError as exc:
+                    engine.discard_speculative_accept()
+                    search = None
+                    search_lens_active = False
+                    search_warm_target = None
+                    search_warm_commands = ()
                     feedback = ChoiceFeedback("error", "SEARCH FAILED", (str(exc),))
                     continue
+                if next_warm_target != search_warm_target:
+                    engine.discard_speculative_accept()
+                search_warm_target = next_warm_target
+                search_warm_commands = (
+                    feedback.completion_commands[:1]
+                    if found is None else self._search_warm_commands(found.query)
+                )
                 if found is not None:
                     search = found
                     search_warm_target = (found.target_rank, found.token_id)
@@ -1014,18 +1022,24 @@ class InteractivePolicy:
                             engine, observation, search
                         )
                     )
+                else:
+                    search = None
+                    search_lens_active = False
                 continue
             if command.kind == CommandKind.TOKEN_SEARCH_VIEW:
                 if command.search_rank is not None:
                     rank = command.search_rank
                     candidate = resolve_candidate(rank)
+                    next_warm_target = (rank, candidate.token_id)
+                    if next_warm_target != search_warm_target:
+                        engine.discard_speculative_accept()
                     search = SearchLens(
                         query=candidate.text, token_id=candidate.token_id,
                         target_rank=rank,
                         lower_rank=max(1, rank - self.search_radius),
                         upper_rank=min(len(observation.logits), rank + self.search_radius),
                     )
-                    search_warm_target = (rank, candidate.token_id)
+                    search_warm_target = next_warm_target
                     search_warm_commands = self._search_warm_commands(candidate.text)
                 if search is None:
                     feedback = ChoiceFeedback(

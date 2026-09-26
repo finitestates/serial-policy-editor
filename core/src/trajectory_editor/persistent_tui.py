@@ -9,7 +9,6 @@ accepting input, so queued keystrokes cannot commit against an obsolete decision
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 import threading
 from _thread import interrupt_main
@@ -54,10 +53,6 @@ from .terminal_contracts import ChoiceViewState, EdgeViewState, PromptRequest
 from .ui_themes import DEFAULT_LIVE_THEME
 
 
-# Default fallback matching the baseline
-DEFAULT_WARM_SELECTION_DELAY = 0.15
-
-
 @dataclass(eq=False)
 class _Request:
     state: ChoiceViewState | EdgeViewState | PromptRequest
@@ -69,9 +64,7 @@ class _Request:
     submitted_target: tuple[int, int] | None = None
     warm_generation: int | None = None
     warm_cancelled: threading.Event = field(default_factory=threading.Event)
-    warm_timer: asyncio.TimerHandle | None = None
     warm_future: Future | None = None
-    warm_search_priority: bool = False
 
 
 @dataclass
@@ -237,11 +230,6 @@ class PersistentTerminalSession(AbstractContextManager):
         input_device=None,
         output_device=None,
         theme=DEFAULT_LIVE_THEME,
-        warm_debounce_mode: str | None = None,
-        fixed_delay: float = DEFAULT_WARM_SELECTION_DELAY,
-        adaptive_min_delay: float = 0.08,
-        adaptive_max_delay: float = 0.25,
-        adaptive_burst_threshold: float = 0.18,
     ):
         self.input_device = input_device
         self.output_device = output_device
@@ -263,23 +251,8 @@ class PersistentTerminalSession(AbstractContextManager):
         self._closing = False
         self._notice = ""
         self._warm_generation = 0
-
-        # Debounce experiment controls (internal default is adaptive)
-        resolved_mode = warm_debounce_mode
-        if resolved_mode is None:
-            resolved_mode = os.getenv("SPE_TEST_WARM_DEBOUNCE_MODE", "adaptive")
-
-        self.warm_debounce_mode = resolved_mode.lower()
-        self.fixed_delay = fixed_delay
-        self.min_delay = adaptive_min_delay
-        self.max_delay = adaptive_max_delay
-        self.burst_threshold = adaptive_burst_threshold
-
-        # Timing and telemetry state
-        self._last_target_time: float | None = None
         self.stats = {
             "warm_dispatches": 0,
-            "warm_aborts": 0,
             "promotions": 0,
         }
 
@@ -391,6 +364,8 @@ class PersistentTerminalSession(AbstractContextManager):
             before_render=self._before_render,
             after_render=self._rendered,
         )
+        # Kept as a watched hot-path hook; candidate movement no longer starts
+        # or retargets speculation. Search warms are scheduled per choice view.
         self.application.key_processor.after_key_press += self._after_key_press
         await self.application.run_async(
             set_exception_handler=False, handle_sigint=False
@@ -407,14 +382,13 @@ class PersistentTerminalSession(AbstractContextManager):
 
     def _after_key_press(self, key_processor):
         del key_processor
-        request = self._current
-        if request is not None:
-            self._refresh_warm_target(request)
 
     @staticmethod
-    def _is_warm_promotion(request: _Request) -> bool:
+    def _is_search_warm_promotion(request: _Request) -> bool:
         if (
             request.warm_cancelled.is_set()
+            or not isinstance(request.state, ChoiceViewState)
+            or request.warm_target != request.state.search_warm_target
             or not request.response.done()
             or request.response.cancelled()
             or request.warm_target is None
@@ -436,8 +410,8 @@ class PersistentTerminalSession(AbstractContextManager):
         if (
             not isinstance(state, ChoiceViewState)
             or request.warm_cancelled.is_set()
-            or not request.warm_search_priority
             or request.warm_target is None
+            or request.warm_target != state.search_warm_target
             or not request.response.done()
             or request.response.cancelled()
             or request.warm_future is None
@@ -447,10 +421,13 @@ class PersistentTerminalSession(AbstractContextManager):
             return False
         try:
             raw = request.response.result()
-            return (
-                raw in state.search_warm_commands
-                and bool(request.warm_future.result())
-            )
+            if not bool(request.warm_future.result()):
+                return False
+            if request.submitted_target is not None:
+                return request.submitted_target == request.warm_target
+            if isinstance(raw, str) and raw.strip().startswith("/"):
+                return raw.strip() in state.search_warm_commands
+            return True
         except BaseException:
             return False
 
@@ -483,85 +460,28 @@ class PersistentTerminalSession(AbstractContextManager):
             request is not self._current
             or request.response.done()
             or not isinstance(request.state, ChoiceViewState)
-            or request.state.warm_selection is None
+            or request.state.warm_search_token is None
+            or request.state.search_warm_target is None
             or self.choice_view is None
         ):
             return
-        raw = self.choice_view.command_buffer.text
-        selected_target = self._choice_target(request, raw)
-        search_target = request.state.search_warm_target
-        carries_search_target = False
-        if search_target is not None:
-            if not raw or selected_target == search_target:
-                carries_search_target = True
-            elif raw in request.state.search_warm_commands:
-                carries_search_target = True
-        target = search_target if carries_search_target else selected_target
-        search_priority = carries_search_target
+        target = request.state.search_warm_target
         if target == request.warm_target:
-            request.warm_search_priority = search_priority
             return
-
-        # Measure inter-arrival time across cursor shifts
-        now = self._loop.time()
-        delta = (
-            now - self._last_target_time
-            if self._last_target_time is not None
-            else float("inf")
-        )
-        self._last_target_time = now
-
-        # Cancel any pending timer or in-flight compute
-        if request.warm_timer is not None or (
-            request.warm_future and not request.warm_future.done()
-        ):
-            self.stats["warm_aborts"] += 1
-
-        request.warm_cancelled.set()
-        if request.warm_timer is not None:
-            request.warm_timer.cancel()
-            request.warm_timer = None
-        if request.warm_future is not None and not request.warm_future.done():
-            request.warm_future.cancel()
-        if request.warm_target is not None:
-            cancel = request.state.cancel_warm_selection
-            if cancel is not None:
-                self._events.put(_Resolution(request, cancel, Future()))
 
         self._warm_generation += 1
         request.warm_generation = self._warm_generation
         request.warm_target = target
-        request.warm_search_priority = search_priority
         request.warm_cancelled = threading.Event()
-        request.warm_future = None
 
-        if target is not None and search_priority and request.state.search_warm_prepared:
+        if request.state.search_warm_prepared:
             request.warm_future = Future()
             request.warm_future.set_result(True)
             return
 
-        if target is not None:
-            if search_priority:
-                delay = 0.0
-            elif self.warm_debounce_mode == "adaptive":
-                if delta < self.burst_threshold:
-                    speed_ratio = 1.0 - (max(0.0, delta) / self.burst_threshold)
-                    delay = (
-                        self.min_delay + (self.max_delay - self.min_delay) * speed_ratio
-                    )
-                else:
-                    delay = self.min_delay
-            else:
-                delay = self.fixed_delay
-
-            request.warm_timer = self._loop.call_later(
-                delay,
-                self._queue_warm_selection,
-                request,
-                request.warm_generation,
-                target,
-                request.warm_cancelled,
-            )
+        self._queue_warm_selection(
+            request, request.warm_generation, target, request.warm_cancelled
+        )
 
     def _queue_warm_selection(
         self,
@@ -570,7 +490,6 @@ class PersistentTerminalSession(AbstractContextManager):
         target: tuple[int, int],
         cancelled: threading.Event,
     ) -> None:
-        request.warm_timer = None
         if (
             request is not self._current
             or request.response.done()
@@ -586,7 +505,7 @@ class PersistentTerminalSession(AbstractContextManager):
         def warm():
             if cancelled.is_set():
                 return None
-            return request.state.warm_selection(
+            return request.state.warm_search_token(
                 target[0], target[1], generation, cancelled.is_set
             )
 
@@ -658,19 +577,17 @@ class PersistentTerminalSession(AbstractContextManager):
         finally:
             if not request.response.done():
                 request.response.cancel()
-            promoted = self._is_warm_promotion(request)
+            promoted = self._is_search_warm_promotion(request)
             carryover = self._is_search_warm_carryover(request)
             keep_prepared = promoted or carryover
             if promoted:
                 self.stats["promotions"] += 1
-            if request.warm_timer is not None:
-                self._call(request.warm_timer.cancel)
             if not keep_prepared:
                 request.warm_cancelled.set()
                 if request.warm_future is not None and not request.warm_future.done():
                     request.warm_future.cancel()
                 if isinstance(request.state, ChoiceViewState):
-                    cancel_warm = request.state.cancel_warm_selection
+                    cancel_warm = request.state.cancel_search_warm
                     if callable(cancel_warm):
                         cancel_warm()
             for preview in request.previews.values():
@@ -779,10 +696,24 @@ class PersistentTerminalSession(AbstractContextManager):
         if (
             exception is None
             and isinstance(request.state, ChoiceViewState)
-            and request.state.warm_selection is not None
+            and request.state.warm_search_token is not None
             and isinstance(result, str)
         ):
             request.submitted_target = self._choice_target(request, result)
+            if (
+                request.warm_target is not None
+                and (
+                    (
+                        request.submitted_target is not None
+                        and request.submitted_target != request.warm_target
+                    )
+                    or (
+                        result.strip().startswith("/")
+                        and result.strip() not in request.state.search_warm_commands
+                    )
+                )
+            ):
+                request.warm_cancelled.set()
         if not request.response.set_running_or_notify_cancel():
             return
         if exception is None:
