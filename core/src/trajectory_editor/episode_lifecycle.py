@@ -1,6 +1,6 @@
 """Core episode lifecycle operations for the terminal runtime."""
 from __future__ import annotations
-from dataclasses import fields, replace
+from dataclasses import dataclass, fields, replace
 from typing import Any, Callable
 from .core.errors import EditorError
 from .core.actions import Write
@@ -49,6 +49,56 @@ def _model_change_sampling(
     )
 
 
+@dataclass(frozen=True)
+class _SourceEpisodeSnapshot:
+    episode: dict[str, Any]
+    token_rows: tuple[dict[str, Any], ...]
+    visible_token_ids: tuple[int, ...]
+    boundary: int
+    sampling_segment: dict[str, Any]
+
+
+def _source_episode_snapshot(
+    store: EpisodeStore,
+    source_id: str,
+    *,
+    boundary: int | None = None,
+    current_sampling_state: dict[str, Any] | None = None,
+) -> _SourceEpisodeSnapshot:
+    episode = store.get_episode(source_id)
+    token_rows = tuple(store.tokens(source_id))
+    visible = tuple(
+        int(row["token_id"])
+        for row in token_rows
+        if bool(row["realized_visible"])
+    )
+    visible_boundary = len(visible)
+    selected_boundary = visible_boundary if boundary is None else boundary
+    if (
+        type(selected_boundary) is not int
+        or not 0 <= selected_boundary <= visible_boundary
+    ):
+        raise EditorError(
+            f"fork boundary must be between 0 and {visible_boundary}"
+        )
+    if current_sampling_state is not None:
+        if (
+            selected_boundary != visible_boundary
+            or current_sampling_state.get("boundary") != visible_boundary
+        ):
+            raise EditorError("episode changed while preparing its current sampler state")
+        segment = current_sampling_state
+    else:
+        segment = store.sampling_segment(source_id, selected_boundary)
+    return _SourceEpisodeSnapshot(
+        episode=episode,
+        token_rows=token_rows,
+        visible_token_ids=visible,
+        boundary=selected_boundary,
+        sampling_segment=segment,
+    )
+
+
 def _materialize_model_change_fork(
     store: EpisodeStore,
     source_id: str,
@@ -60,6 +110,7 @@ def _materialize_model_change_fork(
     max_tokens: int | None,
     requested_id: str | None = None,
     guidance_backend: Any | None = None,
+    source_snapshot: _SourceEpisodeSnapshot | None = None,
 ) -> tuple[EpisodeEngine, str]:
     """Continue a model change while preserving tokenizer-safe lineage.
 
@@ -67,11 +118,15 @@ def _materialize_model_change_fork(
     A different tokenizer gets a new token space and only keeps a separate
     textual origin reference.
     """
-    source = store.get_episode(source_id)
-    source_tokens = store.tokens(source_id)
-    visible_count = sum(bool(row["realized_visible"]) for row in source_tokens)
-    if type(boundary) is not int or not 0 <= boundary <= visible_count:
-        raise EditorError(f"fork boundary must be between 0 and {visible_count}")
+    snapshot = source_snapshot or _source_episode_snapshot(
+        store, source_id, boundary=boundary
+    )
+    if snapshot.episode["episode_id"] != source_id or snapshot.boundary != boundary:
+        raise EditorError("source snapshot does not match the requested fork")
+    source = snapshot.episode
+    source_tokens = snapshot.token_rows
+    source_visible = snapshot.visible_token_ids
+    source_segment = snapshot.sampling_segment
     root_text = str(source["initial_text"])
     source_tokenizer_id = source["backend"].get("tokenizer_id")
     destination_provenance = backend_provenance_with_identity(backend, provenance)
@@ -82,12 +137,6 @@ def _materialize_model_change_fork(
         and source_tokenizer_id == destination_tokenizer_id
         and list(source["initial_token_ids"]) == root_token_ids
     )
-    source_visible = [
-        int(row["token_id"])
-        for row in source_tokens
-        if bool(row["realized_visible"])
-    ]
-    source_segment = store.sampling_segment(source_id, boundary)
     if same_tokenizer:
         prefix = [*source["initial_token_ids"], *source_visible[:boundary]]
         branch = getattr(backend, "branch_to_prefix", None)
@@ -168,20 +217,22 @@ def _materialize_model_change_fork(
 
 def _model_continuation(
     store, source_id, backend, provenance, *, guidance_backend=None,
+    current_sampling_state: dict[str, Any] | None = None,
     sampling_factory: Callable = SamplerConfig.from_record,
 ):
-    source = store.get_episode(source_id)
-    boundary = len(_visible_tokens(store, source_id))
-    segment = store.sampling_segment(source_id, boundary)
+    snapshot = _source_episode_snapshot(
+        store, source_id, current_sampling_state=current_sampling_state
+    )
     return _materialize_model_change_fork(
         store,
         source_id,
-        boundary,
+        snapshot.boundary,
         backend,
         provenance,
-        sampling=sampling_factory(segment["sampling"]),
-        max_tokens=source["max_tokens"],
+        sampling=sampling_factory(snapshot.sampling_segment["sampling"]),
+        max_tokens=snapshot.episode["max_tokens"],
         guidance_backend=guidance_backend,
+        source_snapshot=snapshot,
     )
 
 
@@ -202,6 +253,7 @@ def _restore_engine(
     sampling_override: SamplerConfig | None,
     guidance_backend: Any | None = None,
     sampling_factory: Callable = SamplerConfig.from_record,
+    current_sampling_state: dict[str, Any] | None = None,
     notice=print,
 ) -> EpisodeEngine:
     episode = store.get_episode(episode_id)
@@ -219,7 +271,12 @@ def _restore_engine(
             f"episode {episode_id!r} is sealed; use --replay or --fork-from instead"
         )
     visible = _visible_tokens(store, episode_id)
-    segment = store.sampling_segment(episode_id, len(visible))
+    if current_sampling_state is not None:
+        if current_sampling_state.get("boundary") != len(visible):
+            raise EditorError("episode changed while preparing its current sampler state")
+        segment = current_sampling_state
+    else:
+        segment = store.sampling_segment(episode_id, len(visible))
     source_sampling = sampling_factory(segment["sampling"])
     sampling = sampling_override or source_sampling
     saved_budget = episode["max_tokens"] or None

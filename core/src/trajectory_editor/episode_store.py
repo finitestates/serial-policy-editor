@@ -905,17 +905,61 @@ class EpisodeStore:
             "FROM sampler_segments WHERE episode_id = ? ORDER BY start_boundary",
             (episode_id,),
         ).fetchall()
-        result: list[dict[str, Any]] = []
-        for row in rows:
-            item = dict(row)
-            item["sampling"] = _loads(item.pop("sampling_json"), {})
-            if not isinstance(item["sampling"], dict):
-                raise EditorError("saved sampler settings must be an object")
-            SamplerConfig.from_record(item["sampling"])
-            validate_boundary(item["start_boundary"], "start_boundary")
-            validate_fingerprint(item["stream_fingerprint"])
-            result.append(item)
-        return result
+        return [self._decode_sampler_segment(row) for row in rows]
+
+    @staticmethod
+    def _decode_sampler_segment(row) -> dict[str, Any]:
+        item = dict(row)
+        item["sampling"] = _loads(item.pop("sampling_json"), {})
+        if not isinstance(item["sampling"], dict):
+            raise EditorError("saved sampler settings must be an object")
+        SamplerConfig.from_record(item["sampling"])
+        validate_boundary(item["start_boundary"], "start_boundary")
+        validate_fingerprint(item["stream_fingerprint"])
+        return item
+
+    def _sampling_segment_at_boundary(
+        self, episode_id: str, boundary: int
+    ) -> dict[str, Any]:
+        validate_boundary(boundary, "boundary")
+        row = self.connection.execute(
+            """
+            SELECT episode_id, start_boundary, sampling_json, stream_fingerprint
+            FROM sampler_segments
+            WHERE episode_id = ? AND start_boundary <= ?
+            ORDER BY start_boundary DESC
+            LIMIT 1
+            """,
+            (episode_id, boundary),
+        ).fetchone()
+        if row is None:
+            raise EditorError(f"episode {episode_id!r} has no sampler segment")
+        return self._decode_sampler_segment(row)
+
+    def current_sampling_state(self, episode_id: str) -> dict[str, Any]:
+        """Return the current visible boundary and its active sampler record.
+
+        This reads a visible-token count and one sampler row, without
+        materializing token history or decoding every sampler transition.
+        """
+        row = self.connection.execute(
+            """
+            SELECT (
+                SELECT COUNT(*)
+                FROM tokens
+                WHERE tokens.episode_id = episodes.episode_id
+                  AND tokens.realized_visible = 1
+            ) AS boundary
+            FROM episodes
+            WHERE episode_id = ?
+            """,
+            (episode_id,),
+        ).fetchone()
+        if row is None:
+            raise EditorError(f"unknown episode {episode_id!r}")
+        boundary = int(row["boundary"])
+        segment = self._sampling_segment_at_boundary(episode_id, boundary)
+        return {"boundary": boundary, **segment}
 
     def budget_segments(self, episode_id: str) -> list[dict[str, Any]]:
         """Return budget-control records in root-boundary order."""
@@ -931,11 +975,5 @@ class EpisodeStore:
 
     def sampling_segment(self, episode_id: str, boundary: int = 0) -> dict[str, Any]:
         validate_boundary(boundary, "boundary")
-        matches = [
-            segment
-            for segment in self.sampler_segments(episode_id)
-            if int(segment["start_boundary"]) <= boundary
-        ]
-        if not matches:
-            raise EditorError(f"episode {episode_id!r} has no sampler segment")
-        return dict(matches[-1])
+        self.get_episode(episode_id)
+        return self._sampling_segment_at_boundary(episode_id, boundary)

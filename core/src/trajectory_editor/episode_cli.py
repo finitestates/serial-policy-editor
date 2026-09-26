@@ -821,9 +821,7 @@ def main(
             if selection.kind == "resume":
                 # Only explicit CLI sampler flags override the stored segment.
                 explicit = sampler_overrides_present(args)
-                segment = store.sampling_segment(
-                    args.resume, len(_visible_tokens(store, args.resume))
-                )
+                segment = store.current_sampling_state(args.resume)
                 source_sampling = sampling_factory(segment["sampling"])
                 sampling = (
                     sampler_from_args(args, source_sampling)
@@ -837,6 +835,7 @@ def main(
                     engine, episode_id = _model_continuation(
                         store, args.resume, backend, provenance,
                         guidance_backend=cfg_backend_for(sampling),
+                        current_sampling_state=segment,
                         sampling_factory=sampling_factory,
                     )
                     if args.max_tokens is not None:
@@ -851,6 +850,7 @@ def main(
                         sampling_override=sampling if explicit else None,
                         guidance_backend=cfg_backend_for(sampling),
                         sampling_factory=sampling_factory,
+                        current_sampling_state=segment,
                     )
                     episode_id = args.resume
             elif selection.kind == "new":
@@ -1168,16 +1168,19 @@ def main(
                             )
                         )
                         if changed:
+                            current_sampling_state = store.current_sampling_state(
+                                destination
+                            )
+                            current_sampling = sampling_factory(
+                                current_sampling_state["sampling"]
+                            )
                             new_engine, destination = _model_continuation(
                                 store, destination, new_backend, new_provenance,
                                 guidance_backend=cfg_backend_for(
-                                    sampling_factory(
-                                        store.sampling_segment(
-                                            destination, len(_visible_tokens(store, destination))
-                                        )["sampling"]
-                                    ),
+                                    current_sampling,
                                     primary=new_backend, model_provenance=new_provenance,
                                 ),
+                                current_sampling_state=current_sampling_state,
                                 sampling_factory=sampling_factory,
                             )
                         elif sealed:
@@ -1213,15 +1216,19 @@ def main(
                             )
                             _record_fork_edge_state(store, destination, new_engine)
                         else:
-                            visible = _visible_tokens(store, destination)
-                            new_engine = _restore_engine(store, destination, new_backend,
+                            current_sampling_state = store.current_sampling_state(
+                                destination
+                            )
+                            new_engine = _restore_engine(
+                                store, destination, new_backend,
                                 max_tokens=None, sampling_override=None,
                                 guidance_backend=cfg_backend_for(
                                     sampling_factory(
-                                        store.sampling_segment(destination, len(visible))["sampling"]
+                                        current_sampling_state["sampling"]
                                     )
                                 ),
                                 sampling_factory=sampling_factory,
+                                current_sampling_state=current_sampling_state,
                             )
                     except (EditorError, OSError, RuntimeError) as exc:
                         # A reused backend may already have been repositioned.
