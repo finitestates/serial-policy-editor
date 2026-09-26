@@ -37,7 +37,6 @@ def materialize_live_branch(
         initial_token_ids=state.initial_token_ids,
         sampling=initial.sampling,
         stream_fingerprint=initial.stream_fingerprint,
-        coordinate_offset=initial.coordinate_offset,
         max_tokens=initial.max_tokens,
         backend=provenance,
         metadata={
@@ -58,18 +57,15 @@ def materialize_live_branch(
         if (
             point.sampling,
             point.stream_fingerprint,
-            point.coordinate_offset,
         ) != (
             prior.sampling,
             prior.stream_fingerprint,
-            prior.coordinate_offset,
         ):
             store.record_sampling_segment(
                 identifier,
                 start_boundary=point.boundary,
                 sampling=point.sampling,
                 stream_fingerprint=point.stream_fingerprint,
-                coordinate_offset=point.coordinate_offset,
             )
         if (point.max_tokens, point.checkpoint_boundary) != (
             prior.max_tokens,

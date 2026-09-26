@@ -21,7 +21,6 @@ class TrajectoryState:
     visible_token_ids: list[int] = field(default_factory=list)
     terminal_token_id: int | None = None
     terminal_reason: str | None = None
-    coordinate_offset: int = 0
     stream_fingerprint: str | None = None
     max_tokens: int | None = None
     checkpoint_boundary: int | None = None
@@ -37,8 +36,6 @@ class TrajectoryState:
             raise EditorError("trajectory visible token IDs must be nonnegative integers")
         if not isinstance(self.initial_text, str):
             raise EditorError("trajectory initial text must be a string")
-        if type(self.coordinate_offset) is not int or self.coordinate_offset < 0:
-            raise EditorError("trajectory coordinate offset must be nonnegative")
         if self.stream_fingerprint is not None and not isinstance(self.stream_fingerprint, str):
             raise EditorError("trajectory stream fingerprint must be a string or null")
         if self.max_tokens is not None and (
@@ -88,15 +85,11 @@ class TrajectoryState:
         self.max_tokens = max_tokens
         self.checkpoint_boundary = checkpoint_boundary
 
-    def set_coordinates(self, *, stream_fingerprint: str | None, coordinate_offset: int) -> None:
-        """Restore the replay coordinate associated with the live branch."""
-
+    def set_stream_fingerprint(self, stream_fingerprint: str | None) -> None:
+        """Restore the sampler stream identity associated with the live branch."""
         if stream_fingerprint is not None and not isinstance(stream_fingerprint, str):
-            raise EditorError("trajectory stream fingerprint must be a string or null")
-        if type(coordinate_offset) is not int or coordinate_offset < 0:
-            raise EditorError("trajectory coordinate offset must be nonnegative")
+            raise EditorError("stream fingerprint must be a string or null")
         self.stream_fingerprint = stream_fingerprint
-        self.coordinate_offset = coordinate_offset
 
     def rewind_to(self, boundary: int) -> list[int]:
         """Retain the live branch through ``boundary`` and clear termination."""

@@ -27,7 +27,6 @@ def fresh_root_from(engine: EpisodeEngine, prompt: str) -> EpisodeEngine:
         sampling=replace(engine.sampling),
         max_tokens=engine.max_tokens,
         initial_text=prompt,
-        coordinate_offset=0,
         guidance_backend=engine.guidance_backend,
     )
 

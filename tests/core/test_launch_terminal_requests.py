@@ -109,7 +109,7 @@ def test_noninteractive_commands_do_not_open_terminal(tmp_path, capsys):
         store.create_episode(
             episode_id="source", initial_text="P", initial_token_ids=[7],
             sampling=engine.sampling, stream_fingerprint=engine.stream_fingerprint,
-            coordinate_offset=engine.coordinate_offset, max_tokens=None, backend={},
+            max_tokens=None, backend={},
         )
     exported = tmp_path / "source.jsonl"
     with patch("trajectory_editor.episode_cli.TerminalIO",
@@ -151,7 +151,7 @@ def test_bare_new_cancellation_returns_to_durable_edge(tmp_path):
         store.create_episode(
             episode_id="source", initial_text="P", initial_token_ids=[7],
             sampling=engine.sampling, stream_fingerprint=engine.stream_fingerprint,
-            coordinate_offset=engine.coordinate_offset, max_tokens=None, backend={},
+            max_tokens=None, backend={},
         )
         assert _live_edge_menu(io, store, "source", engine) == ("quit", None)
         assert store.workspace_list().count("#") == 1

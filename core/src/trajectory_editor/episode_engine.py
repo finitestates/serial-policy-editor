@@ -183,14 +183,11 @@ class EpisodeEngine:
         add_bos: bool = True,
         special: bool = True,
         stream_fingerprint: str | None = None,
-        coordinate_offset: int = 0,
         backend_positioned: bool = False,
         guidance_backend: InferenceBackend | None = None,
     ) -> None:
         if max_tokens is not None and (type(max_tokens) is not int or max_tokens < 1):
             raise EditorError("max_tokens must be a positive integer")
-        if type(coordinate_offset) is not int or coordinate_offset < 0:
-            raise EditorError("coordinate_offset must be a nonnegative integer")
         require_inference_backend(backend)
         if guidance_backend is not None:
             require_inference_backend(guidance_backend)
@@ -225,7 +222,6 @@ class EpisodeEngine:
             initial_text=initial_text_value,
             max_tokens=max_tokens,
             checkpoint_boundary=max_tokens,
-            coordinate_offset=coordinate_offset,
             stream_fingerprint=fingerprint,
         )
         self._prefix_snapshot = TokenPrefixSnapshot.root(tokens)
@@ -282,14 +278,6 @@ class EpisodeEngine:
     @terminal_reason.setter
     def terminal_reason(self, value: str | None) -> None:
         self.trajectory.terminal_reason = value
-
-    @property
-    def coordinate_offset(self) -> int:
-        return self.trajectory.coordinate_offset
-
-    @coordinate_offset.setter
-    def coordinate_offset(self, value: int) -> None:
-        self.trajectory.coordinate_offset = value
 
     @property
     def stream_fingerprint(self) -> str | None:
@@ -392,8 +380,9 @@ class EpisodeEngine:
         """Discard visible state after a token boundary and reposition the backend.
 
         The checkpoint boundary is kept intact. The caller restores historical
-        sampler settings and stream coordinates from the episode store; this
-        method only repositions token/backend state and clears cached evidence.
+        sampler settings and stream identity from the episode store; the retained
+        visible-token boundary determines the next sampling coordinate.
+        This method only repositions token/backend state and clears cached evidence.
         """
         if type(boundary) is not int or boundary < 0 or boundary > self.boundary:
             raise EditorError(
@@ -666,7 +655,7 @@ class EpisodeEngine:
 
     def _decision_key(self) -> tuple:
         return (
-            tuple(self.token_ids), self.sampling, self.coordinate_offset,
+            tuple(self.token_ids), self.sampling,
             self.stream_fingerprint,
             tuple(sorted(self._ephemeral_logit_biases.items())),
         )
@@ -767,7 +756,7 @@ class EpisodeEngine:
         )
         logits = statistics.logits
         distribution = statistics.distribution
-        coordinate = self.coordinate_offset + self.boundary
+        coordinate = self.boundary
         proposal = draw_token(
             distribution,
             seed=self.sampling.seed,

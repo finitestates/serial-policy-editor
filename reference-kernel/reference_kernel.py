@@ -41,11 +41,10 @@ def token_prefix_sha256(ids: Sequence[int]) -> str:
 
 @dataclass(frozen=True)
 class World:
-    """The stochastic identity and the offset of visible boundary zero."""
+    """The stochastic identity for one root prompt."""
 
     seed: int
     stream_fingerprint: str
-    coordinate_offset: int = 0
 
     def __post_init__(self) -> None:
         if type(self.seed) is not int or not MIN_SEED <= self.seed <= MAX_SEED:
@@ -54,12 +53,9 @@ class World:
             r"[0-9a-f]{64}", self.stream_fingerprint
         ):
             raise ValueError("stream fingerprint must be a lowercase SHA-256 digest")
-        if type(self.coordinate_offset) is not int or self.coordinate_offset < 0:
-            raise ValueError("coordinate offset must be a nonnegative integer")
-
     @classmethod
-    def for_prefix(cls, seed: int, initial_token_ids: Sequence[int], offset: int = 0) -> World:
-        return cls(seed, token_prefix_sha256(initial_token_ids), offset)
+    def for_prefix(cls, seed: int, initial_token_ids: Sequence[int]) -> World:
+        return cls(seed, token_prefix_sha256(initial_token_ids))
 
 
 def _uniform(world: World, coordinate: int, token_id: int | None = None) -> float:
@@ -234,7 +230,7 @@ def observe(backend: Backend, branch: Branch) -> Observation:
         raise ValueError("no live boundary after termination")
     prefix = branch.state.token_ids
     distribution = branch.policy.distribution(backend.logits(prefix), prefix)
-    coordinate = branch.world.coordinate_offset + branch.state.boundary
+    coordinate = branch.state.boundary
     return Observation(branch.state.boundary, coordinate, prefix, distribution,
                        draw(distribution, branch.world, coordinate, branch.policy.draw_kernel))
 

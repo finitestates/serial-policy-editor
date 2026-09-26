@@ -17,7 +17,7 @@ from .episode_hash import validate_coordinate, validate_fingerprint
 
 @dataclass(frozen=True, init=False)
 class SamplerState:
-    """Sampler and root-relative sampling-coordinate state.
+    """Sampler and root stream identity state.
 
     ``stream_fingerprint`` is nullable so an in-memory adapter can represent
     a coordinate that has not yet been assigned a stream identity.  When it
@@ -26,13 +26,10 @@ class SamplerState:
 
     sampling: SamplerConfig
     stream_fingerprint: str | None
-    coordinate_offset: int
-
     def __init__(
         self,
         sampling: SamplerConfig | None = None,
         stream_fingerprint: str | None = None,
-        coordinate_offset: int = 0,
         *,
         sampler: SamplerConfig | None = None,
     ) -> None:
@@ -43,10 +40,8 @@ class SamplerState:
             raise EditorError("sampler state requires a SamplerConfig")
         if stream_fingerprint is not None:
             validate_fingerprint(stream_fingerprint)
-        validate_coordinate(coordinate_offset, "coordinate_offset")
         object.__setattr__(self, "sampling", selected)
         object.__setattr__(self, "stream_fingerprint", stream_fingerprint)
-        object.__setattr__(self, "coordinate_offset", coordinate_offset)
 
     @property
     def sampler(self) -> SamplerConfig:
@@ -128,14 +123,13 @@ class ControlState:
         cls,
         sampling: SamplerConfig,
         stream_fingerprint: str | None,
-        coordinate_offset: int,
         allowance: int | None,
         checkpoint_boundary: int | None,
     ) -> "ControlState":
         """Build a state directly from adapter-friendly scalar fields."""
 
         return cls(
-            SamplerState(sampling, stream_fingerprint, coordinate_offset),
+            SamplerState(sampling, stream_fingerprint),
             BudgetState(allowance, checkpoint_boundary),
         )
 
@@ -146,10 +140,6 @@ class ControlState:
     @property
     def stream_fingerprint(self) -> str | None:
         return self.sampler.stream_fingerprint
-
-    @property
-    def coordinate_offset(self) -> int:
-        return self.sampler.coordinate_offset
 
     @property
     def allowance(self) -> int | None:
@@ -303,7 +293,7 @@ class ControlTimeline:
         start_boundary: int,
         budget: BudgetState,
     ) -> "ControlTimeline":
-        """Append a budget change, carrying forward sampler coordinates."""
+        """Append a budget change, carrying forward sampler settings and identity."""
 
         if not self.transitions:
             raise EditorError("a budget transition needs an initial control state")
@@ -318,9 +308,8 @@ class ControlTimeline:
     def truncate_after(self, retained_boundary: int) -> "ControlTimeline":
         """Drop transitions after a retained root-visible boundary.
 
-        The retained transition and all state values, especially coordinate
-        offsets, are copied unchanged.  No local or branch-relative rebasing
-        is performed.
+        Retained transitions keep their root-relative boundaries and values.
+        No local or branch-relative rebasing is performed.
         """
 
         validate_coordinate(retained_boundary, "retained_boundary")

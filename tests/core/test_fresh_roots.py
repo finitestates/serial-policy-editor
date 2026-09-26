@@ -60,7 +60,6 @@ def test_fresh_root_factory_copies_runtime_settings_but_starts_a_new_ledger():
     assert fresh.remaining == 4
     assert fresh.boundary == 0
     assert fresh.visible_token_ids == []
-    assert fresh.coordinate_offset == 0
     assert fresh.stream_fingerprint is not None
     assert fresh.initial_text == "Q"
 

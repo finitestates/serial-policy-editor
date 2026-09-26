@@ -117,7 +117,6 @@ def _controls(
                 ControlState.from_parts(
                     sampling_factory(sampling_record),
                     fingerprint,
-                    _required_int(sampler, "coordinate_offset"),
                     budget.get("max_tokens"),
                     budget.get("checkpoint_boundary"),
                 ),

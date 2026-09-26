@@ -22,7 +22,7 @@ from .core.sampler_config import SamplerConfig
 from .episode_history import StoredHistoryPrefix, materialize_stored_prefix
 from .episode_hash import token_prefix_sha256, validate_coordinate, validate_fingerprint
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _core_sampling_record(sampling: SamplerConfig) -> dict[str, Any]:
@@ -64,7 +64,11 @@ class EpisodeStore:
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("PRAGMA journal_mode = WAL")
         self.connection.execute("PRAGMA synchronous = NORMAL")
-        self._create_schema()
+        try:
+            self._create_schema()
+        except Exception:
+            self.connection.close()
+            raise
 
     def __enter__(self) -> EpisodeStore:  # noqa: PYI034 - Python 3.10 support
         return self
@@ -121,7 +125,6 @@ class EpisodeStore:
                     start_boundary INTEGER NOT NULL,
                     sampling_json TEXT NOT NULL,
                     stream_fingerprint TEXT NOT NULL,
-                    coordinate_offset INTEGER NOT NULL,
                     PRIMARY KEY (episode_id, start_boundary)
                 );
 
@@ -214,15 +217,26 @@ class EpisodeStore:
                            (episode["episode_id"], " ".join(episode["initial_text"].split())[:60] or "Untitled", episode["created_at"]))
             row = db.execute("SELECT version FROM schema_info").fetchone()
             if row is None:
-                db.execute(
-                    "INSERT INTO schema_info(version) VALUES (?)", (SCHEMA_VERSION,)
-                )
-            elif int(row["version"]) == 1:
-                db.execute("UPDATE schema_info SET version = ?", (SCHEMA_VERSION,))
-            elif int(row["version"]) != SCHEMA_VERSION:
-                raise EditorError(
-                    f"unsupported episode database schema {row['version']}"
-                )
+                version = SCHEMA_VERSION
+                db.execute("INSERT INTO schema_info(version) VALUES (?)", (version,))
+            else:
+                version = int(row["version"])
+                if version == 1:
+                    # Preserve the existing v1-to-v2 schema repairs. The
+                    # current storage-format change is handled by a separate
+                    # one-time upgrader, never while opening a workspace.
+                    version = 2
+                    db.execute("UPDATE schema_info SET version = ?", (version,))
+                elif version not in {2, SCHEMA_VERSION}:
+                    raise EditorError(
+                        f"unsupported episode database schema {row['version']}"
+                    )
+            needs_one_time_upgrade = version != SCHEMA_VERSION
+        if needs_one_time_upgrade:
+            raise EditorError(
+                "this episode database needs the one-time boundary-coordinate upgrade; "
+                "run scripts/upgrade_boundary_coordinates.py with the database path"
+            )
 
     def create_episode(
         self,
@@ -231,7 +245,6 @@ class EpisodeStore:
         initial_token_ids: Sequence[int],
         sampling: SamplerConfig,
         stream_fingerprint: str,
-        coordinate_offset: int,
         max_tokens: int | None,
         backend: Mapping[str, Any],
         episode_id: str | None = None,
@@ -244,7 +257,6 @@ class EpisodeStore:
             checkpoint_boundary = max_tokens
         token_prefix_sha256(list(initial_token_ids))
         validate_fingerprint(stream_fingerprint)
-        validate_coordinate(coordinate_offset, "coordinate_offset")
         identifier = episode_id or uuid.uuid4().hex
         if not identifier or any(character.isspace() for character in identifier):
             raise EditorError("episode id must be nonempty and contain no whitespace")
@@ -279,15 +291,13 @@ class EpisodeStore:
                 db.execute(
                     """
                     INSERT INTO sampler_segments(
-                        episode_id, start_boundary, sampling_json,
-                        stream_fingerprint, coordinate_offset
-                    ) VALUES (?, 0, ?, ?, ?)
+                        episode_id, start_boundary, sampling_json, stream_fingerprint
+                    ) VALUES (?, 0, ?, ?)
                     """,
                     (
                         identifier,
                         _json(_core_sampling_record(sampling)),
                         stream_fingerprint,
-                        coordinate_offset,
                     ),
                 )
             except sqlite3.IntegrityError as exc:
@@ -505,31 +515,26 @@ class EpisodeStore:
         start_boundary: int,
         sampling: SamplerConfig,
         stream_fingerprint: str,
-        coordinate_offset: int,
     ) -> None:
         """Record a sampler-policy transition at a live token boundary."""
         validate_coordinate(start_boundary, "start_boundary")
-        validate_coordinate(coordinate_offset, "coordinate_offset")
         validate_fingerprint(stream_fingerprint)
         with self.transaction() as db:
             self._require_unsealed(db, episode_id)
             db.execute(
                 """
                 INSERT INTO sampler_segments(
-                    episode_id, start_boundary, sampling_json,
-                    stream_fingerprint, coordinate_offset
-                ) VALUES (?, ?, ?, ?, ?)
+                    episode_id, start_boundary, sampling_json, stream_fingerprint
+                ) VALUES (?, ?, ?, ?)
                 ON CONFLICT(episode_id, start_boundary) DO UPDATE SET
                     sampling_json = excluded.sampling_json,
-                    stream_fingerprint = excluded.stream_fingerprint,
-                    coordinate_offset = excluded.coordinate_offset
+                    stream_fingerprint = excluded.stream_fingerprint
                 """,
                 (
                     episode_id,
                     int(start_boundary),
                     _json(_core_sampling_record(sampling)),
                     stream_fingerprint,
-                    int(coordinate_offset),
                 ),
             )
 
@@ -596,16 +601,14 @@ class EpisodeStore:
                 db.execute(
                     """
                     INSERT OR REPLACE INTO sampler_segments(
-                        episode_id, start_boundary, sampling_json,
-                        stream_fingerprint, coordinate_offset
-                    ) VALUES (?, ?, ?, ?, ?)
+                        episode_id, start_boundary, sampling_json, stream_fingerprint
+                    ) VALUES (?, ?, ?, ?)
                     """,
                     (
                         destination_episode_id,
                         int(segment["start_boundary"]),
                         str(segment["sampling_json"]),
                         str(segment["stream_fingerprint"]),
-                        int(segment["coordinate_offset"]),
                     ),
                 )
             for budget in materialized.budget_segments:
@@ -933,7 +936,8 @@ class EpisodeStore:
         """Return decoded sampler-coordinate records in root-boundary order."""
         self.get_episode(episode_id)
         rows = self.connection.execute(
-            "SELECT * FROM sampler_segments WHERE episode_id = ? ORDER BY start_boundary",
+            "SELECT episode_id, start_boundary, sampling_json, stream_fingerprint "
+            "FROM sampler_segments WHERE episode_id = ? ORDER BY start_boundary",
             (episode_id,),
         ).fetchall()
         result: list[dict[str, Any]] = []
@@ -944,7 +948,6 @@ class EpisodeStore:
                 raise EditorError("saved sampler settings must be an object")
             SamplerConfig.from_record(item["sampling"])
             validate_coordinate(item["start_boundary"], "start_boundary")
-            validate_coordinate(item["coordinate_offset"], "coordinate_offset")
             validate_fingerprint(item["stream_fingerprint"])
             result.append(item)
         return result

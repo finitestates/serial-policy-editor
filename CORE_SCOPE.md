@@ -3,7 +3,7 @@
 This project is an interactive episode runtime: a menu-driven environment
 for selecting tokens sequentially. This environment also has the capacity for rewinding, forking, speculative decoding, as well as replaying episodes.
 
-The engine's complete semantic state is the token ledger plus the sampler configuration and coordinate. The kernel of the program deterministically samples the probability distribution of a language model by constructing sampler coordinates out of the SHA256 hash of prefix, the current offset, and a seed number.
+The engine's complete semantic state is the token ledger, sampler configuration, and sampler stream identity. At each decision, the visible-token boundary is the sampling coordinate: boundary 0 uses coordinate 0, boundary 1 uses coordinate 1, and so on. The deterministic draw is addressed by the root prefix fingerprint, the configured seed, and that boundary.
 
 The deterministic sampler state makes forking, chording, rewinding, and replaying comparatively easy to do. Assuming you know the step, seed number, and prefix, you can calculate the sampler coordinates at a given step exactly.
 
@@ -60,9 +60,10 @@ evidence such as EOG does not advance it.
 
 Rewind truncates the selected open episode or branch in place through that
 boundary. It removes later history, repositions the runtime to the retained
-prefix, clears terminal state, and restores the sampler, stream coordinates,
-and budget state for the selected boundary. Rewind does not create a child
-branch; fork first when both paths should be kept.
+prefix, clears terminal state, and restores the sampler, stream fingerprint,
+and budget state for the selected boundary. The next draw uses that boundary
+as its coordinate. Rewind does not create a child branch; fork first when both
+paths should be kept.
 
 Completed or failed durable
 episodes stay sealed and must be forked to continue. If the boundary cuts through an action, retain only its visible prefix. Represent a partial text or phrase write as an exact write of the retained
@@ -83,6 +84,18 @@ using the same partial-action rules as rewind.
 A model-change fork is a separate case: select the prefix in the source's coordinates, then materialize its text under the destination tokenizer. The
 child's runtime boundaries follow that destination representation, while
 `fork_boundary` remains provenance for the source boundary. Forking actions do not become part of a replay plan derived from an episode.
+
+## Existing workspace update
+
+Existing SQLite workspaces need a one-time manual update before use with this
+boundary-based sampler format. Run:
+
+```sh
+python scripts/upgrade_boundary_coordinates.py PATH/TO/episodes.sqlite3
+```
+
+The utility saves a backup beside the database and does not run automatically
+when the editor opens a workspace.
 
 ## Core-only acceptance gate
 

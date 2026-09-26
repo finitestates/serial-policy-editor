@@ -300,7 +300,7 @@ def test_l01_fresh_root_never_inherits_guidance_continuation(tmp_path, resumed):
                                      sampling_override=None, guidance_backend=PrefixBackend())
         assert_context(source)
         fresh = fresh_root_from(source, 'other')
-        assert fresh.boundary == fresh.coordinate_offset == 0
+        assert fresh.boundary == 0
         assert fresh.visible_token_ids == []
         assert_context(fresh)
 
@@ -329,7 +329,7 @@ def test_r01_r08_l06_source_controls_and_historical_restoration(tmp_path):
         store.record_action(identifier, 0, runtime.apply(Write('x', mode='exact')))
         runtime.sampling = b
         store.record_sampling_segment(identifier, start_boundary=1, sampling=b,
-                                      stream_fingerprint=runtime.stream_fingerprint, coordinate_offset=0)
+                                      stream_fingerprint=runtime.stream_fingerprint)
         store.record_action(identifier, 1, runtime.apply(Write('y', mode='exact')))
         assert_context(runtime, (1, 6, 5))
         _rewind_episode(store, identifier, runtime, 0)
@@ -403,7 +403,7 @@ def test_r01_cli_replay_provisions_cfg_after_unguided_root(tmp_path, fixed):
         store.record_action(identifier, 0, source.apply(Write('x', mode='exact')))
         source.sampling = config(cfg_unconditional_prompt='B')
         store.record_sampling_segment(identifier, start_boundary=1, sampling=source.sampling,
-                                      stream_fingerprint=source.stream_fingerprint, coordinate_offset=0)
+                                      stream_fingerprint=source.stream_fingerprint)
         store.record_action(identifier, 1, source.apply(Write('y', mode='exact')))
     backend, guidance = PrefixBackend(), PrefixBackend()
     with patch('trajectory_editor.episode_backend_loader.load_episode_backend',

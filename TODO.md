@@ -15,7 +15,7 @@ Working backlog from a read-only review and our follow-up discussion. The projec
 
 ## Tokenizer identity and streaming
 
-- [ ] Decide how model-change forks define sampler identity and coordinates. The current fork path re-tokenizes the root prompt with the destination tokenizer, and those root token IDs affect the sampler fingerprint. Decide whether to preserve the source fingerprint and define how token counts map after boundary zero, or require the same tokenizer for forks and use replay to change tokenizers.
+- [ ] Decide how model-change forks define sampler identity. The current fork path re-tokenizes the root prompt with the destination tokenizer, and those root token IDs affect the sampler fingerprint. Decide whether to preserve the source fingerprint across tokenizer changes or keep the destination prefix fingerprint.
 - [ ] Audit and test how streamed partial UTF-8 sequences affect token-step accounting and saved text. Token boundaries advance by token IDs, while a live stream may buffer bytes until a character is complete. Cover display, rewind, partial-write replay, procedure export, and cross-tokenizer forks; keep token IDs authoritative where decoded text cannot faithfully represent a retained prefix. The review identified this as a code-path risk to investigate, not a demonstrated failure.
 
 ## Decide what 1.0 promises

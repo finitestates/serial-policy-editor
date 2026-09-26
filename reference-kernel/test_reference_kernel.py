@@ -28,32 +28,32 @@ class ScriptedBackend:
         return False
 
 
-def start(seed=12345, *, policy=None, offset=0):
+def start(seed=12345, *, policy=None):
     prefix = (1, 2, 3)
-    return Branch(State(prefix), policy or Policy(), World.for_prefix(seed, prefix, offset))
+    return Branch(State(prefix), policy or Policy(), World.for_prefix(seed, prefix))
 
 
 @pytest.mark.parametrize("kernel", ["categorical", "gumbel-max"])
 def test_observe_is_pure_and_directly_addressed(kernel):
     backend = ScriptedBackend()
-    branch = start(policy=Policy(draw_kernel=kernel), offset=41)
+    branch = start(policy=Policy(draw_kernel=kernel))
     first = observe(backend, branch)
     for _ in range(1000):
         assert observe(backend, branch) == first
-    assert first.sampling_coordinate == 41
+    assert first.sampling_coordinate == 0
     later = position_uniform(branch.world, 500)
     for coordinate in range(500):
         position_uniform(branch.world, coordinate)
     assert position_uniform(branch.world, 500) == later
     advanced, _ = apply(backend, branch, Accept())
-    assert observe(backend, advanced).sampling_coordinate == 42
+    assert observe(backend, advanced).sampling_coordinate == 1
 
 
 @pytest.mark.parametrize("kernel", ["categorical", "gumbel-max"])
 @pytest.mark.parametrize("seed", [-11, 1, 12345, 67890])
 def test_immutable_continuation_rewind_and_fork(seed, kernel):
     backend = ScriptedBackend()
-    original = start(seed, policy=Policy(top_k=6, draw_kernel=kernel), offset=13)
+    original = start(seed, policy=Policy(top_k=6, draw_kernel=kernel))
     first_observation = observe(backend, original)
     continuation, first_result = apply(backend, original, Hold(20))
     restored = rewind(continuation, 0)
@@ -64,7 +64,7 @@ def test_immutable_continuation_rewind_and_fork(seed, kernel):
     assert (forked, fork_result) == (continuation, first_result)
     assert first_result.stop_reason == "requested-length"
     assert rewind(continuation, 7).world == original.world
-    assert observe(backend, rewind(continuation, 7)).sampling_coordinate == 20
+    assert observe(backend, rewind(continuation, 7)).sampling_coordinate == 7
 
 
 def test_interventions_and_conditional_hold_keep_the_same_world():
@@ -150,7 +150,7 @@ def test_reroll_round_trip_and_seed_is_replay_data(monkeypatch):
     assert (restored, third) == (before, first)
     assert another.state.token_ids != before.state.token_ids
     assert another_world.policy == original.policy and another_world.state == original.state
-    assert another_world.world.coordinate_offset == original.world.coordinate_offset
+    assert another_world.world.stream_fingerprint == original.world.stream_fingerprint
 
     events = (Hold(2), Reroll(67890), Hold(3), SetPolicy(Policy(top_k=4,
               biases=((7, 0.5),), draw_kernel="gumbel-max")),

@@ -888,7 +888,6 @@ class InteractivePolicy:
                         self.store.record_sampling_segment(
                             self.episode_id, start_boundary=engine.boundary, sampling=updated,
                             stream_fingerprint=engine.stream_fingerprint,
-                            coordinate_offset=engine.coordinate_offset,
                         )
                         for kind, payload, _label, _value in updates:
                             self._interaction(engine.boundary, kind, payload)

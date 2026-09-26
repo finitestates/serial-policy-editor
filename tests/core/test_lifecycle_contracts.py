@@ -54,7 +54,6 @@ def create(store, episode_id, episode):
         initial_token_ids=list(episode.initial_token_ids),
         sampling=episode.sampling,
         stream_fingerprint=episode.stream_fingerprint,
-        coordinate_offset=episode.coordinate_offset,
         max_tokens=episode.max_tokens,
         backend=episode.backend.provenance(),
     )
@@ -291,7 +290,6 @@ def test_l05_fork_lineage_and_fork_map_keep_editorial_boundaries(tmp_path):
             initial_token_ids=[7],
             sampling=root.sampling,
             stream_fingerprint=root.stream_fingerprint,
-            coordinate_offset=0,
             max_tokens=None,
             backend={"backend": "fake"},
             parent_episode_id="root",
@@ -317,19 +315,16 @@ def test_l06_rewind_restores_sampler_transition_at_the_selected_boundary(tmp_pat
         store.record_action(identifier, 0, episode.apply(Hold(1)))
         episode.sampling = changed
         episode.stream_fingerprint = "b" * 64
-        episode.coordinate_offset = 29
         store.record_sampling_segment(
             identifier,
             start_boundary=1,
             sampling=changed,
             stream_fingerprint=episode.stream_fingerprint,
-            coordinate_offset=29,
         )
 
         _rewind_episode(store, identifier, episode, 0)
 
     assert episode.sampling == original
-    assert episode.coordinate_offset == 0
     assert episode.stream_fingerprint != "b" * 64
 
 
@@ -411,7 +406,6 @@ def test_sealed_episodes_reject_all_record_writes(tmp_path, sealed_status):
                 start_boundary=0,
                 sampling=episode.sampling,
                 stream_fingerprint=episode.stream_fingerprint,
-                coordinate_offset=0,
             ),
             lambda: store.record_action(identifier, 0, outcome),
             lambda: store.record_interaction(identifier, 0, "search", {"query": "word"}),

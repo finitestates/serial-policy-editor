@@ -86,7 +86,6 @@ class ControlPoint:
     boundary: int
     sampling: SamplerConfig
     stream_fingerprint: str | None
-    coordinate_offset: int
     max_tokens: int | None
     checkpoint_boundary: int | None
 
@@ -95,8 +94,6 @@ class ControlPoint:
             raise EditorError("control-point boundary must be a nonnegative integer")
         if self.stream_fingerprint is not None and not isinstance(self.stream_fingerprint, str):
             raise EditorError("control-point stream fingerprint must be a string or null")
-        if type(self.coordinate_offset) is not int or self.coordinate_offset < 0:
-            raise EditorError("control-point coordinate offset must be nonnegative")
         if (self.max_tokens is None) != (self.checkpoint_boundary is None):
             raise EditorError("control-point budget and checkpoint must both be set or null")
         if self.max_tokens is not None and (
@@ -218,7 +215,6 @@ def _engine_control(engine: EpisodeEngine) -> ControlPoint:
         engine.boundary,
         engine.sampling,
         engine.stream_fingerprint,
-        engine.coordinate_offset,
         engine.max_tokens,
         engine.checkpoint_boundary,
     )
@@ -228,13 +224,11 @@ def _same_control(left: ControlPoint, right: ControlPoint) -> bool:
     return (
         left.sampling,
         left.stream_fingerprint,
-        left.coordinate_offset,
         left.max_tokens,
         left.checkpoint_boundary,
     ) == (
         right.sampling,
         right.stream_fingerprint,
-        right.coordinate_offset,
         right.max_tokens,
         right.checkpoint_boundary,
     )
@@ -415,7 +409,6 @@ class LiveSession:
             initial_text=self.prompt,
             initial_token_ids=state.initial_token_ids,
             stream_fingerprint=point.stream_fingerprint,
-            coordinate_offset=point.coordinate_offset,
             backend_positioned=True,
             guidance_backend=self._guidance_backend,
         )
@@ -549,11 +542,11 @@ class LiveSession:
         return () if self._discarded else self.branch_state().visible_token_ids
 
     @property
-    def sampler_states(self) -> tuple[tuple[int, SamplerConfig, str | None, int], ...]:
+    def sampler_states(self) -> tuple[tuple[int, SamplerConfig, str | None], ...]:
         if self._discarded:
             return ()
         return tuple(
-            (point.boundary, point.sampling, point.stream_fingerprint, point.coordinate_offset)
+            (point.boundary, point.sampling, point.stream_fingerprint)
             for point in self.branch_state().control_points
         )
 
@@ -583,7 +576,6 @@ class LiveSession:
         sampler: SamplerConfig,
         *,
         stream_fingerprint: str | None = None,
-        coordinate_offset: int | None = None,
         _branch_id: str | None = None,
     ) -> None:
         branch_id = self._active_id if _branch_id is None else _branch_id
@@ -592,8 +584,6 @@ class LiveSession:
         engine.sampling = sampler
         if stream_fingerprint is not None:
             engine.stream_fingerprint = stream_fingerprint
-        if coordinate_offset is not None:
-            engine.coordinate_offset = coordinate_offset
         self._record_control(branch_id)
         self._emit("sampler-changed", self._state(branch_id).identity, engine.boundary, {})
 
@@ -716,10 +706,7 @@ class LiveSession:
         point = self._control_at(state, boundary)
         engine.rewind_to(boundary)
         engine.sampling = point.sampling
-        engine.trajectory.set_coordinates(
-            stream_fingerprint=point.stream_fingerprint,
-            coordinate_offset=point.coordinate_offset,
-        )
+        engine.trajectory.set_stream_fingerprint(point.stream_fingerprint)
         engine.trajectory.set_budget(point.max_tokens, point.checkpoint_boundary)
         rewind = RewindState(
             boundary,
@@ -734,8 +721,8 @@ class LiveSession:
             control_points=self._control_prefix(state, boundary),
             # Rewinding before a branch's original fork point removes some or
             # all inherited actions.  The first remaining action is then the
-            # new local divergence point; keeping the old offset makes the
-            # BranchState invalid (and would hide newly generated actions).
+            # new local divergence point; keeping the old start index makes
+            # the BranchState invalid (and would hide newly generated actions).
             local_action_start=min(state.local_action_start, len(prefix.retained_tape)),
             terminal_token_id=None,
             terminal_reason=None,
@@ -934,11 +921,11 @@ class LiveBranch:
         return () if self._session.is_discarded else self.branch_state.visible_token_ids
 
     @property
-    def sampler_states(self) -> tuple[tuple[int, SamplerConfig, str | None, int], ...]:
+    def sampler_states(self) -> tuple[tuple[int, SamplerConfig, str | None], ...]:
         if self._session.is_discarded:
             return ()
         return tuple(
-            (point.boundary, point.sampling, point.stream_fingerprint, point.coordinate_offset)
+            (point.boundary, point.sampling, point.stream_fingerprint)
             for point in self.branch_state.control_points
         )
 
@@ -953,8 +940,14 @@ class LiveBranch:
     def activate(self) -> EpisodeEngine:
         return self._session.activate(self._identity.branch_id)
 
-    def set_sampler(self, sampler: SamplerConfig, **kwargs: Any) -> None:
-        self._session.set_sampler(sampler, _branch_id=self._identity.branch_id, **kwargs)
+    def set_sampler(
+        self, sampler: SamplerConfig, *, stream_fingerprint: str | None = None
+    ) -> None:
+        self._session.set_sampler(
+            sampler,
+            stream_fingerprint=stream_fingerprint,
+            _branch_id=self._identity.branch_id,
+        )
 
     def resume(self, **kwargs: Any) -> None:
         self._session.resume(_branch_id=self._identity.branch_id, **kwargs)
