@@ -12,7 +12,6 @@ from trajectory_editor.activation_vectors import (
     CONTROL_VECTOR_POSITION,
     CAPTURE_POSITIONS,
     SteeringVectorArtifact,
-    model_identity,
 )
 from trajectory_editor.core.errors import EditorError
 
@@ -30,7 +29,6 @@ def _supported_kwargs(function: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
 
 def create_hidden_state_prompt_pair(
     backend: Any,
-    provenance: Mapping[str, Any],
     prompt_a: str,
     prompt_b: str,
     *,
@@ -137,10 +135,7 @@ def create_hidden_state_prompt_pair(
     except (RuntimeError, TypeError, ValueError) as exc:
         raise EditorError(f"could not capture hidden-state pair: {exc}") from exc
 
-    model = model_identity(provenance, hidden_state_width=width)
-    model.setdefault("hidden_state_layer_count", layer_count)
     return SteeringVectorArtifact(
-        model=model,
         vector=tuple(float(value) for value in directions.reshape(-1)),
         layer=CONTROL_VECTOR_LAYER,
         position=CONTROL_VECTOR_POSITION,

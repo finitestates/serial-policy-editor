@@ -70,11 +70,9 @@ slice that should be rewritten into the reduced suite.
 ## Optional vectors
 
 The user-facing vector package is optional and is not part of the core test
-count. These tests cover conventional hidden-state steering-vector
-production or the portable artifact loader/application boundary. It owns the
-stronger vector correctness rules: construction details, provenance policy,
-model identity, layer/site semantics, and rejection of artifacts that are not
-safe for its production/analysis workflows.
+count. These tests cover conventional hidden-state steering-vector production,
+cvector parsing and layer translation, numerical validation, and artifact
+application.
 
 | Existing module | Disposition | Destination |
 | --- | --- | --- |
@@ -111,16 +109,15 @@ The same artifact can therefore have two different test responsibilities:
 | Recognize supported artifact format | yes | yes |
 | Read vector values and available metadata | yes | yes |
 | Preserve optional provenance when present | yes | yes |
-| Require provenance to load | no | only where the producing/analysis workflow requires it |
-| Enforce model identity or layer/site alignment before loading | no | yes, for workflows that make that guarantee |
-| Reject an unknown-provenance artifact | no, not by itself | yes, where the package contract requires provenance |
-| Apply a vector and report backend incompatibility | yes | yes |
+| Require provenance to load | no | no |
+| Enforce compatibility labels before loading | no | no |
+| Reject an unknown-provenance artifact | no | no |
+| Apply a vector and report dimension or runtime failures | yes | yes |
 | Create, compare, blend, or analyze vectors | no | vectors or archive |
 
-Core tests should include an externally produced, provenance-light vector and
-an intentionally layer-mismatched artifact to prove that core loading remains
-permissive. Optional-vector tests may separately assert strict provenance or
-alignment rules; those assertions must not leak back into the core install.
+Core and vector tests should use provenance-light artifacts and verify numeric
+dimensions, cvector layer translation, and backend runtime behavior. Model labels
+do not gate vector application.
 
 ### Dependency-light cvector correctness test
 

@@ -9,9 +9,7 @@ from trajectory_editor.activation_vectors import (
     CONTROL_VECTOR_LAYER,
     CONTROL_VECTOR_POSITION,
     SteeringVectorArtifact,
-    assert_model_compatible,
 )
-from trajectory_editor.model_hash import sha256_path
 
 def _write_cvector(path):
     def string(value):
@@ -62,62 +60,17 @@ class ControlBackend(ConformingFakeBackend):
         self.control_calls.append((tuple(vector), layer_start, layer_end, strength))
 
 
-def test_model_identity_requires_matching_hash_for_strong_artifacts(tmp_path):
-    model = tmp_path / "same-name.gguf"
-    model.write_bytes(b"first contents")
-    expected = {
-        "backend": "llama.cpp",
-        "filename": model.name,
-        "file_size_bytes": model.stat().st_size,
-        "hidden_state_width": 3,
-        "model_sha256": sha256_path(model),
-    }
-    assert_model_compatible(expected, dict(expected), label="loaded model")
-
-    model.write_bytes(b"other contents")
-    actual = dict(expected)
-    actual["file_size_bytes"] = model.stat().st_size
-    actual["model_sha256"] = sha256_path(model)
-    with pytest.raises(EditorError, match="model_sha256"):
-        assert_model_compatible(expected, actual, label="loaded model")
-
-
-def test_legacy_metadata_only_identity_is_explicit_and_remains_readable():
-    value = SteeringVectorArtifact(
-        model={"backend": "fake", "filename": "model.gguf", "hidden_state_width": 3},
-        vector=(1.0, 0.0, 0.0),
-    )
+def test_current_artifact_drops_model_compatibility_metadata():
+    value = SteeringVectorArtifact(vector=(1.0, 0.0, 0.0))
     document = value.to_dict()
-    assert document["schema_version"] == 2
-    assert document["compatibility"] == {
-        "model_identity": "metadata-only",
-        "hash_algorithm": None,
-    }
 
-    legacy = dict(document)
-    legacy.pop("schema_version")
-    legacy.pop("compatibility")
-    assert SteeringVectorArtifact.from_mapping(legacy).model == value.model
+    assert document["schema_version"] == 3
+    assert "model" not in document
+    assert "compatibility" not in document
+    assert SteeringVectorArtifact.from_mapping(document).vector == value.vector
 
-
-def test_model_identity_reports_architecture_and_width_mismatches():
-    expected = {
-        "backend": "llama.cpp",
-        "model_type": "llama",
-        "hidden_state_width": 3,
-        "hidden_state_layer_count": 4,
-    }
-    actual = {**expected, "model_type": "qwen", "hidden_state_width": 4}
-    with pytest.raises(EditorError, match="model_type"):
-        assert_model_compatible(expected, actual, label="loaded model")
-
-
-def test_ambiguous_legacy_artifacts_are_rejected_without_guessing():
-    with pytest.raises(EditorError, match="ambiguous activation-vector artifact"):
-        SteeringVectorArtifact.from_mapping({
-            "format": "spe-activation-vector-v1",
-            "kind": "activation",
-        })
+    with pytest.raises(EditorError, match="schema version must be 3"):
+        SteeringVectorArtifact.from_mapping({**document, "schema_version": 2})
 
 
 def test_cvector_gguf_import_preserves_layerwise_directions(tmp_path, capsys):
@@ -132,7 +85,6 @@ def test_cvector_gguf_import_preserves_layerwise_directions(tmp_path, capsys):
     assert loaded.layer_start == 2
     assert loaded.layer_end == 3
     assert loaded.vector == pytest.approx((0, 0, 0, 1, 2, 3, 4, 5, 6))
-    assert loaded.model["hidden_state_layer_count"] == 3
     assert vector_main(["inspect", str(source)]) == 0
     assert "layers: 2..3" in capsys.readouterr().out
 
@@ -140,7 +92,6 @@ def test_cvector_gguf_import_preserves_layerwise_directions(tmp_path, capsys):
 def test_layerwise_cvector_is_installed_before_runtime_logits():
     backend = ControlBackend()
     cvector = SteeringVectorArtifact(
-        model={"backend": "fake", "activation_width": 3, "activation_layer_count": 2},
         vector=(1, 2, 3, 4, 5, 6),
         layer=CONTROL_VECTOR_LAYER,
         position=CONTROL_VECTOR_POSITION,

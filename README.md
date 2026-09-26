@@ -145,7 +145,7 @@ policy-editor-vector create \
 policy-editor-vector inspect calm-vs-angry.json
 ```
 
-The core editor can load a compatible externally produced vector without the
+The core editor can load an externally produced vector without the
 vector package:
 
 ```bash

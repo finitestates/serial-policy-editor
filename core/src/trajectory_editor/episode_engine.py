@@ -246,7 +246,6 @@ class EpisodeEngine:
         self._latest_speculation_generation = -1
         self._speculative_accept_prefix: tuple[int, ...] | None = None
         self._ephemeral_logit_biases: dict[int, float] = {}
-        self._activation_validation_key: tuple | None = None
         self._activation_runtime_key: tuple | None = None
         # This engine owns one backend/tokenizer. Sampler changes and rewinds
         # do not change token spellings, so their classifications remain valid.
@@ -335,7 +334,6 @@ class EpisodeEngine:
         if any(token >= self.backend.vocabulary_size() for token in bias_tokens):
             raise EditorError("bias token id is outside the model vocabulary")
         self._sampling = value
-        self._activation_validation_key = None
         if hasattr(self, "_activation_runtime_key") and (
             previous_activation_key != self._activation_backend_key_for(value)
         ):
@@ -579,7 +577,6 @@ class EpisodeEngine:
 
         content_digest = steering_vector_digest_for(
             sampling.activation_vector,
-            model=sampling.activation_vector_model,
             layer=sampling.activation_vector_layer,
             position=sampling.activation_vector_position,
             strength=sampling.activation_vector_strength,
@@ -590,7 +587,6 @@ class EpisodeEngine:
             "control-vector",
             content_digest,
             sampling.activation_vector_digest,
-            sampling.activation_vector_model,
             sampling.activation_vector_layer_start,
             sampling.activation_vector_layer_end,
             sampling.activation_vector_strength,
@@ -618,34 +614,6 @@ class EpisodeEngine:
                 raise EditorError(
                     "the loaded backend does not expose llama.cpp control-vector runtime support"
                 )
-            validation_key = (
-                current_key[1],
-                self.sampling.activation_vector_model,
-            )
-            if validation_key != self._activation_validation_key:
-                from .activation_vectors import (
-                    assert_model_compatible,
-                    model_identity,
-                    model_identity_from_json,
-                )
-                expected_model = model_identity_from_json(
-                    self.sampling.activation_vector_model
-                )
-                if expected_model:
-                    width_method = getattr(self.backend, "activation_width", None)
-                    if not callable(width_method):
-                        raise EditorError(
-                            "the loaded backend does not expose hidden-state width metadata"
-                        )
-                    assert_model_compatible(
-                        expected_model,
-                        model_identity(
-                            self.backend.provenance(include_model_sha256=True),
-                            hidden_state_width=int(width_method()),
-                        ),
-                        label="loaded model",
-                    )
-                self._activation_validation_key = validation_key
             try:
                 setter(
                     self.sampling.activation_vector,
@@ -709,34 +677,6 @@ class EpisodeEngine:
                 raise EditorError(
                     "the loaded backend does not expose output-head steering runtime support"
                 )
-            validation_key = (
-                self.sampling.activation_vector_digest,
-                self.sampling.activation_vector_model,
-            )
-            if validation_key != self._activation_validation_key:
-                from .activation_vectors import (
-                    assert_model_compatible,
-                    model_identity,
-                    model_identity_from_json,
-                )
-                expected_model = model_identity_from_json(
-                    self.sampling.activation_vector_model
-                )
-                if expected_model:
-                    width_method = getattr(self.backend, "activation_width", None)
-                    if not callable(width_method):
-                        raise EditorError(
-                            "the loaded backend does not expose hidden-state width metadata"
-                        )
-                    assert_model_compatible(
-                        expected_model,
-                        model_identity(
-                            self.backend.provenance(include_model_sha256=True),
-                            hidden_state_width=int(width_method()),
-                        ),
-                        label="loaded model",
-                    )
-                self._activation_validation_key = validation_key
             try:
                 activation_logit_adjustments = provider(
                     self.sampling.activation_vector,

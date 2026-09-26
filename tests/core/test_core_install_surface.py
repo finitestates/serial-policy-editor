@@ -125,8 +125,6 @@ class DivergingBackend(Backend):
 
 from trajectory_editor import EpisodeEngine, EpisodeRunner, EpisodeStore, SamplerConfig
 from trajectory_editor.core.actions import Accept
-from trajectory_editor.core.sampler_config import SAMPLING_POLICY_SCHEME
-from trajectory_editor.core.sampling import RNG_SCHEME
 from trajectory_editor.episode_cli import main
 from trajectory_editor.episode_runner import TapeStep
 from trajectory_editor.projector import project_episode
@@ -161,13 +159,11 @@ workspace = Path(r"__WORKSPACE__")
 artifact_path = workspace.with_name("steering.json")
 artifact_path.write_text(json.dumps({
     "format": "spe-steering-vector-v1",
-    "schema_version": 2,
+    "schema_version": 3,
     "kind": "output-head-steering-vector",
-    "model": {},
     "strength": 1.0,
     "method": "core-smoke",
     "vector": [0.25],
-    "compatibility": {"model_identity": "metadata-only", "hash_algorithm": None},
 }), encoding="utf-8")
 from trajectory_editor.activation_vectors import SteeringVectorArtifact
 assert not hasattr(SteeringVectorArtifact, "from_prompt_pair")
@@ -184,39 +180,19 @@ assert loaded_vector.vector == (0.25,)
 layer_mismatch_path = workspace.with_name("layer-mismatch.json")
 layer_mismatch_path.write_text(json.dumps({
     "format": "spe-steering-vector-v1",
-    "schema_version": 2,
+    "schema_version": 3,
     "kind": "hidden-state-vector",
-    "model": {"hidden_state_width": 3, "hidden_state_layer_count": 4},
-    "target": {
-        "site": "decoder-block-output-residual",
-        "layer_numbering": "one-based",
-        "coordinate": "canonical-decoder-block-output-v1",
-    },
     "layer_start": 1,
     "layer_end": 4,
     "position": "layers",
     "strength": 1.0,
     "method": "external-smoke",
     "vector": [0.25, 0.5],
-    "compatibility": {"model_identity": "metadata-only", "hash_algorithm": None},
 }), encoding="utf-8")
 layer_mismatch = SteeringVectorArtifact.from_path(layer_mismatch_path)
 assert layer_mismatch.dimension == 2
 assert layer_mismatch.layer_start == 1
 assert layer_mismatch.layer_end == 4
-
-# A historical sampler record may be wider than the current core contract.
-# Its unknown research fields are ignored; its replayable fields still load.
-legacy = SamplerConfig.from_record({
-    "temperature": 0.8,
-    "policy_scheme": SAMPLING_POLICY_SCHEME,
-    "rng_scheme": RNG_SCHEME,
-    "history_scope": "model-visible-prefix-tail-v1",
-    "group_controls": [{"research": "ignored"}],
-    "token_preference_vector": [1, 2, 3],
-    "reference_prior_routes": [],
-})
-assert legacy.temperature == 0.8
 
 backend = Backend()
 source_engine = EpisodeEngine(backend, sampling=SamplerConfig(), initial_token_ids=[1])
@@ -229,18 +205,6 @@ with EpisodeStore(workspace) as store:
         max_tokens=None,
         backend=backend.provenance(),
     )
-    legacy_record = source_engine.sampling.to_dict()
-    legacy_record.update({
-        "group_controls": [{"research": "ignored"}],
-        "token_preference_vector": [1, 2, 3],
-        "reference_prior_routes": [],
-    })
-    store.connection.execute(
-        "UPDATE sampler_segments SET sampling_json = ? WHERE episode_id = ?",
-        (json.dumps(legacy_record), source),
-    )
-    store.connection.commit()
-    assert store.sampling_segment(source, 0)["sampling"]["group_controls"]
     outcome = source_engine.apply(Accept())
     store.record_action(source, 0, outcome)
     store.update_episode(source, visible_text=source_engine.text, max_tokens=None, status="open")

@@ -45,7 +45,6 @@ def _model_change_sampling(
         activation_vector_strength=0.0,
         activation_vector_layer_start=None,
         activation_vector_layer_end=None,
-        activation_vector_model="",
         activation_vector_digest="",
     )
 

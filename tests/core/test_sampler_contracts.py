@@ -48,13 +48,7 @@ def test_s01_sampler_config_accepts_rejects_and_round_trips_core_state():
         repeat_penalty=1.1,
         seed=77,
     )
-    record = config.to_dict()
-    record.update(
-        token_preference_vector=[1, 2, 3],
-        reference_prior_routes=[],
-        group_controls=[{"research": "ignored"}],
-    )
-    assert SamplerConfig.from_record(record) == config
+    assert SamplerConfig.from_record(config.to_dict()) == config
     for invalid in (MIN_SEED - 1, MAX_SEED + 1):
         with pytest.raises(EditorError):
             SamplerConfig(seed=invalid)

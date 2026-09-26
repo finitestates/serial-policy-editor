@@ -22,7 +22,7 @@ The ordinary Transformers extra is sufficient for basic CPU/GPU inference and
 does not install Accelerate. The `transformers-gguf` and `transformers-bnb`
 extras are explicit heavier paths.
 
-Core can load compatible externally produced steering-vector artifacts, but
+Core can load externally produced steering-vector artifacts, but
 vector creation and inspection are provided by the separate `vector/` package.
 
 ## In-memory episodes

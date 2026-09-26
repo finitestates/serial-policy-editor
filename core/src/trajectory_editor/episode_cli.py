@@ -813,7 +813,7 @@ def main(
                 activation_artifact = SteeringVectorArtifact.from_path(
                     args.activation_vector
                 )
-                activation_artifact.validate_against_backend(backend, provenance)
+                activation_artifact.validate_against_backend(backend)
             requested_id = args.episode_id
             parent_id: str | None = None
             fork_boundary: int | None = None

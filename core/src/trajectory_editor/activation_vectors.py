@@ -28,29 +28,14 @@ from .core.sampler_config import SamplerConfig
 
 
 FORMAT = "spe-steering-vector-v1"
-LEGACY_FORMAT = "spe-activation-vector-v1"
 OUTPUT_HEAD_KIND = "output-head-steering-vector"
 HIDDEN_STATE_KIND = "hidden-state-vector"
-HIDDEN_STATE_SITE = "decoder-block-output-residual"
-HIDDEN_STATE_LAYER_NUMBERING = "one-based"
 HIDDEN_STATE_COORDINATE = "canonical-decoder-block-output-v1"
 OUTPUT_LAYER = "output"
 RUNTIME_POSITION = "current"
 CONTROL_VECTOR_LAYER = "control-vector"
 CONTROL_VECTOR_POSITION = "layers"
 CAPTURE_POSITIONS = {"first", "last"}
-MODEL_IDENTITY_FIELDS = (
-    "backend",
-    "adapter",
-    "filename",
-    "file_size_bytes",
-    "vocabulary_size",
-    "tokenizer_fingerprint",
-    "model_type",
-    "hidden_state_width",
-    "hidden_state_layer_count",
-    "model_sha256",
-)
 
 
 def _vector(value: Any, name: str = "steering_vector") -> tuple[float, ...]:
@@ -67,72 +52,17 @@ def _vector(value: Any, name: str = "steering_vector") -> tuple[float, ...]:
     return result
 
 
-def model_identity(
-    provenance: Mapping[str, Any], *, hidden_state_width: int | None = None
-) -> dict[str, Any]:
-    """Keep stable model facts needed to interpret a steering vector."""
-    result = {
-        name: provenance[name]
-        for name in MODEL_IDENTITY_FIELDS
-        if name not in {"hidden_state_width", "hidden_state_layer_count"}
-        and name in provenance
-        and provenance[name] is not None
-    }
-    if hidden_state_width is None:
-        hidden_state_width = provenance.get(
-            "hidden_state_width", provenance.get("activation_width")
-        )
-    if hidden_state_width is not None:
-        result["hidden_state_width"] = int(hidden_state_width)
-    if "hidden_state_layer_count" not in result and "activation_layer_count" in provenance:
-        result["hidden_state_layer_count"] = int(provenance["activation_layer_count"])
-    return result
-
-
-def model_identity_json(model: Mapping[str, Any]) -> str:
-    return json.dumps(
-        dict(model), ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    )
-
-
-def model_identity_from_json(value: str) -> dict[str, Any]:
-    if not isinstance(value, str) or not value:
-        return {}
-    try:
-        parsed = json.loads(value)
-    except (TypeError, ValueError) as exc:
-        raise EditorError("steering vector model identity is malformed") from exc
-    if not isinstance(parsed, dict):
-        raise EditorError("steering vector model identity must be an object")
-    return parsed
-
-
 def steering_vector_digest_for(
     vector: Sequence[float],
     *,
-    model: Mapping[str, Any] | str | None = None,
     layer: str = OUTPUT_LAYER,
     position: str = RUNTIME_POSITION,
     strength: float = 1.0,
     layer_start: int | None = None,
     layer_end: int | None = None,
 ) -> str:
-    """Return the canonical content digest used by steering artifacts.
-
-    Runtime state must not rely on a caller-provided label alone.  Keeping the
-    digest construction here also makes artifact and live sampler identities
-    agree without making the domain module import the artifact type.
-    """
-    if model is None:
-        model_value: Mapping[str, Any] = {}
-    elif isinstance(model, str):
-        model_value = model_identity_from_json(model)
-    elif isinstance(model, Mapping):
-        model_value = model
-    else:
-        raise EditorError("steering vector model identity must be an object")
+    """Return the canonical content digest used by steering artifacts."""
     payload = {
-        "model": dict(model_value),
         "layer": layer,
         "position": position,
         "coordinate": (
@@ -149,35 +79,6 @@ def steering_vector_digest_for(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
-
-
-def _check_model_compatibility(
-    left: Mapping[str, Any], right: Mapping[str, Any], *, label: str
-) -> None:
-    for name in MODEL_IDENTITY_FIELDS:
-        left_value = left.get(name)
-        right_value = right.get(name)
-        if (
-            left_value is not None
-            and right_value is not None
-            and left_value != right_value
-        ):
-            raise EditorError(
-                f"incompatible activation models: {label} differs in {name} "
-                f"(expected {left_value!r}, got {right_value!r})"
-            )
-    if left.get("model_sha256") is not None and right.get("model_sha256") is None:
-        raise EditorError(
-            f"incompatible activation models: {label} did not provide model_sha256; "
-            "strong artifact compatibility cannot be verified"
-        )
-
-
-def assert_model_compatible(
-    expected: Mapping[str, Any], actual: Mapping[str, Any], *, label: str
-) -> None:
-    """Validate a saved activation model identity against a loaded model."""
-    _check_model_compatibility(expected, actual, label=label)
 
 
 def _supported_kwargs(function: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -262,7 +163,7 @@ class _GGUFReader:
         return name, shape, tensor_type, offset
 
 
-def _load_cvector_gguf(path: Path) -> tuple[dict[str, Any], tuple[float, ...], dict[str, Any]]:
+def _load_cvector_gguf(path: Path) -> tuple[tuple[float, ...], dict[str, Any]]:
     reader = _GGUFReader(path)
     if reader.data[:4] != b"GGUF":
         raise EditorError("cvector input is not a GGUF file")
@@ -330,13 +231,6 @@ def _load_cvector_gguf(path: Path) -> tuple[dict[str, Any], tuple[float, ...], d
         value for layer in expected_layers for value in directions[layer]
     )
     model_hint = metadata.get("controlvector.model_hint")
-    model = {
-        "backend": "llama.cpp",
-        "model_type": model_hint if isinstance(model_hint, str) else None,
-        "hidden_state_width": width,
-        "hidden_state_layer_count": layer_count,
-    }
-    model = {key: value for key, value in model.items() if value is not None}
     source = {
         "type": "llama-cvector-gguf",
         "adapter": "llama-cvector",
@@ -348,14 +242,13 @@ def _load_cvector_gguf(path: Path) -> tuple[dict[str, Any], tuple[float, ...], d
         "direction_layers": expected_layers,
         "canonical_layer_range": [2, layer_count],
     }
-    return model, canonical_vector, source
+    return canonical_vector, source
 
 
 @dataclass(frozen=True)
 class SteeringVectorArtifact:
-    """A model-matched output-head or hidden-state steering vector."""
+    """An output-head or hidden-state steering vector."""
 
-    model: Mapping[str, Any]
     vector: tuple[float, ...]
     layer: str = OUTPUT_LAYER
     position: str = RUNTIME_POSITION
@@ -366,17 +259,6 @@ class SteeringVectorArtifact:
     layer_end: int | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.model, Mapping):
-            raise EditorError("steering vector artifact model must be an object")
-        model = dict(self.model)
-        # Backend provenance still exposes a few historical field names.  The
-        # portable artifact normalizes them before serialization so they never
-        # leak into the user-facing contract.
-        if "hidden_state_width" not in model and "activation_width" in model:
-            model["hidden_state_width"] = model.pop("activation_width")
-        if "hidden_state_layer_count" not in model and "activation_layer_count" in model:
-            model["hidden_state_layer_count"] = model.pop("activation_layer_count")
-        object.__setattr__(self, "model", model)
         vector = _vector(self.vector)
         object.__setattr__(self, "vector", vector)
         if self.layer == OUTPUT_LAYER:
@@ -418,16 +300,6 @@ class SteeringVectorArtifact:
                 raise EditorError("steering vector artifact source must be an object")
             object.__setattr__(self, "source", dict(self.source))
 
-        width = self.model.get("hidden_state_width")
-        if width is not None:
-            if type(width) is not int or width < 1:
-                raise EditorError("hidden-state model width must be a positive integer")
-        layer_count = self.model.get("hidden_state_layer_count")
-        if layer_count is not None and (
-            type(layer_count) is not int or layer_count < 1
-        ):
-            raise EditorError("hidden-state model layer count must be a positive integer")
-
     @property
     def dimension(self) -> int:
         return len(self.vector)
@@ -440,7 +312,6 @@ class SteeringVectorArtifact:
     def digest(self) -> str:
         return steering_vector_digest_for(
             self.vector,
-            model=self.model,
             layer=self.layer,
             position=self.position,
             strength=self.strength,
@@ -468,63 +339,27 @@ class SteeringVectorArtifact:
     def from_mapping(cls, value: Mapping[str, Any]) -> "SteeringVectorArtifact":
         if not isinstance(value, Mapping):
             raise EditorError("steering vector artifact must be an object")
-        if value.get("format") == LEGACY_FORMAT or value.get("kind") == "activation":
-            raise EditorError(
-                "ambiguous activation-vector artifact is not accepted; recreate it "
-                "as an output-head-steering-vector or hidden-state-vector artifact"
-            )
         if value.get("format") != FORMAT:
             raise EditorError(f"steering vector artifact must use format {FORMAT}")
-        schema_version = value.get("schema_version", 1)
-        if type(schema_version) is not int or schema_version not in {1, 2}:
-            raise EditorError("unsupported steering vector artifact schema version")
+        schema_version = value.get("schema_version")
+        if type(schema_version) is not int or schema_version != 3:
+            raise EditorError("steering vector artifact schema version must be 3")
         kind = value.get("kind")
         if kind not in {OUTPUT_HEAD_KIND, HIDDEN_STATE_KIND}:
             raise EditorError(
                 "steering vector artifact kind must be "
                 f"{OUTPUT_HEAD_KIND!r} or {HIDDEN_STATE_KIND!r}"
             )
-        model = value.get("model")
-        if not isinstance(model, Mapping):
-            raise EditorError("steering vector artifact requires model metadata")
-        compatibility = value.get("compatibility")
-        if schema_version >= 2:
-            if not isinstance(compatibility, Mapping):
-                raise EditorError("steering vector artifact requires compatibility metadata")
-            expected_identity = "sha256" if model.get("model_sha256") else "metadata-only"
-            if compatibility.get("model_identity") != expected_identity:
-                raise EditorError(
-                    "steering vector compatibility metadata does not match model identity"
-                )
         if kind == OUTPUT_HEAD_KIND:
             layer = OUTPUT_LAYER
             position = RUNTIME_POSITION
             layer_start = layer_end = None
         else:
-            target = value.get("target")
-            if target is not None:
-                if not isinstance(target, Mapping):
-                    raise EditorError("hidden-state steering target must be an object")
-                if target.get("site") != HIDDEN_STATE_SITE:
-                    raise EditorError(
-                        f"hidden-state steering target site must be {HIDDEN_STATE_SITE!r}"
-                    )
-                if target.get("layer_numbering") != HIDDEN_STATE_LAYER_NUMBERING:
-                    raise EditorError(
-                        "hidden-state steering target must use one-based layer numbering"
-                    )
-                if target.get("coordinate") != HIDDEN_STATE_COORDINATE:
-                    raise EditorError(
-                        "hidden-state steering target must use the canonical decoder-block output coordinate"
-                    )
-            else:
-                raise EditorError("hidden-state steering artifact requires a target coordinate")
             layer = CONTROL_VECTOR_LAYER
             position = CONTROL_VECTOR_POSITION
             layer_start = value.get("layer_start")
             layer_end = value.get("layer_end")
         return cls(
-            model=model,
             vector=value.get("vector"),
             layer=layer,
             position=position,
@@ -553,14 +388,13 @@ class SteeringVectorArtifact:
     def from_cvector_path(
         cls, path: Path, *, strength: float = 1.0
     ) -> "SteeringVectorArtifact":
-        model, vector, source = _load_cvector_gguf(path)
-        layer_count = int(model["hidden_state_layer_count"])
+        vector, source = _load_cvector_gguf(path)
+        layer_count = int(source["canonical_layer_count"])
         if layer_count < 2:
             raise EditorError(
                 "cvector GGUF has no canonical decoder-block output layer that llama.cpp can steer"
             )
         return cls(
-            model=model,
             vector=vector,
             layer=CONTROL_VECTOR_LAYER,
             position=CONTROL_VECTOR_POSITION,
@@ -577,28 +411,16 @@ class SteeringVectorArtifact:
     def to_dict(self) -> dict[str, Any]:
         result = {
             "format": FORMAT,
-            "schema_version": 2,
+            "schema_version": 3,
             "kind": self.kind,
-            "model": dict(self.model),
             "strength": self.strength,
             "method": self.method,
             "vector": list(self.vector),
             "digest": self.digest,
-            "compatibility": {
-                "model_identity": (
-                    "sha256" if self.model.get("model_sha256") else "metadata-only"
-                ),
-                "hash_algorithm": "sha256" if self.model.get("model_sha256") else None,
-            },
         }
         if self.kind == HIDDEN_STATE_KIND:
             result.update(
                 {
-                    "target": {
-                        "site": HIDDEN_STATE_SITE,
-                        "layer_numbering": HIDDEN_STATE_LAYER_NUMBERING,
-                        "coordinate": HIDDEN_STATE_COORDINATE,
-                    },
                     "layer_start": self.layer_start,
                     "layer_end": self.layer_end,
                 }
@@ -616,31 +438,22 @@ class SteeringVectorArtifact:
         except OSError as exc:
             raise EditorError(f"could not write steering vector artifact: {exc}") from exc
 
-    def validate_against_backend(
-        self, backend: Any, provenance: Mapping[str, Any]
-    ) -> np.ndarray:
+    def validate_against_backend(self, backend: Any) -> np.ndarray:
+        if self.layer == CONTROL_VECTOR_LAYER:
+            setter = getattr(backend, "set_activation_control_vector", None)
+            if not callable(setter):
+                raise EditorError(
+                    "the loaded backend does not expose llama.cpp control-vector runtime support"
+                )
+            # The backend is the authority for whether a vector can be
+            # installed. Externally produced vectors may be intentional
+            # experiments; the runtime setter reports application failures.
+            return np.zeros(int(backend.vocabulary_size()), dtype=np.float64)
         width_method = getattr(backend, "activation_width", None)
         if not callable(width_method):
             raise EditorError(
                 "the loaded backend does not expose hidden-state width metadata"
             )
-        loaded_model = model_identity(
-            provenance, hidden_state_width=int(width_method())
-        )
-        assert_model_compatible(self.model, loaded_model, label="loaded model")
-        if self.layer == CONTROL_VECTOR_LAYER:
-            control_width = getattr(backend, "activation_control_vector_width", None)
-            control_layers = getattr(backend, "activation_control_vector_layer_count", None)
-            if not callable(control_width) or not callable(control_layers):
-                raise EditorError(
-                    "the loaded backend does not expose llama.cpp control-vector runtime support"
-                )
-            # The backend is the authority for whether a vector can be
-            # installed.  Artifact loading deliberately does not infer layer
-            # alignment from metadata: externally-produced vectors may be
-            # intentional experiments, and llama.cpp/Transformers can report
-            # the actual failure when the control vector is applied.
-            return np.zeros(int(backend.vocabulary_size()), dtype=np.float64)
         adjustment = getattr(backend, "activation_logit_adjustments", None)
         if not callable(adjustment):
             raise EditorError(
@@ -676,7 +489,6 @@ class SteeringVectorArtifact:
             strength=self.strength if strength is None else strength,
             layer=self.layer,
             position=self.position,
-            model=self.model,
             digest=self.digest,
             layer_start=self.layer_start,
             layer_end=self.layer_end,
@@ -690,7 +502,6 @@ def replace_steering_sampling(
     strength: float,
     layer: str,
     position: str,
-    model: Mapping[str, Any],
     digest: str,
     layer_start: int | None = None,
     layer_end: int | None = None,
@@ -704,7 +515,6 @@ def replace_steering_sampling(
         activation_vector_strength=float(strength),
         activation_vector_layer=layer,
         activation_vector_position=position,
-        activation_vector_model=model_identity_json(model),
         activation_vector_digest=digest,
         activation_vector_layer_start=layer_start,
         activation_vector_layer_end=layer_end,

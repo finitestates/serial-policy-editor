@@ -250,7 +250,7 @@ def run_ephemeral(
         from .activation_vectors import SteeringVectorArtifact
 
         activation_artifact = SteeringVectorArtifact.from_path(args.activation_vector)
-        activation_artifact.validate_against_backend(backend, provenance)
+        activation_artifact.validate_against_backend(backend)
         sampling = apply_activation_artifact(sampling, activation_artifact, args)
     guidance_backend = None
     if episode_backend_loader.cfg_required(
@@ -259,7 +259,7 @@ def run_ephemeral(
         io.write("Loading second model copy for CFG prefix guidance...")
         guidance_backend = episode_backend_loader.load_cfg_guidance_backend(
             args,
-            provenance,
+            backend.provenance(),
         )
     engine = EpisodeEngine(
         backend,

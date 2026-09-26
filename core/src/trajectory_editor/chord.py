@@ -125,7 +125,6 @@ class Chord:
                 preview._prefix_snapshot_dirty = False
                 preview.checkpoint_boundary = engine.checkpoint_boundary
                 preview._activation_runtime_key = engine._activation_runtime_key
-                preview._activation_validation_key = engine._activation_validation_key
                 if shared_observation is not None:
                     preview._observation = shared_observation
                     preview._observation_key = preview._decision_key()

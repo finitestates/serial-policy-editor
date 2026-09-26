@@ -101,11 +101,11 @@ production guidance positioning helper.
 
 | ID | Contract | Existing evidence to migrate |
 | --- | --- | --- |
-| V01 | core loads an external JSON vector without provenance requirements | `test_vector_contracts.py` |
+| V01 | core loads an external JSON vector without model metadata requirements | `test_vector_contracts.py` |
 | V02 | core loads a cvector with the exact canonical layer ordering | `test_vector_contracts.py` |
 | V03 | malformed or dimensionally unusable artifacts fail clearly | `test_vector_contracts.py` |
-| V04 | core records available vector metadata without inventing provenance | `test_vector_contracts.py` |
-| V05 | backend application uses the common capability boundary for llama/Transformers | `test_vector_contracts.py` |
+| V04 | model labels do not gate vector application | `test_vector_contracts.py` |
+| V05 | output vectors use backend math and runtime capabilities | `test_vector_contracts.py` |
 
 ## SQLite and export contracts — 4
 

@@ -212,7 +212,6 @@ DEBT = {
     ("never-on-interactive-path", "transformers_backend:TransformersBackend.activation_logit_adjustments", "hashlib"): "U",
     ("never-on-interactive-path", "transformers_backend:TransformersBackend.set_hidden_state_vector", "hashlib"): "U",
     # First observe() with a model-bound vector hashes the entire model FILE (cached after).
-    ("never-on-interactive-path", "model_hash:sha256_path", "hashlib"): "U",
     # adopt_preview_state constructs an engine; __init__ renders when initial_text is not a str.
     ("invalidate-dont-refresh", "episode_engine:EpisodeEngine.__init__", "render"): "U",
 }
@@ -233,6 +232,8 @@ COLD = {  # baseline classification; the owner adds new entries
     "decoder:LlamaCppDecoder.__init__",
     "decoder:LlamaCppDecoder.close",
     "decoder:LlamaCppDecoder.model_id",
+    "decoder:LlamaCppDecoder._model_sha256",
+    "decoder:LlamaCppDecoder.provenance",
     "episode_engine:EpisodeEngine.resume",
     "episode_engine:EpisodeEngine.terminal_reason",
     "episode_engine:EpisodeEngine.terminate",
@@ -263,4 +264,7 @@ COLD = {  # baseline classification; the owner adds new entries
     "transformers_backend:TransformersBackend.hidden_state_runtime_layer_range",
     "transformers_backend:TransformersBackend.hidden_state_snapshot",
     "transformers_backend:TransformersBackend.model_id",
+    "transformers_backend:TransformersBackend._model_sha256",
+    "transformers_backend:TransformersBackend.hidden_state_layer_types",
+    "transformers_backend:TransformersBackend.provenance",
 }

@@ -2,14 +2,12 @@
 
 ``SamplerConfig`` owns settings needed to produce and replay a token draw:
 candidate filters, CFG, history penalties, manual/conditional bias rules,
-and optional steering-vector application.  Research controls are deliberately
-not fields here. Historical records may contain wider fields; persistence
-projects them into this type before execution.
+and optional steering-vector application. Research controls are deliberately
+not fields here. Persisted records must match the current core contract.
 """
 
 from __future__ import annotations
 
-import json
 import math
 import re
 from dataclasses import dataclass
@@ -55,9 +53,6 @@ class SamplerConfig:
     activation_vector_position: str = "current"
     activation_vector_layer_start: int | None = None
     activation_vector_layer_end: int | None = None
-    # Stored as canonical JSON so the frozen sampler remains hashable while
-    # retaining the model identity needed for replay diagnostics.
-    activation_vector_model: str = ""
     activation_vector_digest: str = ""
 
     def __post_init__(self) -> None:
@@ -126,20 +121,6 @@ class SamplerConfig:
         ):
             raise EditorError("activation_vector_strength must be finite and nonnegative")
         object.__setattr__(self, "activation_vector_strength", float(value))
-        model = self.activation_vector_model
-        if isinstance(model, Mapping):
-            model = json.dumps(dict(model), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        if not isinstance(model, str):
-            raise EditorError("activation_vector_model must be a JSON object")
-        if model:
-            try:
-                parsed_model = json.loads(model)
-            except (TypeError, ValueError) as exc:
-                raise EditorError("activation_vector_model must be valid JSON") from exc
-            if not isinstance(parsed_model, dict):
-                raise EditorError("activation_vector_model must be a JSON object")
-            model = json.dumps(parsed_model, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        object.__setattr__(self, "activation_vector_model", model)
         digest = self.activation_vector_digest
         if not isinstance(digest, str) or (digest and re.fullmatch(r"[0-9a-f]{64}", digest) is None):
             raise EditorError("activation_vector_digest must be a lowercase SHA-256 digest")
@@ -237,90 +218,81 @@ class SamplerConfig:
         )
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, Any]) -> "SamplerConfig":
-        """Build a core sampler from a partial mapping."""
-
-        if not isinstance(value, Mapping):
-            raise EditorError("sampler settings must be an object")
-        defaults = cls()
-        steering_kind = value.get("steering_kind")
-        steering_layer = value.get("activation_vector_layer", defaults.activation_vector_layer)
-        if steering_kind == "output-head-steering-vector":
-            steering_layer = "output"
-        elif steering_kind == "hidden-state-vector":
-            steering_layer = "control-vector"
-        elif steering_kind is not None:
-            raise EditorError(
-                "steering_kind must identify an output-head or hidden-state vector"
-            )
-        steering_vector = value.get(
-            "steering_vector", value.get("activation_vector", defaults.activation_vector)
-        )
-        steering_position = value.get(
-            "steering_position", value.get("activation_vector_position", defaults.activation_vector_position)
-        )
-        if steering_kind == "hidden-state-vector" and "steering_position" not in value:
-            steering_position = "layers"
-        return cls(
-            temperature=value.get("temperature", defaults.temperature),
-            top_k=value.get("top_k", defaults.top_k),
-            top_p=value.get("top_p", defaults.top_p),
-            min_p=value.get("min_p", defaults.min_p),
-            typical_p=value.get("typical_p", defaults.typical_p),
-            tail_free_z=value.get("tail_free_z", defaults.tail_free_z),
-            draw_kernel=value.get("draw_kernel", defaults.draw_kernel),
-            cfg_unconditional_prompt=value.get(
-                "cfg_unconditional_prompt", defaults.cfg_unconditional_prompt
-            ),
-            cfg_scale=value.get("cfg_scale", defaults.cfg_scale),
-            cfg_prefix_tokens=value.get("cfg_prefix_tokens", defaults.cfg_prefix_tokens),
-            repeat_penalty=value.get("repeat_penalty", defaults.repeat_penalty),
-            repeat_last_n=value.get("repeat_last_n", defaults.repeat_last_n),
-            presence_penalty=value.get("presence_penalty", defaults.presence_penalty),
-            frequency_penalty=value.get("frequency_penalty", defaults.frequency_penalty),
-            seed=value.get("seed", defaults.seed),
-            bias_step=value.get("bias_step", defaults.bias_step),
-            bias_rules=value.get("bias_rules", defaults.bias_rules),
-            bias_groups=value.get("bias_groups", defaults.bias_groups),
-            activation_vector=steering_vector,
-            activation_vector_strength=value.get(
-                "steering_strength",
-                value.get("activation_vector_strength", defaults.activation_vector_strength),
-            ),
-            activation_vector_layer=steering_layer,
-            activation_vector_position=steering_position,
-            activation_vector_layer_start=value.get(
-                "steering_layer_start",
-                value.get("activation_vector_layer_start", defaults.activation_vector_layer_start),
-            ),
-            activation_vector_layer_end=value.get(
-                "steering_layer_end",
-                value.get("activation_vector_layer_end", defaults.activation_vector_layer_end),
-            ),
-            activation_vector_model=value.get(
-                "steering_model",
-                value.get("activation_vector_model", defaults.activation_vector_model),
-            ),
-            activation_vector_digest=value.get(
-                "steering_digest",
-                value.get("activation_vector_digest", defaults.activation_vector_digest),
-            ),
-        )
-
-    @classmethod
     def from_record(cls, value: Mapping[str, Any]) -> "SamplerConfig":
-        """Restore only the core portion of a saved sampler record."""
+        """Restore a complete record written by ``to_dict``."""
 
         if not isinstance(value, Mapping):
             raise EditorError("saved sampler settings must be an object")
+        required = {
+            "temperature", "top_k", "top_p", "min_p", "typical_p",
+            "tail_free_z", "draw_kernel", "cfg_unconditional_prompt",
+            "cfg_scale", "cfg_prefix_tokens", "repeat_penalty", "repeat_last_n",
+            "presence_penalty", "frequency_penalty", "history_scope",
+            "policy_scheme", "seed", "rng_scheme",
+        }
+        optional = {"bias_rules", "bias_groups", "bias_step"}
+        steering = {
+            "steering_vector", "steering_strength", "steering_kind",
+            "steering_position", "steering_layer_start", "steering_layer_end",
+            "steering_digest",
+        }
+        keys = set(value)
+        missing = required - keys
+        if missing:
+            names = ", ".join(sorted(missing))
+            raise EditorError(f"saved sampler settings are missing fields: {names}")
+        unknown = keys - required - optional - steering
+        if unknown:
+            names = ", ".join(repr(name) for name in sorted(unknown, key=repr))
+            raise EditorError(f"saved sampler settings contain unknown fields: {names}")
         for name, expected in (
             ("rng_scheme", RNG_SCHEME),
             ("policy_scheme", SAMPLING_POLICY_SCHEME),
             ("history_scope", "model-visible-prefix-tail-v1"),
         ):
-            if name in value and value[name] != expected:
+            if value[name] != expected:
                 raise EditorError(f"unsupported {name}: {value[name]!r}")
-        return cls.from_mapping(value)
+
+        steering_keys = keys & steering
+        if steering_keys and steering_keys != steering:
+            missing_steering = steering - steering_keys
+            names = ", ".join(sorted(missing_steering))
+            raise EditorError(f"saved sampler steering fields are incomplete: {names}")
+        steering_kind = value.get("steering_kind", "output-head-steering-vector")
+        if steering_kind == "output-head-steering-vector":
+            steering_layer = "output"
+        elif steering_kind == "hidden-state-vector":
+            steering_layer = "control-vector"
+        else:
+            raise EditorError("saved sampler has an unsupported steering kind")
+
+        return cls(
+            temperature=value["temperature"],
+            top_k=value["top_k"],
+            top_p=value["top_p"],
+            min_p=value["min_p"],
+            typical_p=value["typical_p"],
+            tail_free_z=value["tail_free_z"],
+            draw_kernel=value["draw_kernel"],
+            cfg_unconditional_prompt=value["cfg_unconditional_prompt"],
+            cfg_scale=value["cfg_scale"],
+            cfg_prefix_tokens=value["cfg_prefix_tokens"],
+            repeat_penalty=value["repeat_penalty"],
+            repeat_last_n=value["repeat_last_n"],
+            presence_penalty=value["presence_penalty"],
+            frequency_penalty=value["frequency_penalty"],
+            seed=value["seed"],
+            bias_step=value.get("bias_step", 0.5),
+            bias_rules=value.get("bias_rules", ()),
+            bias_groups=value.get("bias_groups", ()),
+            activation_vector=value.get("steering_vector", ()),
+            activation_vector_strength=value.get("steering_strength", 0.0),
+            activation_vector_layer=steering_layer,
+            activation_vector_position=value.get("steering_position", "current"),
+            activation_vector_layer_start=value.get("steering_layer_start"),
+            activation_vector_layer_end=value.get("steering_layer_end"),
+            activation_vector_digest=value.get("steering_digest", ""),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -352,7 +324,6 @@ class SamplerConfig:
         if (
             self.activation_vector
             or self.activation_vector_strength != 0.0
-            or self.activation_vector_model
             or self.activation_vector_digest
             or self.activation_vector_layer_start is not None
             or self.activation_vector_layer_end is not None
@@ -369,9 +340,6 @@ class SamplerConfig:
                     "steering_position": self.activation_vector_position,
                     "steering_layer_start": self.activation_vector_layer_start,
                     "steering_layer_end": self.activation_vector_layer_end,
-                    "steering_model": json.loads(self.activation_vector_model)
-                    if self.activation_vector_model
-                    else {},
                     "steering_digest": self.activation_vector_digest,
                 }
             )

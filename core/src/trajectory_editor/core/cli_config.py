@@ -136,7 +136,6 @@ def sampler_from_args(
         if hasattr(base, "activation_vector"):
             updates.update(
                 activation_vector=(),
-                activation_vector_model="",
                 activation_vector_digest="",
                 activation_vector_strength=0.0,
                 activation_vector_layer_start=None,

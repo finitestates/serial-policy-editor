@@ -65,8 +65,6 @@ def _inspect(path: Path) -> int:
     print(f"strength: {artifact.strength:g}")
     if artifact.layer_start is not None:
         print(f"layers: {artifact.layer_start}..{artifact.layer_end}")
-    if artifact.model:
-        print(f"model: {artifact.model}")
     return 0
 
 
@@ -87,7 +85,6 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 artifact = create_hidden_state_prompt_pair(
                     backend,
-                    backend.provenance(),
                     args.prompt_a,
                     args.prompt_b,
                     layer_start=args.layer_start,

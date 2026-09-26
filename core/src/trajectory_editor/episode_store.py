@@ -26,13 +26,11 @@ SCHEMA_VERSION = 1
 
 
 def _core_sampling_record(sampling: SamplerConfig) -> dict[str, Any]:
-    """Validate a sampler and serialize only its core replay contract."""
+    """Serialize the canonical sampler record."""
 
     if not isinstance(sampling, SamplerConfig):
         raise EditorError("episode sampling must implement the core sampler contract")
-    raw = sampling.to_dict()
-    projected = SamplerConfig.from_record(raw).to_dict()
-    return projected if type(sampling) is SamplerConfig else raw
+    return SamplerConfig.from_record(sampling.to_dict()).to_dict()
 
 
 def _utc_now() -> str:
@@ -181,33 +179,11 @@ class EpisodeStore:
                 db.execute("ALTER TABLE episodes ADD COLUMN checkpoint_boundary INTEGER")
                 db.execute("UPDATE episodes SET checkpoint_boundary = max_tokens WHERE max_tokens > 0")
             token_columns = {row["name"]: row for row in db.execute("PRAGMA table_info(tokens)")}
-            if token_columns["raw_model_nll"]["notnull"]:
-                db.execute("ALTER TABLE tokens RENAME TO tokens_legacy")
-                db.execute("""
-                    CREATE TABLE tokens (
-                        episode_id TEXT NOT NULL,
-                        action_ordinal INTEGER NOT NULL,
-                        action_token_index INTEGER NOT NULL,
-                        boundary INTEGER NOT NULL,
-                        token_id INTEGER NOT NULL,
-                        text TEXT NOT NULL,
-                        realized_visible INTEGER NOT NULL,
-                        is_eog INTEGER NOT NULL,
-                        sampling_boundary INTEGER NOT NULL,
-                        proposal_token_id INTEGER NOT NULL,
-                        raw_model_nll REAL,
-                        raw_rank INTEGER,
-                        policy_rank INTEGER,
-                        decoder_probability REAL NOT NULL,
-                        proposal_agreement INTEGER NOT NULL,
-                        PRIMARY KEY (episode_id, action_ordinal, action_token_index),
-                        FOREIGN KEY (episode_id, action_ordinal)
-                            REFERENCES actions(episode_id, ordinal) ON DELETE CASCADE
-                    )
-                """)
-                db.execute("INSERT INTO tokens SELECT * FROM tokens_legacy")
-                db.execute("DROP TABLE tokens_legacy")
-                db.execute("CREATE INDEX tokens_by_boundary ON tokens(episode_id, boundary)")
+            raw_nll_column = token_columns.get("raw_model_nll")
+            if raw_nll_column is None or raw_nll_column["notnull"]:
+                raise EditorError(
+                    "episode database has an unsupported token table; create a current workspace"
+                )
             db.execute("""CREATE TABLE IF NOT EXISTS episode_names (
                 number INTEGER PRIMARY KEY AUTOINCREMENT,
                 episode_id TEXT UNIQUE NOT NULL REFERENCES episodes(episode_id),
