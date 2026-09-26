@@ -32,8 +32,16 @@ def _tokens(ids: Sequence[int]) -> tuple[int, ...]:
     return result
 
 
-def token_prefix_sha256(ids: Sequence[int]) -> str:
+def token_prefix_sha256(
+    ids: Sequence[int], *, tokenizer_id: str | None = None
+) -> str:
     digest = hashlib.sha256()
+    if tokenizer_id is not None:
+        if not isinstance(tokenizer_id, str) or not tokenizer_id:
+            raise ValueError("tokenizer ID must be nonempty text")
+        tokenizer_bytes = tokenizer_id.encode("utf-8")
+        digest.update(len(tokenizer_bytes).to_bytes(8, "little", signed=False))
+        digest.update(tokenizer_bytes)
     for token_id in _tokens(ids):
         digest.update(token_id.to_bytes(8, "little", signed=True))
     return digest.hexdigest()
@@ -54,8 +62,17 @@ class World:
         ):
             raise ValueError("stream fingerprint must be a lowercase SHA-256 digest")
     @classmethod
-    def for_prefix(cls, seed: int, initial_token_ids: Sequence[int]) -> World:
-        return cls(seed, token_prefix_sha256(initial_token_ids))
+    def for_prefix(
+        cls,
+        seed: int,
+        initial_token_ids: Sequence[int],
+        *,
+        tokenizer_id: str | None = None,
+    ) -> World:
+        return cls(
+            seed,
+            token_prefix_sha256(initial_token_ids, tokenizer_id=tokenizer_id),
+        )
 
 
 def _uniform(world: World, boundary: int, token_id: int | None = None) -> float:
