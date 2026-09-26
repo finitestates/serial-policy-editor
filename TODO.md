@@ -14,7 +14,7 @@
 
 ## Tokenizer identity and streaming
 
-- [ ] Change how mixed-model forks are handled. If a model has a different tokenizer than the episode it is forking from, it will have different sampler coordinates. As such, it's really not a fork. A different model with the same tokenizer could be considered a fork assuming the token IDs of the prompt/prefix match. In order to enforce this, we need to have better provenance data about model & tokenizer (currently, the system resolves "same model" by evaluating absolute path, which is stupid).
+- [x] Change how mixed-model forks are handled. If a model has a different tokenizer than the episode it is forking from, it will have different sampler coordinates. As such, it's really not a fork. A different model with the same tokenizer could be considered a fork assuming the token IDs of the prompt/prefix match. In order to enforce this, we need to have better provenance data about model & tokenizer (currently, the system resolves "same model" by evaluating absolute path, which is stupid).
 - [ ] Audit and test how streamed partial UTF-8 sequences affect token-step accounting and saved text. Token boundaries advance by token IDs, while a live stream may buffer bytes until a character is complete. Cover display, rewind, partial-write replay, procedure export, and cross-tokenizer forks; keep token IDs authoritative where decoded text cannot faithfully represent a retained prefix. The review identified this as a code-path risk to investigate, not a demonstrated failure.
 
 ## Decide what 1.0 promises
