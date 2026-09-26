@@ -28,9 +28,13 @@ class ScriptedBackend:
         return False
 
 
-def start(seed=12345, *, policy=None):
+def start(seed=12345, *, policy=None, tokenizer_id=None):
     prefix = (1, 2, 3)
-    return Branch(State(prefix), policy or Policy(), World.for_prefix(seed, prefix))
+    return Branch(
+        State(prefix),
+        policy or Policy(),
+        World.for_prefix(seed, prefix, tokenizer_id=tokenizer_id),
+    )
 
 
 @pytest.mark.parametrize("kernel", ["categorical", "gumbel-max"])
@@ -222,6 +226,10 @@ def test_small_counterfactual_example():
 
 def test_world_prefix_validation_and_exact_serialization():
     assert World.for_prefix(4, (1, 2)).stream_fingerprint == token_prefix_sha256([1, 2])
+    assert World.for_prefix(4, (1, 2), tokenizer_id="tok-a").stream_fingerprint == \
+           token_prefix_sha256([1, 2], tokenizer_id="tok-a")
+    assert World.for_prefix(4, (1, 2), tokenizer_id="tok-a").stream_fingerprint != \
+           World.for_prefix(4, (1, 2), tokenizer_id="tok-b").stream_fingerprint
     for invalid in (1 << 63, -(1 << 63) - 1, True):
         with pytest.raises(ValueError, match="seed"):
             World.for_prefix(invalid, (1,))

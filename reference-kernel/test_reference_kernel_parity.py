@@ -21,6 +21,9 @@ from reference_kernel import (
 )
 
 
+SCRIPTED_TOKENIZER_ID = "reference-kernel-scripted-tokenizer-v1"
+
+
 class ProductionScriptedBackend(ScriptedBackend):
     """The same pure logits function behind EpisodeEngine's incremental API."""
 
@@ -51,13 +54,19 @@ class ProductionScriptedBackend(ScriptedBackend):
     def eog_token_ids(self):
         return ()
 
+    def tokenizer_id(self):
+        return SCRIPTED_TOKENIZER_ID
+
     def provenance(self, *, include_model_sha256=True):
         return {"backend": "scripted", "vocabulary_size": 10}
 
 
 @pytest.mark.parametrize("prefix", [(), (0,), (1, 2, 3), ((1 << 63) - 1,)])
-def test_token_prefix_hash_matches_production(prefix):
-    assert token_prefix_sha256(prefix) == production_sha256(prefix)
+@pytest.mark.parametrize("tokenizer_id", [None, SCRIPTED_TOKENIZER_ID])
+def test_token_prefix_hash_matches_production(prefix, tokenizer_id):
+    assert token_prefix_sha256(
+        prefix, tokenizer_id=tokenizer_id
+    ) == production_sha256(prefix, tokenizer_id=tokenizer_id)
 
 
 @pytest.mark.parametrize("seed", [-(1 << 63), -5, 0, 17, (1 << 63) - 1])
@@ -90,7 +99,11 @@ def test_fixed_distribution_draws_match_production(kernel):
 @pytest.mark.parametrize("seed", [12345, 67890])
 def test_production_sampling_boundaries_observations_holds_and_rewind(seed, kernel):
     reference_backend = ScriptedBackend()
-    reference = start(seed, policy=Policy(top_k=6, draw_kernel=kernel))
+    reference = start(
+        seed,
+        policy=Policy(top_k=6, draw_kernel=kernel),
+        tokenizer_id=SCRIPTED_TOKENIZER_ID,
+    )
     production = EpisodeEngine(
         ProductionScriptedBackend(), initial_token_ids=[1, 2, 3],
         sampling=SamplerConfig(seed=seed, temperature=1.0, top_k=6, top_p=1.0,
@@ -135,10 +148,21 @@ def test_top_k_policy_remaps_same_quantile_in_production():
 
     backend = Flat()
     reference_backend = Flat()
-    branch = Branch(State((1, 2)), Policy(top_k=2), World.for_prefix(5, (1, 2)))
-    production = EpisodeEngine(backend, initial_token_ids=[1, 2], sampling=SamplerConfig(
-        seed=5, top_k=2, top_p=1.0, min_p=0.0,
-    ))
+    # Pin the same world in both implementations. This test isolates policy
+    # remapping from root fingerprint construction, which has its own parity
+    # assertion above.
+    stream_fingerprint = "a" * 64
+    branch = Branch(
+        State((1, 2)),
+        Policy(top_k=2),
+        World(5, stream_fingerprint),
+    )
+    production = EpisodeEngine(
+        backend,
+        initial_token_ids=[1, 2],
+        stream_fingerprint=stream_fingerprint,
+        sampling=SamplerConfig(seed=5, top_k=2, top_p=1.0, min_p=0.0),
+    )
     a = observe(reference_backend, branch).proposal_token_id
     assert a == production.observe().proposal_token_id
     branch = replace(branch, policy=Policy(top_k=3))
