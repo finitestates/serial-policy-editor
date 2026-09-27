@@ -1,17 +1,11 @@
 # Core contract matrix
 
 This is the budget and source of truth for the reduced core test suite. The
-numbers below are contract slots, not a limit on parametrized examples. A
-slot may cover many actions, sampler configurations, boundaries, or backend
-implementations.
+numbers below are contract slots. Every retained core test must map to one of these slots. Additional slots may be added on an as-needed basis, but only after consultation with the code owner.
 
-Every retained core test must map to one of these slots. Tests with no slot
-are moved to `vectors`, deleted as obsolete, or added here only after
-deliberately changing the contract budget.
+Core tests assert observable state, persisted records, replay results, and may also check for patterns associated with performance regression (many of those are in `hot_path/` but may also appear here).
 
-The terminal extraction adds four active UI lifecycle slots, T01-T04, beyond
-the original 55 engine/storage slots. They use pipe input and in-memory output;
-no model or external terminal is required.
+## Terminal contracts
 
 | ID | Terminal contract | Active evidence |
 | --- | --- | --- |
@@ -19,17 +13,6 @@ no model or external terminal is required.
 | T02 | preview callbacks run only on the episode-owning thread; unexpected failures wake the owner while expected validation remains editable | `test_terminal_lifecycle.py` |
 | T03 | submitted and not-yet-rendered requests reject stale input; obsolete and abandoned previews are cancelled | `test_terminal_lifecycle.py` |
 | T04 | exit restores the terminal after ordinary completion, an exception, EOF, or interrupt; plain mode consumes the same request types | `test_terminal_lifecycle.py` |
-
-Core tests assert observable state, persisted records, and replay results.
-CFG evaluation-work assertions also enforce S03: with caching enabled, evaluate
-the guidance root once and submit only newly required continuation IDs on normal
-forward generation. Unchanged observations and sampler-only invalidation must
-not resubmit that prefix. Backend cache-off behavior remains adapter-owned (S08).
-`test_cfg_contracts.py` maps save/resume to L01, rewind to L02/L06,
-forks/switching to L04, cutoff/budget renewal to L07, destination tokenizers to
-L08, and source-sampling replay/provisioning to R01/R08. Its full-prefix oracle
-checks contexts, complete guided logits, and distributions independently of the
-production guidance positioning helper.
 
 ## Sampler and action contracts — 8
 
@@ -125,12 +108,3 @@ production guidance positioning helper.
 | Q03 | rewind followed by replay reproduces the retained prefix | `test_property_contracts.py` |
 | Q04 | fork at N preserves exactly the first N visible tokens | `test_property_contracts.py` |
 | Q05 | generated divergence terminates at the live edge or continues ballistically | `test_property_contracts.py` |
-
-## Migration rule
-
-The existing suite is source material, not a preservation obligation. Migrate
-the strongest assertions into these slots, parameterize their meaningful
-variants, and delete assertions that concern removed APIs, private helpers,
-cache strategy, SQL access patterns, or speculative extension behavior. New
-tests are added only for a missing contract or a demonstrated mutation/branch
-coverage gap.
