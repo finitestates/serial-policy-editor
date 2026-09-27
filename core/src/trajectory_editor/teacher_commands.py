@@ -808,7 +808,7 @@ def interpret_command(
     if lower == "overlay":
         return CommandInterpretation(raw, CommandState.INCOMPLETE, message="Type a wired overlay name.")
     if lower == "draw":
-        return CommandInterpretation(raw, CommandState.INCOMPLETE, message="Type a token ID after draw.")
+        return CommandInterpretation(raw, CommandState.INCOMPLETE, message="Type a raw rank after draw.")
     chord_parts = stripped.split()
     if chord_parts and chord_parts[0].lower() == "chord" and len(chord_parts) < 3:
         if len(chord_parts) == 1:
