@@ -22,6 +22,7 @@ class Candidate:
     neighbor_margin: float | None = None
     # (logit - mean) / std over full-vocab raw logits; None when unset/undefined.
     logit_z: float | None = None
+    gumbel_rank: int | None = None
 
     @property
     def model_probability(self) -> float | None:
@@ -50,6 +51,7 @@ class Candidate:
             "model_logit": self.model_logit,
             "neighbor_margin": self.neighbor_margin,
             "logit_z": self.logit_z,
+            "gumbel_rank": self.gumbel_rank,
         }
 
 

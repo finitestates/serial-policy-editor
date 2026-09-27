@@ -282,6 +282,7 @@ class PolicyViewPreferences:
 
     show: bool | None = None
     sort_by_policy: bool = False
+    sort_by_gumbel: bool = False
     logit_view: str = "none"
     show_model_probabilities: bool = False
     # Single middle-column overlay focus; None = identity (or fall back to l/%).
@@ -617,11 +618,32 @@ class InteractivePolicy:
     def choose(self, engine: EpisodeEngine, observation: EpisodeObservation) -> PolicyAction:
         self._prepare_seamless_action_index(engine, observation.boundary)
         self.choice_serial += 1
+        policy_sort = self.view_preferences.sort_by_policy
+        gumbel_sort = (
+            self.view_preferences.sort_by_gumbel
+            and not policy_sort
+            and engine.sampling.draw_kernel == "gumbel-max"
+        )
+        if policy_sort or (self.view_preferences.sort_by_gumbel and not gumbel_sort):
+            self.view_preferences.sort_by_gumbel = False
         view = self._view_plan(engine)
-        candidates = engine.candidates(
-            observation,
-            count=min(self.menu_size, len(observation.logits)),
-            metrics=view.metrics,
+
+        def candidate_page(count: int, metrics: frozenset[str]) -> tuple[Candidate, ...]:
+            if gumbel_sort:
+                return engine.gumbel_candidates(
+                    observation, count=count, metrics=metrics
+                )
+            return engine.candidates(observation, count=count, metrics=metrics)
+
+        def candidate_at_rank(rank: int, metrics: frozenset[str]) -> Candidate:
+            if gumbel_sort:
+                metrics = metrics | frozenset({"gumbel_rank"})
+            return engine.candidates(
+                observation, start_rank=rank, count=1, metrics=metrics
+            )[0]
+
+        candidates = candidate_page(
+            min(self.menu_size, len(observation.logits)), view.metrics
         )
         choice = self._choice_for_observation(
             engine, observation, candidates, view=view
@@ -633,12 +655,9 @@ class InteractivePolicy:
 
         def resolve_candidate(rank: int) -> Candidate:
             if rank not in preview_candidates:
-                preview_candidates[rank] = engine.candidates(
-                    observation,
-                    start_rank=rank,
-                    count=1,
-                    metrics=self._view_plan(engine).metrics,
-                )[0]
+                preview_candidates[rank] = candidate_at_rank(
+                    rank, self._view_plan(engine).metrics
+                )
             return preview_candidates[rank]
 
         search: SearchLens | None = None
@@ -646,18 +665,13 @@ class InteractivePolicy:
         search_warm_target: tuple[int, int] | None = None
         search_warm_commands: tuple[str, ...] = ()
         feedback: ChoiceFeedback | None = None
-        policy_sort = self.view_preferences.sort_by_policy
         review_boundary: int | None = None
         proposal_prefill_available = not self.manual_acceptance
         while True:
             policy_columns = self._show_policy_diagnostics(engine)
             view = self._view_plan(engine)
             if view != choice_view:
-                refreshed = engine.candidates(
-                    observation,
-                    count=len(choice.candidates),
-                    metrics=view.metrics,
-                )
+                refreshed = candidate_page(len(choice.candidates), view.metrics)
                 choice = replace(
                     choice,
                     candidates=refreshed,
@@ -675,12 +689,7 @@ class InteractivePolicy:
                     ),
                 )
                 exposed = {
-                    rank: engine.candidates(
-                        observation,
-                        start_rank=rank,
-                        count=1,
-                        metrics=view.metrics,
-                    )[0]
+                    rank: candidate_at_rank(rank, view.metrics)
                     for rank in exposed
                 }
                 exposed.update((candidate.rank, candidate) for candidate in refreshed)
@@ -696,10 +705,22 @@ class InteractivePolicy:
                         metrics=view.metrics,
                     )
                     if policy_sort
-                    else choice.candidates
+                    else (
+                        engine.gumbel_candidates(
+                            observation,
+                            count=len(choice.candidates),
+                            metrics=view.metrics,
+                        )
+                        if gumbel_sort
+                        else engine.candidates(
+                            observation,
+                            count=len(choice.candidates),
+                            metrics=view.metrics,
+                        )
+                    )
                 )
             )
-            if policy_sort and not search_lens_active:
+            if (policy_sort or gumbel_sort) and not search_lens_active:
                 exposed.update((candidate.rank, candidate) for candidate in displayed)
             review = None
             if review_boundary is not None:
@@ -739,6 +760,7 @@ class InteractivePolicy:
                 policy_active=engine.sampling.policy_active,
                 show_policy_rank=policy_columns,
                 sort_by_policy=policy_sort and not search_lens_active,
+                sort_by_gumbel=gumbel_sort and not search_lens_active,
                 logit_view=self.view_preferences.logit_view,
                 show_model_probabilities=self.view_preferences.show_model_probabilities,
                 column_focus=self.view_preferences.column_focus,
@@ -865,22 +887,29 @@ class InteractivePolicy:
                 else:
                     engine.sampling = updated
                 observation = engine.observe()
+                if gumbel_sort and engine.sampling.draw_kernel != "gumbel-max":
+                    gumbel_sort = False
+                    self.view_preferences.sort_by_gumbel = False
+                view = self._view_plan(engine)
+                rank_metrics = view.metrics | (
+                    frozenset({"gumbel_rank"}) if gumbel_sort else frozenset()
+                )
                 ranks = tuple(exposed)
                 exposed = {
                     rank: engine.candidates(
                         observation,
                         start_rank=rank,
                         count=1,
-                        metrics=self._view_plan(engine).metrics,
+                        metrics=rank_metrics,
                     )[0]
                     for rank in ranks
                 }
                 preview_candidates = dict(exposed)
-                candidates = tuple(resolve_candidate(candidate.rank) for candidate in choice.candidates)
+                candidates = candidate_page(len(choice.candidates), view.metrics)
                 choice = self._choice_for_observation(
-                    engine, observation, candidates, view=self._view_plan(engine)
+                    engine, observation, candidates, view=view
                 )
-                choice_view = self._view_plan(engine)
+                choice_view = view
                 lines = tuple(f"{label}: {value:+g}" for label, value in updates)
                 feedback = ChoiceFeedback("status", "BIAS UPDATED", lines)
                 continue
@@ -888,7 +917,7 @@ class InteractivePolicy:
                 payload = command.sampler_text
                 if payload is None:
                     payload = self.io.read(
-                        "sampler key=value changes (blank cancels; e.g. top_k=20 temperature=.8)> "
+                        "sampler key=value changes (blank cancels; e.g. top_k=none temperature=1)> "
                     ) or ""
                 if not payload.strip():
                     continue
@@ -902,24 +931,29 @@ class InteractivePolicy:
                     feedback = ChoiceFeedback("error", "INVALID SAMPLER", (str(exc),))
                     continue
                 observation = engine.observe()
+                if gumbel_sort and engine.sampling.draw_kernel != "gumbel-max":
+                    gumbel_sort = False
+                    self.view_preferences.sort_by_gumbel = False
+                view = self._view_plan(engine)
+                rank_metrics = view.metrics | (
+                    frozenset({"gumbel_rank"}) if gumbel_sort else frozenset()
+                )
                 ranks = tuple(exposed)
                 exposed = {
                     rank: engine.candidates(
                         observation,
                         start_rank=rank,
                         count=1,
-                        metrics=self._view_plan(engine).metrics,
+                        metrics=rank_metrics,
                     )[0]
                     for rank in ranks
                 }
                 preview_candidates = dict(exposed)
-                candidates = tuple(
-                    resolve_candidate(candidate.rank) for candidate in choice.candidates
-                )
+                candidates = candidate_page(len(choice.candidates), view.metrics)
                 choice = self._choice_for_observation(
-                    engine, observation, candidates, view=self._view_plan(engine)
+                    engine, observation, candidates, view=view
                 )
-                choice_view = self._view_plan(engine)
+                choice_view = view
                 feedback = ChoiceFeedback("status", "SAMPLER UPDATED", (payload,))
                 continue
             if command.kind == CommandKind.REROLL:
@@ -1011,11 +1045,7 @@ class InteractivePolicy:
                     len(observation.logits), len(choice.candidates) + additional
                 )
                 view = self._view_plan(engine)
-                candidates = engine.candidates(
-                    observation,
-                    count=target,
-                    metrics=view.metrics,
-                )
+                candidates = candidate_page(target, view.metrics)
                 choice = self._choice_for_observation(
                     engine,
                     observation,
@@ -1119,7 +1149,18 @@ class InteractivePolicy:
                     self.io.write(f"Note not retained by this session: {note}")
                 continue
             if command.kind == CommandKind.POLICY_VIEW:
-                policy_sort = not policy_sort
+                if engine.sampling.draw_kernel == "gumbel-max":
+                    if policy_sort:
+                        policy_sort = False
+                        gumbel_sort = True
+                    elif gumbel_sort:
+                        gumbel_sort = False
+                    else:
+                        policy_sort = True
+                else:
+                    policy_sort = not policy_sort
+                    gumbel_sort = False
+                self.view_preferences.sort_by_gumbel = gumbel_sort
                 self.view_preferences.sort_by_policy = policy_sort
                 continue
             if command.kind == CommandKind.POLICY_COLUMN:

@@ -40,6 +40,15 @@ CORE_SAMPLER_FIELDS = (
     "bias_groups",
 )
 
+_UNFILTERED_VALUES = {
+    "temperature": 1.0,
+    "top_k": None,
+    "top_p": 1.0,
+    "min_p": 0.0,
+    "typical_p": 1.0,
+    "tail_free_z": 1.0,
+}
+
 SAMPLER_ALIASES = {
     "temp": "temperature",
     "rep": "repeat_penalty",
@@ -50,6 +59,14 @@ SAMPLER_ALIASES = {
 }
 
 
+class _StoreTopK(argparse.Action):
+    """Store an optional top-k while retaining whether None was explicit."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        setattr(namespace, "_top_k_specified", True)
+
+
 def add_core_sampler_arguments(
     parser: argparse.ArgumentParser, *, include_vector: bool = True
 ) -> None:
@@ -58,7 +75,6 @@ def add_core_sampler_arguments(
     sampling = parser.add_argument_group("sampling")
     for name, kind in (
         ("temperature", float),
-        ("top_k", int),
         ("top_p", float),
         ("min_p", float),
         ("typical_p", float),
@@ -69,6 +85,20 @@ def add_core_sampler_arguments(
         ("frequency_penalty", float),
     ):
         sampling.add_argument("--" + name.replace("_", "-"), type=kind)
+    sampling.add_argument(
+        "--top-k",
+        type=_parse_top_k,
+        action=_StoreTopK,
+        default=None,
+        metavar="N|none",
+        help="keep the top N candidates; none disables top-k (default: 40)",
+    )
+    parser.set_defaults(_top_k_specified=False)
+    sampling.add_argument(
+        "--unfiltered",
+        action="store_true",
+        help="disable temperature and all candidate filters",
+    )
     sampling.add_argument(
         "--draw-kernel",
         choices=("categorical", "gumbel-max"),
@@ -118,6 +148,35 @@ def random_seed() -> int:
     return secrets.randbelow(MAX_SEED - MIN_SEED + 1) + MIN_SEED
 
 
+def _parse_top_k(value: str) -> int | None:
+    if value.strip().lower() == "none":
+        return None
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer or 'none'") from exc
+
+
+def _top_k_was_specified(args: argparse.Namespace) -> bool:
+    specified = getattr(args, "_top_k_specified", None)
+    return (
+        specified
+        if specified is not None
+        else getattr(args, "top_k", None) is not None
+    )
+
+
+def _unfiltered_values(args: argparse.Namespace) -> dict[str, Any]:
+    values = dict(_UNFILTERED_VALUES)
+    cli_explicit = getattr(args, "_cli_explicit_options", set())
+    if "unfiltered" not in cli_explicit:
+        for name in _UNFILTERED_VALUES:
+            if name not in cli_explicit:
+                continue
+            values[name] = getattr(args, name, None)
+    return values
+
+
 def sampler_from_args(
     args: argparse.Namespace, source: SamplerConfig | None = None
 ) -> SamplerConfig:
@@ -138,22 +197,51 @@ def sampler_from_args(
                 activation_vector_layer_end=None,
             )
         base = replace(base, **updates)
-    values = {
-        name: getattr(args, name)
-        if getattr(args, name, None) is not None
-        else getattr(base, name)
-        for name in CORE_SAMPLER_FIELDS
-    }
+    values = {}
+    for name in CORE_SAMPLER_FIELDS:
+        if name == "top_k":
+            values[name] = (
+                getattr(args, name, None)
+                if _top_k_was_specified(args)
+                else base.top_k
+            )
+        else:
+            value = getattr(args, name, None)
+            values[name] = getattr(base, name) if value is None else value
+    if getattr(args, "unfiltered", False):
+        values.update(_unfiltered_values(args))
     return SamplerConfig(**values)
 
 
 def sampler_overrides_present(args: argparse.Namespace) -> bool:
-    return any(
-        getattr(args, name, None) is not None for name in CORE_SAMPLER_FIELDS
-    ) or bool(
+    for name in CORE_SAMPLER_FIELDS:
+        if name == "top_k":
+            if _top_k_was_specified(args):
+                return True
+            continue
+        if getattr(args, name, None) is not None:
+            return True
+    return bool(getattr(args, "unfiltered", False)) or bool(
         getattr(args, "activation_vector", None) is not None
         or getattr(args, "activation_strength", None) is not None
     )
+
+
+def sampler_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    """Return only sampler values explicitly supplied on the CLI/profile."""
+
+    values: dict[str, Any] = {}
+    for name in CORE_SAMPLER_FIELDS:
+        if name == "top_k":
+            if _top_k_was_specified(args):
+                values[name] = getattr(args, name, None)
+            continue
+        value = getattr(args, name, None)
+        if value is not None:
+            values[name] = value
+    if getattr(args, "unfiltered", False):
+        values.update(_unfiltered_values(args))
+    return values
 
 
 def sampler_override(current: SamplerConfig, raw: str) -> SamplerConfig:
@@ -180,13 +268,15 @@ def sampler_override(current: SamplerConfig, raw: str) -> SamplerConfig:
         return current
     for piece in pieces:
         if "=" not in piece:
-            raise EditorError("sampler changes use key=value (for example top_k=20)")
+            raise EditorError("sampler changes use key=value (for example top_k=20 or top_k=none)")
         key, value = piece.split("=", 1)
         key = SAMPLER_ALIASES.get(key.strip().lower(), key.strip().lower())
         if key not in values or key in {"token_biases", "bias_groups"}:
             raise EditorError(f"unknown sampler field {key!r}")
         try:
-            if key in {"top_k", "repeat_last_n", "cfg_prefix_tokens", "seed"}:
+            if key == "top_k" and value.strip().lower() == "none":
+                values[key] = None
+            elif key in {"top_k", "repeat_last_n", "cfg_prefix_tokens", "seed"}:
                 values[key] = int(value)
             elif key == "draw_kernel":
                 if value not in {"categorical", "gumbel-max"}:
@@ -221,5 +311,6 @@ __all__ = [
     "random_seed",
     "sampler_from_args",
     "sampler_override",
+    "sampler_overrides_from_args",
     "sampler_overrides_present",
 ]

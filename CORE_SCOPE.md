@@ -39,6 +39,19 @@ A database or other storage medium can be part of the workspace implementation, 
 of an episode. The runtime owns episode/action meaning; persistence adapts that
 meaning to the workspace.
 
+### Candidate rank and menu order
+
+The rank shown beside a candidate is its **model rank**: its one-based position
+under the model's unadjusted logits for the current decision. It is the stable
+numeric address used to select that candidate, including with `draw N`.
+
+Menu views can change the order in which candidates appear. Policy sorting uses
+the policy-adjusted scores, which can include vectors and other adjustments;
+Gumbel sorting uses the Gumbel scores over the active draw set. These views
+change row order but keep each candidate's model-rank address unchanged. The
+policy and Gumbel positions are separate ranks, not replacements for the model
+rank.
+
 ## Replay contract
 
 An executable replay plan is an ordered sequence of teacher actions. Each step contains an action and, optionally, an expected result: visible token IDs, an optional terminal token ID, and a stop reason. The step number is its position in the plan; it is not a separate in-memory identity field.

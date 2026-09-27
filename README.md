@@ -122,6 +122,10 @@ top-k: 40
 no-policy-view: true
 ```
 
+Use `top-k: null` or `--top-k none` to disable only top-k. The
+`--unfiltered` flag sets temperature to 1 and disables top-k, top-p, min-p,
+typical-p, and tail-free filtering.
+
 ```bash
 policy-editor --profile profile.yaml --new-prompt 'Once upon a time'
 ```

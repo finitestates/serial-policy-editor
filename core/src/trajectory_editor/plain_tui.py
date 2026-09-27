@@ -17,7 +17,8 @@ ACTION_TEXT = (
     "\nActions: accept | rank | chord RANK RANK... | t TEXT | x TEXT | "
     "h [N] | h . [N] | h | [N] | "
     "[ / ] review | f [N|-N] | m [N] | /TERM | "
-    "ms [+|- [N]] | c focus / C clear | overlay NAME | context [N|all] | v order | "
+    "ms [+|- [N]] | c focus / C clear | overlay NAME | context [N|all] | "
+    "v order (model / policy / Gumbel) | "
     "V policy columns | l logits / L both | % probs | n [note-before] | "
     "p [note-after] | e | e! | q | ?"
 )
@@ -37,6 +38,7 @@ def display_choice(
     policy_active: bool = False,
     show_policy_rank: bool = False,
     sort_by_policy: bool = False,
+    sort_by_gumbel: bool = False,
     logit_view: str = "none",
     show_model_probabilities: bool = False,
     column_focus: str | None = None,
@@ -72,6 +74,7 @@ def display_choice(
         target_token_id=target_token_id,
         show_policy_rank=show_policy_rank,
         sort_by_policy=sort_by_policy,
+        sort_by_gumbel=sort_by_gumbel,
         logit_view=logit_view,
         show_model_probabilities=show_model_probabilities,
         column_focus=column_focus,
@@ -89,6 +92,7 @@ def display_candidates(
     target_token_id: int | None = None,
     show_policy_rank: bool = False,
     sort_by_policy: bool = False,
+    sort_by_gumbel: bool = False,
     logit_view: str = "none",
     show_model_probabilities: bool = False,
     column_focus: str | None = None,
@@ -96,7 +100,18 @@ def display_candidates(
     raw_k1_logit: float | None = None,
 ) -> None:
     ordered = tuple(candidates)
-    if sort_by_policy:
+    if sort_by_gumbel:
+        ordered = tuple(
+            sorted(
+                ordered,
+                key=lambda candidate: (
+                    candidate.gumbel_rank is None,
+                    candidate.gumbel_rank if candidate.gumbel_rank is not None else candidate.rank,
+                    candidate.rank,
+                ),
+            )
+        )
+    elif sort_by_policy:
         ordered = tuple(
             sorted(
                 ordered,
@@ -166,6 +181,7 @@ def read_choice(io: IO, state: ChoiceViewState) -> str | None:
             policy_active=state.policy_active,
             show_policy_rank=state.show_policy_rank,
             sort_by_policy=state.sort_by_policy,
+            sort_by_gumbel=state.sort_by_gumbel,
             logit_view=state.logit_view,
             show_model_probabilities=state.show_model_probabilities,
             column_focus=state.column_focus,

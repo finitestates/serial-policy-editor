@@ -39,6 +39,8 @@ from .episode_hash import (
 from .core.policy_calculations import PolicyCalculations
 from .core.sampling import (
     draw_token,
+    gumbel_ranking_scores,
+    gumbel_winner,
 )
 
 
@@ -637,13 +639,25 @@ class EpisodeEngine:
         )
         distribution = policy_calculations.distribution
         sampling_boundary = self.boundary
-        proposal = draw_token(
-            distribution,
-            seed=self.sampling.seed,
-            stream_fingerprint=self.stream_fingerprint,
-            aligned_step=sampling_boundary,
-            kernel=self.sampling.draw_kernel,
-        )
+        gumbel_scores: np.ndarray | None = None
+        if self.sampling.draw_kernel == "gumbel-max":
+            ranking = gumbel_ranking_scores(
+                distribution,
+                seed=self.sampling.seed,
+                stream_fingerprint=self.stream_fingerprint,
+                aligned_step=sampling_boundary,
+            )
+            ranking.setflags(write=False)
+            gumbel_scores = ranking
+            proposal = gumbel_winner(distribution, ranking)
+        else:
+            proposal = draw_token(
+                distribution,
+                seed=self.sampling.seed,
+                stream_fingerprint=self.stream_fingerprint,
+                aligned_step=sampling_boundary,
+                kernel=self.sampling.draw_kernel,
+            )
         observation = EpisodeObservation(
             boundary=self.boundary,
             sampling_boundary=sampling_boundary,
@@ -653,6 +667,7 @@ class EpisodeEngine:
             proposal_raw_rank=policy_calculations.raw_rank(proposal),
             proposal_decoder_probability=distribution.probability(proposal),
             policy_calculations=policy_calculations,
+            gumbel_scores=gumbel_scores,
         )
         self._observation = observation
         self._observation_key = key
@@ -740,7 +755,7 @@ class EpisodeEngine:
         count: int = 12,
         metrics: frozenset[str] = frozenset(),
     ) -> tuple[Candidate, ...]:
-        """Full-vocabulary policy top-N; selections still use absolute raw rank."""
+        """Full-vocabulary policy top-N; candidates keep their model-rank address."""
         if count < 1:
             raise EditorError("candidate count must be positive")
         self._validate_observation(observation)
@@ -748,6 +763,28 @@ class EpisodeEngine:
         return self._candidates_for_tokens(
             observation, ordered,
             metrics=metrics | frozenset({"policy_rank"}),
+        )
+
+    def gumbel_candidates(
+        self,
+        observation: EpisodeObservation,
+        *,
+        count: int = 12,
+        metrics: frozenset[str] = frozenset(),
+    ) -> tuple[Candidate, ...]:
+        """Return candidates in Gumbel order, keeping their model-rank addresses."""
+        if count < 1:
+            raise EditorError("candidate count must be positive")
+        self._validate_observation(observation)
+        if observation.gumbel_scores is None:
+            raise EditorError(
+                "Gumbel-ranked candidates require the gumbel-max draw kernel"
+            )
+        ordered = observation.gumbel_order[: min(count, len(observation.gumbel_order))]
+        return self._candidates_for_tokens(
+            observation,
+            list(ordered),
+            metrics=metrics | frozenset({"gumbel_rank"}),
         )
 
     def _candidates_for_tokens(
@@ -805,6 +842,10 @@ class EpisodeEngine:
                 raw_logit=(logit if metrics.intersection({"raw_logit", "top_raw_logit"}) else None),
                 neighbor_margin=margin,
                 logit_z=z_val,
+                gumbel_rank=(
+                    observation.gumbel_ranks.get(int(token_id))
+                    if "gumbel_rank" in metrics else None
+                ),
             )
             for token_id, probability, policy_probability, logit, margin, z_val in zip(
                 ordered, probabilities, policy_probabilities, logits, margins, zs

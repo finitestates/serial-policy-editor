@@ -24,11 +24,11 @@ from .backend_factory import BACKEND_NAMES
 from .decoder import KV_CACHE_TYPES
 from .core.errors import EditorError
 from .core.cli_config import (
-    CORE_SAMPLER_FIELDS,
     add_core_sampler_arguments,
     apply_activation_artifact,
     random_seed,
     sampler_from_args,
+    sampler_overrides_from_args,
     sampler_overrides_present,
 )
 from .core.sampler_config import SamplerConfig
@@ -424,6 +424,7 @@ def main(
             )
             args = parser.parse_args([*profile_tokens, *arguments])
         args._explicit_options = cli_explicit | profile_applied
+        args._cli_explicit_options = cli_explicit
         sampling_factory = SamplerConfig.from_record
         selection = _select_launch_source(args)
         _validate_prompt_source(args, selection)
@@ -608,10 +609,7 @@ def main(
                     store, str(args.replay), args.until
                 )
                 source_sampling = recipe.initial_sampling
-                overrides = {
-                    name: getattr(args, name) for name in CORE_SAMPLER_FIELDS
-                    if getattr(args, name) is not None
-                }
+                overrides = sampler_overrides_from_args(args)
                 sampling = apply_activation_artifact(
                     sampler_from_args(args, source_sampling), activation_artifact, args
                 )

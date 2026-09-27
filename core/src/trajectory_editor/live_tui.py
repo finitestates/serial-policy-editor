@@ -266,7 +266,7 @@ def action_preview(
         CommandKind.TOKEN_SEARCH: ("token search", "Exact-token search executes on Enter; no text is committed."),
         CommandKind.TOKEN_SEARCH_VIEW: ("search view", "The token-search neighborhood updates on Enter."),
         CommandKind.CONTEXT: ("context", "The requested context view opens on Enter."),
-        CommandKind.POLICY_VIEW: ("policy view", "The table toggles between raw-model and policy ordering on Enter."),
+        CommandKind.POLICY_VIEW: ("candidate order", "The table advances to the next model, policy, or Gumbel order on Enter."),
         CommandKind.POLICY_COLUMN: ("policy columns", "Policy diagnostics toggle on Enter without reordering."),
         CommandKind.LOGIT_VIEW: ("logit view", "Logit view changes on Enter."),
         CommandKind.PROBABILITY_VIEW: ("probability view", "Model probability overlays toggle on Enter."),
@@ -326,8 +326,13 @@ def _visible_candidates(
     maximum_rows: int,
     *,
     sort_by_policy: bool = False,
+    sort_by_gumbel: bool = False,
 ) -> tuple[tuple[Candidate, ...], int, int]:
-    ordered = _ordered_candidates(candidates, sort_by_policy=sort_by_policy)
+    ordered = _ordered_candidates(
+        candidates,
+        sort_by_policy=sort_by_policy,
+        sort_by_gumbel=sort_by_gumbel,
+    )
     if len(ordered) <= maximum_rows:
         return ordered, 0, 0
     selected_index = next(
@@ -348,23 +353,35 @@ def _ordered_candidates(
     candidates: tuple[Candidate, ...],
     *,
     sort_by_policy: bool = False,
+    sort_by_gumbel: bool = False,
 ) -> tuple[Candidate, ...]:
     """Return the exact visual row order used by rendering and Tab navigation."""
-    return tuple(
-        sorted(
-            candidates,
-            key=(
-                (lambda candidate: (
+    if sort_by_gumbel:
+        return tuple(
+            sorted(
+                candidates,
+                key=lambda candidate: (
+                    candidate.gumbel_rank is None,
+                    candidate.gumbel_rank
+                    if candidate.gumbel_rank is not None
+                    else candidate.rank,
+                    candidate.rank,
+                ),
+            )
+        )
+    if sort_by_policy:
+        return tuple(
+            sorted(
+                candidates,
+                key=lambda candidate: (
                     candidate.policy_rank
                     if candidate.policy_rank is not None
                     else candidate.rank,
                     candidate.rank,
-                ))
-                if sort_by_policy
-                else (lambda candidate: candidate.rank)
-            ),
+                ),
+            )
         )
-    )
+    return tuple(sorted(candidates, key=lambda candidate: candidate.rank))
 
 
 def _candidate_command_cycle(
@@ -372,9 +389,14 @@ def _candidate_command_cycle(
     candidates: tuple[Candidate, ...],
     *,
     sort_by_policy: bool = False,
+    sort_by_gumbel: bool = False,
 ) -> tuple[str, ...]:
     """Return rank commands downward from the proposal, wrapping in view order."""
-    ordered = _ordered_candidates(candidates, sort_by_policy=sort_by_policy)
+    ordered = _ordered_candidates(
+        candidates,
+        sort_by_policy=sort_by_policy,
+        sort_by_gumbel=sort_by_gumbel,
+    )
     proposal_command = str(choice.proposal_raw_rank)
     proposal_index = next(
         (
@@ -401,17 +423,23 @@ def _navigation_command_cycle(
     feedback: ChoiceFeedback | None,
     *,
     sort_by_policy: bool = False,
+    sort_by_gumbel: bool = False,
     search_lens_active: bool = False,
 ) -> tuple[str, ...]:
     suggestions = feedback.completion_commands if feedback is not None else ()
     unique_suggestions = tuple(dict.fromkeys(suggestions))
     if search_lens_active:
-        ordered = _ordered_candidates(candidates, sort_by_policy=sort_by_policy)
+        ordered = _ordered_candidates(
+            candidates,
+            sort_by_policy=sort_by_policy,
+            sort_by_gumbel=sort_by_gumbel,
+        )
         return unique_suggestions + tuple(str(candidate.rank) for candidate in ordered)
     candidates_cycle = _candidate_command_cycle(
         choice,
         candidates,
         sort_by_policy=sort_by_policy,
+        sort_by_gumbel=sort_by_gumbel,
     )
     return candidates_cycle[:1] + unique_suggestions + candidates_cycle[1:]
 
@@ -925,7 +953,7 @@ def _preview_status(preview: ActionPreview) -> tuple[str, str]:
 
 def _render_writing(choice: ChoiceSet, candidates: tuple[Candidate, ...],
                     preview: ActionPreview, width: int, height: int,
-                    offset: int, sort_by_policy: bool,
+                    offset: int, sort_by_policy: bool, sort_by_gumbel: bool,
                     show_policy_rank: bool = False,
                     logit_view: str = "none",
                     show_model_probabilities: bool = False,
@@ -973,7 +1001,11 @@ def _render_writing(choice: ChoiceSet, candidates: tuple[Candidate, ...],
         else "Candidates · rank / token ID / overlays / text"
     )
     fragments.append(("class:table-header", _one_line(heading, width) + "\n"))
-    shown = _ordered_candidates(candidates, sort_by_policy=sort_by_policy)[:3]
+    shown = _ordered_candidates(
+        candidates,
+        sort_by_policy=sort_by_policy,
+        sort_by_gumbel=sort_by_gumbel,
+    )[:3]
     for candidate in shown:
         fragments.append(("class:table-row", _one_line(
             f"{candidate.rank:>5}"
@@ -995,6 +1027,7 @@ def _render_choice(
     policy_active: bool = False,
     show_policy_rank: bool = False,
     sort_by_policy: bool = False,
+    sort_by_gumbel: bool = False,
     logit_view: str = "none",
     show_model_probabilities: bool = False,
     column_focus: str | None = None,
@@ -1022,7 +1055,7 @@ def _render_choice(
     )
     if expanded_editor and _is_writing(command_text):
         return _render_writing(choice, tuple(candidates if display_candidates is None else display_candidates),
-                               preview, width, height, context_offset, sort_by_policy,
+                               preview, width, height, context_offset, sort_by_policy, sort_by_gumbel,
                                show_policy_rank, logit_view,
                                show_model_probabilities, column_focus, overlays,
                                context_layout=context_layout)
@@ -1094,6 +1127,7 @@ def _render_choice(
         focus_rank,
         maximum_rows,
         sort_by_policy=sort_by_policy,
+        sort_by_gumbel=sort_by_gumbel,
     )
     rule = "─" * max(20, width - 1)
     fragments: StyleAndTextTuples = []
@@ -1807,7 +1841,9 @@ class LiveChoiceView(ViewLifecycle):
         )
         self.navigation_commands = _navigation_command_cycle(
             state.choice, self.active_table_candidates, state.feedback,
-            sort_by_policy=state.sort_by_policy, search_lens_active=state.search_lens_active,
+            sort_by_policy=state.sort_by_policy,
+            sort_by_gumbel=state.sort_by_gumbel,
+            search_lens_active=state.search_lens_active,
         )
         text = state.initial_command if self.completion_owned else ""
         self.command_buffer.reset(document=Document(text, cursor_position=len(text)))
@@ -1841,7 +1877,8 @@ class LiveChoiceView(ViewLifecycle):
             state.choice, state.candidates, self.command_buffer.text,
             state.resolve_insertion, state.target_token_id,
             state.feedback, state.policy_active, state.show_policy_rank,
-            state.sort_by_policy, state.logit_view, state.show_model_probabilities,
+            state.sort_by_policy, state.sort_by_gumbel,
+            state.logit_view, state.show_model_probabilities,
             state.column_focus,
             state.overlays,
             state.display_candidates,

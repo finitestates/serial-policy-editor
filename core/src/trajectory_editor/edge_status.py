@@ -9,7 +9,8 @@ def sampler_summary(config: SamplerConfig) -> str:
     """Describe the active sampler without exposing backend implementation."""
 
     summary = (
-        f"temp={config.temperature:g} top_k={config.top_k} top_p={config.top_p:g} "
+        f"temp={config.temperature:g} top_k={'none' if config.top_k is None else config.top_k} "
+        f"top_p={config.top_p:g} "
         f"min_p={config.min_p:g} typical_p={config.typical_p:g} "
         f"tfs_z={config.tail_free_z:g} draw={config.draw_kernel} "
         f"rep={config.repeat_penalty:g}/{config.repeat_last_n} "

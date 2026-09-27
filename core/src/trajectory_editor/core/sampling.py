@@ -27,7 +27,7 @@ class SamplingFilterConfig(Protocol):
     """The configuration fields required by candidate filtering."""
 
     temperature: float
-    top_k: int
+    top_k: int | None
     top_p: float
     min_p: float
     typical_p: float
@@ -132,7 +132,33 @@ class StandardCandidateFilter:
         scaled = adjusted if temperature == 1.0 else adjusted / temperature
         if not np.all(np.isfinite(scaled)):
             raise ValueError("temperature produced non-finite scaled logits")
-        after_top_k = _top_ids(scaled, min(config.top_k, len(scaled)))
+        if (
+            temperature == 1.0
+            and config.top_k is None
+            and config.typical_p == 1.0
+            and config.tail_free_z == 1.0
+            and config.top_p == 1.0
+            and config.min_p == 0.0
+        ):
+            all_ids = np.arange(len(scaled), dtype=np.int64)
+            return CandidateFilterResult(
+                scaled,
+                {
+                    "after_temperature": None,
+                    "after_top_k": all_ids,
+                    "after_typical": all_ids,
+                    "after_tail_free": all_ids,
+                    "after_top_p": all_ids,
+                    "after_min_p": all_ids,
+                },
+                {"filter": cls.name, "unfiltered": True},
+            )
+
+        after_top_k = (
+            _top_ids(scaled, min(config.top_k, len(scaled)))
+            if config.top_k is not None
+            else np.arange(len(scaled), dtype=np.int64)
+        )
         typical_p = float(config.typical_p)
         if typical_p >= 1.0:
             after_typical = after_top_k
@@ -300,26 +326,78 @@ def draw_token(
     if kernel not in {"categorical", "gumbel-max"}:
         raise EditorError("unsupported draw kernel")
     if kernel == "gumbel-max":
-        if distribution.scores is None:
-            raise ValueError("gumbel-max requires candidate scores")
-        uniforms = np.asarray(
-            [
-                position_uniform_token(seed, stream_fingerprint, aligned_step, int(token_id))
-                for token_id in distribution.ids
-            ],
-            dtype=np.float64,
+        scores = gumbel_ranking_scores(
+            distribution,
+            seed=seed,
+            stream_fingerprint=stream_fingerprint,
+            aligned_step=aligned_step,
         )
-        gumbels = -np.log(-np.log(uniforms))
-        scores = np.asarray(distribution.scores, dtype=np.float64)
-        if scores.shape != distribution.ids.shape:
-            raise ValueError("candidate scores do not match candidate IDs")
-        ranking = scores + gumbels
-        best = np.flatnonzero(ranking == np.max(ranking))
-        index = int(best[np.argmin(distribution.ids[best])])
-        return int(distribution.ids[index])
+        return gumbel_winner(distribution, scores)
     draw = position_uniform(seed, stream_fingerprint, aligned_step)
     index = int(np.searchsorted(np.cumsum(distribution.probabilities), draw, side="right"))
     return int(distribution.ids[min(index, len(distribution.ids) - 1)])
+
+
+def gumbel_ranking_scores(
+    distribution: SparseDistribution,
+    *,
+    seed: int,
+    stream_fingerprint: str,
+    aligned_step: int,
+) -> np.ndarray:
+    """Return effective scores plus the replay-stable Gumbel perturbations."""
+
+    if distribution.scores is None:
+        raise ValueError("gumbel-max requires candidate scores")
+    scores = np.asarray(distribution.scores, dtype=np.float64)
+    ids = np.asarray(distribution.ids, dtype=np.int64)
+    if scores.shape != ids.shape:
+        raise ValueError("candidate scores do not match candidate IDs")
+    if not len(ids):
+        raise ValueError("gumbel-max requires at least one candidate")
+    uniforms = np.asarray(
+        [
+            position_uniform_token(seed, stream_fingerprint, aligned_step, int(token_id))
+            for token_id in ids
+        ],
+        dtype=np.float64,
+    )
+    return scores - np.log(-np.log(uniforms))
+
+
+def gumbel_winner(
+    distribution: SparseDistribution, ranking_scores: np.ndarray
+) -> int:
+    """Return the maximum Gumbel score, breaking exact ties by token ID."""
+
+    ids = np.asarray(distribution.ids, dtype=np.int64)
+    scores = np.asarray(ranking_scores, dtype=np.float64)
+    if scores.shape != ids.shape:
+        raise ValueError("Gumbel scores do not match candidate IDs")
+    if not len(ids):
+        raise ValueError("gumbel-max requires at least one candidate")
+    best = np.flatnonzero(scores == np.max(scores))
+    return int(ids[best[np.argmin(ids[best])]])
+
+
+def gumbel_ranked_ids(
+    distribution: SparseDistribution,
+    *,
+    seed: int,
+    stream_fingerprint: str,
+    aligned_step: int,
+) -> np.ndarray:
+    """Return eligible token IDs in deterministic Gumbel-Max order."""
+
+    ids = np.asarray(distribution.ids, dtype=np.int64)
+    ranking = gumbel_ranking_scores(
+        distribution,
+        seed=seed,
+        stream_fingerprint=stream_fingerprint,
+        aligned_step=aligned_step,
+    )
+    order = np.lexsort((ids, -ranking))
+    return ids[order]
 
 
 def find_seed_for_token(
@@ -380,6 +458,9 @@ __all__ = [
     "apply_candidate_filter",
     "draw_token",
     "find_seed_for_token",
+    "gumbel_ranking_scores",
+    "gumbel_ranked_ids",
+    "gumbel_winner",
     "position_uniform",
     "position_uniform_token",
     "raw_rank",

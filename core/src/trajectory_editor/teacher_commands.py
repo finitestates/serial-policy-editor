@@ -131,7 +131,7 @@ HELP_TEXT = """Commands:
                       no plural or generated title-case variants
                       use literal:"text" in a group to disable surface variants
   multi-token terms bias only the final token after an exact prefix match
-  s top_k=20      change sampler settings; changes are part of the action tape
+  s top_k=20|none change sampler settings; changes are part of the action tape
   s {JSON}        replace all sampler settings from a complete SamplerConfig record
   reroll [SEED]   change the draw seed as a replayable action
   draw RAW_RANK   find a seed that draws the token at this raw rank
@@ -163,7 +163,7 @@ HELP_TEXT = """Commands:
   overlay NAME       toggle any named overlay alongside the others
   context [N|all]    page more of the current context (default: 2000 chars);
                      c N / c all still work (bare c is column focus)
-  v                  toggle raw top-N / full-vocabulary policy top-N
+  v                  cycle candidate order: model → policy → Gumbel (Gumbel-Max only)
   V                  toggle policy diagnostics independently of ordering
   l                  cycle logits: none / model / gap@raw1
   L                  toggle model logits + gap@raw1 together

@@ -295,7 +295,7 @@ def session_edge_menu(
             payload = command.text
             if payload is None:
                 payload = io.read(
-                    "sampler key=value changes (blank cancels; e.g. top_k=20 temperature=.8)> "
+                    "sampler key=value changes (blank cancels; e.g. top_k=none temperature=1)> "
                 ) or ""
             if not payload.strip():
                 continue

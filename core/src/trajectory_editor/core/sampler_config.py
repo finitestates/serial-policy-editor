@@ -29,7 +29,7 @@ class SamplerConfig:
     """
 
     temperature: float = 1.0
-    top_k: int = 40
+    top_k: int | None = 40
     top_p: float = 0.95
     min_p: float = 0.05
     typical_p: float = 1.0
@@ -127,9 +127,9 @@ class SamplerConfig:
             raise EditorError("temperature must be a finite number")
         if self.temperature < 0.0:
             raise EditorError("temperature cannot be negative")
-        if type(self.top_k) is not int:
-            raise EditorError("top_k must be an integer")
-        if self.top_k < 1:
+        if self.top_k is not None and type(self.top_k) is not int:
+            raise EditorError("top_k must be a positive integer or null")
+        if self.top_k is not None and self.top_k < 1:
             raise EditorError("top_k must be at least 1")
         if type(self.top_p) not in {int, float} or not math.isfinite(float(self.top_p)):
             raise EditorError("top_p must be a finite number")

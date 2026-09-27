@@ -75,6 +75,7 @@ class ChoiceViewState:
     search_warm_target: tuple[int, int] | None = None
     search_warm_commands: tuple[str, ...] = ()
     search_warm_prepared: bool = False
+    sort_by_gumbel: bool = False
 
 
 @dataclass(frozen=True)
