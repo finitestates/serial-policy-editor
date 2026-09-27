@@ -33,7 +33,7 @@ def _choice_state(resolve=lambda text, mode: text):
         "choice", "prompt", 0, 0, "0" * 64, "P", 2, " x", .8, .8,
         False, (candidate,), vocabulary_size=5, proposal_raw_rank=1,
     )
-    return ChoiceViewState(choice, None, (candidate,), resolve)
+    return ChoiceViewState(choice, (candidate,), resolve)
 
 
 def _terminal():
@@ -62,7 +62,7 @@ def test_one_application_transitions_across_choice_review_edge_page_prompt_choic
     stream, output = _terminal()
     prompt = PromptRequest("Name> ")
     page = PromptRequest("", body="Long page\nsecond line", page=True)
-    edge = EdgeViewState("episode", 0, 3, 3, "temperature 1")
+    edge = EdgeViewState("episode", 0, "temperature 1")
     choice = _choice_state()
     review = replace(choice, review=BoundaryReview(
         0, 0, "P", {"kind": "token-boundary"},
@@ -114,7 +114,7 @@ def test_live_terminal_redraws_after_resize_and_handles_narrow_multiline_surface
     choice = replace(_choice_state(), choice=replace(
         _choice_state().choice, context_text_tail="A very long context line " * 12,
     ))
-    edge = EdgeViewState("episode", 0, 3, 3, "temperature 1")
+    edge = EdgeViewState("episode", 0, "temperature 1")
     prompt = PromptRequest("New prompt > ", multiline=True, isolated=True)
     with create_pipe_input() as pipe:
         with CountingSession(input_device=pipe, output_device=output, theme=theme) as session:
@@ -173,7 +173,7 @@ def test_live_application_startup_failure_releases_its_thread():
 def test_live_composer_rejects_empty_then_returns_to_edge_after_cancel():
     stream, output = _terminal()
     prompt = PromptRequest("New prompt > ", multiline=True, isolated=True)
-    edge = EdgeViewState("episode", 0, 3, 3, "sampler")
+    edge = EdgeViewState("episode", 0, "sampler")
     with create_pipe_input() as pipe:
         with PersistentTerminalSession(input_device=pipe, output_device=output) as session:
             def feed_prompt():
@@ -467,7 +467,7 @@ def test_plain_terminal_consumes_the_same_choice_edge_and_prompt_requests(monkey
     with terminal.session() as session:
         assert session is None
         assert terminal.read_choice(_choice_state()) == "1"
-        assert terminal.read_edge(EdgeViewState("episode", 0, 3, 3, "sampler")) == "c"
+        assert terminal.read_edge(EdgeViewState("episode", 0, "sampler")) == "c"
         assert terminal.prompt(PromptRequest("Confirm> ")) == "yes"
         assert terminal.prompt(PromptRequest("Chord> ", body="a (1)", isolated=True)) == "a"
     output = capsys.readouterr().out
@@ -532,7 +532,7 @@ def test_live_requests_require_the_session_context():
     with pytest.raises(RuntimeError, match="TerminalIO.session"):
         terminal.read_choice(_choice_state())
     with pytest.raises(RuntimeError, match="TerminalIO.session"):
-        terminal.read_edge(EdgeViewState("episode", 0, 3, 3, "sampler"))
+        terminal.read_edge(EdgeViewState("episode", 0, "sampler"))
     with pytest.raises(RuntimeError, match="TerminalIO.session"):
         terminal.prompt(PromptRequest("Input> "))
 

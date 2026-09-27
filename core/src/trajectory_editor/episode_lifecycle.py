@@ -10,7 +10,7 @@ from .core.sampler_config import SamplerConfig
 from .episode_engine import EpisodeEngine
 from .core.backend_position import position_backend
 from .spr_recipe import (
-    ReplayControlPolicy,
+    ReplaySamplerPolicy,
     ReplayPlacement,
     SourceReplayRecipe,
     compose_replay_plan,
@@ -24,16 +24,6 @@ POLICY_FIELDS = tuple(
     field.name for field in fields(SamplerConfig)
     if field.name.startswith("activation_")
 )
-
-
-def _inherit_budget(store, episode_id, engine, boundary, *, notice=print):
-    state = store.budget_at(episode_id, boundary)
-    if state is None:
-        if store.get_episode(episode_id)["max_tokens"] is not None:
-            notice("Budget history is missing at this boundary; continuing with unlimited tokens.")
-        engine.trajectory.set_budget(None, None)
-        return
-    engine.trajectory.set_budget(state["max_tokens"], state["checkpoint_boundary"])
 
 
 def _model_change_sampling(
@@ -65,12 +55,10 @@ def _restore_engine(
     episode_id: str,
     backend: Any,
     *,
-    max_tokens: int | None,
     sampling_override: SamplerConfig | None,
     guidance_backend: Any | None = None,
     sampling_factory: Callable = SamplerConfig.from_record,
     current_sampling_state: dict[str, Any] | None = None,
-    notice=print,
 ) -> EpisodeEngine:
     episode = store.get_episode(episode_id)
     saved_tokenizer_id = episode["backend"].get("tokenizer_id")
@@ -92,14 +80,12 @@ def _restore_engine(
             raise EditorError("episode changed while preparing its current sampler state")
         segment = current_sampling_state
     else:
-        segment = store.sampling_segment(episode_id, len(visible))
+        segment = store.current_sampling_state(episode_id)
     source_sampling = sampling_factory(segment["sampling"])
     sampling = sampling_override or source_sampling
-    saved_budget = episode["max_tokens"] or None
     runtime = EpisodeEngine(
         backend,
         sampling=sampling,
-        max_tokens=saved_budget if max_tokens is None else max_tokens,
         initial_text=str(episode["initial_text"]),
         initial_token_ids=episode["initial_token_ids"],
         stream_fingerprint=segment["stream_fingerprint"],
@@ -110,10 +96,6 @@ def _restore_engine(
     runtime.trajectory.visible_token_ids.extend(visible)
     if not position_backend(runtime.backend, runtime.token_ids):
         runtime.backend.reset(runtime.token_ids)
-    if max_tokens is None:
-        _inherit_budget(store, episode_id, runtime, len(visible), notice=notice)
-    else:
-        runtime.resume(max_tokens=max_tokens, sampling=sampling)
     return runtime
 
 
@@ -122,8 +104,7 @@ def _spr_engine_from_source(
     backend: Any,
     *,
     sampling: SamplerConfig,
-    max_tokens: int | None,
-    control_policy: ReplayControlPolicy,
+    sampler_policy: ReplaySamplerPolicy,
     sampling_overrides: dict[str, Any] | None = None,
     initial_token_ids: list[int],
     stream_fingerprint: str | None = None,
@@ -135,21 +116,19 @@ def _spr_engine_from_source(
     if overrides.keys() - set(SAMPLER_FIELDS):
         raise EditorError("unknown replay sampler override")
     sampling = replace(sampling, **overrides)
-    root_controls = recipe.controls.effective_at(0)
     if stream_fingerprint is None:
-        stream_fingerprint = root_controls.stream_fingerprint
+        stream_fingerprint = recipe.stream_fingerprint
     if stream_fingerprint is None:
         raise EditorError("source replay requires a sampler stream fingerprint")
     plan = compose_replay_plan(
         recipe,
         ReplayPlacement.SOURCE_ROOT,
-        control_policy,
+        sampler_policy,
         sampler_overrides=overrides,
     )
     runtime = EpisodeEngine(
         backend,
         sampling=sampling,
-        max_tokens=max_tokens,
         initial_text=recipe.source_prompt,
         initial_token_ids=initial_token_ids,
         stream_fingerprint=stream_fingerprint,

@@ -187,14 +187,12 @@ def test_bias_feedback_is_in_next_choice_request():
 
 def test_edge_help_is_shared_by_plain_and_live_with_mode_specific_actions():
     for mode in ("episode", "session"):
-        state = EdgeViewState("one", 2, 10, 8, "temp=1", mode=mode)
+        state = EdgeViewState("one", 2, "temp=1", mode=mode)
         plain = ScriptedIO(["q"])
         assert read_edge(plain, state) == "q"
         plain_text = "".join(plain.output)
         live_text = "".join(fragment for _, fragment in _edge_header(
             episode_id=state.episode_id, boundary=state.boundary,
-            current_budget=state.current_budget,
-            remaining_tokens=state.remaining_tokens,
             sampler_summary=state.sampler_summary, mode=mode,
         ))
         for item in edge_help(mode):

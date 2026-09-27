@@ -51,13 +51,12 @@ class SequenceBackend(ConformingFakeBackend):
         return logits
 
 
-def engine(backend=None, *, max_tokens=10):
+def engine(backend=None):
     return EpisodeEngine(
         backend or ConformingFakeBackend(),
         initial_text="P",
         initial_token_ids=[7],
         sampling=SamplerConfig(temperature=0.0, top_k=8, top_p=1.0, min_p=0.0),
-        max_tokens=max_tokens,
     )
 
 
@@ -218,34 +217,11 @@ def test_e08_eog_hold_and_menu_end_have_distinct_terminal_semantics(
         assert runtime.terminal_reason == "menu-end"
 
 
-def test_e09_budget_is_a_checkpoint_that_can_be_explicitly_resumed():
-    runtime = engine(max_tokens=1)
-
-    runtime.apply(Accept())
-
-    assert runtime.checkpointed
-    assert not runtime.ended
-    assert runtime.terminal_reason is None
-
-    runtime.resume(max_tokens=2)
-    assert not runtime.checkpointed
-    assert runtime.remaining == 2
-
-
 def test_observe_rejects_after_a_terminal_event():
     runtime = engine()
 
     runtime.apply(EndGeneration())
 
-    with pytest.raises(EditorError, match="no live decision boundary"):
-        runtime.observe()
-
-
-def test_observe_rejects_at_a_budget_checkpoint():
-    runtime = engine(max_tokens=1)
-    runtime.apply(Accept())
-
-    assert runtime.checkpointed
     with pytest.raises(EditorError, match="no live decision boundary"):
         runtime.observe()
 

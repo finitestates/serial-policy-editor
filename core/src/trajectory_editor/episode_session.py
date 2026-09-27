@@ -1,9 +1,9 @@
 """Persistence-free live sessions and lightweight branch records.
 
 Live forks form a branch tree.  The session owns one active engine/backend and
-keeps a compact, canonical record for every retained branch.  A cache snapshot
-is optional acceleration only; a branch's prefix and control history are its
-identity and always suffice for reconstruction.
+keeps a compact, canonical record for every retained branch. A cache snapshot
+is optional acceleration only; a branch's action prefix is its identity and
+always suffices for reconstruction.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from types import MappingProxyType
 from typing import Any
 from uuid import uuid4
 
-from .core.actions import Accept, PolicyAction
+from .core.actions import Accept, PolicyAction, SetSampler, sampler_after_action
 from .core.errors import EditorError
 from .core.results import ActionOutcome, ReplayExpectation
 from .core.sampler_config import SamplerConfig
@@ -80,32 +80,6 @@ class BranchTree:
 
 
 @dataclass(frozen=True)
-class ControlPoint:
-    """Sampler, stream, and budget state at a root-visible-token boundary."""
-
-    boundary: int
-    sampling: SamplerConfig
-    stream_fingerprint: str | None
-    max_tokens: int | None
-    checkpoint_boundary: int | None
-
-    def __post_init__(self) -> None:
-        if type(self.boundary) is not int or self.boundary < 0:
-            raise EditorError("control-point boundary must be a nonnegative integer")
-        if self.stream_fingerprint is not None and not isinstance(self.stream_fingerprint, str):
-            raise EditorError("control-point stream fingerprint must be a string or null")
-        if (self.max_tokens is None) != (self.checkpoint_boundary is None):
-            raise EditorError("control-point budget and checkpoint must both be set or null")
-        if self.max_tokens is not None and (
-            type(self.max_tokens) is not int
-            or self.max_tokens < 1
-            or type(self.checkpoint_boundary) is not int
-            or self.checkpoint_boundary < self.boundary
-        ):
-            raise EditorError("control-point budget is invalid")
-
-
-@dataclass(frozen=True)
 class _BackendCacheSnapshot:
     """Opaque in-memory cache data associated with one exact token prefix."""
 
@@ -119,10 +93,11 @@ class BranchState:
 
     identity: BranchIdentity
     initial_token_ids: tuple[int, ...]
+    initial_sampling: SamplerConfig
+    stream_fingerprint: str | None
     visible_token_ids: tuple[int, ...]
     tape: tuple[TapeStep, ...]
     outcomes: tuple[ActionOutcome, ...]
-    control_points: tuple[ControlPoint, ...]
     local_action_start: int = 0
     terminal_token_id: int | None = None
     terminal_reason: str | None = None
@@ -134,17 +109,14 @@ class BranchState:
     def __post_init__(self) -> None:
         if not self.initial_token_ids:
             raise EditorError("branch state requires initial token ids")
+        if not isinstance(self.initial_sampling, SamplerConfig):
+            raise EditorError("branch state requires its initial sampler configuration")
+        if self.stream_fingerprint is not None and not isinstance(self.stream_fingerprint, str):
+            raise EditorError("branch stream fingerprint must be a string or null")
         if len(self.tape) != len(self.outcomes):
             raise EditorError("branch tape and outcomes must align")
         if not 0 <= self.local_action_start <= len(self.tape):
             raise EditorError("branch local action offset is invalid")
-        if not self.control_points or self.control_points[0].boundary != 0:
-            raise EditorError("branch state requires a root control point")
-        previous_control = -1
-        for point in self.control_points:
-            if point.boundary < previous_control:
-                raise EditorError("branch control points must be ordered")
-            previous_control = point.boundary
         previous_boundary = 0
         for outcome in self.outcomes:
             if outcome.boundary_before != previous_boundary:
@@ -194,28 +166,13 @@ class ForkState:
     boundary: int
 
 
-def _engine_control(engine: EpisodeEngine) -> ControlPoint:
-    return ControlPoint(
-        engine.boundary,
-        engine.sampling,
-        engine.stream_fingerprint,
-        engine.max_tokens,
-        engine.checkpoint_boundary,
-    )
-
-
-def _same_control(left: ControlPoint, right: ControlPoint) -> bool:
-    return (
-        left.sampling,
-        left.stream_fingerprint,
-        left.max_tokens,
-        left.checkpoint_boundary,
-    ) == (
-        right.sampling,
-        right.stream_fingerprint,
-        right.max_tokens,
-        right.checkpoint_boundary,
-    )
+def _sampler_after_tape(
+    initial: SamplerConfig, tape: tuple[TapeStep, ...]
+) -> SamplerConfig:
+    sampling = initial
+    for step in tape:
+        sampling = sampler_after_action(sampling, step.action)
+    return sampling
 
 
 class LiveSession:
@@ -226,32 +183,32 @@ class LiveSession:
         engine: EpisodeEngine,
         *,
         prompt: str | None = None,
-        sampler: SamplerConfig | None = None,
         environment_stamp: Mapping[str, Any] | None = None,
         branch_id: str | None = None,
         initial_state: BranchState | None = None,
     ) -> None:
         if not isinstance(engine, EpisodeEngine):
             raise TypeError("engine must be an EpisodeEngine")
-        if sampler is not None:
-            engine.sampling = sampler
         self._engine = engine
         self._backend = engine.backend
         self._guidance_backend = engine.guidance_backend
         self.prompt = engine.initial_text if prompt is None else prompt
         if not isinstance(self.prompt, str):
             raise EditorError("prompt must be a string")
-        self.environment_stamp = MappingProxyType(dict(environment_stamp or {}))
+        environment = dict(environment_stamp or {})
+        environment.pop("sampler", None)
+        self.environment_stamp = MappingProxyType(environment)
         self.session_id = f"live-session-{uuid4().hex}"
         if initial_state is None:
             identity = BranchIdentity(branch_id or self._new_branch_id())
             root = BranchState(
                 identity=identity,
                 initial_token_ids=tuple(engine.initial_token_ids),
+                initial_sampling=engine.sampling,
+                stream_fingerprint=engine.stream_fingerprint,
                 visible_token_ids=tuple(engine.visible_token_ids),
                 tape=(),
                 outcomes=(),
-                control_points=(replace(_engine_control(engine), boundary=0),),
             )
         else:
             if branch_id is not None:
@@ -321,26 +278,12 @@ class LiveSession:
                 return False
         return False
 
-    def _points_with_current_engine(self, state: BranchState) -> tuple[ControlPoint, ...]:
-        current = _engine_control(self._engine)
-        points = list(state.control_points)
-        if points and _same_control(points[-1], current):
-            return tuple(points)
-        if points and points[-1].boundary == current.boundary:
-            points[-1] = current
-        else:
-            points.append(current)
-        return tuple(points)
-
     def _capture_active(self, *, capture_cache: bool = False) -> BranchState:
-        """Freeze the active engine's complete semantic state into its record."""
+        """Freeze the active engine's token and terminal state into its record."""
         self._require_session()
         if self._detached:
             raise EditorError("the live session is detached from its shared backend")
         state = self._branches[self._active_id]
-        # Callers invoke this only between complete action applications.  It
-        # deliberately detects direct sampler/budget edits, too.
-        points = self._points_with_current_engine(state)
         status = state.status
         if self._engine.ended and status == "open":
             status = "completed"
@@ -351,7 +294,6 @@ class LiveSession:
         captured = replace(
             state,
             visible_token_ids=tuple(self._engine.visible_token_ids),
-            control_points=points,
             terminal_token_id=self._engine.terminal_token_id,
             terminal_reason=self._engine.terminal_reason,
             status=status,
@@ -359,21 +301,6 @@ class LiveSession:
         )
         self._branches[self._active_id] = captured
         return captured
-
-    @staticmethod
-    def _control_at(state: BranchState, boundary: int) -> ControlPoint:
-        candidates = [point for point in state.control_points if point.boundary <= boundary]
-        if not candidates:
-            raise EditorError("no control point is available at this boundary")
-        return candidates[-1]
-
-    @classmethod
-    def _control_prefix(cls, state: BranchState, boundary: int) -> tuple[ControlPoint, ...]:
-        points = [point for point in state.control_points if point.boundary <= boundary]
-        active = cls._control_at(state, boundary)
-        if not points or points[-1].boundary != boundary:
-            points.append(replace(active, boundary=boundary))
-        return tuple(points)
 
     def _activate(self, branch_id: str) -> EpisodeEngine:
         self._require_session()
@@ -385,20 +312,17 @@ class LiveSession:
         state = self._state(branch_id)
         prefix = state.prefix_token_ids
         self._restore_cache(state.backend_cache_snapshot, prefix)
-        point = self._control_at(state, state.boundary)
         engine = EpisodeEngine(
             self._backend,
-            sampling=point.sampling,
-            max_tokens=point.max_tokens,
+            sampling=_sampler_after_tape(state.initial_sampling, state.tape),
             initial_text=self.prompt,
             initial_token_ids=state.initial_token_ids,
-            stream_fingerprint=point.stream_fingerprint,
+            stream_fingerprint=state.stream_fingerprint,
             guidance_backend=self._guidance_backend,
         )
         engine.visible_token_ids = list(state.visible_token_ids)
         engine.terminal_token_id = state.terminal_token_id
         engine.terminal_reason = state.terminal_reason
-        engine.trajectory.set_budget(point.max_tokens, point.checkpoint_boundary)
         self._engine = engine
         self._active_id = branch_id
         self._active_identity = state.identity
@@ -524,15 +448,6 @@ class LiveSession:
         return () if self._discarded else self.branch_state().visible_token_ids
 
     @property
-    def sampler_states(self) -> tuple[tuple[int, SamplerConfig, str | None], ...]:
-        if self._discarded:
-            return ()
-        return tuple(
-            (point.boundary, point.sampling, point.stream_fingerprint)
-            for point in self.branch_state().control_points
-        )
-
-    @property
     def rewind_state(self) -> RewindState | None:
         return None if self._discarded else self._rewinds.get(self._active_id)
 
@@ -540,46 +455,17 @@ class LiveSession:
     def fork_state(self) -> ForkState | None:
         return None if self._discarded else self._forks.get(self._active_id)
 
-    def _record_control(self, branch_id: str) -> None:
-        engine = self._activate(branch_id)
-        state = self._branches[branch_id]
-        point = _engine_control(engine)
-        points = list(state.control_points)
-        if points and points[-1].boundary == point.boundary:
-            points[-1] = point
-        elif not points or not _same_control(points[-1], point):
-            points.append(point)
-        self._branches[branch_id] = replace(
-            state, control_points=tuple(points), backend_cache_snapshot=None
-        )
-
     def set_sampler(
         self,
         sampler: SamplerConfig,
         *,
-        stream_fingerprint: str | None = None,
         _branch_id: str | None = None,
     ) -> None:
         branch_id = self._active_id if _branch_id is None else _branch_id
         self._require_live_branch(branch_id)
         engine = self._activate(branch_id)
-        engine.sampling = sampler
-        if stream_fingerprint is not None:
-            engine.stream_fingerprint = stream_fingerprint
-        self._record_control(branch_id)
-
-    def resume(
-        self,
-        *,
-        max_tokens: int | None | str = "keep",
-        sampling: SamplerConfig | None = None,
-        _branch_id: str | None = None,
-    ) -> None:
-        branch_id = self._active_id if _branch_id is None else _branch_id
-        self._require_live_branch(branch_id)
-        engine = self._activate(branch_id)
-        engine.resume(max_tokens=max_tokens, sampling=sampling)
-        self._record_control(branch_id)
+        if engine.sampling != sampler:
+            self.generate(SetSampler(sampler), _branch_id=branch_id)
 
     def generate(
         self,
@@ -595,7 +481,6 @@ class LiveSession:
         engine = self._activate(branch_id)
         resolved_action = Accept() if action is None else action
         state = self._branches[branch_id]
-        control_points = self._points_with_current_engine(state)
         outcome = engine.apply(
             resolved_action,
             expectation=expectation,
@@ -613,7 +498,6 @@ class LiveSession:
             visible_token_ids=tuple(engine.visible_token_ids),
             tape=(*state.tape, TapeStep(resolved_action, expectation_to_record)),
             outcomes=(*state.outcomes, outcome),
-            control_points=control_points,
             terminal_token_id=engine.terminal_token_id,
             terminal_reason=engine.terminal_reason,
             status=status,
@@ -644,10 +528,6 @@ class LiveSession:
         if tuple(engine.visible_token_ids[:state.boundary]) != state.visible_token_ids:
             raise EditorError("promoted engine does not share the live branch prefix")
 
-        control = _engine_control(engine)
-        control_points = state.control_points
-        if not _same_control(self._control_at(state, state.boundary), control):
-            control_points = (*control_points, replace(control, boundary=state.boundary))
         promoted_tape = tuple(
             TapeStep(item.action, item.expectation()) for item in outcomes
         )
@@ -656,7 +536,6 @@ class LiveSession:
             visible_token_ids=tuple(engine.visible_token_ids),
             tape=(*state.tape, *promoted_tape),
             outcomes=(*state.outcomes, *outcomes),
-            control_points=control_points,
             terminal_token_id=engine.terminal_token_id,
             terminal_reason=engine.terminal_reason,
             status="completed" if engine.ended else state.status,
@@ -673,11 +552,10 @@ class LiveSession:
         prefix = truncate_live_history(
             state.tape, state.outcomes, boundary
         )
-        point = self._control_at(state, boundary)
         engine.rewind_to(boundary)
-        engine.sampling = point.sampling
-        engine.trajectory.set_stream_fingerprint(point.stream_fingerprint)
-        engine.trajectory.set_budget(point.max_tokens, point.checkpoint_boundary)
+        retained_tape = prefix.retained_tape
+        engine.sampling = _sampler_after_tape(state.initial_sampling, retained_tape)
+        engine.trajectory.set_stream_fingerprint(state.stream_fingerprint)
         rewind = RewindState(
             boundary,
             prefix.discarded_tape,
@@ -686,9 +564,8 @@ class LiveSession:
         self._branches[branch_id] = replace(
             state,
             visible_token_ids=tuple(engine.visible_token_ids),
-            tape=prefix.retained_tape,
+            tape=retained_tape,
             outcomes=prefix.retained_outcomes,
-            control_points=self._control_prefix(state, boundary),
             # Rewinding before a branch's original fork point removes some or
             # all inherited actions.  The first remaining action is then the
             # new local divergence point; keeping the old start index makes
@@ -727,7 +604,6 @@ class LiveSession:
             visible_token_ids=source.visible_token_ids[:target],
             tape=prefix.retained_tape,
             outcomes=prefix.retained_outcomes,
-            control_points=self._control_prefix(source, target),
             local_action_start=len(prefix.retained_tape),
             terminal_token_id=None,
             terminal_reason=None,
@@ -849,15 +725,6 @@ class LiveBranch:
         return () if self._session.is_discarded else self.branch_state.visible_token_ids
 
     @property
-    def sampler_states(self) -> tuple[tuple[int, SamplerConfig, str | None], ...]:
-        if self._session.is_discarded:
-            return ()
-        return tuple(
-            (point.boundary, point.sampling, point.stream_fingerprint)
-            for point in self.branch_state.control_points
-        )
-
-    @property
     def rewind_state(self) -> RewindState | None:
         return None if self._session.is_discarded else self._session._rewinds.get(self._identity.branch_id)
 
@@ -868,17 +735,11 @@ class LiveBranch:
     def activate(self) -> EpisodeEngine:
         return self._session.activate(self._identity.branch_id)
 
-    def set_sampler(
-        self, sampler: SamplerConfig, *, stream_fingerprint: str | None = None
-    ) -> None:
+    def set_sampler(self, sampler: SamplerConfig) -> None:
         self._session.set_sampler(
             sampler,
-            stream_fingerprint=stream_fingerprint,
             _branch_id=self._identity.branch_id,
         )
-
-    def resume(self, **kwargs: Any) -> None:
-        self._session.resume(_branch_id=self._identity.branch_id, **kwargs)
 
     def generate(self, action: PolicyAction | None = None, **kwargs: Any) -> ActionOutcome:
         return self._session.generate(action, _branch_id=self._identity.branch_id, **kwargs)
@@ -1007,8 +868,6 @@ class LiveSessionRoster:
         source.suspend()
         try:
             engine = fresh_root_from(source_engine, prompt)
-            if "sampler" in environment:
-                environment["sampler"] = engine.sampling.to_dict()
             root = LiveSession(
                 engine,
                 prompt=prompt,
@@ -1032,7 +891,6 @@ __all__ = [
     "BranchNode",
     "BranchState",
     "BranchTree",
-    "ControlPoint",
     "ForkState",
     "LiveBranch",
     "LiveRosterEntry",

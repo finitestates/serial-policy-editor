@@ -88,7 +88,7 @@ def load_teacher_plan(
             except EditorError as exc:
                 raise EditorError(f"{label}: invalid observation: {exc}") from exc
         steps.append(TapeStep(action, expectation))
-    return ReplayPlan(steps=tuple(steps), follow_source_sampling=False)
+    return ReplayPlan(steps=tuple(steps))
 
 
 def load_teacher_tape_jsonl(
@@ -223,7 +223,7 @@ def export_teacher_tape(
 ) -> dict[str, Any]:
     """Export a stored episode as JSONL plus an optional JSON envelope sidecar."""
     episode = store.get_episode(episode_id)
-    initial = store.sampling_segment(episode_id, 0)["sampling"]
+    initial = episode["initial_sampling"]
     envelope = {
         "format": TAPE_FORMAT,
         "version": TAPE_VERSION,
@@ -246,7 +246,10 @@ def export_live_teacher_tape(
 ) -> dict[str, Any]:
     """Export the currently selected non-durable branch as a portable tape."""
     environment = dict(getattr(session, "environment", {}))
-    environment.setdefault("sampler", session.sampler.to_dict())
+    branch_state = getattr(session, "branch_state")
+    if callable(branch_state):
+        branch_state = branch_state()
+    environment["sampler"] = branch_state.initial_sampling.to_dict()
     envelope = {
         "format": TAPE_FORMAT,
         "version": TAPE_VERSION,

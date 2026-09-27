@@ -160,31 +160,29 @@ def test_nested_fork_truncates_a_partial_action_in_root_boundaries():
 
 
 @pytest.mark.invariant
-def test_branch_reactivation_restores_sampler_and_budget_at_the_fork_point():
+def test_rewind_and_fork_drop_sampler_commands_at_the_selected_boundary():
+    initial = SamplerConfig(temperature=0.0)
     session = LiveSession(
         EpisodeEngine(
             ConformingFakeBackend(),
             initial_token_ids=[7],
-            sampling=SamplerConfig(temperature=0.0),
-            max_tokens=1,
+            sampling=initial,
         ),
         branch_id="root",
     )
     session.generate(Accept())
-    session.resume(max_tokens=3)
     expected_sampler = replace(session.sampler, temperature=0.7)
     session.set_sampler(expected_sampler)
     child = session.fork(boundary=1, branch_id="child")
 
-    assert child.engine.sampling == expected_sampler
-    assert child.engine.max_tokens == 3
-    assert child.engine.checkpoint_boundary == 4
+    assert child.engine.sampling == initial
 
     session.activate("root")
+    session.rewind(1)
+    assert session.sampler == initial
     session.set_sampler(replace(session.sampler, temperature=0.2))
     session.activate("child")
-    assert session.sampler == expected_sampler
-    assert session.engine.remaining == 3
+    assert session.sampler == initial
 
 
 @pytest.mark.invariant

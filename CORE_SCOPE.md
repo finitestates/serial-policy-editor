@@ -46,10 +46,10 @@ The runner receives the divergence policy for the replay run (handoff or ballist
 
 Replay executes supported teacher actions in order. At the first action it cannot interpret, it stops before applying that action, leaves later actions unexecuted, and yields to the EDGE menu with a warning that identifies the step and reason. It does not skip or reinterpret the action. A step with no recorded expectation may still execute, but its result cannot be checked against the source.
 
-Source-derived plans follow the source sampler schedule by default. A caller can instead preserve the destination sampler or supply a different schedule; fixed or counterfactual plans can omit the source schedule.
+Source-derived plans follow sampler commands in the source action sequence by default. A caller can preserve the destination sampler or override the source command values; fixed or counterfactual plans can omit the source commands.
 
 ### Serial policy replay
-`spr SOURCE [until]` appends the source episode's surviving teacher procedure to the currently selected episode, leaving the destination root intact. The source prompt, if present, is replayed as an exact write, followed by the selected source actions and their recorded expectations. until is measured in the source's root-relative visible-token boundaries; the resulting history is recorded at the destination's boundaries. SPR preserves the destination's sampler context instead of applying the source sampler schedule, while the selected divergence policy controls whether replay hands off on divergence or continues.
+`spr SOURCE [until]` appends the source episode's surviving teacher procedure to the currently selected episode, leaving the destination root intact. The source prompt, if present, is replayed as an exact write, followed by the selected source actions and their recorded expectations. until is measured in the source's root-relative visible-token boundaries; the resulting history is recorded at the destination's boundaries. SPR preserves the destination's sampler context instead of applying source sampler commands, while the selected divergence policy controls whether replay hands off on divergence or continues.
 
 ## Rewind contract
 
@@ -60,10 +60,11 @@ evidence such as EOG does not advance it.
 
 Rewind truncates the selected open episode or branch in place through that
 boundary. It removes later history, repositions the runtime to the retained
-prefix, clears terminal state, and restores the sampler, stream fingerprint,
-and budget state for the selected boundary. The next draw uses the retained
-boundary. Rewind does not create a child branch; fork first when both
-paths should be kept.
+prefix, clears terminal state, derives sampler settings from the retained
+action sequence, and preserves the root stream identity. Commands at the
+selected boundary are removed, so rewinding to boundary `N` returns to the
+state before any command recorded at `N`. Rewind does not create a child
+branch; fork first when both paths should be kept.
 
 Completed or failed durable
 episodes stay sealed and must be forked to continue. If the boundary cuts through an action, retain only its visible prefix. Represent a partial text or phrase write as an exact write of the retained
@@ -74,8 +75,8 @@ token count. The unretained remainder of the original action does not become par
 
 An ordinary fork creates a new open episode from the source's history through a
 root-relative visible-token boundary. The source remains unchanged. The new episode
-inherits the initial text, retained visible prefix, and the control state needed
-to continue from that boundary. Its next local action begins there.
+inherits the initial text and retained action prefix. Its next local action
+begins at the selected boundary, before commands recorded there.
 
 Nested ordinary forks keep the same root-relative history frame. Parent identity and `fork_boundary` record provenance; they do not restrict where the
 child may rewind or fork. A child may rewind before its original fork boundary. If the fork boundary cuts through an action, materialize the retained prefix

@@ -440,7 +440,6 @@ class PersistentTerminalSession(AbstractContextManager):
             raw,
             state.candidates,
             state.resolve_insertion,
-            remaining_tokens=state.remaining_tokens,
             resolve_candidate=state.resolve_candidate,
             default_hold_tokens=state.default_hold_tokens,
             default_search_radius=state.default_search_radius,

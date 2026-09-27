@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from tests.fakes import ConformingFakeBackend, ScriptedIO
-from trajectory_editor.core.actions import Accept, EndGeneration, Hold, Phrase, Write
+from trajectory_editor.core.actions import Accept, EndGeneration, Hold, Phrase, SetSampler, Write
 from trajectory_editor.core.results import ReplayExpectation
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine
@@ -14,15 +14,13 @@ from trajectory_editor.episode_cli import main
 from trajectory_editor.episode_lifecycle import _restore_engine
 from trajectory_editor.episode_materializer import materialize_live_branch
 from trajectory_editor.episode_replay_source import build_source_replay_recipe, replay_procedure
-from trajectory_editor.run_loop import (
-    ReplayContext, ReplayPlan, TapeStep, run_plan,
-)
+from trajectory_editor.run_loop import ReplayPlan, TapeStep, run_plan
 from trajectory_editor.episode_session import LiveSession
 from trajectory_editor.episode_store import EpisodeStore
 from trajectory_editor.episode_ui import InteractivePolicy
 from trajectory_editor.run_loop import EdgeRequested
 from trajectory_editor.spr_recipe import (
-    ReplayControlPolicy,
+    ReplaySamplerPolicy,
     ReplayPlacement,
     compose_replay_plan,
 )
@@ -69,7 +67,6 @@ def create(store, episode_id, episode):
         initial_token_ids=list(episode.initial_token_ids),
         sampling=episode.sampling,
         stream_fingerprint=episode.stream_fingerprint,
-        max_tokens=episode.max_tokens,
         backend=episode.backend.provenance(),
     )
 
@@ -79,18 +76,6 @@ def engine(prefix=7):
         ConformingFakeBackend(),
         initial_token_ids=[prefix],
         sampling=SamplerConfig(temperature=0.0),
-    )
-
-
-def create_legacy(store, episode, identifier="test"):
-    return store.create_episode(
-        episode_id=identifier,
-        initial_text=episode.text,
-        initial_token_ids=list(episode.initial_token_ids),
-        sampling=episode.sampling,
-        stream_fingerprint=episode.stream_fingerprint,
-        max_tokens=None,
-        backend={},
     )
 
 
@@ -126,30 +111,32 @@ def test_live_session_executes_without_a_store():
 def test_interactive_bias_before_first_action_survives_save_and_replay(tmp_path):
     session = LiveSession(engine())
     result = run_plan(session, divergence_policy="handoff",
-        live_policy=InteractivePolicy(io=ScriptedIO(["2+100", "h 1"]), menu_size=3),
+        live_policy=InteractivePolicy(
+            io=ScriptedIO(["2+100", "h 1"]), menu_size=3, session=session
+        ),
         max_live_actions=1,
     )
 
     assert result.outcomes[0].visible_token_ids == (2,)
-    assert [(boundary, sampling.bias_rules) for boundary, sampling, _ in session.sampler_states] == [
-        (0, session.sampler.bias_rules),
-    ]
+    assert isinstance(session.history_tape[0].action, SetSampler)
+    assert session.history_tape[1].action == Hold(1)
 
     with EpisodeStore(tmp_path / "episodes.sqlite3") as store:
         source_id = materialize_live_branch(
             store, session, session.branch_state(), {}, episode_id="biased"
         )
-        segments = store.sampler_segments(source_id)
-        assert [segment["start_boundary"] for segment in segments] == [0]
+        assert [row["kind"] for row in store.actions(source_id)] == [
+            "set-sampler", "hold",
+        ]
         recipe = build_source_replay_recipe(store, source_id)
 
     plan = compose_replay_plan(
-        recipe, ReplayPlacement.SOURCE_ROOT, ReplayControlPolicy.FOLLOW_SOURCE
+        recipe, ReplayPlacement.SOURCE_ROOT, ReplaySamplerPolicy.FOLLOW_SOURCE
     )
     replay = run_plan(LiveSession(engine()), divergence_policy="handoff", tape=plan)
 
-    assert replay.replayed_actions == 1
-    assert replay.outcomes[0].visible_token_ids == (2,)
+    assert replay.replayed_actions == 2
+    assert replay.outcomes[1].visible_token_ids == (2,)
     assert not replay.handed_off
 
 
@@ -250,24 +237,25 @@ def test_replay_plan_uses_source_sampling_on_an_inactive_branch():
     first = SamplerConfig(temperature=0.0, seed=11)
     second = SamplerConfig(temperature=0.0, seed=22)
     final = SamplerConfig(temperature=0.0, seed=33)
-    plan = ReplayPlan(
-        steps=(TapeStep(Hold(1), None), TapeStep(Hold(1), None)),
-        context=ReplayContext(sampling=(first, second)),
-        final_sampling=final,
-    )
+    plan = ReplayPlan(steps=(
+        TapeStep(SetSampler(first), None),
+        TapeStep(Hold(1), None),
+        TapeStep(SetSampler(second), None),
+        TapeStep(Hold(1), None),
+        TapeStep(SetSampler(final), None),
+    ))
 
     result = run_plan(child, divergence_policy="handoff", tape=plan, live_policy=NeverChoose())
 
-    assert result.replayed_actions == 2
+    assert result.replayed_actions == 5
     assert result.replay_exhausted
-    assert len(result.outcomes) == 2
+    assert len(result.outcomes) == 5
     assert child.history_visible_token_ids == (1, 3, 5)
-    assert [(boundary, sampling) for boundary, sampling, _ in child.sampler_states] == [
-        (0, SamplerConfig(temperature=0.0)),
-        (1, first),
-        (2, second),
-        (3, final),
-    ]
+    assert [
+        outcome.action.sampling
+        for outcome in child.history_outcomes
+        if isinstance(outcome.action, SetSampler)
+    ] == [first, second, final]
     session.activate("root")
     assert session.history_visible_token_ids == (1,)
 

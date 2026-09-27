@@ -15,6 +15,8 @@ from .core.ui import EditAction, InsertMode
 class CommandKind(str, Enum):
     CHORD = "chord"
     BIAS = "bias"
+    SAMPLER = "sampler"
+    REROLL = "reroll"
     EDIT = "edit"
     PHRASE = "phrase"
     HOLD = "hold"
@@ -86,6 +88,8 @@ class TeacherCommand:
     bias_group_members: tuple[str, ...] | None = None
     bias_group_member_bare: tuple[bool, ...] | None = None
     chord_ranks: tuple[int, ...] | None = None
+    sampler_text: str | None = None
+    reroll_seed: int | None = None
 
 
 class CommandState(str, Enum):
@@ -113,6 +117,9 @@ HELP_TEXT = """Commands:
                     --manual-acceptance leaves the command blank instead
   accept             commit the sampled proposal
   b wings + / - / =  adapt group appearance: promote / suppress / maintain
+  s top_k=20      change sampler settings; changes are part of the action tape
+  s {JSON}        replace all sampler settings from a complete SamplerConfig record
+  reroll [SEED]   change the draw seed as a replayable action
   b wings off        disable this target (optional after/until scope)
   b {wings, scales, claws} +0.5          bias several targets at once
   b {wings, scales} + after {dragon, wyvern} until "."
@@ -557,6 +564,19 @@ def parse_command(
             CommandKind.TEACHER_EOG,
             invoked_as=lower,
             force=True,
+        )
+    if lower == "s" or lower.startswith("s "):
+        payload = raw.strip()[1:].strip()
+        return TeacherCommand(
+            CommandKind.SAMPLER,
+            sampler_text=payload or None,
+        )
+    reroll_match = re.fullmatch(r"reroll(?:\s+([+-]?\d+))?", command, re.IGNORECASE)
+    if reroll_match is not None:
+        seed_text = reroll_match.group(1)
+        return TeacherCommand(
+            CommandKind.REROLL,
+            reroll_seed=int(seed_text) if seed_text is not None else None,
         )
     phrase_command = raw.lstrip()
     phrase_lower = phrase_command.lower()

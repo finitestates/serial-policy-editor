@@ -17,7 +17,6 @@ from dataclasses import dataclass
 
 from .core.actions import Hold, Phrase, PolicyAction, Write
 from .core.results import ActionOutcome, ReplayExpectation
-from .core.sampler_config import SamplerConfig
 from .run_loop import TapeStep
 
 
@@ -45,7 +44,6 @@ class ProcedureRecord:
     visible_token_ids: tuple[int, ...] = ()
     visible_text: str = ""
     boundary_before: int = 0
-    sampling: SamplerConfig | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, str) or not self.status:
@@ -63,7 +61,6 @@ class ProcedureRecord:
         outcome: ActionOutcome,
         *,
         expectation: ReplayExpectation | None = None,
-        sampling: SamplerConfig | None = None,
     ) -> "ProcedureRecord":
         """Build a neutral record from an in-memory runtime outcome.
 
@@ -81,7 +78,6 @@ class ProcedureRecord:
             visible_token_ids=tuple(outcome.visible_token_ids),
             visible_text=outcome.resolved_text,
             boundary_before=outcome.boundary_before,
-            sampling=sampling,
         )
 
 
@@ -92,7 +88,6 @@ class ProcedureStep:
     tape_step: TapeStep
     boundary: int
     source_index: int
-    sampling: SamplerConfig | None = None
     partial: bool = False
 
     @property
@@ -185,7 +180,6 @@ def project_surviving_procedure(
                     tape_step=tape_step,
                     boundary=record.boundary_before,
                     source_index=source_index,
-                    sampling=record.sampling,
                     partial=True,
                 )
             )
@@ -201,7 +195,6 @@ def project_surviving_procedure(
                 tape_step=TapeStep(action, record.expectation),
                 boundary=record.boundary_before,
                 source_index=source_index,
-                sampling=record.sampling,
             )
         )
 

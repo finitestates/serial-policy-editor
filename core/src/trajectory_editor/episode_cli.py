@@ -1,8 +1,8 @@
 """Command line for the reduced Serial Policy Editor.
 
 A live episode alternates between the ordinary teacher loop and live edges.
-Token budgets, replay exhaustion, and replay divergence yield at a live edge;
-only EOG or explicit ``end`` seals the episode.
+Replay exhaustion and replay divergence yield at a live edge; only EOG or
+explicit ``end`` seals the episode.
 """
 
 from __future__ import annotations
@@ -33,12 +33,12 @@ from .core.cli_config import (
 )
 from .core.sampler_config import SamplerConfig
 from .episode_lifecycle import (
-    POLICY_FIELDS, _inherit_budget, _visible_tokens, _restore_engine,
+    POLICY_FIELDS, _visible_tokens, _restore_engine,
     _spr_engine_from_source,
 )
 from .episode_engine import EpisodeEngine
 from .episode_replay_source import build_source_replay_recipe
-from .spr_recipe import ReplayControlPolicy, ReplayPlacement, compose_replay_plan
+from .spr_recipe import ReplaySamplerPolicy, ReplayPlacement, compose_replay_plan
 from .projector import (
     project_episode,
     project_lineage,
@@ -192,8 +192,7 @@ def build_parser(
     parser = argparse.ArgumentParser(
         prog=prog,
         description=(
-            "Interactive token-policy editor with Serial Policy Replay. "
-            "Token budgets are checkpoints, not run termination."
+            "Interactive token-policy editor with Serial Policy Replay."
         ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
@@ -233,7 +232,7 @@ def build_parser(
         "--continue-from",
         dest="resume",
         metavar="EPISODE_ID",
-        help="continue an unsealed/checkpointed saved episode in a live session",
+        help="continue an unsealed saved episode in a live session",
     )
     parser.add_argument(
         "--fixed-config", action="store_true",
@@ -263,12 +262,6 @@ def build_parser(
         type=Path,
         metavar="FILE",
         help="load reusable CLI values from a YAML controller profile",
-    )
-    parser.add_argument(
-        "--max-tokens",
-        type=int,
-        default=None,
-        help="optional visible-token allowance before a live edge (default: unlimited)",
     )
     parser.add_argument("--table-depth", type=int, default=12)
     parser.add_argument("--search-radius", type=int, default=3)
@@ -515,13 +508,13 @@ def main(
             cfg_guidance_backend = None
             cfg_primary_backend = None
 
-            def cfg_backend_for(sampling, *, plan=None, historical_sampling=(),
-                                primary=None, model_provenance=None):
+            def cfg_backend_for(sampling, *, plan=None, primary=None,
+                                model_provenance=None):
                 nonlocal cfg_guidance_backend, cfg_primary_backend
                 primary = backend if primary is None else primary
                 model_provenance = provenance if model_provenance is None else model_provenance
                 if not episode_backend_loader.cfg_required(
-                    sampling, plan=plan, historical_sampling=historical_sampling
+                    sampling, plan=plan
                 ):
                     return cfg_guidance_backend if cfg_primary_backend is primary else None
                 if cfg_guidance_backend is None or cfg_primary_backend is not primary:
@@ -577,19 +570,16 @@ def main(
                 explicit = sampling != source_sampling
                 io.write("Restoring saved context...")
                 visible = _visible_tokens(store, episode_id)
-                historical_sampling = tuple(
-                    sampling_factory(row["sampling"]) for row in store.sampler_segments(episode_id)
-                )
-                guidance = cfg_backend_for(sampling, historical_sampling=historical_sampling)
+                guidance = cfg_backend_for(sampling)
                 if model_changed:
                     session = model_change_session(
                         store, episode_id, backend, provenance,
                         boundary=len(visible), sampling=sampling,
-                        max_tokens=args.max_tokens, guidance_backend=guidance,
+                        guidance_backend=guidance,
                     )
                 else:
                     engine = _restore_engine(
-                        store, episode_id, backend, max_tokens=args.max_tokens,
+                        store, episode_id, backend,
                         sampling_override=sampling if explicit else None,
                         guidance_backend=guidance,
                         sampling_factory=sampling_factory,
@@ -605,19 +595,19 @@ def main(
                 initial_text = args.new_prompt if args.new_prompt is not None else episode_prompts.read_prompt_file(args.new_prompt_file)
                 sampling = apply_activation_artifact(sampler_from_args(args), activation_artifact, args)
                 engine = EpisodeEngine(
-                    backend, sampling=sampling, max_tokens=args.max_tokens,
+                    backend, sampling=sampling,
                     initial_text=initial_text,
                     guidance_backend=cfg_backend_for(sampling, plan=pending_tape),
                 )
                 session = LiveSession(
                     engine, prompt=initial_text,
-                    environment_stamp={"backend": provenance, "sampler": sampling.to_dict()},
+                    environment_stamp={"backend": provenance},
                 )
             elif selection.kind == "replay":
                 recipe = build_source_replay_recipe(
-                    store, str(args.replay), args.until, sampling_factory=sampling_factory
+                    store, str(args.replay), args.until
                 )
-                source_sampling = recipe.controls.effective_at(0).sampling
+                source_sampling = recipe.initial_sampling
                 overrides = {
                     name: getattr(args, name) for name in CORE_SAMPLER_FIELDS
                     if getattr(args, name) is not None
@@ -633,8 +623,8 @@ def main(
                     if model_changed else list(source["initial_token_ids"])
                 )
                 replay_control_policy = (
-                    ReplayControlPolicy.PRESERVE_DESTINATION if args.fixed_config
-                    else ReplayControlPolicy.FOLLOW_SOURCE
+                    ReplaySamplerPolicy.PRESERVE_DESTINATION if args.fixed_config
+                    else ReplaySamplerPolicy.FOLLOW_SOURCE
                 )
                 pending_tape = compose_replay_plan(
                     recipe,
@@ -643,8 +633,8 @@ def main(
                     sampler_overrides=overrides,
                 )
                 engine, pending_tape = _spr_engine_from_source(
-                    recipe, backend, sampling=sampling, max_tokens=args.max_tokens,
-                    control_policy=replay_control_policy,
+                    recipe, backend, sampling=sampling,
+                    sampler_policy=replay_control_policy,
                     sampling_overrides=overrides, initial_token_ids=replay_prefix,
                     guidance_backend=cfg_backend_for(sampling, plan=pending_tape),
                 )
@@ -663,37 +653,27 @@ def main(
                 target = len(visible) if args.at is None else args.at
                 if not 0 <= target <= len(visible):
                     raise EditorError(f"fork boundary must be 0..{len(visible)}")
-                segment = store.sampling_segment(episode_id, target)
+                segment = store.sampling_state_at_boundary(episode_id, target)
                 source_sampling = sampling_factory(segment["sampling"])
                 sampling = apply_activation_artifact(
                     sampler_from_args(args, source_sampling), activation_artifact, args
                 )
-                history = tuple(
-                    sampling_factory(row["sampling"])
-                    for row in store.sampler_segments(episode_id)
-                    if int(row["start_boundary"]) <= target
-                )
-                guidance = cfg_backend_for(sampling, historical_sampling=history)
+                guidance = cfg_backend_for(sampling)
                 if model_changed:
                     session = model_change_session(
                         store, episode_id, backend, provenance,
                         boundary=target, sampling=sampling,
-                        max_tokens=args.max_tokens, guidance_backend=guidance,
+                        guidance_backend=guidance,
                     )
                 else:
                     engine = EpisodeEngine(
                         backend, sampling=sampling,
-                        max_tokens=source["max_tokens"] if args.max_tokens is None else args.max_tokens,
                         initial_text=str(source["initial_text"]),
                         initial_token_ids=source["initial_token_ids"],
                         stream_fingerprint=segment["stream_fingerprint"],
                         guidance_backend=guidance,
                     )
                     engine.visible_token_ids = list(visible[:target])
-                    if args.max_tokens is None:
-                        _inherit_budget(store, episode_id, engine, target)
-                    else:
-                        engine.trajectory.set_budget(args.max_tokens, target + args.max_tokens)
                     session = restore_live_session(
                         store, episode_id, engine, boundary=target,
                         branch_identity=BranchIdentity(
@@ -715,17 +695,13 @@ def main(
                 boundary = len(visible)
                 state = store.current_sampling_state(episode_id)
                 sampling = sampling_factory(state["sampling"])
-                historical = tuple(
-                    sampling_factory(row["sampling"]) for row in store.sampler_segments(episode_id)
-                )
                 guidance = cfg_backend_for(
                     sampling, primary=new_backend, model_provenance=new_provenance,
-                    historical_sampling=historical,
                 )
                 if changed:
                     loaded = model_change_session(
                         store, episode_id, new_backend, new_provenance,
-                        boundary=boundary, sampling=sampling, max_tokens=None,
+                        boundary=boundary, sampling=sampling,
                         guidance_backend=guidance,
                     )
                 elif target_episode["status"] in {"completed", "failed"}:
@@ -736,14 +712,12 @@ def main(
                         )
                     engine = EpisodeEngine(
                         new_backend, sampling=sampling,
-                        max_tokens=target_episode["max_tokens"] or None,
                         initial_text=str(target_episode["initial_text"]),
                         initial_token_ids=target_episode["initial_token_ids"],
                         stream_fingerprint=state["stream_fingerprint"],
                         guidance_backend=guidance,
                     )
                     engine.visible_token_ids = list(visible)
-                    _inherit_budget(store, episode_id, engine, boundary)
                     loaded = restore_live_session(
                         store, episode_id, engine,
                         branch_identity=BranchIdentity(
@@ -752,7 +726,7 @@ def main(
                     )
                 else:
                     engine = _restore_engine(
-                        store, episode_id, new_backend, max_tokens=None,
+                        store, episode_id, new_backend,
                         sampling_override=None, guidance_backend=guidance,
                         sampling_factory=sampling_factory, current_sampling_state=state,
                     )

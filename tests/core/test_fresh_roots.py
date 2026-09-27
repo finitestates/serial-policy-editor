@@ -25,7 +25,7 @@ class DurableFakeBackend(ConformingFakeBackend):
         }
 
 
-def _session(*, guidance: bool = False, max_tokens: int = 3) -> LiveSession:
+def _session(*, guidance: bool = False) -> LiveSession:
     backend = ConformingFakeBackend()
     sampling = SamplerConfig(
         temperature=0.25,
@@ -40,15 +40,14 @@ def _session(*, guidance: bool = False, max_tokens: int = 3) -> LiveSession:
         initial_text="P",
         initial_token_ids=[7],
         sampling=sampling,
-        max_tokens=max_tokens,
         guidance_backend=ConformingFakeBackend() if guidance else None,
     )
     return LiveSession(engine, prompt="P")
 
 
 @pytest.mark.invariant
-def test_fresh_root_factory_copies_runtime_settings_but_starts_a_new_ledger():
-    source = _session(max_tokens=4)
+def test_fresh_root_factory_copies_sampler_but_starts_a_new_ledger():
+    source = _session()
     source.generate(Write(" A", mode="exact"))
 
     fresh = fresh_root_from(source.engine, "Q")
@@ -56,8 +55,6 @@ def test_fresh_root_factory_copies_runtime_settings_but_starts_a_new_ledger():
     assert fresh.backend is source.engine.backend
     assert fresh.guidance_backend is source.engine.guidance_backend
     assert fresh.sampling == source.sampler
-    assert fresh.max_tokens == 4
-    assert fresh.remaining == 4
     assert fresh.boundary == 0
     assert fresh.visible_token_ids == []
     assert fresh.stream_fingerprint is not None
@@ -91,8 +88,6 @@ def test_ephemeral_help_and_bare_new_expose_the_polished_commands():
         for _, fragment in _edge_header(
             episode_id="#1",
             boundary=0,
-            current_budget=3,
-            remaining_tokens=3,
             sampler_summary="temp=1",
             mode="session",
         )
@@ -154,14 +149,19 @@ def test_default_live_new_has_one_model_load_and_global_stable_addresses(
     io = ScriptedIO(
         [
             "1",       # original root action
+            "q",       # return to EDGE
             "fork 1",  # original root #1 -> branch #2
+            "q",       # return to EDGE
             "s temperature=0.7",  # change the active sampler at EDGE
             "new Q",   # unrelated root #3
             "1",       # action in root #3
+            "q",       # return to EDGE
             "fork 1",  # root #3 -> branch #4
+            "q",       # return to EDGE
             "branches",
             "#1",      # bare global address returns to the original root
-            "q",
+            "q",       # return to EDGE
+            "q",       # quit
         ]
     )
 
@@ -185,8 +185,6 @@ def test_default_live_new_has_one_model_load_and_global_stable_addresses(
                 "--plain-ui",
                 "--model",
                 "fake",
-                "--max-tokens",
-                "1",
                 "--new-prompt",
                 "P",
             ]
@@ -207,12 +205,14 @@ def test_durable_new_is_parentless_and_bare_number_returns_to_prior_episode(tmp_
     backend = DurableFakeBackend()
     io = ScriptedIO([
         "1",
+        "q",
         f"save {workspace} original",
         "s temperature=0.7",
         "new Q",
         "q",
         f"save {workspace} fresh",
         "#1",
+        "q",
         "q",
     ])
 
@@ -224,8 +224,6 @@ def test_durable_new_is_parentless_and_bare_number_returns_to_prior_episode(tmp_
                 "--plain-ui",
                 "--model",
                 "fake",
-                "--max-tokens",
-                "1",
                 "--workspace",
                 str(workspace),
                 "--new-prompt",
@@ -240,9 +238,7 @@ def test_durable_new_is_parentless_and_bare_number_returns_to_prior_episode(tmp_
         fresh = store.resolve_id("#2")
         assert store.get_episode(fresh)["parent_episode_id"] is None
         assert store.get_episode(fresh)["initial_text"] == "Q"
-        assert store.get_episode(fresh)["max_tokens"] == 1
-        assert store.get_episode(fresh)["checkpoint_boundary"] == 1
-        assert store.sampling_segment(fresh, 0)["sampling"]["temperature"] == 0.7
+        assert store.get_episode(fresh)["initial_sampling"]["temperature"] == 0.7
         assert store.actions(fresh) == []
         assert store.tokens(fresh) == []
         assert store.get_episode(original)["parent_episode_id"] is None

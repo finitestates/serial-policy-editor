@@ -34,7 +34,6 @@ def display_choice(
     io: IO,
     choice: ChoiceSet,
     *,
-    remaining_tokens: int | None = None,
     policy_active: bool = False,
     show_policy_rank: bool = False,
     sort_by_policy: bool = False,
@@ -46,13 +45,8 @@ def display_choice(
     target_token_id: int | None = None,
 ) -> None:
     io.write("\n" + "=" * 72)
-    remaining = (
-        f" | remaining: {remaining_tokens}"
-        if remaining_tokens is not None
-        else ""
-    )
     io.write(
-        f"Step {choice.aligned_step}{remaining} | "
+        f"Step {choice.aligned_step} | "
         f"context tail: {choice.context_text_tail!r}"
     )
     backend = (
@@ -169,7 +163,6 @@ def read_choice(io: IO, state: ChoiceViewState) -> str | None:
     else:
         display_choice(
             io, state.choice,
-            remaining_tokens=state.remaining_tokens,
             policy_active=state.policy_active,
             show_policy_rank=state.show_policy_rank,
             sort_by_policy=state.sort_by_policy,
@@ -192,15 +185,6 @@ def read_edge(io: IO, state: EdgeViewState) -> str | None:
     else:
         io.write(state.episode_id)
         io.write(f"\nLive edge @ boundary {state.boundary} · {state.sampler_summary}")
-    allowance = (
-        f"default next allowance: {state.current_budget} tokens"
-        if state.current_budget is not None else "no automatic checkpoint"
-    )
-    remaining = (
-        f"{state.remaining_tokens} tokens remaining"
-        if state.remaining_tokens is not None else "unlimited"
-    )
-    io.write(f"Budget: {remaining} · {allowance}")
     for item in edge_help(state.mode):
         io.write(f"[{item.command}] {item.description}")
     return io.read("EDGE> ")

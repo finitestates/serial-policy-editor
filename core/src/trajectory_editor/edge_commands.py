@@ -20,14 +20,7 @@ class EdgeCommandParseError(EditorError):
 
 @dataclass(frozen=True, slots=True)
 class ContinueCommand:
-    """Continue with the currently configured allowance."""
-
-
-@dataclass(frozen=True, slots=True)
-class BudgetCommand:
-    """Set the next continuation allowance, or remove it with ``None``."""
-
-    tokens: int | None
+    """Return to the live decision loop."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,7 +132,6 @@ class ReplaySelectionCommand:
 
 EdgeCommand: TypeAlias = (
     ContinueCommand
-    | BudgetCommand
     | SamplerCommand
     | RewindCommand
     | RerollCommand
@@ -214,16 +206,6 @@ def parse_edge_command(raw: str) -> EdgeCommand:
     if command in {"c", "continue"}:
         _require_arity(parts, 1, usage="c or continue")
         return ContinueCommand()
-
-    if command in {"n", "next"}:
-        _require_arity(parts, 2, usage="n N, n off, next N, or next off")
-        allowance = parts[1].lower()
-        if allowance in {"off", "none", "unlimited"}:
-            return BudgetCommand(None)
-        tokens = _integer(parts[1], label="budget")
-        if tokens < 1:
-            _parse_error("budget must be a positive integer")
-        return BudgetCommand(tokens)
 
     if command in {"s", "sampler"}:
         payload = text[len(parts[0]) :].strip()
@@ -331,7 +313,6 @@ def parse_edge_command(raw: str) -> EdgeCommand:
 
 __all__ = [
     "BranchesCommand",
-    "BudgetCommand",
     "ContinueCommand",
     "EdgeCommand",
     "EdgeCommandParseError",

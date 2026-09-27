@@ -9,7 +9,6 @@ launch:
   cache: auto
   temperature: 0.0
   seed: 17
-  max-tokens: 64
   cfg-unconditional-prompt: "A neutral list:"
   cfg-scale: 1.5
 rtol: 0.001

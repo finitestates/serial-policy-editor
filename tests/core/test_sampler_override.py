@@ -1,4 +1,4 @@
-"""The ``s`` edge command edits sampler fields; the draw seed is excluded."""
+"""The ``s`` command edits the complete scalar sampler surface."""
 
 from __future__ import annotations
 
@@ -11,10 +11,11 @@ from trajectory_editor.core.sampler_config import SamplerConfig
 pytestmark = pytest.mark.current_workflow
 
 
-def test_sampler_override_rejects_seed_assignment():
+def test_sampler_override_includes_seed_in_the_sampler_record():
     config = SamplerConfig(seed=7)
-    with pytest.raises(EditorError, match="reroll"):
-        sampler_override(config, "seed=42")
+    updated = sampler_override(config, "seed=42")
+    assert updated.seed == 42
+    assert updated.temperature == config.temperature
 
 
 def test_sampler_override_rejects_bare_random_seed_forms():

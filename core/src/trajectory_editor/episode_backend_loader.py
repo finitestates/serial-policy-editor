@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .backend_factory import BACKEND_NAMES, create_backend
+from .core.actions import SetSampler
 from .core.errors import EditorError
 from .decoder import LlamaCppSettings
 from .transformers_backend import TransformersSettings
@@ -239,12 +240,15 @@ def load_episode_backend(
             selected.model = Path(path).expanduser()
 
 
-def cfg_required(sampling, *, plan=None, historical_sampling=()) -> bool:
+def cfg_required(sampling, *, plan=None) -> bool:
     """Runtime setup must provision guidance for reachable sampler controls."""
-    configurations = [sampling, *historical_sampling]
-    if plan is not None and plan.follow_source_sampling:
-        configurations.extend(plan.context.sampling)
-        configurations.append(plan.final_sampling)
+    configurations = [sampling]
+    if plan is not None:
+        configurations.extend(
+            step.action.sampling
+            for step in plan.steps
+            if isinstance(step.action, SetSampler)
+        )
     return any(
         config is not None and config.cfg_unconditional_prompt is not None
         for config in configurations

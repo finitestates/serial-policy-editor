@@ -1,6 +1,6 @@
 # Core contract matrix
 
-This is the budget and source of truth for the reduced core test suite. The
+This is the source of truth for the reduced core test suite. The
 numbers below are contract slots. Every retained core test must map to one of these slots. Additional slots may be added on an as-needed basis, but only after consultation with the code owner.
 
 Core tests assert observable state, persisted records, replay results, and may also check for patterns associated with performance regression.
@@ -27,7 +27,7 @@ Core tests assert observable state, persisted records, replay results, and may a
 | S07 | every core action and replay expectation serializes canonically | `test_sampler_contracts.py` |
 | S08 | llama and Transformers backends consume the same core sampler contract | `test_vector_contracts.py`, sampler smoke tests |
 
-## Engine action contracts — 10
+## Engine action contracts — 9
 
 | ID | Contract | Existing evidence to migrate |
 | --- | --- | --- |
@@ -39,8 +39,7 @@ Core tests assert observable state, persisted records, replay results, and may a
 | E06 | holds respect count, boundary, stop, and teacher limits | `test_engine_contracts.py` |
 | E07 | check and force are durable write actions, not menu-only events | `test_engine_contracts.py` |
 | E08 | model EOG, teacher EOG, finite hold, and menu termination are distinct | `test_engine_contracts.py` |
-| E09 | budgets checkpoint without silently ending the episode | `test_engine_contracts.py` |
-| E10 | rejected or invalid actions leave token state unchanged | `test_engine_contracts.py` |
+| E09 | rejected or invalid actions leave token state unchanged | `test_engine_contracts.py` |
 
 ## Replay contracts — 10
 
@@ -57,7 +56,7 @@ Core tests assert observable state, persisted records, replay results, and may a
 | R09 | replay never mutates the recorded source prefix | `test_replay_contracts.py` |
 | R10 | replay statuses and terminal reasons remain semantically distinct | `test_replay_contracts.py` |
 
-## Persistence and lifecycle contracts — 8
+## Persistence and lifecycle contracts — 7
 
 | ID | Contract | Existing evidence to migrate |
 | --- | --- | --- |
@@ -67,8 +66,7 @@ Core tests assert observable state, persisted records, replay results, and may a
 | L04 | fork preserves exactly the requested visible prefix | `test_lifecycle_contracts.py` |
 | L05 | fork/rewind preserve episode identity and parent lineage correctly | `test_lifecycle_contracts.py` |
 | L06 | sampler transitions restore at the selected historical boundary | `test_lifecycle_contracts.py` |
-| L07 | budget state follows the retained boundary and explicit renewal | `test_lifecycle_contracts.py` |
-| L08 | model/backend continuation preserves visible text and sampler results | `test_lifecycle_contracts.py` |
+| L07 | model/backend continuation preserves visible text and sampler results | `test_lifecycle_contracts.py` |
 
 ## Vocabulary and menu contracts — 5
 

@@ -18,6 +18,7 @@ from typing import Any
 from .candidate_columns import CandidateColumns, CandidateViewPlan, next_column_focus
 from .chord import ChordRequested
 from .core.candidates import Candidate
+from .core.cli_config import sampler_override
 from .core.errors import EditorError
 from .core.ui import ChoiceSet, ContextText
 from .core.actions import (
@@ -27,9 +28,11 @@ from .core.actions import (
     PHRASE_DEFAULT_MAX_SHIFT,
     PHRASE_DEFAULT_MAX_TOKENS,
     PolicyAction,
+    Reroll,
     SelectRawRank,
     Write,
 )
+from .core.cli_config import random_seed
 from .episode_engine import EpisodeEngine, Observation, TokenPrefixSnapshot
 from .run_loop import EdgeRequested, ForkRequested, SeamlessRewindRequested
 from .core.sampling import raw_rank
@@ -708,7 +711,6 @@ class InteractivePolicy:
                 self._context_cursor.prewarm(engine, review_boundary)
             raw = self.io.read_choice(ChoiceViewState(
                 choice,
-                remaining_tokens=engine.remaining,
                 candidates=tuple(exposed[rank] for rank in sorted(exposed)),
                 display_candidates=displayed,
                 resolve_candidate=resolve_candidate,
@@ -860,6 +862,50 @@ class InteractivePolicy:
                 lines = tuple(f"{label}: {value:+g}" for label, value in updates)
                 feedback = ChoiceFeedback("status", "STEERING UPDATED", lines)
                 continue
+            if command.kind == CommandKind.SAMPLER:
+                payload = command.sampler_text
+                if payload is None:
+                    payload = self.io.read(
+                        "sampler key=value changes (blank cancels; e.g. top_k=20 temperature=.8)> "
+                    ) or ""
+                if not payload.strip():
+                    continue
+                try:
+                    updated = sampler_override(engine.sampling, payload)
+                    if self.session is not None:
+                        self.session.set_sampler(updated)
+                    else:
+                        engine.sampling = updated
+                except EditorError as exc:
+                    feedback = ChoiceFeedback("error", "INVALID SAMPLER", (str(exc),))
+                    continue
+                observation = engine.observe()
+                ranks = tuple(exposed)
+                exposed = {
+                    rank: engine.candidates(
+                        observation,
+                        start_rank=rank,
+                        count=1,
+                        view=self._view_plan(engine),
+                    )[0]
+                    for rank in ranks
+                }
+                preview_candidates = dict(exposed)
+                candidates = tuple(
+                    resolve_candidate(candidate.rank) for candidate in choice.candidates
+                )
+                choice = self._choice_for_observation(
+                    engine, observation, candidates, view=self._view_plan(engine)
+                )
+                choice_view = self._view_plan(engine)
+                feedback = ChoiceFeedback("status", "SAMPLER UPDATED", (payload,))
+                continue
+            if command.kind == CommandKind.REROLL:
+                return Reroll(
+                    command.reroll_seed
+                    if command.reroll_seed is not None
+                    else random_seed()
+                )
             if command.kind == CommandKind.HELP:
                 self.io.page(HELP_TEXT)
                 continue

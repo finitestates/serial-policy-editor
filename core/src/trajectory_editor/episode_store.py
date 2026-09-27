@@ -15,14 +15,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .core.actions import Phrase, Write, Hold
+from .core.actions import Phrase, Write, Hold, action_from_dict, sampler_after_action
 from .core.errors import EditorError
 from .core.results import ActionOutcome
 from .core.sampler_config import SamplerConfig
 from .episode_history import StoredHistoryPrefix, materialize_stored_prefix
 from .episode_hash import token_prefix_sha256, validate_boundary, validate_fingerprint
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _core_sampling_record(sampling: SamplerConfig) -> dict[str, Any]:
@@ -59,11 +59,11 @@ class EpisodeStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(self.path)
         self.connection.row_factory = sqlite3.Row
-        self.connection.execute("PRAGMA foreign_keys = ON")
-        self.connection.execute("PRAGMA journal_mode = WAL")
-        self.connection.execute("PRAGMA synchronous = NORMAL")
         try:
+            self.connection.execute("PRAGMA foreign_keys = ON")
             self._create_schema()
+            self.connection.execute("PRAGMA journal_mode = WAL")
+            self.connection.execute("PRAGMA synchronous = NORMAL")
         except Exception:
             self.connection.close()
             raise
@@ -86,6 +86,7 @@ class EpisodeStore:
             raise EditorError(f"episode database transaction failed: {exc}") from exc
 
     def _create_schema(self) -> None:
+        self._reject_previous_schema()
         with self.transaction() as db:
             db.executescript(
                 """
@@ -102,28 +103,13 @@ class EpisodeStore:
                     finished_at TEXT,
                     initial_text TEXT NOT NULL,
                     initial_token_ids_json TEXT NOT NULL,
+                    initial_sampling_json TEXT NOT NULL,
+                    initial_stream_fingerprint TEXT NOT NULL,
                     visible_text TEXT NOT NULL DEFAULT '',
                     terminal_token_id INTEGER,
                     terminal_reason TEXT,
-                    max_tokens INTEGER NOT NULL,
                     backend_json TEXT NOT NULL,
                     metadata_json TEXT NOT NULL DEFAULT '{}'
-                );
-
-                CREATE TABLE IF NOT EXISTS budget_segments (
-                    episode_id TEXT NOT NULL REFERENCES episodes(episode_id) ON DELETE CASCADE,
-                    start_boundary INTEGER NOT NULL,
-                    max_tokens INTEGER,
-                    checkpoint_boundary INTEGER,
-                    PRIMARY KEY (episode_id, start_boundary)
-                );
-
-                CREATE TABLE IF NOT EXISTS sampler_segments (
-                    episode_id TEXT NOT NULL REFERENCES episodes(episode_id) ON DELETE CASCADE,
-                    start_boundary INTEGER NOT NULL,
-                    sampling_json TEXT NOT NULL,
-                    stream_fingerprint TEXT NOT NULL,
-                    PRIMARY KEY (episode_id, start_boundary)
                 );
 
                 CREATE TABLE IF NOT EXISTS actions (
@@ -172,36 +158,75 @@ class EpisodeStore:
                     payload_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS episode_names (
+                    number INTEGER PRIMARY KEY AUTOINCREMENT,
+                    episode_id TEXT UNIQUE NOT NULL REFERENCES episodes(episode_id),
+                    title TEXT NOT NULL,
+                    visited_at TEXT NOT NULL
+                );
                 """
             )
-            columns = {row["name"] for row in db.execute("PRAGMA table_info(episodes)")}
-            if "checkpoint_boundary" not in columns:
-                db.execute("ALTER TABLE episodes ADD COLUMN checkpoint_boundary INTEGER")
-                db.execute("UPDATE episodes SET checkpoint_boundary = max_tokens WHERE max_tokens > 0")
             token_columns = {row["name"]: row for row in db.execute("PRAGMA table_info(tokens)")}
             raw_nll_column = token_columns.get("raw_model_nll")
             if raw_nll_column is None or raw_nll_column["notnull"]:
                 raise EditorError(
                     "episode database has an unsupported token table; create a current workspace"
                 )
-            db.execute("""CREATE TABLE IF NOT EXISTS episode_names (
-                number INTEGER PRIMARY KEY AUTOINCREMENT,
-                episode_id TEXT UNIQUE NOT NULL REFERENCES episodes(episode_id),
-                title TEXT NOT NULL, visited_at TEXT NOT NULL)""")
-            for episode in db.execute("SELECT episode_id, initial_text, created_at FROM episodes WHERE episode_id NOT IN (SELECT episode_id FROM episode_names) ORDER BY created_at, rowid").fetchall():
-                db.execute("INSERT OR IGNORE INTO episode_names(episode_id, title, visited_at) VALUES (?, ?, ?)",
-                           (episode["episode_id"], " ".join(episode["initial_text"].split())[:60] or "Untitled", episode["created_at"]))
             row = db.execute("SELECT version FROM schema_info").fetchone()
             if row is None:
                 db.execute(
                     "INSERT INTO schema_info(version) VALUES (?)",
                     (SCHEMA_VERSION,),
                 )
-            else:
-                db.execute(
-                    "UPDATE schema_info SET version = ?",
-                    (SCHEMA_VERSION,),
+            elif int(row["version"]) != SCHEMA_VERSION:
+                raise EditorError(
+                    "episode workspace schema is unsupported; create a new workspace"
                 )
+
+    def _reject_previous_schema(self) -> None:
+        """Require a fresh workspace after the sampler and budget format break."""
+        tables = {
+            str(row["name"])
+            for row in self.connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if not tables:
+            return
+
+        unsupported = (
+            "this workspace uses the previous episode format, which is no longer "
+            "supported; create a new workspace (existing episodes were left untouched)"
+        )
+        if "schema_info" not in tables:
+            raise EditorError(unsupported)
+        version_row = self.connection.execute(
+            "SELECT version FROM schema_info LIMIT 1"
+        ).fetchone()
+        if version_row is None or int(version_row["version"]) != SCHEMA_VERSION:
+            raise EditorError(unsupported)
+        if "episodes" not in tables:
+            # A partially initialized store must not be completed in place.
+            raise EditorError(unsupported)
+
+        columns = {
+            str(row["name"])
+            for row in self.connection.execute("PRAGMA table_info(episodes)")
+        }
+        old_controls = {"max_tokens", "checkpoint_boundary"} & columns
+        old_tables = {"sampler_segments", "budget_segments"} & tables
+        required_columns = {"initial_sampling_json", "initial_stream_fingerprint"}
+        required_tables = {"actions", "tokens", "interactions", "episode_names"}
+        if (
+            old_controls
+            or old_tables
+            or not required_columns.issubset(columns)
+            or not required_tables.issubset(tables)
+        ):
+            raise EditorError(
+                unsupported
+            )
 
     def create_episode(
         self,
@@ -210,16 +235,12 @@ class EpisodeStore:
         initial_token_ids: Sequence[int],
         sampling: SamplerConfig,
         stream_fingerprint: str,
-        max_tokens: int | None,
         backend: Mapping[str, Any],
         episode_id: str | None = None,
         parent_episode_id: str | None = None,
         fork_boundary: int | None = None,
         metadata: Mapping[str, Any] | None = None,
-        checkpoint_boundary: int | None | str = "initial",
     ) -> str:
-        if checkpoint_boundary == "initial":
-            checkpoint_boundary = max_tokens
         token_prefix_sha256(list(initial_token_ids))
         validate_fingerprint(stream_fingerprint)
         identifier = episode_id or uuid.uuid4().hex
@@ -234,8 +255,9 @@ class EpisodeStore:
                     INSERT INTO episodes(
                         episode_id, parent_episode_id, fork_boundary, status,
                         created_at, initial_text, initial_token_ids_json,
-                        max_tokens, backend_json, metadata_json
-                    ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)
+                        initial_sampling_json, initial_stream_fingerprint,
+                        backend_json, metadata_json
+                    ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         identifier,
@@ -244,32 +266,16 @@ class EpisodeStore:
                         _utc_now(),
                         initial_text,
                         _json([int(value) for value in initial_token_ids]),
-                        max_tokens or 0,
-                        _json(dict(backend)),
-                        _json(dict(metadata or {})),
-                    ),
-                )
-                db.execute(
-                    "UPDATE episodes SET checkpoint_boundary = ? WHERE episode_id = ?",
-                    (checkpoint_boundary, identifier),
-                )
-                db.execute(
-                    """
-                    INSERT INTO sampler_segments(
-                        episode_id, start_boundary, sampling_json, stream_fingerprint
-                    ) VALUES (?, 0, ?, ?)
-                    """,
-                    (
-                        identifier,
                         _json(_core_sampling_record(sampling)),
                         stream_fingerprint,
+                        _json(dict(backend)),
+                        _json(dict(metadata or {})),
                     ),
                 )
             except sqlite3.IntegrityError as exc:
                 raise EditorError(f"episode {identifier!r} already exists") from exc
             db.execute("INSERT INTO episode_names(episode_id, title, visited_at) VALUES (?, ?, ?)",
                        (identifier, " ".join(initial_text.split())[:60] or "Untitled", _utc_now()))
-            self._record_budget(db, identifier, 0, max_tokens, checkpoint_boundary)
         return identifier
 
     def resolve_id(self, value: str) -> str:
@@ -318,22 +324,6 @@ class EpisodeStore:
         ).fetchone()
         return int(row["value"])
 
-    def budget_at(self, episode_id: str, boundary: int) -> dict[str, Any] | None:
-        row = self.connection.execute(
-            "SELECT max_tokens, checkpoint_boundary FROM budget_segments "
-            "WHERE episode_id = ? AND start_boundary <= ? ORDER BY start_boundary DESC LIMIT 1",
-            (episode_id, boundary),
-        ).fetchone()
-        if row is None:
-            return None
-        allowance, checkpoint = row["max_tokens"], row["checkpoint_boundary"]
-        if allowance is None and checkpoint is None:
-            return dict(row)
-        if (type(allowance) is not int or allowance <= 0
-                or type(checkpoint) is not int or checkpoint < boundary):
-            return None
-        return dict(row)
-
     @staticmethod
     def _require_unsealed(db: sqlite3.Connection, episode_id: str) -> None:
         row = db.execute(
@@ -344,47 +334,25 @@ class EpisodeStore:
         if row["status"] in {"completed", "failed"}:
             raise EditorError(f"episode {episode_id!r} is sealed")
 
-    def record_budget(self, episode_id: str, boundary: int, max_tokens: int | None,
-                      checkpoint_boundary: int | None) -> None:
-        """Record edits and renewals, not ordinary consumption of an allowance."""
-        with self.transaction() as db:
-            self._record_budget(db, episode_id, boundary, max_tokens, checkpoint_boundary)
-
-    def _record_budget(self, db: sqlite3.Connection, episode_id: str, boundary: int,
-                       max_tokens: int | None, checkpoint_boundary: int | None) -> None:
-        self._require_unsealed(db, episode_id)
-        if (max_tokens is None) != (checkpoint_boundary is None):
-            raise EditorError("budget allowance and checkpoint must both be set or unlimited")
-        if max_tokens is not None and (type(max_tokens) is not int or max_tokens <= 0
-                or type(checkpoint_boundary) is not int or checkpoint_boundary < boundary):
-            raise EditorError("invalid budget allowance or checkpoint")
-        state = {"max_tokens": max_tokens, "checkpoint_boundary": checkpoint_boundary}
-        if self.budget_at(episode_id, boundary) != state:
-            db.execute("INSERT OR REPLACE INTO budget_segments VALUES (?, ?, ?, ?)",
-                       (episode_id, boundary, max_tokens, checkpoint_boundary))
-        db.execute("UPDATE episodes SET max_tokens = ?, checkpoint_boundary = ? WHERE episode_id = ?",
-                   (max_tokens or 0, checkpoint_boundary, episode_id))
-
     def update_episode(
         self,
         episode_id: str,
         *,
         visible_text: str,
-        max_tokens: int | None,
         status: str = "open",
     ) -> None:
         """Persist the current live edge without sealing the episode."""
-        if status not in {"open", "checkpoint", "replay-edge"}:
+        if status not in {"open", "replay-edge"}:
             raise EditorError(f"invalid unsealed episode status {status!r}")
         with self.transaction() as db:
             cursor = db.execute(
                 """
                 UPDATE episodes
-                SET status = ?, visible_text = ?, max_tokens = ?,
+                SET status = ?, visible_text = ?,
                     terminal_token_id = NULL, terminal_reason = NULL, finished_at = NULL
                 WHERE episode_id = ? AND status NOT IN ('completed', 'failed')
                 """,
-                (status, visible_text, max_tokens or 0, episode_id),
+                (status, visible_text, episode_id),
             )
             if cursor.rowcount != 1:
                 self.get_episode(episode_id)
@@ -396,14 +364,11 @@ class EpisodeStore:
         boundary: int,
         *,
         visible_text: str,
-        max_tokens: int | None,
     ) -> dict[str, Any]:
         """Persist the root-relative history retained through ``boundary``."""
 
         if type(boundary) is not int or boundary < 0:
             raise EditorError("rewind boundary must be a nonnegative integer")
-        if max_tokens is not None and (type(max_tokens) is not int or max_tokens < 1):
-            raise EditorError("max_tokens must be a positive integer")
         episode = self.get_episode(episode_id)
         if episode["status"] in {"completed", "failed"}:
             raise EditorError(f"episode {episode_id!r} is sealed")
@@ -417,8 +382,6 @@ class EpisodeStore:
             retained = materialize_stored_prefix(
                 self.actions(episode_id),
                 token_rows,
-                (),
-                (),
                 boundary,
             )
         except ValueError as exc:
@@ -446,24 +409,15 @@ class EpisodeStore:
                 "DELETE FROM interactions WHERE episode_id = ? AND boundary >= ?",
                 (episode_id, boundary),
             )
-            db.execute(
-                "DELETE FROM budget_segments WHERE episode_id = ? AND start_boundary > ?",
-                (episode_id, boundary),
-            )
-            db.execute(
-                "DELETE FROM sampler_segments "
-                "WHERE episode_id = ? AND start_boundary > ?",
-                (episode_id, boundary),
-            )
             cursor = db.execute(
                 """
                 UPDATE episodes
-                SET status = 'open', visible_text = ?, max_tokens = ?,
+                SET status = 'open', visible_text = ?,
                     terminal_token_id = NULL, terminal_reason = NULL,
                     finished_at = NULL
                 WHERE episode_id = ?
                 """,
-                (visible_text, max_tokens or 0, episode_id),
+                (visible_text, episode_id),
             )
             if cursor.rowcount != 1:
                 raise EditorError(f"unknown episode {episode_id!r}")
@@ -473,36 +427,6 @@ class EpisodeStore:
         }
 
 
-    def record_sampling_segment(
-        self,
-        episode_id: str,
-        *,
-        start_boundary: int,
-        sampling: SamplerConfig,
-        stream_fingerprint: str,
-    ) -> None:
-        """Record a sampler-policy transition at a live token boundary."""
-        validate_boundary(start_boundary, "start_boundary")
-        validate_fingerprint(stream_fingerprint)
-        with self.transaction() as db:
-            self._require_unsealed(db, episode_id)
-            db.execute(
-                """
-                INSERT INTO sampler_segments(
-                    episode_id, start_boundary, sampling_json, stream_fingerprint
-                ) VALUES (?, ?, ?, ?)
-                ON CONFLICT(episode_id, start_boundary) DO UPDATE SET
-                    sampling_json = excluded.sampling_json,
-                    stream_fingerprint = excluded.stream_fingerprint
-                """,
-                (
-                    episode_id,
-                    int(start_boundary),
-                    _json(_core_sampling_record(sampling)),
-                    stream_fingerprint,
-                ),
-            )
-
     def copy_prefix(
         self,
         source_episode_id: str,
@@ -510,7 +434,6 @@ class EpisodeStore:
         boundary: int,
         *,
         visible_text: str,
-        max_tokens: int | None,
     ) -> None:
         """Persist one source history prefix as a new root-relative episode."""
 
@@ -520,8 +443,6 @@ class EpisodeStore:
             raise EditorError("cannot copy an episode prefix onto itself")
         if type(boundary) is not int or boundary < 0:
             raise EditorError("fork boundary must be a nonnegative integer")
-        if max_tokens is not None and (type(max_tokens) is not int or max_tokens < 1):
-            raise EditorError("max_tokens must be a positive integer")
         if self.actions(destination_episode_id) or self.tokens(destination_episode_id):
             raise EditorError("destination episode already has recorded history")
 
@@ -530,31 +451,17 @@ class EpisodeStore:
         visible_count = sum(bool(row["realized_visible"]) for row in source_tokens)
         if boundary > visible_count:
             raise EditorError(f"fork boundary must be between 0 and {visible_count}")
-        source_segments = self.connection.execute(
-            "SELECT * FROM sampler_segments "
-            "WHERE episode_id = ? AND start_boundary <= ? "
-            "ORDER BY start_boundary",
-            (source_episode_id, boundary),
-        ).fetchall()
-        source_budgets = self.connection.execute(
-            "SELECT * FROM budget_segments "
-            "WHERE episode_id = ? AND start_boundary <= ? "
-            "ORDER BY start_boundary",
-            (source_episode_id, boundary),
-        ).fetchall()
         try:
             materialized = materialize_stored_prefix(
                 source_actions,
                 source_tokens,
-                [dict(segment) for segment in source_segments],
-                [dict(budget) for budget in source_budgets],
                 boundary,
             )
         except ValueError as exc:
             raise EditorError(str(exc)) from exc
 
         # Keep the destination identity and root context, replacing only its
-        # provisional control rows with the copied root-relative prefix.
+        # initial rows with the copied root-relative prefix.
         with self.transaction() as db:
             self._write_history_actions(
                 db,
@@ -562,44 +469,22 @@ class EpisodeStore:
                 materialized,
                 preserve_ordinals=False,
             )
-            for segment in materialized.sampler_segments:
-                db.execute(
-                    """
-                    INSERT OR REPLACE INTO sampler_segments(
-                        episode_id, start_boundary, sampling_json, stream_fingerprint
-                    ) VALUES (?, ?, ?, ?)
-                    """,
-                    (
-                        destination_episode_id,
-                        int(segment["start_boundary"]),
-                        str(segment["sampling_json"]),
-                        str(segment["stream_fingerprint"]),
-                    ),
-                )
-            for budget in materialized.budget_segments:
-                db.execute(
-                    """
-                    INSERT OR REPLACE INTO budget_segments(
-                        episode_id, start_boundary, max_tokens,
-                        checkpoint_boundary
-                    ) VALUES (?, ?, ?, ?)
-                    """,
-                    (
-                        destination_episode_id,
-                        int(budget["start_boundary"]),
-                        budget["max_tokens"],
-                        budget["checkpoint_boundary"],
-                    ),
-                )
+            source = self.get_episode(source_episode_id)
             db.execute(
                 """
                 UPDATE episodes
-                SET visible_text = ?, max_tokens = ?, status = 'open',
+                SET visible_text = ?, initial_sampling_json = ?,
+                    initial_stream_fingerprint = ?, status = 'open',
                     terminal_token_id = NULL, terminal_reason = NULL,
                     finished_at = NULL
                 WHERE episode_id = ?
                 """,
-                (visible_text, max_tokens or 0, destination_episode_id),
+                (
+                    visible_text,
+                    _json(source["initial_sampling"]),
+                    source["initial_stream_fingerprint"],
+                    destination_episode_id,
+                ),
             )
 
     def _replace_history_actions(
@@ -804,8 +689,12 @@ class EpisodeStore:
         if row is None:
             raise EditorError(f"unknown episode {episode_id!r}")
         result = dict(row)
-        result["max_tokens"] = result["max_tokens"] or None
         result["initial_token_ids"] = _loads(result.pop("initial_token_ids_json"), [])
+        result["initial_sampling"] = _loads(result.pop("initial_sampling_json"), {})
+        if not isinstance(result["initial_sampling"], dict):
+            raise EditorError("saved initial sampler settings must be an object")
+        SamplerConfig.from_record(result["initial_sampling"])
+        validate_fingerprint(result["initial_stream_fingerprint"])
         result["backend"] = _loads(result.pop("backend_json"), {})
         result["metadata"] = _loads(result.pop("metadata_json"), {})
         return result
@@ -896,83 +785,49 @@ class EpisodeStore:
             result.append(item)
         return result
 
-    def sampler_segments(self, episode_id: str) -> list[dict[str, Any]]:
-        """Return decoded sampler-control records in root-boundary order."""
-        self.get_episode(episode_id)
-        rows = self.connection.execute(
-            "SELECT episode_id, start_boundary, sampling_json, stream_fingerprint "
-            "FROM sampler_segments WHERE episode_id = ? ORDER BY start_boundary",
-            (episode_id,),
-        ).fetchall()
-        return [self._decode_sampler_segment(row) for row in rows]
-
-    @staticmethod
-    def _decode_sampler_segment(row) -> dict[str, Any]:
-        item = dict(row)
-        item["sampling"] = _loads(item.pop("sampling_json"), {})
-        if not isinstance(item["sampling"], dict):
-            raise EditorError("saved sampler settings must be an object")
-        SamplerConfig.from_record(item["sampling"])
-        validate_boundary(item["start_boundary"], "start_boundary")
-        validate_fingerprint(item["stream_fingerprint"])
-        return item
-
-    def _sampling_segment_at_boundary(
-        self, episode_id: str, boundary: int
+    def sampling_state_at_boundary(
+        self, episode_id: str, boundary: int | None = None
     ) -> dict[str, Any]:
-        validate_boundary(boundary, "boundary")
-        row = self.connection.execute(
-            """
-            SELECT episode_id, start_boundary, sampling_json, stream_fingerprint
-            FROM sampler_segments
-            WHERE episode_id = ? AND start_boundary <= ?
-            ORDER BY start_boundary DESC
-            LIMIT 1
-            """,
-            (episode_id, boundary),
-        ).fetchone()
-        if row is None:
-            raise EditorError(f"episode {episode_id!r} has no sampler segment")
-        return self._decode_sampler_segment(row)
+        """Resolve sampler state from the executable action prefix."""
+        episode = self.get_episode(episode_id)
+        visible_boundary = int(
+            self.connection.execute(
+                "SELECT COUNT(*) FROM tokens WHERE episode_id = ? AND realized_visible = 1",
+                (episode_id,),
+            ).fetchone()[0]
+        )
+        selected = visible_boundary if boundary is None else boundary
+        validate_boundary(selected, "boundary")
+        if selected > visible_boundary:
+            raise EditorError(f"sampler boundary must be between 0 and {visible_boundary}")
+        if boundary is None:
+            rows = self.connection.execute(
+                "SELECT arguments_json FROM actions WHERE episode_id = ? ORDER BY ordinal",
+                (episode_id,),
+            )
+        else:
+            rows = self.connection.execute(
+                """
+                SELECT arguments_json FROM actions
+                WHERE episode_id = ?
+                  AND (boundary_after < ? OR
+                       (boundary_after = ? AND boundary_before < ?))
+                ORDER BY ordinal
+                """,
+                (episode_id, selected, selected, selected),
+            )
+        sampling = SamplerConfig.from_record(episode["initial_sampling"])
+        for row in rows:
+            arguments = _loads(row["arguments_json"], {})
+            if not isinstance(arguments, Mapping):
+                raise EditorError("saved action arguments must be an object")
+            action = action_from_dict(arguments)
+            sampling = sampler_after_action(sampling, action)
+        return {
+            "boundary": selected,
+            "sampling": sampling.to_dict(),
+            "stream_fingerprint": episode["initial_stream_fingerprint"],
+        }
 
     def current_sampling_state(self, episode_id: str) -> dict[str, Any]:
-        """Return the current visible boundary and its active sampler record.
-
-        This reads a visible-token count and one sampler row, without
-        materializing token history or decoding every sampler transition.
-        """
-        row = self.connection.execute(
-            """
-            SELECT (
-                SELECT COUNT(*)
-                FROM tokens
-                WHERE tokens.episode_id = episodes.episode_id
-                  AND tokens.realized_visible = 1
-            ) AS boundary
-            FROM episodes
-            WHERE episode_id = ?
-            """,
-            (episode_id,),
-        ).fetchone()
-        if row is None:
-            raise EditorError(f"unknown episode {episode_id!r}")
-        boundary = int(row["boundary"])
-        segment = self._sampling_segment_at_boundary(episode_id, boundary)
-        return {"boundary": boundary, **segment}
-
-    def budget_segments(self, episode_id: str) -> list[dict[str, Any]]:
-        """Return budget-control records in root-boundary order."""
-        self.get_episode(episode_id)
-        rows = self.connection.execute(
-            "SELECT * FROM budget_segments WHERE episode_id = ? ORDER BY start_boundary",
-            (episode_id,),
-        ).fetchall()
-        result = [dict(row) for row in rows]
-        for item in result:
-            validate_boundary(item["start_boundary"], "start_boundary")
-        return result
-
-    def sampling_segment(self, episode_id: str, boundary: int = 0) -> dict[str, Any]:
-        validate_boundary(boundary, "boundary")
-        self.get_episode(episode_id)
-        return self._sampling_segment_at_boundary(episode_id, boundary)
+        return self.sampling_state_at_boundary(episode_id)

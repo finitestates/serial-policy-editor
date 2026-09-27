@@ -1,7 +1,7 @@
 """Prompt-toolkit presentation for the live-edge command surface.
 
-The live-edge menu owns no episode behavior.  It only presents the current
-checkpoint and returns the raw command to ``episode_cli`` for interpretation.
+The live-edge menu owns no episode behavior. It only presents the current
+session state and returns the raw command to ``episode_cli`` for interpretation.
 Keeping that boundary small lets the plain/non-TTY menu and all of the
 episode-side effects continue to use the existing code path.
 """
@@ -35,27 +35,15 @@ def _edge_header(
     *,
     episode_id: str,
     boundary: int,
-    current_budget: int | None,
-    remaining_tokens: int | None,
     sampler_summary: str,
     mode: str = "episode",
 ) -> StyleAndTextTuples:
-    remaining_label = "token" if remaining_tokens == 1 else "tokens"
     fragments: StyleAndTextTuples = [
         ("class:status-strong", "LIVE SESSION\n" if mode == "session" else "LIVE EDGE\n"),
         ("class:section", "Branch " if mode == "session" else "Episode "),
         ("", f"{episode_id}"),
         ("class:muted", f"  ·  boundary {boundary}\n"),
         ("class:rule", "────────────────────────────────────────\n"),
-        ("class:section", "Budget\n"),
-        (
-            "class:proposal",
-            (f"  {remaining_tokens} {remaining_label} remaining  " if remaining_tokens is not None else "  Unlimited  "),
-        ),
-        (
-            "class:muted",
-            (f"default next allowance: {current_budget} tokens\n" if current_budget is not None else "no automatic checkpoint\n"),
-        ),
         ("class:section", "Sampler\n"),
         ("class:muted", f"  {sampler_summary}\n"),
         ("class:section", "Commands\n"),

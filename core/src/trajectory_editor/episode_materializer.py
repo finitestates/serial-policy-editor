@@ -26,8 +26,7 @@ def materialize_live_branch(
 ) -> str:
     """Write one canonical live branch as an independent durable episode."""
 
-    initial = state.control_points[0]
-    if initial.stream_fingerprint is None:
+    if state.stream_fingerprint is None:
         raise EditorError("the selected branch has no stream fingerprint to save")
     identifier = store.create_episode(
         episode_id=episode_id,
@@ -35,9 +34,8 @@ def materialize_live_branch(
         fork_boundary=state.identity.fork_boundary if parent_episode_id is not None else None,
         initial_text=session.prompt,
         initial_token_ids=state.initial_token_ids,
-        sampling=initial.sampling,
-        stream_fingerprint=initial.stream_fingerprint,
-        max_tokens=initial.max_tokens,
+        sampling=state.initial_sampling,
+        stream_fingerprint=state.stream_fingerprint,
         backend=provenance,
         metadata={
             "mode": mode,
@@ -48,40 +46,10 @@ def materialize_live_branch(
             "live_materialization": "full-root-branch",
             "boundary_system": "root-relative",
         },
-        checkpoint_boundary=initial.checkpoint_boundary,
     )
-    prior = initial
-    for point in state.control_points[1:]:
-        if point.stream_fingerprint is None:
-            raise EditorError("the selected branch has no stream fingerprint to save")
-        if (
-            point.sampling,
-            point.stream_fingerprint,
-        ) != (
-            prior.sampling,
-            prior.stream_fingerprint,
-        ):
-            store.record_sampling_segment(
-                identifier,
-                start_boundary=point.boundary,
-                sampling=point.sampling,
-                stream_fingerprint=point.stream_fingerprint,
-            )
-        if (point.max_tokens, point.checkpoint_boundary) != (
-            prior.max_tokens,
-            prior.checkpoint_boundary,
-        ):
-            store.record_budget(
-                identifier,
-                point.boundary,
-                point.max_tokens,
-                point.checkpoint_boundary,
-            )
-        prior = point
     for ordinal, outcome in enumerate(state.history_outcomes):
         store.record_action(identifier, ordinal, outcome)
     visible_text = session.engine.backend.render(list(state.visible_token_ids))
-    final = state.control_points[-1]
     if state.terminal_reason is not None:
         store.finish_episode(
             identifier,
@@ -93,7 +61,6 @@ def materialize_live_branch(
         store.update_episode(
             identifier,
             visible_text=visible_text,
-            max_tokens=final.max_tokens,
         )
     return identifier
 

@@ -9,7 +9,7 @@ import pytest
 
 from tests.fakes import ConformingFakeBackend, ScriptedIO
 from trajectory_editor.candidate_columns import CandidateColumns
-from trajectory_editor.core.actions import Accept, SelectRawRank
+from trajectory_editor.core.actions import Accept, SelectRawRank, SetSampler
 from trajectory_editor.core.errors import EditorError
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine
@@ -97,7 +97,6 @@ def test_projector_replays_missing_metrics_without_persisting_them(tmp_path):
             initial_token_ids=engine.initial_token_ids,
             sampling=engine.sampling,
             stream_fingerprint=engine.stream_fingerprint,
-            max_tokens=engine.max_tokens,
             backend=backend.provenance(),
         )
         store.record_action(episode_id, 0, outcome)
@@ -135,11 +134,11 @@ def test_projector_replays_missing_metrics_without_persisting_them(tmp_path):
         assert "raw-rank=7" in legacy and "policy-rank=6" in legacy
 
 
-def test_projector_follows_recorded_budget_and_sampler_changes(tmp_path):
+def test_projector_replays_sampler_changes_as_ordered_actions(tmp_path):
     backend = ConformingFakeBackend()
     engine = EpisodeEngine(
         backend, sampling=SamplerConfig(temperature=0.0),
-        initial_token_ids=[7], max_tokens=1,
+        initial_token_ids=[7],
     )
     with EpisodeStore(tmp_path / "renewed.db") as store:
         episode_id = store.create_episode(
@@ -147,23 +146,16 @@ def test_projector_follows_recorded_budget_and_sampler_changes(tmp_path):
             initial_token_ids=engine.initial_token_ids,
             sampling=engine.sampling,
             stream_fingerprint=engine.stream_fingerprint,
-            max_tokens=engine.max_tokens,
             backend=backend.provenance(),
         )
         store.record_action(episode_id, 0, engine.apply(Accept()))
-        assert engine.checkpointed
-        engine.resume(max_tokens=1)
-        store.record_budget(
-            episode_id, engine.boundary, engine.max_tokens, engine.checkpoint_boundary,
+        sampler_outcome = engine.apply(
+            SetSampler(SamplerConfig(temperature=0.0, presence_penalty=100.0))
         )
-        engine.sampling = SamplerConfig(temperature=0.0, presence_penalty=100.0)
-        store.record_sampling_segment(
-            episode_id, start_boundary=engine.boundary, sampling=engine.sampling,
-            stream_fingerprint=engine.stream_fingerprint,
-        )
+        store.record_action(episode_id, 1, sampler_outcome)
         expected_policy_rank = engine.observe().statistics.policy_rank(1)
         assert expected_policy_rank > 3
-        store.record_action(episode_id, 1, engine.apply(SelectRawRank(3)))
+        store.record_action(episode_id, 2, engine.apply(SelectRawRank(3)))
         report = project_episode(
             store, episode_id, with_loss=True, with_policy_rank=True,
             backend=ConformingFakeBackend(),
@@ -184,7 +176,6 @@ def test_projector_refuses_to_reconstruct_metrics_past_unknown_saved_action(tmp_
             initial_token_ids=engine.initial_token_ids,
             sampling=engine.sampling,
             stream_fingerprint=engine.stream_fingerprint,
-            max_tokens=engine.max_tokens,
             backend=backend.provenance(),
         )
         store.record_action(episode_id, 0, outcome)

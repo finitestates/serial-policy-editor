@@ -22,8 +22,6 @@ class TrajectoryState:
     terminal_token_id: int | None = None
     terminal_reason: str | None = None
     stream_fingerprint: str | None = None
-    max_tokens: int | None = None
-    checkpoint_boundary: int | None = None
 
     def __post_init__(self) -> None:
         self.initial_token_ids = tuple(self.initial_token_ids)
@@ -38,14 +36,6 @@ class TrajectoryState:
             raise EditorError("trajectory initial text must be a string")
         if self.stream_fingerprint is not None and not isinstance(self.stream_fingerprint, str):
             raise EditorError("trajectory stream fingerprint must be a string or null")
-        if self.max_tokens is not None and (
-            type(self.max_tokens) is not int or self.max_tokens < 1
-        ):
-            raise EditorError("trajectory max_tokens must be positive or null")
-        if self.checkpoint_boundary is not None and (
-            type(self.checkpoint_boundary) is not int or self.checkpoint_boundary < 0
-        ):
-            raise EditorError("trajectory checkpoint boundary must be nonnegative or null")
 
     @property
     def boundary(self) -> int:
@@ -56,34 +46,8 @@ class TrajectoryState:
         return [*self.initial_token_ids, *self.visible_token_ids]
 
     @property
-    def remaining(self) -> int | None:
-        if self.checkpoint_boundary is None:
-            return None
-        return max(0, self.checkpoint_boundary - self.boundary)
-
-    @property
-    def checkpointed(self) -> bool:
-        return self.terminal_reason is None and self.remaining == 0
-
-    @property
     def ended(self) -> bool:
         return self.terminal_reason is not None
-
-    def set_budget(
-        self,
-        max_tokens: int | None,
-        checkpoint_boundary: int | None,
-    ) -> None:
-        """Update the allowance state restored by a lifecycle adapter."""
-
-        if max_tokens is not None and (type(max_tokens) is not int or max_tokens < 1):
-            raise EditorError("trajectory max_tokens must be positive or null")
-        if checkpoint_boundary is not None and (
-            type(checkpoint_boundary) is not int or checkpoint_boundary < 0
-        ):
-            raise EditorError("trajectory checkpoint boundary must be nonnegative or null")
-        self.max_tokens = max_tokens
-        self.checkpoint_boundary = checkpoint_boundary
 
     def set_stream_fingerprint(self, stream_fingerprint: str | None) -> None:
         """Restore the sampler stream identity associated with the live branch."""

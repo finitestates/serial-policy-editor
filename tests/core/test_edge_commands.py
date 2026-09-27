@@ -6,7 +6,6 @@ import pytest
 
 from trajectory_editor.edge_commands import (
     BranchesCommand,
-    BudgetCommand,
     ContinueCommand,
     EdgeCommandParseError,
     EndCommand,
@@ -38,10 +37,6 @@ pytestmark = pytest.mark.current_workflow
         ("   ", ContinueCommand()),
         ("c", ContinueCommand()),
         ("CONTINUE", ContinueCommand()),
-        ("n 17", BudgetCommand(17)),
-        ("next +3", BudgetCommand(3)),
-        ("n off", BudgetCommand(None)),
-        ("next none", BudgetCommand(None)),
         ("s", SamplerCommand()),
         ("s temperature=.8 top_k=20", SamplerCommand("temperature=.8 top_k=20")),
         ("SAMPLER random-seed", SamplerCommand("random-seed")),
@@ -93,12 +88,6 @@ def test_parse_edge_command_extracts_typed_values(raw, expected):
 
 @pytest.mark.parametrize("raw", ["rewind nope", "fork 1.5", "reroll nope", "replay source --until later"])
 def test_malformed_numeric_boundaries_are_parse_errors(raw):
-    with pytest.raises(EdgeCommandParseError):
-        parse_edge_command(raw)
-
-
-@pytest.mark.parametrize("raw", ["n 0", "n -1", "next nope", "n 2 extra"])
-def test_malformed_budgets_are_parse_errors(raw):
     with pytest.raises(EdgeCommandParseError):
         parse_edge_command(raw)
 

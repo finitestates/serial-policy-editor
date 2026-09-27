@@ -132,7 +132,7 @@ def main():
                             )
                         if len(result.outcomes) != len(actions) or engine.visible_token_ids != preview:
                             raise RuntimeError('selected continuation did not match the preview')
-                        if engine.ended or engine.checkpointed:
+                        if engine.ended:
                             raise RuntimeError('selected path has no next menu; choose another fixture')
                         with phase(phases, 'next_menu'):
                             try:

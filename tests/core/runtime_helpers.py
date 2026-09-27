@@ -14,7 +14,6 @@ class LiveScriptedIO(ScriptedIO):
     def __init__(self, responses: list[str | None]) -> None:
         super().__init__(responses)
         self.initial_commands: list[str | None] = []
-        self.remaining_tokens: list[int] = []
         self.entered = 0
 
     @property
@@ -24,7 +23,6 @@ class LiveScriptedIO(ScriptedIO):
     def read_choice(self, state):
         self.choice_requests.append(state)
         self.initial_commands.append(state.initial_command)
-        self.remaining_tokens.append(state.remaining_tokens)
         if not self.responses:
             raise AssertionError("unexpected live input request")
         return self.responses.pop(0)
@@ -53,11 +51,10 @@ class PhraseBackend(ConformingFakeBackend):
         return super().tokenize(text, add_bos=add_bos, special=special)
 
 
-def engine(backend=None, *, max_tokens: int = 2) -> EpisodeEngine:
+def engine(backend=None) -> EpisodeEngine:
     return EpisodeEngine(
         backend or ConformingFakeBackend(),
         sampling=SamplerConfig(temperature=0.0, top_k=8, top_p=1.0, min_p=0.0),
-        max_tokens=max_tokens,
         initial_text="P",
         initial_token_ids=[7],
     )

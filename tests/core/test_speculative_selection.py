@@ -12,7 +12,6 @@ from trajectory_editor.core.actions import Accept, SelectRawRank
 def engine(
     backend: ConformingFakeBackend,
     *,
-    max_tokens: int | None = None,
     sampling: SamplerConfig | None = None,
     initial_token_ids: list[int] | None = None,
     guidance_backend: ConformingFakeBackend | None = None,
@@ -21,7 +20,6 @@ def engine(
         backend,
         initial_token_ids=initial_token_ids or [7],
         sampling=sampling or SamplerConfig(temperature=0.0),
-        max_tokens=max_tokens,
         guidance_backend=guidance_backend,
     )
 
@@ -161,30 +159,6 @@ def test_default_proposal_warm_up_commits_through_accept():
     assert backend.tokens == [7, 1]
     episode.apply(Accept())
 
-    assert backend.eval_calls == [(1,)]
-    assert backend.tokens == [7, 1]
-
-
-@pytest.mark.invariant
-def test_final_checkpoint_token_is_not_warmed():
-    backend = SpeculativeFakeBackend()
-    episode = engine(backend, max_tokens=1)
-    observation = episode.observe()
-
-    assert not episode.speculate_accept(observation, raw_rank=2, token_id=2)
-    assert backend.eval_calls == []
-    assert backend.tokens == [7]
-
-
-@pytest.mark.invariant
-def test_checkpointed_episode_declines_a_stale_warm_up_request():
-    backend = SpeculativeFakeBackend()
-    episode = engine(backend, max_tokens=1)
-    observation = episode.observe()
-    episode.apply(Accept())
-    assert episode.checkpointed
-
-    assert not episode.speculate_accept(observation, raw_rank=2, token_id=2)
     assert backend.eval_calls == [(1,)]
     assert backend.tokens == [7, 1]
 

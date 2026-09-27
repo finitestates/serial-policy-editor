@@ -8,11 +8,12 @@ deliberately not part of this module.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from typing import Any, TypeAlias
 
 from .errors import EditorError
+from .sampler_config import SamplerConfig
 from .sampling import MAX_SEED, MIN_SEED
 
 
@@ -148,9 +149,33 @@ class Reroll:
         return {"kind": self.kind, "seed": self.seed}
 
 
+@dataclass(frozen=True)
+class SetSampler:
+    """Replace the complete sampler configuration at this action boundary."""
+
+    sampling: SamplerConfig
+    kind: str = "set-sampler"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.sampling, SamplerConfig):
+            raise EditorError("sampler change requires a SamplerConfig")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"kind": self.kind, "sampling": self.sampling.to_dict()}
+
+
 PolicyAction: TypeAlias = (
-    Accept | SelectRawRank | Write | Phrase | Hold | EndGeneration | Reroll
+    Accept | SelectRawRank | Write | Phrase | Hold | EndGeneration | Reroll | SetSampler
 )
+
+
+def sampler_after_action(sampling: SamplerConfig, action: PolicyAction) -> SamplerConfig:
+    """Apply the sampler-state effect of one action, if it has one."""
+    if isinstance(action, SetSampler):
+        return action.sampling
+    if isinstance(action, Reroll):
+        return replace(sampling, seed=action.seed)
+    return sampling
 
 
 class UnsupportedPolicyActionKind(EditorError):
@@ -199,4 +224,9 @@ def action_from_dict(raw: Mapping[str, Any]) -> PolicyAction:
         if type(seed) is not int:
             raise EditorError("reroll action has no valid seed")
         return Reroll(seed)
+    if kind == "set-sampler":
+        sampling = raw.get("sampling")
+        if not isinstance(sampling, Mapping):
+            raise EditorError("sampler change has no valid sampling configuration")
+        return SetSampler(SamplerConfig.from_record(sampling))
     raise UnsupportedPolicyActionKind(f"unsupported policy action kind {kind!r}")

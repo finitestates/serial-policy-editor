@@ -17,6 +17,7 @@ from .core.actions import (
     Phrase,
     PolicyAction,
     Reroll,
+    SetSampler,
     SelectRawRank,
     Write,
 )
@@ -45,10 +46,6 @@ from .core.sampling import (
 
 class InstructionRejected(EditorError):
     """A recognized move cannot execute in the current target state."""
-
-
-class TokenBudgetExceeded(InstructionRejected):
-    """An atomic action cannot fit within the current allowance."""
 
 
 @dataclass(frozen=True, eq=False, slots=True)
@@ -183,7 +180,6 @@ class EpisodeEngine:
         backend: InferenceBackend,
         *,
         sampling: SamplerConfig,
-        max_tokens: int | None = None,
         initial_text: str | None = None,
         initial_token_ids: Sequence[int] | None = None,
         add_bos: bool = True,
@@ -191,8 +187,6 @@ class EpisodeEngine:
         stream_fingerprint: str | None = None,
         guidance_backend: InferenceBackend | None = None,
     ) -> None:
-        if max_tokens is not None and (type(max_tokens) is not int or max_tokens < 1):
-            raise EditorError("max_tokens must be a positive integer")
         require_inference_backend(backend)
         if guidance_backend is not None:
             require_inference_backend(guidance_backend)
@@ -226,8 +220,6 @@ class EpisodeEngine:
         self.trajectory = TrajectoryState(
             initial_token_ids=tuple(tokens),
             initial_text=initial_text_value,
-            max_tokens=max_tokens,
-            checkpoint_boundary=max_tokens,
             stream_fingerprint=fingerprint,
         )
         self._prefix_snapshot = TokenPrefixSnapshot.root(tokens)
@@ -291,26 +283,6 @@ class EpisodeEngine:
         self.trajectory.stream_fingerprint = value
 
     @property
-    def max_tokens(self) -> int | None:
-        return self.trajectory.max_tokens
-
-    @max_tokens.setter
-    def max_tokens(self, value: int | None) -> None:
-        if value is not None and (type(value) is not int or value < 1):
-            raise EditorError("max_tokens must be a positive integer")
-        self.trajectory.max_tokens = value
-
-    @property
-    def checkpoint_boundary(self) -> int | None:
-        return self.trajectory.checkpoint_boundary
-
-    @checkpoint_boundary.setter
-    def checkpoint_boundary(self, value: int | None) -> None:
-        if value is not None and (type(value) is not int or value < 0):
-            raise EditorError("checkpoint boundary must be nonnegative")
-        self.trajectory.checkpoint_boundary = value
-
-    @property
     def sampling(self) -> SamplerConfig:
         return self._sampling
 
@@ -342,49 +314,12 @@ class EpisodeEngine:
         return self.trajectory.boundary
 
     @property
-    def remaining(self) -> int | None:
-        """Visible tokens remaining until the next checkpoint."""
-        return self.trajectory.remaining
-
-    @property
-    def checkpointed(self) -> bool:
-        """Whether the live episode has yielded at its current checkpoint."""
-        return self.trajectory.checkpointed
-
-    @property
     def ended(self) -> bool:
         """True only after a genuine terminal event."""
         return self.trajectory.ended
 
-    def resume(
-        self,
-        *,
-        max_tokens: int | None | str = "keep",
-        sampling: SamplerConfig | None = None,
-    ) -> None:
-        """Continue with the remaining allowance, renewing only when exhausted.
-
-        An explicit integer starts a fresh allowance; None removes the budget.
-        Sampling changes begin at the current token boundary.
-        """
-        if self.ended:
-            raise EditorError("cannot resume a terminated episode")
-        budget = self.max_tokens if max_tokens == "keep" else max_tokens
-        if budget is not None and (type(budget) is not int or budget < 1):
-            raise EditorError("max_tokens must be a positive integer")
-        self.max_tokens = budget
-        if max_tokens != "keep" or self.checkpointed:
-            self.checkpoint_boundary = None if budget is None else self.boundary + budget
-        if sampling is not None:
-            self.sampling = sampling
-
     def rewind_to(self, boundary: int, *, _defer_backend_positioning: bool = False) -> None:
-        """Discard visible state after a token boundary and reconcile the backend.
-
-        The checkpoint boundary is kept intact. The caller restores historical
-        sampler settings and stream identity from the episode store; the retained
-        visible-token boundary determines the next sampling boundary.
-        """
+        """Discard visible state after a token boundary and reconcile the backend."""
         if type(boundary) is not int or boundary < 0 or boundary > self.boundary:
             raise EditorError(
                 f"rewind boundary must be between 0 and {self.boundary}"
@@ -486,7 +421,7 @@ class EpisodeEngine:
             or is_cancelled()
         ):
             return False
-        if self.ended or self.checkpointed:
+        if self.ended:
             return False
         self._validate_observation(observation)
         if raw_rank is None and token_id is None:
@@ -518,7 +453,6 @@ class EpisodeEngine:
         self.discard_speculative_accept()
         if (
             self.backend.is_eog(token_id)
-            or (self.remaining is not None and self.remaining <= 1)
             or self._cfg_active()
             or not callable(getattr(self.backend, "speculate", None))
             or not callable(getattr(self.backend, "commit_speculation", None))
@@ -648,14 +582,14 @@ class EpisodeEngine:
 
     def _validate_observation(self, observation: Observation) -> None:
         if (
-            self.ended or self.checkpointed
+            self.ended
             or observation is not self._observation
             or self._observation_key != self._decision_key()
         ):
             raise EditorError("request refers to a stale observation")
 
     def observe(self) -> Observation:
-        if self.ended or self.checkpointed:
+        if self.ended:
             raise EditorError("the episode has no live decision boundary")
         key = self._decision_key()
         if self._observation is not None and self._observation_key == key:
@@ -1146,8 +1080,6 @@ class EpisodeEngine:
             raise InstructionRejected(
                 f"{action.kind} has {len(planned)} tokens; max is {action.max_tokens}"
             )
-        if self.remaining is not None and len(planned) > self.remaining:
-            raise TokenBudgetExceeded("phrase exceeds the remaining token budget")
         if any(self.backend.is_eog(token_id) for token_id in planned):
             raise InstructionRejected("phrase text resolves to an EOG token")
 
@@ -1272,8 +1204,6 @@ class EpisodeEngine:
             raise EditorError("divergence policy must be handoff or ballistic")
         if self.ended:
             raise EditorError("cannot apply an action after the episode ended")
-        if self.checkpointed:
-            raise EditorError("cannot apply an action until the checkpoint is resumed")
         prepared = self._prepared_accept
         if replay or not isinstance(action, (Accept, SelectRawRank)):
             self.discard_speculative_accept()
@@ -1288,13 +1218,18 @@ class EpisodeEngine:
             )
         ):
             self.discard_speculative_accept()
-        if (
-            isinstance(action, Hold)
-            and self.remaining is not None
-            and action.limit > self.remaining
-        ):
-            raise TokenBudgetExceeded(
-                f"hold requests {action.limit} tokens but only {self.remaining} remain"
+        if isinstance(action, SetSampler):
+            self.sampling = action.sampling
+            return ActionOutcome(
+                action=action,
+                boundary_before=self.boundary,
+                boundary_after=self.boundary,
+                resolved_text="",
+                resolved_token_ids=(),
+                visible_token_ids=(),
+                terminal_token_id=None,
+                stop_reason="sampler-change",
+                evidence=(),
             )
         if isinstance(action, Phrase):
             return self._apply_phrase(
@@ -1356,10 +1291,6 @@ class EpisodeEngine:
 
         if isinstance(action, (Accept, SelectRawRank, Write, EndGeneration)):
             planned, resolved_text = self._resolve_once(action)
-            if self.remaining is not None and len(planned) > self.remaining + sum(
-                self.backend.is_eog(token_id) for token_id in planned
-            ):
-                raise TokenBudgetExceeded("action exceeds the remaining token budget")
             # Write is atomic at the policy boundary: its tokenization is
             # checked before any wedge is committed.
             if isinstance(action, Write) and expectation is not None:
@@ -1447,7 +1378,6 @@ class EpisodeEngine:
             while (
                 len(visible) < limit
                 and not self.ended
-                and not self.checkpointed
             ):
                 observation = self.observe()
                 token_id = observation.proposal_token_id
@@ -1486,10 +1416,7 @@ class EpisodeEngine:
                         stop_reason = f"{boundary_kind}-boundary"
                         break
             else:
-                if self.checkpointed:
-                    stop_reason = "checkpoint"
-                else:
-                    stop_reason = "requested-length"
+                stop_reason = "requested-length"
             resolved_text = self.backend.render(visible)
 
         if expectation is not None and divergence is None:

@@ -9,7 +9,6 @@ launch:
   cache: auto
   temperature: 0.0
   seed: 17
-  max-tokens: 64
 rtol: 0.001
 atol: 0.02
 scenarios:

@@ -202,12 +202,11 @@ with EpisodeStore(workspace) as store:
         initial_token_ids=[1],
         sampling=source_engine.sampling,
         stream_fingerprint=source_engine.stream_fingerprint,
-        max_tokens=None,
         backend=backend.provenance(),
     )
     outcome = source_engine.apply(Accept())
     store.record_action(source, 0, outcome)
-    store.update_episode(source, visible_text=source_engine.text, max_tokens=None, status="open")
+    store.update_episode(source, visible_text=source_engine.text, status="open")
     from trajectory_editor.episode_replay_source import replay_procedure
     step = replay_procedure(store, source)[0]
     action, expectation = step["action"], step["expectation"]

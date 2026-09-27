@@ -28,8 +28,8 @@ vector creation and inspection are provided by the separate `vector/` package.
 ## In-memory episodes
 
 For an application that does not need a workspace, construct `LiveSession`
-with an `EpisodeEngine`. It records action tape, outcomes, sampler/budget
-control points, branch lineage, and rewind/fork state without importing or
+with an `EpisodeEngine`. It records action tape, outcomes, sampler changes,
+branch lineage, and rewind/fork state without importing or
 requiring `EpisodeStore`. A fork is a lightweight session event: it retains a
 reconstructible token prefix and reactivates on the one loaded backend. An
 optional backend cache snapshot can make that faster, but is never branch

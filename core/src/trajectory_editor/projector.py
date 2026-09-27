@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import math
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from .core.actions import Accept, EndGeneration, Hold, Phrase, Reroll, SelectRawRank, Write
+from .core.actions import Accept, EndGeneration, Hold, Phrase, Reroll, SelectRawRank, SetSampler, Write
 from .core.errors import EditorError
 from .episode_lineage import EpisodeRelation, LineageNode, LineageView
 from .episode_lineage_source import EpisodeLineageReader, build_lineage_view
-from .episode_replay_source import build_source_replay_recipe, final_sampling, replay_procedure
+from .episode_replay_source import build_source_replay_recipe, replay_procedure
 from .episode_store import EpisodeStore
 
 
@@ -52,8 +53,8 @@ def _recompute_missing_metrics(
     from .core.sampler_config import SamplerConfig
     from .episode_backend_loader import load_cfg_guidance_backend, load_episode_backend
     from .episode_engine import EpisodeEngine
-    from .run_loop import ReplayContext, ReplayPlan, run_plan
-    from .spr_recipe import ReplayControlPolicy, ReplayPlacement, compose_replay_plan
+    from .run_loop import run_plan
+    from .spr_recipe import ReplaySamplerPolicy, ReplayPlacement, compose_replay_plan
 
     owned_backend = backend is None
     owned_guidance = False
@@ -84,9 +85,17 @@ def _recompute_missing_metrics(
         matched = [key for key in keys if saved.get(key) is not None]
         if not matched or any(saved[key] != actual.get(key) for key in matched):
             raise EditorError("recorded model identity differs from the loaded model")
+        recipe = build_source_replay_recipe(store, episode_id)
+        plan = compose_replay_plan(
+            recipe, ReplayPlacement.SOURCE_ROOT, ReplaySamplerPolicy.FOLLOW_SOURCE
+        )
+        sampler_configs = [recipe.initial_sampling]
+        sampler_configs.extend(
+            step.action.sampling
+            for step in plan.steps if isinstance(step.action, SetSampler)
+        )
         if guidance_backend is None and any(
-            SamplerConfig.from_record(row["sampling"]).cfg_unconditional_prompt is not None
-            for row in store.sampler_segments(episode_id)
+            sampling.cfg_unconditional_prompt is not None for sampling in sampler_configs
         ):
             if not owned_backend:
                 raise EditorError("guidance backend is required to replay CFG report metrics")
@@ -97,19 +106,14 @@ def _recompute_missing_metrics(
             if any(saved[key] != guidance.get(key) for key in matched):
                 raise EditorError("recorded model identity differs from the guidance model")
 
-        initial = store.sampling_segment(episode_id, 0)
-        budgets = store.budget_segments(episode_id)
-        first_budget = budgets[0]
         engine = EpisodeEngine(
             backend,
-            sampling=SamplerConfig.from_record(initial["sampling"]),
+            sampling=recipe.initial_sampling,
             initial_text=episode["initial_text"],
             initial_token_ids=episode["initial_token_ids"],
-            max_tokens=first_budget["max_tokens"],
-            stream_fingerprint=initial["stream_fingerprint"],
+            stream_fingerprint=recipe.stream_fingerprint,
             guidance_backend=guidance_backend,
         )
-        engine.checkpoint_boundary = first_budget["checkpoint_boundary"]
 
         def capture(observation: Any, token_id: int) -> None:
             token = missing.get((observation.boundary, token_id))
@@ -130,47 +134,14 @@ def _recompute_missing_metrics(
             def __init__(self) -> None:
                 self.engine = engine
 
-            def set_sampler(self, sampling: SamplerConfig) -> None:
-                engine.sampling = sampling
-
             def generate(self, action: Any, *, expectation: Any, divergence_policy: str, replay: bool) -> Any:
-                boundary = engine.boundary
-                budget = next(row for row in reversed(budgets) if int(row["start_boundary"]) <= boundary)
-                engine.max_tokens = budget["max_tokens"]
-                engine.checkpoint_boundary = budget["checkpoint_boundary"]
                 return engine.apply(action, expectation=expectation, divergence_policy=divergence_policy, replay=replay)
-
-        recipe = build_source_replay_recipe(store, episode_id)
-        plan = compose_replay_plan(
-            recipe, ReplayPlacement.SOURCE_ROOT, ReplayControlPolicy.FOLLOW_SOURCE
-        )
         if plan.incomplete_handoff_reason is not None:
             raise EditorError(plan.incomplete_handoff_reason)
         target = ProjectionTarget()
-        replayed = 0
-        while replayed < len(plan.steps):
-            if engine.checkpointed:
-                budget = next(
-                    row for row in reversed(budgets)
-                    if int(row["start_boundary"]) <= engine.boundary
-                )
-                if (
-                    budget["checkpoint_boundary"] is not None
-                    and int(budget["checkpoint_boundary"]) <= engine.boundary
-                ):
-                    raise EditorError("recorded budget cannot resume metric replay")
-                engine.resume(max_tokens=budget["max_tokens"])
-                engine.checkpoint_boundary = budget["checkpoint_boundary"]
-            chunk = ReplayPlan(
-                steps=plan.steps[replayed:],
-                follow_source_sampling=plan.follow_source_sampling,
-                final_sampling=plan.final_sampling,
-                context=ReplayContext(sampling=plan.context.sampling[replayed:]),
-            )
-            result = run_plan(target, divergence_policy="handoff", tape=chunk)
-            if result.handed_off or result.replayed_actions == 0:
-                raise EditorError("recorded episode could not be replayed exactly for report metrics")
-            replayed += result.replayed_actions
+        result = run_plan(target, divergence_policy="handoff", tape=plan)
+        if result.handed_off or result.replayed_actions != len(plan.steps):
+            raise EditorError("recorded episode could not be replayed exactly for report metrics")
         if any(
             token.get(field) is None
             for token in missing.values()
@@ -562,7 +533,7 @@ def project_procedure(store: EpisodeStore, episode_id: str) -> str:
 
     episode = store.get_episode(episode_id)
     steps = replay_procedure(store, episode_id)
-    initial = SamplerConfig.from_record(store.sampling_segment(episode_id, 0)["sampling"])
+    initial = SamplerConfig.from_record(episode["initial_sampling"])
     backend = episode["backend"]
     model = backend.get("filename") or backend.get("model_path") or backend.get("model") or "unknown"
     model = PurePosixPath(str(model).replace(chr(92), "/")).name
@@ -578,28 +549,9 @@ def project_procedure(store: EpisodeStore, episode_id: str) -> str:
         f"P       : {_procedure_text(str(episode['initial_text']))}",
         "",
     ]
-    # No source budget is imported by replay; do not pretend the last saved
-    # allowance was necessarily the allowance at the start of this procedure.
     rows: list[tuple[int, str, str | None]] = []
     current = initial
     boundary = 0
-
-    def transition(config: SamplerConfig, at: int, *, trailing: bool = False) -> None:
-        nonlocal current
-        changes = [
-            f"{key}={value}" for key in fields
-            if (value := getattr(config, key)) != getattr(current, key)
-        ]
-        if changes:
-            rows.append((at, "q", None))
-            rows.append((at, "s " + " ".join(changes), None))
-            if not trailing:
-                rows.append((at, "c", None))
-        if config.bias_rules != current.bias_rules:
-            rows.append((at, f"# Set logical bias rules to {[r.to_dict() for r in config.bias_rules]!r}", None))
-        if config.bias_groups != current.bias_groups:
-            rows.append((at, f"# Set bias groups to {[group.to_dict() for group in config.bias_groups]!r}", None))
-        current = config
 
     if initial.bias_rules:
         lines.insert(3, f"RULES   : logical bias rules {[r.to_dict() for r in initial.bias_rules]!r}")
@@ -608,11 +560,22 @@ def project_procedure(store: EpisodeStore, episode_id: str) -> str:
 
     for step in steps:
         boundary = step["boundary"]
-        transition(step["sampling"], boundary)
         action = step["action"]
         tokens = step["tokens"]
         result = "".join(str(token["text"]) for token in tokens)
         comment: str | None = _procedure_text(result)
+        if isinstance(action, SetSampler):
+            updated = action.sampling
+            if updated != current:
+                payload = json.dumps(
+                    updated.to_dict(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                rows.append((boundary, "s " + payload, None))
+            current = updated
+            continue
         if isinstance(action, SelectRawRank):
             command = str(action.rank)
         elif isinstance(action, Accept):
@@ -647,18 +610,13 @@ def project_procedure(store: EpisodeStore, episode_id: str) -> str:
         elif isinstance(action, EndGeneration):
             command = "e!"
         elif isinstance(action, Reroll):
-            # No menu command produces a reroll yet; render it as a comment so
-            # procedure transcripts stay complete and replayable by tape.
-            command = f"# Reroll draw seed to {action.seed}"
+            command = f"reroll {action.seed}"
             comment = None
         else:
             raise EditorError(f"cannot render procedure action {action!r}")
         rows.append((boundary, command, comment))
-        boundary += len(step["expectation"].token_ids)
-
-    transition(final_sampling(store, episode_id), boundary, trailing=True)
     # Finite procedures return live control, never seal the destination.
-    if not rows or rows[-1][1] not in {"q", "e!"} and not rows[-1][1].startswith("s "):
+    if not rows or rows[-1][1] not in {"q", "e!"}:
         rows.append((boundary, "q", None))
     width = max((len(f"{at} : {command}") for at, command, _ in rows), default=0)
     for at, command, comment in rows:

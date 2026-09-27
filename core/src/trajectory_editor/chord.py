@@ -80,8 +80,6 @@ class ChordPath:
     def state(self) -> str:
         if self.engine.ended:
             return "EOG"
-        if self.engine.checkpointed:
-            return "budget reached"
         return "live"
 
 
@@ -89,7 +87,7 @@ class Chord:
     """Owns preview engines; the episode engine and histories stay untouched."""
 
     def __init__(self, engine: EpisodeEngine, ranks: tuple[int, ...]) -> None:
-        if engine.ended or engine.checkpointed:
+        if engine.ended:
             raise EditorError("chord requires a live decision boundary")
         if engine._speculative_accept_prefix is not None:
             engine.discard_speculative_accept()
@@ -118,7 +116,6 @@ class Chord:
                 preview = EpisodeEngine(
                     engine.backend,
                     sampling=engine.sampling,
-                    max_tokens=engine.max_tokens,
                     initial_text=engine.initial_text,
                     initial_token_ids=engine.initial_token_ids,
                     stream_fingerprint=engine.stream_fingerprint,
@@ -128,7 +125,6 @@ class Chord:
                 preview._prefix_snapshot = shared_prefix_snapshot
                 preview._prefix_snapshot_boundary = engine.boundary
                 preview._prefix_snapshot_dirty = False
-                preview.checkpoint_boundary = engine.checkpoint_boundary
                 preview._activation_runtime_key = engine._activation_runtime_key
                 if shared_observation is not None:
                     preview._observation = shared_observation

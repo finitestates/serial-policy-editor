@@ -46,7 +46,6 @@ class ChoiceViewState:
     """One prepared teacher decision, including optional read-only review."""
 
     choice: ChoiceSet
-    remaining_tokens: int | None
     candidates: tuple[Candidate, ...]
     resolve_insertion: Callable[[str, InsertMode], str]
     display_candidates: tuple[Candidate, ...] | None = None
@@ -82,8 +81,6 @@ class ChoiceViewState:
 class EdgeViewState:
     episode_id: str
     boundary: int
-    current_budget: int | None
-    remaining_tokens: int | None
     sampler_summary: str
     mode: str = "episode"
 

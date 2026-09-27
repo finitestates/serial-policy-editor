@@ -56,9 +56,9 @@ class LogitMismatch(AssertionError):
         self.diagnostics = diagnostics
 
 
-def _session(backend, sampling, *, prompt: str = PROMPT, max_tokens: int = 64) -> LiveSession:
+def _session(backend, sampling, *, prompt: str = PROMPT) -> LiveSession:
     return LiveSession(
-        EpisodeEngine(backend, sampling=sampling, max_tokens=max_tokens, initial_text=prompt),
+        EpisodeEngine(backend, sampling=sampling, initial_text=prompt),
         prompt=prompt,
     )
 
@@ -230,7 +230,7 @@ def action_jsonl(backend, sampling, *, rtol: float, atol: float, **_kwargs) -> d
             with meter.phase("teacher_plan"):
                 result = run_plan(session, divergence_policy="ballistic", tape=tape.plan)
             ledger = tuple(session.engine.visible_token_ids)
-            live_edge = not session.engine.ended and not session.engine.checkpointed
+            live_edge = not session.engine.ended
             with meter.phase("finalization"):
                 session.quit()
         if result.replayed_actions != len(ACTION_RECORDS) or len(result.outcomes) != len(ACTION_RECORDS):
@@ -272,7 +272,7 @@ def observed_jsonl(backend, sampling, *, rtol: float, atol: float, **_kwargs) ->
             with meter.phase("teacher_plan"):
                 replay = run_plan(dest, divergence_policy="handoff", tape=tape.plan)
             dest_ledger = tuple(dest.engine.visible_token_ids)
-            live_edge = not dest.engine.ended and not dest.engine.checkpointed
+            live_edge = not dest.engine.ended
             with meter.phase("finalization"):
                 dest.quit()
         if replay.handed_off or replay.replayed_actions != len(tape.plan):
@@ -288,11 +288,11 @@ def observed_jsonl(backend, sampling, *, rtol: float, atol: float, **_kwargs) ->
         changed = (expected.token_ids[0] + 1) % backend.vocabulary_size()
         altered = ReplayPlan(steps=(TapeStep(first.action, ReplayExpectation(
             (changed, *expected.token_ids[1:]), expected.terminal_token_id, expected.stop_reason
-        )), *tape.plan.steps[1:]), follow_source_sampling=False)
+        )), *tape.plan.steps[1:]))
         with _no_database():
             divergent = _session(backend, sampling)
             handoff = run_plan(divergent, divergence_policy="handoff",tape=altered)
-            usable = not divergent.engine.ended and not divergent.engine.checkpointed
+            usable = not divergent.engine.ended
             divergent.discard()
         if (not handoff.handed_off or handoff.replayed_actions != 0 or not usable
                 or len(handoff.outcomes) != 1
@@ -395,7 +395,7 @@ def save_resume(backend, sampling, *, rtol: float, atol: float, provenance: dict
                 source.discard()
                 with meter.phase("resume"):
                     restored_engine = _restore_engine(
-                        store, identifier, backend, max_tokens=None,
+                        store, identifier, backend,
                         sampling_override=None, notice=lambda _message: None,
                     )
                     restored = restore_live_session(
@@ -483,7 +483,7 @@ def long_context(backend, sampling, *, rtol: float, atol: float, **_kwargs) -> d
                 completed_actions += 1
                 prefix = tuple((*session.engine.initial_token_ids, *session.engine.visible_token_ids))
                 captures.append((prefix, backend.last_logits().copy(), outcome.visible_token_ids[-1]))
-                if session.engine.ended or session.engine.checkpointed:
+                if session.engine.ended:
                     stop_reason = outcome.stop_reason
                     break
         ledger = tuple(session.engine.visible_token_ids)
@@ -571,7 +571,7 @@ def cfg_lifecycle(backend, sampling, *, profile, provenance: dict, rtol: float,
     try:
         meter = Measurement()
         with meter.attach(backend, role="conditional"), meter.attach(guidance, role="unconditional"), meter.active():
-            engine = EpisodeEngine(backend, sampling=sampling, max_tokens=64,
+            engine = EpisodeEngine(backend, sampling=sampling,
                                    initial_text=PROMPT, guidance_backend=guidance)
             session = LiveSession(engine, prompt=PROMPT)
             first = session.generate(Accept())

@@ -52,6 +52,7 @@ def _preview(raw, choice, candidates, **kwargs):
     "force hello", "forcex hello", "h", "hold", "h5", "h.5", "h|5",
     "m", "more", "m10", "ms", "ms 8", "ms+2", "ms-2", "/A", '/"\\n"',
     "context", "c 200", "c all", "c900", "f", "f-1", "[", "]", "b",
+    "s", "s temperature=0.7", "reroll", "reroll 42",
     "b A +", "bl 1 +", "1+", "v", "V", "l", "L", "%", "c", "C",
     "overlay pct", "n note", "p note", "q", "e", "e!", "?",
     "chord 1 2", "chord\t1 2",

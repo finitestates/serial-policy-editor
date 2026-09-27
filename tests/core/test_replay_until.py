@@ -8,14 +8,13 @@ import pytest
 
 from tests.core.runtime_helpers import NoEogBackend
 from tests.fakes import ScriptedIO
-from trajectory_editor.core.actions import Hold, Write
+from trajectory_editor.core.actions import Hold, SetSampler, Write
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_cli import main
 from trajectory_editor.session_runtime import session_edge_menu
 from trajectory_editor.episode_session import LiveSession
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.projector import project_fork_map
-from trajectory_editor.episode_replay_source import final_sampling
 from trajectory_editor.episode_store import EpisodeStore
 
 
@@ -35,15 +34,15 @@ def source_workspace(tmp_path):
             initial_token_ids=source.initial_token_ids,
             sampling=source.sampling,
             stream_fingerprint=source.stream_fingerprint,
-            max_tokens=None,
             backend={},
         )
-        for ordinal, action in enumerate([Write(" A B", "exact"), Hold(2)]):
-            store.record_action("source", ordinal, source.apply(action))
+        store.record_action("source", 0, source.apply(Write(" A B", "exact")))
+        changed = replace(source.sampling, seed=123)
+        store.record_action("source", 1, source.apply(SetSampler(changed)))
+        store.record_action("source", 2, source.apply(Hold(2)))
         store.update_episode(
             "source",
             visible_text=source.backend.render(source.visible_token_ids),
-            max_tokens=None,
         )
     return path
 
@@ -108,21 +107,11 @@ def test_cli_replay_until_invalid_or_cancelled_selection_does_not_insert(
         assert "destination" not in store.workspace_list(include_finished=True)
 
 
-@pytest.mark.parametrize("until, seed", [(0, 999), (1, 999), (2, 123), (3, 123)])
+@pytest.mark.parametrize("until, seed", [(0, 999), (1, 999), (2, 999), (3, 123)])
 @pytest.mark.invariant
-def test_cli_replay_until_uses_sampler_state_at_the_selected_boundary(
+def test_cli_replay_until_uses_sampler_commands_before_the_selected_boundary(
     source_workspace, until, seed
 ):
-    with EpisodeStore(source_workspace) as store:
-        segment = store.sampling_segment("source", 0)
-        for boundary, next_seed in [(2, 123), (4, 456)]:
-            store.record_sampling_segment(
-                "source",
-                start_boundary=boundary,
-                sampling=replace(SamplerConfig.from_record(segment["sampling"]), seed=next_seed),
-                stream_fingerprint=segment["stream_fingerprint"],
-            )
-
     run_cli(
         source_workspace,
         [f"save {source_workspace} destination", "q"],
@@ -131,7 +120,7 @@ def test_cli_replay_until_uses_sampler_state_at_the_selected_boundary(
         "--episode-id", "destination",
     )
     with EpisodeStore(source_workspace) as store:
-        assert final_sampling(store, "destination").seed == seed
+        assert store.current_sampling_state("destination")["sampling"]["seed"] == seed
 
 
 @pytest.mark.invariant
@@ -209,11 +198,10 @@ def test_cli_cfg_fork_uses_inherited_tokens_once(tmp_path, cfg_prefix_tokens, ro
             initial_token_ids=[7],
             sampling=sampling,
             stream_fingerprint=source.stream_fingerprint,
-            max_tokens=None,
             backend={"backend": "llama.cpp", "model_path": str(Path("fake").resolve())},
         )
         store.record_action("source", 0, source.apply(Write(" A B", mode="exact")))
-        store.update_episode("source", visible_text=" A B", max_tokens=None)
+        store.update_episode("source", visible_text=" A B")
         if route == "sealed-switch":
             store.finish_episode(
                 "source", visible_text=" A B", terminal_token_id=None,
@@ -250,7 +238,6 @@ def test_cli_prompt_replay_uses_the_destination_tokenizer_and_remains_rewindable
             initial_token_ids=[7],
             sampling=source.sampling,
             stream_fingerprint=source.stream_fingerprint,
-            max_tokens=None,
             backend={},
         )
 
@@ -307,16 +294,6 @@ def test_cli_historical_unknown_action_yields_to_operational_edge(
                 "WHERE episode_id = ? AND ordinal = ?",
                 ('{"kind":"future-action"}', "source", unsupported_ordinal),
             )
-        if unsupported_ordinal == 1:
-            segment = store.sampling_segment("source", 0)
-            store.record_sampling_segment(
-                "source",
-                start_boundary=2,
-                sampling=replace(
-                    SamplerConfig.from_record(segment["sampling"]), seed=123
-                ),
-                stream_fingerprint=segment["stream_fingerprint"],
-            )
 
     io = run_cli(
         source_workspace,
@@ -335,4 +312,4 @@ def test_cli_historical_unknown_action_yields_to_operational_edge(
         destination = store.get_episode("destination")
         assert destination["visible_text"] == expected_text
         assert len(store.actions("destination")) == expected_actions
-        assert final_sampling(store, "destination").seed == 999
+        assert store.current_sampling_state("destination")["sampling"]["seed"] == 999

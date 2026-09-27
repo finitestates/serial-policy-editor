@@ -8,7 +8,6 @@ from typing import Protocol
 
 from .core.actions import Phrase, PolicyAction
 from .core.results import ActionOutcome, ReplayExpectation
-from .core.sampler_config import SamplerConfig
 from .episode_engine import InstructionRejected, Observation
 
 
@@ -45,30 +44,11 @@ class TapeStep:
 
 
 @dataclass(frozen=True)
-class ReplayContext:
-    """Auxiliary execution context aligned with a replay plan's steps."""
-
-    sampling: tuple[SamplerConfig | None, ...] = ()
-
-    def sampling_at(self, index: int) -> SamplerConfig | None:
-        if index >= len(self.sampling):
-            return None
-        return self.sampling[index]
-
-
-@dataclass(frozen=True)
 class ReplayPlan(Sequence[TapeStep]):
     """A finite procedure whose authority ends when the runner yields."""
 
     steps: tuple[TapeStep, ...] = ()
-    follow_source_sampling: bool = True
-    final_sampling: SamplerConfig | None = None
-    context: ReplayContext = ReplayContext()
     incomplete_handoff_reason: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.context.sampling and len(self.context.sampling) != len(self.steps):
-            raise ValueError("replay sampling context must align with replay steps")
 
     def __len__(self) -> int:
         return len(self.steps)
@@ -91,8 +71,6 @@ class RunTarget(Protocol):
 
     @property
     def engine(self): ...
-
-    def set_sampler(self, sampling: SamplerConfig) -> None: ...
 
     def generate(
         self,
@@ -123,15 +101,8 @@ def run_plan(
     replay_exhausted = False
     try:
         for index, step in enumerate(plan.steps):
-            if target.engine.ended or target.engine.checkpointed:
+            if target.engine.ended:
                 break
-            sampling = plan.context.sampling_at(index)
-            if (
-                plan.follow_source_sampling
-                and sampling is not None
-                and target.engine.sampling != sampling
-            ):
-                target.set_sampler(sampling)
             outcome = target.generate(
                 step.action,
                 expectation=step.expectation,
@@ -151,22 +122,14 @@ def run_plan(
             ):
                 handed_off = True
                 handoff_reason = plan.incomplete_handoff_reason
-            elif not target.engine.checkpointed:
+            else:
                 replay_exhausted = replayed == len(plan.steps)
-        if (
-            replay_exhausted
-            and plan.follow_source_sampling
-            and plan.final_sampling is not None
-            and target.engine.sampling != plan.final_sampling
-        ):
-            target.set_sampler(plan.final_sampling)
 
         live_actions = 0
         while (
             (max_live_actions is None or live_actions < max_live_actions)
             and not had_tape
             and not target.engine.ended
-            and not target.engine.checkpointed
             and live_policy is not None
         ):
             observation = target.engine.observe()
@@ -212,7 +175,6 @@ __all__ = [
     "EdgeRequested",
     "ForkRequested",
     "LivePolicy",
-    "ReplayContext",
     "ReplayPlan",
     "RunResult",
     "RunTarget",

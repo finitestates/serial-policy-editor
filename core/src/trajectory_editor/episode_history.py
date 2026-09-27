@@ -112,8 +112,6 @@ class StoredHistoryPrefix:
     """A root-relative durable prefix projected from action and token records."""
 
     actions: tuple[StoredHistoryAction, ...]
-    sampler_segments: tuple[Mapping[str, Any], ...]
-    budget_segments: tuple[Mapping[str, Any], ...]
     source_boundary: int
     partial: RecordedAttempt | None = None
 
@@ -272,7 +270,9 @@ class EpisodeHistory:
             expectation=expectation,
         )
 
-    def truncate(self, boundary: int) -> HistoryTruncation:
+    def truncate(
+        self, boundary: int, *, include_boundary_events: bool = False
+    ) -> HistoryTruncation:
         """Retain the history through ``boundary`` without rebasing it.
 
         Raw zero-width handed-off attempts before the requested boundary are
@@ -299,6 +299,10 @@ class EpisodeHistory:
             after = outcome.boundary_after
 
             if after < boundary or (after == boundary and before < boundary):
+                retained.append(attempt)
+                continue
+
+            if include_boundary_events and before == boundary == after:
                 retained.append(attempt)
                 continue
 
@@ -344,9 +348,9 @@ def visible_text_prefix(
 def materialize_stored_prefix(
     actions: Sequence[Mapping[str, Any]],
     tokens: Sequence[Mapping[str, Any]],
-    sampler_segments: Sequence[Mapping[str, Any]],
-    budget_segments: Sequence[Mapping[str, Any]],
     boundary: int,
+    *,
+    include_boundary_events: bool = False,
 ) -> StoredHistoryPrefix:
     """Project durable records into one retained root-relative history prefix.
 
@@ -411,7 +415,9 @@ def materialize_stored_prefix(
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"stored history is invalid: {exc}") from exc
 
-    truncation = history.truncate(boundary)
+    truncation = history.truncate(
+        boundary, include_boundary_events=include_boundary_events
+    )
     partial_ordinal = (
         truncation.partial.ordinal if truncation.partial is not None else None
     )
@@ -427,16 +433,6 @@ def materialize_stored_prefix(
     )
     return StoredHistoryPrefix(
         actions=materialized_actions,
-        sampler_segments=tuple(
-            dict(segment)
-            for segment in sampler_segments
-            if int(segment["start_boundary"]) <= boundary
-        ),
-        budget_segments=tuple(
-            dict(segment)
-            for segment in budget_segments
-            if int(segment["start_boundary"]) <= boundary
-        ),
         source_boundary=boundary,
         partial=truncation.partial,
     )

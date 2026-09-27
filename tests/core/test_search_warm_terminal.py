@@ -104,7 +104,6 @@ def _search_state(
     )
     state = ChoiceViewState(
         choice=choice,
-        remaining_tokens=engine.remaining,
         candidates=tuple(by_rank[key] for key in sorted(by_rank)),
         display_candidates=rows if search_lens_active else menu,
         resolve_insertion=lambda text, mode: text,

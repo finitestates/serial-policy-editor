@@ -1,4 +1,4 @@
-"""S03/S08, L01-L08, R01/R08: CFG contexts and evaluation work."""
+"""S03/S08, L01-L07, R01/R08: CFG contexts and evaluation work."""
 from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
@@ -8,13 +8,13 @@ import numpy as np
 import pytest
 
 from tests.fakes import ConformingFakeBackend, ScriptedIO
-from trajectory_editor.core.actions import Accept, SelectRawRank, Write
+from trajectory_editor.core.actions import Accept, SelectRawRank, SetSampler, Write
 from trajectory_editor.core.errors import EditorError
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_lifecycle import _restore_engine
 from trajectory_editor.episode_session import LiveSession, LiveSessionRoster
-from trajectory_editor.run_loop import ReplayContext, ReplayPlan, TapeStep, run_plan
+from trajectory_editor.run_loop import ReplayPlan, TapeStep, run_plan
 from trajectory_editor.episode_store import EpisodeStore
 from trajectory_editor.fresh_episode import fresh_root_from
 
@@ -131,9 +131,7 @@ def save(store, runtime, name='source'):
         initial_token_ids=list(runtime.initial_token_ids),
         sampling=runtime.sampling,
         stream_fingerprint=runtime.stream_fingerprint,
-        max_tokens=runtime.max_tokens,
         backend=runtime.backend.provenance(),
-        checkpoint_boundary=runtime.checkpoint_boundary,
     )
 
 
@@ -155,7 +153,7 @@ def test_s03_l01_prompt_entrances_and_real_resume(tmp_path, prompt, expected, bo
             assert text.visible_token_ids == [7]
             assert text.backend.tokenize(text.backend.render([7])) == [8]
         original = assert_context(text, expected)
-        restored = _restore_engine(store, identifier, PrefixBackend(), max_tokens=None,
+        restored = _restore_engine(store, identifier, PrefixBackend(),
                                    sampling_override=None, guidance_backend=PrefixBackend())
         np.testing.assert_array_equal(original.logits, assert_context(restored, expected).logits)
         assert restored.guidance_backend.work == [('reset', (*expected, *text.visible_token_ids))]
@@ -172,10 +170,10 @@ def test_s03_tokenless_guidance_and_missing_backend_fail_clearly(tmp_path):
                 engine(sampling=sampling, guidance_backend=PrefixBackend(tokenless=True),
                        initial_token_ids=source.initial_token_ids if exact else None)
         with pytest.raises(EditorError, match='produced no tokens'):
-            _restore_engine(store, identifier, PrefixBackend(), max_tokens=None,
+            _restore_engine(store, identifier, PrefixBackend(),
                             sampling_override=None, guidance_backend=PrefixBackend(tokenless=True))
     runtime = engine(sampling=config(cfg_unconditional_prompt=None), guidance_backend=None)
-    runtime.sampling = config()
+    runtime.apply(SetSampler(config()))
     with pytest.raises(EditorError, match='no unconditional guidance backend'):
         runtime.observe()
 
@@ -197,59 +195,64 @@ def test_l04_live_forks_keep_the_cfg_window_at_each_boundary(boundary):
 
 
 @pytest.mark.current_workflow
-def test_s03_l02_l07_cutoff_rewind_and_lazy_catchup():
-    runtime = engine(sampling=config(cfg_prefix_tokens=2), max_tokens=2)
+def test_s03_cutoff_rewind_and_lazy_catchup():
+    session = LiveSession(engine(sampling=config(cfg_prefix_tokens=2)))
+    runtime = session.engine
     guidance = runtime.guidance_backend
     assert guidance.work == []
     first = assert_context(runtime)
     assert runtime.observe() is first
-    raw_token(runtime)
+    observation = runtime.observe()
+    session.generate(SelectRawRank(observation.statistics.raw_rank(7)))
     assert_context(runtime)  # N-1
-    runtime.apply(Write('y', mode='exact'))
-    runtime.resume(max_tokens=4)
-    assert_context(runtime)  # N, renewal does not restart CFG
-    runtime.apply(Write('z', mode='exact'))
+    session.generate(Write('y', mode='exact'))
+    assert_context(runtime)  # Reaching the cutoff does not restart CFG.
+    session.generate(Write('z', mode='exact'))
     assert_context(runtime)  # N+1
     assert guidance.work == [('reset', (1, 5)), ('eval', (7,))]
-    runtime.sampling = replace(runtime.sampling, cfg_prefix_tokens=6)
+    session.set_sampler(replace(session.sampler, cfg_prefix_tokens=6))
     assert_context(runtime)
     assert guidance.work[-1] == ('eval', (9, 10))
-    runtime.rewind_to(1)
+    session.rewind(1)
     assert_context(runtime)
-    runtime.apply(Write('x', mode='exact'))
+    session.generate(Write('x', mode='exact'))
     assert_context(runtime)
     # Rewind keeps the surviving cached prefix; only later suffix tokens run.
     assert all(kind != 'reset' for kind, _ in guidance.work[1:])
-    assert [token for kind, ids in guidance.work if kind == 'eval' for token in ids][-3:] == [
-        9, 10, 8,
+    assert session.sampler.cfg_prefix_tokens == 2
+    assert not runtime._cfg_active()  # The change at boundary 3 was discarded.
+    assert [token for kind, ids in guidance.work if kind == 'eval' for token in ids] == [
+        7, 9, 10,
     ]
 
 
 @pytest.mark.current_workflow
 def test_s03_append_only_evaluation_and_sampler_changes():
     runtime = engine()
+    session = LiveSession(runtime)
     guidance = runtime.guidance_backend
     assert_context(runtime)
     for name, value in [('temperature', 1.2), ('seed', 999), ('cfg_scale', .4), ('cfg_prefix_tokens', 8)]:
-        runtime.sampling = replace(runtime.sampling, **{name: value})
+        session.set_sampler(replace(session.sampler, **{name: value}))
         assert_context(runtime)
     assert guidance.work == [('reset', (1, 5))]
-    raw_token(runtime)
+    observation = runtime.observe()
+    session.generate(SelectRawRank(observation.statistics.raw_rank(7)))
     assert_context(runtime)
-    runtime.apply(Write('xy', mode='exact'))
+    session.generate(Write('xy', mode='exact'))
     assert_context(runtime)
     assert guidance.work[0] == ('reset', (1, 5))
     assert all(kind == 'eval' for kind, _ in guidance.work[1:])
     assert [t for _, ids in guidance.work[1:] for t in ids] == [7, 8, 9]
     evaluated_calls = len(guidance.work)
-    runtime.sampling = replace(runtime.sampling, cfg_unconditional_prompt=None)
-    runtime.apply(Write('z', mode='exact'))
+    session.set_sampler(replace(session.sampler, cfg_unconditional_prompt=None))
+    session.generate(Write('z', mode='exact'))
     assert_context(runtime)
     assert len(guidance.work) == evaluated_calls
-    runtime.sampling = replace(runtime.sampling, cfg_unconditional_prompt='U')
+    session.set_sampler(replace(session.sampler, cfg_unconditional_prompt='U'))
     assert_context(runtime)
     assert guidance.work[-1] == ('eval', (10,))
-    runtime.sampling = replace(runtime.sampling, cfg_unconditional_prompt='B')
+    session.set_sampler(replace(session.sampler, cfg_unconditional_prompt='B'))
     # U and B share BOS, so only the suffix from their first divergence is new.
     prompt_change = len(guidance.work)
     assert_context(runtime, (1, 6, 5))
@@ -309,7 +312,7 @@ def test_l01_fresh_root_never_inherits_guidance_continuation(tmp_path, resumed):
         outcome = raw_token(source)
         store.record_action(identifier, 0, outcome)
         if resumed:
-            source = _restore_engine(store, identifier, PrefixBackend(), max_tokens=None,
+            source = _restore_engine(store, identifier, PrefixBackend(),
                                      sampling_override=None, guidance_backend=PrefixBackend())
         assert_context(source)
         fresh = fresh_root_from(source, 'other')
@@ -324,17 +327,23 @@ def test_r01_r08_l06_source_controls_follow_live_replay_and_rewind():
     session = LiveSession(engine(sampling=unguided), prompt='conditional')
     a, b = config(), config(cfg_unconditional_prompt='B')
     plan = ReplayPlan(
-        tuple(TapeStep(Write(text, mode='exact'), None) for text in ('x', 'y', 'z')),
-        context=ReplayContext(sampling=(a, b, unguided)), final_sampling=b,
+        (
+            TapeStep(SetSampler(a), None),
+            TapeStep(Write('x', mode='exact'), None),
+            TapeStep(SetSampler(b), None),
+            TapeStep(Write('y', mode='exact'), None),
+            TapeStep(SetSampler(unguided), None),
+            TapeStep(Write('z', mode='exact'), None),
+        ),
     )
     result = run_plan(session, divergence_policy="handoff", tape=plan)
     assert result.replay_exhausted
-    assert_context(session.engine, (1, 6, 5))
+    assert session.sampler == unguided
     session.rewind(1)
-    assert session.sampler == b
-    assert_context(session.engine, (1, 6, 5))
-    session.rewind(0)
     assert session.sampler == a
+    assert_context(session.engine)
+    session.rewind(0)
+    assert session.sampler == unguided
     assert_context(session.engine)
 
 
@@ -354,7 +363,6 @@ def test_l08_destination_tokenizer_owns_both_contexts(tmp_path):
             destination.provenance(),
             boundary=1,
             sampling=source.sampling,
-            max_tokens=None,
             guidance_backend=PrefixBackend(destination=True),
         )
         assert child.engine.visible_token_ids == [10]
@@ -380,15 +388,15 @@ def test_s03_formula_and_conditional_only_hidden_controls(scale):
     assert runtime.guidance_backend.controls == []
 
 
-@pytest.mark.parametrize('final_only', [False, True])
 @pytest.mark.invariant
-def test_r08_default_session_setup_provisions_future_cfg(final_only):
+def test_r08_default_session_setup_provisions_cfg_for_sampler_actions():
     from trajectory_editor.episode_cli import build_parser
     from trajectory_editor.session_runtime import run_new_session
     plan = ReplayPlan(
-        (TapeStep(Write('x', mode='exact'), None),),
-        context=ReplayContext(sampling=(None if final_only else config(),)),
-        final_sampling=config(),
+        (
+            TapeStep(Write('x', mode='exact'), None),
+            TapeStep(SetSampler(config()), None),
+        ),
     )
     args = build_parser().parse_args(['--model', 'fake', '--new-prompt',
                                      'conditional', '--plain-ui'])
@@ -397,8 +405,7 @@ def test_r08_default_session_setup_provisions_future_cfg(final_only):
          patch('trajectory_editor.episode_backend_loader.load_cfg_guidance_backend', return_value=guidance) as load:
         assert run_new_session(args, io=ScriptedIO(['q']), teacher_tape=SimpleNamespace(plan=plan)) == 0
     load.assert_called_once()
-    if not final_only:
-        assert guidance.work == [('reset', (1, 5))]
+    assert guidance.work == []  # CFG positioning stays lazy until logits are needed.
 
 
 @pytest.mark.parametrize('fixed', [False, True])
@@ -410,10 +417,11 @@ def test_r01_cli_replay_provisions_cfg_after_unguided_root(tmp_path, fixed):
     with EpisodeStore(path) as store:
         identifier = save(store, source)
         store.record_action(identifier, 0, source.apply(Write('x', mode='exact')))
-        source.sampling = config(cfg_unconditional_prompt='B')
-        store.record_sampling_segment(identifier, start_boundary=1, sampling=source.sampling,
-                                      stream_fingerprint=source.stream_fingerprint)
-        store.record_action(identifier, 1, source.apply(Write('y', mode='exact')))
+        sampler_outcome = source.apply(
+            SetSampler(config(cfg_unconditional_prompt='B'))
+        )
+        store.record_action(identifier, 1, sampler_outcome)
+        store.record_action(identifier, 2, source.apply(Write('y', mode='exact')))
     backend, guidance = PrefixBackend(), PrefixBackend()
     with patch('trajectory_editor.episode_backend_loader.load_episode_backend',
                return_value=(backend, backend.provenance(), False)), \

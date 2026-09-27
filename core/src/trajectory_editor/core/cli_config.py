@@ -8,7 +8,9 @@ must not be added here.
 from __future__ import annotations
 
 import argparse
+import json
 import secrets
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -163,12 +165,23 @@ def sampler_overrides_present(args: argparse.Namespace) -> bool:
 def sampler_override(current: SamplerConfig, raw: str) -> SamplerConfig:
     """Apply live core sampler edits without reconstructing discarded fields.
 
-    The draw seed is not adjustable here: use ``reroll [SEED]`` so seed
-    changes are recorded on the tape and survive export/replay.
+    The returned configuration is recorded as one ``SetSampler`` action by
+    the live-session owner, including seed changes. A complete serialized
+    ``SamplerConfig`` may also be supplied as JSON after ``s``.
     """
 
+    payload = raw.strip()
+    if payload.startswith("{"):
+        try:
+            record = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise EditorError(f"invalid sampler JSON: {exc.msg}") from exc
+        if not isinstance(record, Mapping):
+            raise EditorError("sampler JSON must be an object")
+        return SamplerConfig.from_record(record)
+
     values = {name: getattr(current, name) for name in CORE_SAMPLER_FIELDS}
-    pieces = raw.replace(",", " ").split()
+    pieces = payload.replace(",", " ").split()
     if not pieces:
         return current
     for piece in pieces:
@@ -176,12 +189,10 @@ def sampler_override(current: SamplerConfig, raw: str) -> SamplerConfig:
             raise EditorError("sampler changes use key=value (for example top_k=20)")
         key, value = piece.split("=", 1)
         key = SAMPLER_ALIASES.get(key.strip().lower(), key.strip().lower())
-        if key == "seed":
-            raise EditorError("use reroll [SEED] to change the draw seed")
         if key not in values or key in {"bias_rules", "bias_groups"}:
             raise EditorError(f"unknown sampler field {key!r}")
         try:
-            if key in {"top_k", "repeat_last_n", "cfg_prefix_tokens"}:
+            if key in {"top_k", "repeat_last_n", "cfg_prefix_tokens", "seed"}:
                 values[key] = int(value)
             elif key == "draw_kernel":
                 if value not in {"categorical", "gumbel-max"}:

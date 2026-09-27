@@ -28,8 +28,6 @@ def test_stored_prefix_keeps_absolute_boundaries_when_cutting_a_hold():
     prefix = materialize_stored_prefix(
         actions,
         tokens,
-        [{"start_boundary": 0, "sampling_json": "{}"}],
-        [{"start_boundary": 0, "max_tokens": None, "checkpoint_boundary": None}],
         1,
     )
 
@@ -74,8 +72,6 @@ def test_stored_prefix_turns_a_partial_phrase_into_an_exact_write():
     prefix = materialize_stored_prefix(
         [source_action],
         tokens,
-        (),
-        (),
         2,
     )
 

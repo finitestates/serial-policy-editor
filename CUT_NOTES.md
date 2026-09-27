@@ -20,10 +20,10 @@ It is not intended to preserve any historical obligations.
 
 ## Lifecycle semantics
 
-Token budgets are optional; the default is unlimited. An explicit budget is a checkpoint, not termination. Reaching it yields to the live
-edge menu while keeping the same episode alive. The user may continue with a new
-budget or sampler settings, fork, invoke SPR, project, quit while leaving the
-episode resumable, or explicitly end/seal it.
+Episodes have no global token budget. `h N` delegates a finite span, while
+`q` opens the live-edge menu immediately without generating tokens. Sampler
+changes are ordinary ordered actions, so rewind and fork derive their settings
+from the retained action prefix.
 
 `q` opens the live-edge menu immediately without generating tokens.
 

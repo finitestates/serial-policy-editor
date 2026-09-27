@@ -92,9 +92,12 @@ With llama.cpp:
 policy-editor \
   --backend llama.cpp \
   --model /path/to/model.gguf \
-  --new-prompt 'Once upon a time' \
-  --max-tokens 100
+  --new-prompt 'Once upon a time'
 ```
+
+Episodes run without a global token budget. Use `h N` for a finite delegated
+span, and change settings at any decision with `s key=value`; sampler changes
+are recorded in the same replayable action sequence as other commands.
 
 With a local Hugging Face model directory:
 
@@ -204,7 +207,7 @@ checks are opt-in and skip when their local model is absent.
 - [Cut notes](CUT_NOTES.md) — architectural decisions and migration notes;
 - [Core package](core/README.md) — standalone core installation;
 - [Vector package](vector/README.md) — optional steering-vector tooling;
-- [Core contract matrix](tests/CORE_CONTRACTS.md) — the reduced test budget;
+- [Core contract matrix](tests/CORE_CONTRACTS.md) — the reduced core suite;
 - [Test inventory](tests/TEST_INVENTORY.md) — active test buckets and their history.
 
 The version currently represented by the active package manifests is `0.8.0`.

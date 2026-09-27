@@ -24,10 +24,10 @@ from trajectory_editor.terminal_contracts import PromptRequest
 from trajectory_editor.teacher_plan import load_teacher_tape_jsonl
 
 
-def engine(*, budget=None, backend=None, guidance=None, sampling=None):
+def engine(*, backend=None, guidance=None, sampling=None):
     return EpisodeEngine(
         backend or ConformingFakeBackend(), initial_text="P",
-        sampling=sampling or SamplerConfig(), max_tokens=budget,
+        sampling=sampling or SamplerConfig(),
         guidance_backend=guidance,
     )
 
@@ -164,16 +164,11 @@ def test_chord_menu_preview_matches_committed_tokens_after_switch_and_rewind(
 
 
 @pytest.mark.current_workflow
-def test_chord_eog_and_budget_paths_and_stable_rank_selection():
-    original = engine(budget=2)
+def test_chord_eog_paths_and_stable_rank_selection():
+    original = engine()
     chord = Chord(original, (1, 2, 4))
     assert chord.paths[2].actions == [SelectRawRank(4)]
     assert chord.paths[2].state == "EOG"
-    assert chord.advance()
-    assert chord.paths[0].state == "budget reached"
-    assert chord.paths[1].state == "EOG"
-    assert chord.rewind()
-    assert [path.state for path in chord.paths] == ["live", "live", "EOG"]
     assert chord.select("4") == (SelectRawRank(4),)
     assert original.boundary == 0
     outcome = original.apply(SelectRawRank(4))
@@ -228,25 +223,7 @@ def test_chord_shows_bounded_shared_context_above_stable_paths():
 
 
 @pytest.mark.current_workflow
-def test_chord_display_tracks_live_locked_and_rewound_paths():
-    chord = Chord(engine(budget=2), (1, 2, 4))
-    initial = chord.display(width=40)
-    assert "a  rank 1  LIVE\n    A" in initial
-    assert "b  rank 2  LIVE\n    B" in initial
-    assert "c  rank 4  EOG\n   (no visible continuation)" in initial
-
-    assert chord.advance()
-    advanced = chord.display(width=40)
-    assert "a  rank 1  BUDGET REACHED\n    A B" in advanced
-    assert "b  rank 2  EOG\n    B" in advanced
-    assert "c  rank 4  EOG\n   (no visible continuation)" in advanced
-    assert not chord.advance()
-    assert chord.display(width=40) == advanced
-
-    assert chord.rewind()
-    assert chord.display(width=40) == initial
-    chord.discard()
-
+def test_chord_display_tracks_live_and_eog_paths_through_rewind():
     chord = Chord(engine(), (1, 2))
     assert chord.advance()
     ended = "b  rank 2  EOG\n    B"
@@ -293,11 +270,6 @@ def test_chord_prompts_distinguish_options_and_help_explains_commit():
     assert "a–z or starting rank: choose and commit | q: options" in output
     assert "c: resume chord | discard: restore episode | q: quit editor" in output
     assert "commit that path's actions and drop the other previews" in output
-
-    locked = ScriptedIO(["", "a"])
-    result, actions = chord_menu(locked, Chord(engine(budget=1), (1, 2, 4)))
-    assert result == "select" and actions == (SelectRawRank(1),)
-    assert "All chord paths are locked." in "".join(locked.output)
 
 
 @pytest.mark.current_workflow
@@ -542,21 +514,3 @@ def test_durable_chord_eog_selection_uses_ordinary_terminal_action(tmp_path, cho
         episode_id = "chord-eog"
         assert [row["kind"] for row in store.actions(episode_id)] == expected
         assert store.get_episode(episode_id)["terminal_reason"] == "teacher-eog"
-
-
-@pytest.mark.parametrize("workspace_enabled", [False, True])
-@pytest.mark.invariant
-def test_chord_budget_selection_stops_at_checkpoint(tmp_path, workspace_enabled):
-    workspace = tmp_path / "episode.sqlite3"
-    io = ScriptedIO(["chord 1 2", "", "a", "q"])
-    flags = ["--workspace", str(workspace)] if workspace_enabled else []
-    with patch("trajectory_editor.episode_backend_loader.load_backend",
-               return_value=ConformingFakeBackend() if not workspace_enabled else DurableFakeBackend()), patch(
-        "trajectory_editor.episode_cli.TerminalIO", return_value=io
-    ):
-        assert main(["--model", "fake", "--plain-ui", "--new-prompt", "P",
-                     "--max-tokens", "1", *flags]) == 0
-    assert any("BUDGET REACHED" in item for item in io.output)
-    if workspace_enabled:
-        with EpisodeStore(workspace) as store:
-            assert store.workspace_list(include_finished=True) == "No open episodes."

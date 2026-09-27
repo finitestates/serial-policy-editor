@@ -89,7 +89,6 @@ def action_preview(
     candidates: tuple[Candidate, ...],
     resolve_insertion: InsertionResolver,
     *,
-    remaining_tokens: int | None = None,
     resolve_candidate: Callable[[int], Candidate] | None = None,
     default_hold_tokens: int = 100,
     default_search_radius: int = 3,
@@ -193,7 +192,7 @@ def action_preview(
             return ActionPreview(
                 kind="insertion",
                 label=label,
-                detail="Tokenization and budget are validated on Enter.",
+                detail="Tokenization and action validity are checked on Enter.",
                 appended_text=pending.appended_text,
                 command=command,
             )
@@ -205,7 +204,7 @@ def action_preview(
             )
         return ActionPreview(
             kind="insertion", label=label,
-            detail="Tokenization and budget are validated on Enter.",
+            detail="Tokenization and action validity are checked on Enter.",
             appended_text=rendered, command=command,
         )
 
@@ -229,6 +228,23 @@ def action_preview(
 
     effects = {
         CommandKind.BIAS: ("token bias", "Update this bias rule; stay at this step."),
+        CommandKind.SAMPLER: (
+            "sampler settings",
+            (
+                "Enter opens sampler settings input; an accepted change is recorded "
+                "in the action tape."
+                if command.sampler_text is None
+                else "Enter applies and records these sampler settings at this boundary."
+            ),
+        ),
+        CommandKind.REROLL: (
+            "reroll",
+            (
+                f"Enter rerolls the draw and records seed {command.reroll_seed}."
+                if command.reroll_seed is not None
+                else "Enter chooses a fresh draw seed and records it in the action tape."
+            ),
+        ),
         CommandKind.PHRASE: (
             "phrase action",
             (
@@ -967,7 +983,6 @@ def _render_choice(
     choice: ChoiceSet,
     candidates: tuple[Candidate, ...],
     command_text: str,
-    remaining_tokens: int | None,
     resolve_insertion: InsertionResolver,
     target_token_id: int | None,
     feedback: ChoiceFeedback | None = None,
@@ -995,7 +1010,6 @@ def _render_choice(
         command_text,
         candidates,
         resolve_insertion,
-        remaining_tokens=remaining_tokens,
         resolve_candidate=resolve_candidate,
         default_hold_tokens=default_hold_tokens,
         default_search_radius=default_search_radius,
@@ -1083,7 +1097,6 @@ def _render_choice(
             ("class:status-strong", f"Step {choice.aligned_step}"),
             ("class:muted", " · teacher track"),
             ("", " " * 3),
-            ("class:muted", (f"{remaining_tokens} tokens remaining\n" if remaining_tokens is not None else "No token budget\n")),
             ("class:rule", rule + "\n"),
             ("class:section", "DECISION BOUNDARY\n\n"),
 
@@ -1599,7 +1612,7 @@ class LiveChoiceView(ViewLifecycle):
                     )
                 return
             preview = action_preview(self.state.choice, self.command_buffer.text, self.state.candidates, self.state.resolve_insertion,
-                                     remaining_tokens=self.state.remaining_tokens, resolve_candidate=self.state.resolve_candidate,
+                                     resolve_candidate=self.state.resolve_candidate,
                                      default_hold_tokens=self.state.default_hold_tokens,
                                      default_search_radius=self.state.default_search_radius)
             budget = _scroll_budget(height, preview)
@@ -1619,7 +1632,7 @@ class LiveChoiceView(ViewLifecycle):
                     self._review_viewport.page_down()
                 return
             preview = action_preview(self.state.choice, self.command_buffer.text, self.state.candidates, self.state.resolve_insertion,
-                                     remaining_tokens=self.state.remaining_tokens, resolve_candidate=self.state.resolve_candidate,
+                                     resolve_candidate=self.state.resolve_candidate,
                                      default_hold_tokens=self.state.default_hold_tokens,
                                      default_search_radius=self.state.default_search_radius)
             budget = _scroll_budget(height, preview)
@@ -1748,7 +1761,7 @@ class LiveChoiceView(ViewLifecycle):
                                           " · Alt+Enter newline · Tab indent · Enter commits")
                                     if _in_authored_text()
                                     else (
-                                        (f"Next live edge in {self.state.remaining_tokens} {self.remaining_label} · " if self.state.remaining_tokens is not None else "q opens the live edge · ") +
+                                        "q opens the live edge · " +
                                         "Enter commits · Alt+Enter newline in t/x · PgUp/PgDn context · Ctrl+G explores rank."
                                     )
                                 ),
@@ -1790,7 +1803,6 @@ class LiveChoiceView(ViewLifecycle):
             state.choice, self.active_table_candidates, state.feedback,
             sort_by_policy=state.sort_by_policy, search_lens_active=state.search_lens_active,
         )
-        self.remaining_label = "token" if state.remaining_tokens == 1 else "tokens"
         text = state.initial_command if self.completion_owned else ""
         self.command_buffer.reset(document=Document(text, cursor_position=len(text)))
 
@@ -1821,7 +1833,7 @@ class LiveChoiceView(ViewLifecycle):
         )
         return _render_choice(
             state.choice, state.candidates, self.command_buffer.text,
-            state.remaining_tokens, state.resolve_insertion, state.target_token_id,
+            state.resolve_insertion, state.target_token_id,
             state.feedback, state.policy_active, state.show_policy_rank,
             state.sort_by_policy, state.logit_view, state.show_model_probabilities,
             state.column_focus,

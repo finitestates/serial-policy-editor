@@ -7,6 +7,7 @@ from .core.actions import (
     Phrase,
     Reroll,
     SelectRawRank,
+    SetSampler,
     Write,
 )
 from .core.backend import InferenceBackend
@@ -19,7 +20,6 @@ from .run_loop import RunResult, TapeStep
 from .episode_session import (
     BranchIdentity,
     BranchState,
-    ControlPoint,
     LiveBranch,
     LiveRosterEntry,
     LiveSession,
@@ -42,7 +42,6 @@ __all__ = [
     "InferenceBackend",
     "BranchIdentity",
     "BranchState",
-    "ControlPoint",
     "LiveBranch",
     "Observation",
     "LiveRosterEntry",
@@ -54,6 +53,7 @@ __all__ = [
     "RunResult",
     "SamplerConfig",
     "SelectRawRank",
+    "SetSampler",
     "TapeStep",
     "TokenEvidence",
     "Write",

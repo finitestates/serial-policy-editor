@@ -12,9 +12,8 @@ class EdgeHelpItem:
 
 
 _COMMON_START = (
-    EdgeHelpItem("c / continue", "resume the current tranche"),
-    EdgeHelpItem("n N / n off", "set an allowance or remove the budget"),
-    EdgeHelpItem("s key=value", "change sampler settings"),
+    EdgeHelpItem("c / continue", "return to teacher decisions"),
+    EdgeHelpItem("s key=value / JSON", "change sampler settings; changes are recorded"),
     EdgeHelpItem("reroll [SEED]", "replace the draw seed; recorded on the tape"),
     EdgeHelpItem("f N", "fork at boundary N"),
 )

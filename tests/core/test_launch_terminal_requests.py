@@ -117,7 +117,7 @@ def test_noninteractive_commands_do_not_open_terminal(tmp_path, capsys):
         store.create_episode(
             episode_id="source", initial_text="P", initial_token_ids=[7],
             sampling=engine.sampling, stream_fingerprint=engine.stream_fingerprint,
-            max_tokens=None, backend={},
+            backend={},
         )
     exported = tmp_path / "source.jsonl"
     with patch("trajectory_editor.episode_cli.TerminalIO",
@@ -159,7 +159,7 @@ def test_bare_new_cancellation_returns_to_the_session_edge(tmp_path):
         store.create_episode(
             episode_id="source", initial_text="P", initial_token_ids=[7],
             sampling=engine.sampling, stream_fingerprint=engine.stream_fingerprint,
-            max_tokens=None, backend={},
+            backend={},
         )
         session = LiveSession(engine)
         assert session_edge_menu(io, session, store=store) == ("quit", None)

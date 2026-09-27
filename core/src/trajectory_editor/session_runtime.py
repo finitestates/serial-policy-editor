@@ -113,8 +113,6 @@ def session_edge_menu(
         raw = io.read_edge(EdgeViewState(
             episode_id=displayed_id,
             boundary=session.engine.boundary,
-            current_budget=session.engine.max_tokens,
-            remaining_tokens=session.engine.remaining,
             sampler_summary=sampler_summary(session.sampler),
             mode="session",
         ))
@@ -130,7 +128,7 @@ def session_edge_menu(
         if isinstance(command, edge_commands.EndCommand):
             return "end", None
         if isinstance(command, edge_commands.ContinueCommand):
-            return "continue", "keep"
+            return "continue", None
         if isinstance(command, edge_commands.NewCommand):
             prompt_text = command.prompt if command.prompt else read_new_prompt(io)
             if prompt_text is None:
@@ -293,8 +291,6 @@ def session_edge_menu(
             return "save-family", (command.workspace, command.root_reference)
         if isinstance(command, edge_commands.SaveCommand):
             return "save", (command.workspace, command.reference)
-        if isinstance(command, edge_commands.BudgetCommand):
-            return "continue", command.tokens
         if isinstance(command, edge_commands.SamplerCommand):
             payload = command.text
             if payload is None:
@@ -418,10 +414,6 @@ def run_session_roster(
             # the user can explicitly save that final state before quitting.
             continue
         if action == "continue":
-            try:
-                session.resume(max_tokens=value)
-            except EditorError as exc:
-                io.write(str(exc))
             continue
         if action == "rewind":
             try:
@@ -546,7 +538,7 @@ def run_session_roster(
                 io.write("Source replay requires a workspace.")
                 continue
             from .spr_recipe import (
-                ReplayControlPolicy,
+                ReplaySamplerPolicy,
                 ReplayPlacement,
                 compose_replay_plan,
             )
@@ -555,12 +547,11 @@ def run_session_roster(
             try:
                 recipe = build_source_replay_recipe(
                     store, source_id, until,
-                    sampling_factory=SamplerConfig.from_record,
                 )
                 pending_tape = compose_replay_plan(
                     recipe,
                     ReplayPlacement.APPEND_TO_CURRENT_BRANCH,
-                    ReplayControlPolicy.PRESERVE_DESTINATION,
+                    ReplaySamplerPolicy.PRESERVE_DESTINATION,
                 )
             except (EditorError, ValueError) as exc:
                 io.write(str(exc))
@@ -612,14 +603,13 @@ def run_new_session(
     engine = EpisodeEngine(
         backend,
         sampling=sampling,
-        max_tokens=args.max_tokens,
         initial_text=initial_text,
         guidance_backend=guidance_backend,
     )
     session = LiveSession(
         engine,
         prompt=initial_text,
-        environment_stamp={"backend": provenance, "sampler": sampling.to_dict()},
+        environment_stamp={"backend": provenance},
     )
     return run_session_roster(
         args,
