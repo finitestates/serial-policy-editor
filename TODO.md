@@ -4,7 +4,7 @@
 
 - [ ] Decide whether speculative execution for token selection earns its complexity. Measure its latency benefit on supported backends and weigh it against the warmup, cancellation, and promotion logic. If the benefit is small or inconsistent, remove that path and keep selection on the ordinary commit flow.
 - [ ] Bring non-runtime menus into line with the main runtime menu’s visual conventions. Review screens such as EDGE, search/review, and setup; make selection, context, status, and available commands easy to read in the same way.
-- [x] Add an end-to-end regression for Tab/Enter through `run_plan()`, checking the recorded action and next view. If speculative execution stays, check that the warmed target matches the committed selection; if it goes, check the ordinary selection flow. The current [selection warm test](tests/core/test_selection_warm_terminal.py#L65) stops at applying the action directly to the engine. The [interaction notes](RUNTIME_MENU_ENTER_CYCLE.md#L82) describe the mixed Tab cycle and target invariant.
+- [x] Add an end-to-end regression for Tab/Enter through `run_plan()`, checking the recorded action and next view. The [selection test](tests/core/test_selection_warm_terminal.py) checks the ordinary selection flow and confirms that candidate navigation does not trigger speculative warming.
 - [ ] Remove stale functions/data fields/tests/aliases; cut-down on processes that make reads/writes/copies for no obvious purpose.
 
 ## Replay authoring and independent correctness

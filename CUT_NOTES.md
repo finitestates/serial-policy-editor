@@ -25,8 +25,6 @@ Episodes have no global token budget. `h N` delegates a finite span, while
 changes are ordinary ordered actions, so rewind and fork derive their settings
 from the retained action prefix.
 
-`q` opens the live-edge menu immediately without generating tokens.
-
 True termination is limited to:
 
 1. explicit End at the live-edge menu;

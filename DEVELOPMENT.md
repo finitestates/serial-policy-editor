@@ -1,8 +1,9 @@
 # Development branches
 
-`main` is being prepared for `0.8.0`. It unifies interactive and replayed
-execution around an in-memory runtime, with SQLite workspaces used for explicit
-restoration and saving.
+The active release represented by this tree is `v0.8.5`. Interactive and
+replayed execution run through the in-memory runtime; SQLite workspaces are
+used for explicit restoration and saving. Sampler changes and rerolls are
+ordered actions, and episodes no longer have a global token budget.
 
 Develop experimental work in a separate checkout. Promote individual features
 with focused changes and tests; do not merge the entire experimental branch

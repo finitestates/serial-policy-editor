@@ -96,8 +96,10 @@ policy-editor \
 ```
 
 Episodes run without a global token budget. Use `h N` for a finite delegated
-span, and change settings at any decision with `s key=value`; sampler changes
-are recorded in the same replayable action sequence as other commands.
+span. Change settings at any decision with `s key=value`, replace the full
+sampler configuration with `s {JSON}`, or change the draw seed with
+`reroll [SEED]`. These are recorded in the replayable action sequence, so
+rewind and fork restore settings from the retained action prefix.
 
 With a local Hugging Face model directory:
 
@@ -174,7 +176,8 @@ New sessions run in memory and do not create a database. Pass `--workspace`
 (optionally followed by a path) to open or create an SQLite workspace for
 saved-episode operations. At EDGE, `save` materializes the selected branch and
 `save-family` materializes all retained branches; unsaved session history is
-discarded when the process exits.
+discarded when the process exits. Version 0.8.5 requires a fresh workspace:
+previous-format workspace data is left untouched and is not migrated.
 
 Replay tapes are storage-independent sequences of teacher actions with
 optional expected results. Forks, rewinds, searches, and menus are editorial
@@ -210,4 +213,4 @@ checks are opt-in and skip when their local model is absent.
 - [Core contract matrix](tests/CORE_CONTRACTS.md) — the reduced core suite;
 - [Test inventory](tests/TEST_INVENTORY.md) — active test buckets and their history.
 
-The version currently represented by the active package manifests is `0.8.0`.
+The version currently represented by the active package manifests is `0.8.5`.

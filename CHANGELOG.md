@@ -1,13 +1,13 @@
 # Changelog
 
-## Unreleased
+## v0.8.5 — 2026-09-27
 
 - Remove global token budgets and the abandoned control-track state. Episodes
   now run until an explicit action yields or ends them; finite `h N` holds
   remain available.
-- Record sampler changes as ordinary ordered actions. Rewind and fork derive
-  sampler settings from the retained prefix, with a boundary selecting the
-  state before commands recorded there.
+- Record sampler changes and rerolls as ordinary ordered actions. Rewind and
+  fork derive sampler settings from the retained prefix, with a boundary
+  selecting the state before commands recorded there.
 - Require a new workspace for the new episode schema. Previous workspace data
   is left untouched and is not migrated.
 
