@@ -94,6 +94,7 @@ def engine(**kwargs):
 
 
 def assert_context(runtime, unconditional=(1, 5)):
+    observation = runtime.observe()
     visible = runtime.visible_token_ids
     primary = [*runtime.initial_token_ids, *visible]
     assert runtime.backend.tokens == primary
@@ -103,7 +104,6 @@ def assert_context(runtime, unconditional=(1, 5)):
     runtime.sampling.cfg_unconditional_prompt is not None
     and (limit == 0 or len(visible) < limit)
     )
-    observation = runtime.observe()
     if active:
         guidance = [*unconditional, *visible]
         assert runtime.guidance_backend.tokens == guidance
@@ -218,7 +218,11 @@ def test_s03_l02_l07_cutoff_rewind_and_lazy_catchup():
     assert_context(runtime)
     runtime.apply(Write('x', mode='exact'))
     assert_context(runtime)
-    assert guidance.work[-2:] == [('reset', (1, 5, 7)), ('eval', (8,))]
+    # Rewind keeps the surviving cached prefix; only later suffix tokens run.
+    assert all(kind != 'reset' for kind, _ in guidance.work[1:])
+    assert [token for kind, ids in guidance.work if kind == 'eval' for token in ids][-3:] == [
+        9, 10, 8,
+    ]
 
 
 @pytest.mark.current_workflow
@@ -246,8 +250,13 @@ def test_s03_append_only_evaluation_and_sampler_changes():
     assert_context(runtime)
     assert guidance.work[-1] == ('eval', (10,))
     runtime.sampling = replace(runtime.sampling, cfg_unconditional_prompt='B')
+    # U and B share BOS, so only the suffix from their first divergence is new.
+    prompt_change = len(guidance.work)
     assert_context(runtime, (1, 6, 5))
-    assert guidance.work[-1] == ('reset', (1, 6, 5, 7, 8, 9, 10))
+    assert all(kind == 'eval' for kind, _ in guidance.work[prompt_change:])
+    assert [token for _, ids in guidance.work[prompt_change:] for token in ids] == [
+        6, 5, 7, 8, 9, 10,
+    ]
 
 
 @pytest.mark.current_workflow
@@ -261,7 +270,9 @@ def test_s03_shared_guidance_invalidates_cached_observation():
     assert_context(b, (1, 6, 5))
     assert_context(a)
     assert a.observe() is not first
-    assert shared.work == [('reset', (1, 5)), ('reset', (1, 6, 5)), ('reset', (1, 5))]
+    assert shared.work[0] == ('reset', (1, 5))
+    assert all(kind == 'eval' for kind, _ in shared.work[1:])
+    assert [token for _, ids in shared.work[1:] for token in ids] == [6, 5, 5]
 
 
 @pytest.mark.invariant
@@ -437,13 +448,19 @@ def test_s08_adapter_cfg_evaluation_preserves_cache_mode(kind, cache):
             def __init__(self):
                 self._ctx = SimpleNamespace(ctx=1)
                 self.tokens = []
+                self.n_tokens = 0
+                self._requires_eval = False
 
             def reset(self):
                 self.tokens = []
+                self.n_tokens = 0
+                self._requires_eval = False
 
             def eval(self, ids):
                 submitted.append(tuple(ids))
                 self.tokens.extend(ids)
+                self.n_tokens += len(ids)
+                self._requires_eval = False
                 self.logits = reference(self.tokens).astype(np.float32)
 
             def tokenize(self, text, **kwargs):
@@ -456,6 +473,8 @@ def test_s08_adapter_cfg_evaluation_preserves_cache_mode(kind, cache):
         guidance._model = Model()
         guidance._llama_cpp = SimpleNamespace(llama_get_logits=lambda _: guidance._model.logits.ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
         guidance._fallback_eog_ids = {0}
+        guidance._restored_logits = None
+        guidance._last_logits_cache = None
     else:
         class Tensor:
             def __init__(self, values):
@@ -464,6 +483,9 @@ def test_s08_adapter_cfg_evaluation_preserves_cache_mode(kind, cache):
 
             def __getitem__(self, key):
                 return Tensor(self.values[key])
+
+            def contiguous(self):
+                return Tensor(np.ascontiguousarray(self.values))
 
             def tolist(self):
                 return self.values.tolist()
@@ -489,10 +511,17 @@ def test_s08_adapter_cfg_evaluation_preserves_cache_mode(kind, cache):
             def __call__(self, input_ids, past_key_values=(), use_cache=False, **kwargs):
                 ids = input_ids[0].tolist()
                 submitted.append(tuple(ids))
-                prefix = [*past_key_values, *ids]
+                past = (
+                    past_key_values[0][0].values[0, 0, :, 0].astype(int).tolist()
+                    if past_key_values else []
+                )
+                prefix = [*past, *ids]
+                cache_values = Tensor(
+                    np.asarray(prefix, dtype=np.int64).reshape(1, 1, len(prefix), 1)
+                )
                 return SimpleNamespace(
                     logits=Tensor(reference(prefix).astype(np.float32).reshape(1, 1, -1)),
-                    past_key_values=tuple(prefix) if use_cache else None,
+                    past_key_values=((cache_values, cache_values),) if use_cache else None,
                 )
 
         guidance = object.__new__(TransformersBackend)
@@ -503,6 +532,7 @@ def test_s08_adapter_cfg_evaluation_preserves_cache_mode(kind, cache):
         guidance._supports_logits_to_keep = False
         guidance._cache_active = False
         guidance._past_key_values = None
+        guidance._last_logits = None
         guidance._eog_ids = {0}
         guidance._tokenizer = SimpleNamespace(
             bos_token_id=1, all_special_ids=[0, 1],

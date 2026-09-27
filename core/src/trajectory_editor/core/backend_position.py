@@ -112,17 +112,34 @@ def position_report(
 def position_backend(
     backend, token_ids: tuple[int, ...] | list[int]
 ) -> bool:
-    """Use the backend's cache-aware prefix operation when it has one.
+    """Align through cache-aware branching or append a verified missing suffix.
 
-    Return false when the adapter exposes only the minimal reset operation so
-    the owning runtime can perform its explicit full-prefix fallback.
+    Return false when the available position and mutation APIs cannot preserve
+    a reusable prefix so the owning runtime can perform its explicit fallback.
     """
 
     prefix = list(token_ids)
-    comparison = position_report(backend, prefix)
+    position = getattr(backend, "position", None)
+    if callable(position):
+        reported = position()
+        comparison = compare_backend_position(reported, prefix)
+    else:
+        reported = None
+        comparison = position_report(backend, prefix)
     if comparison.status == "aligned":
         return True
     branch = getattr(backend, "branch_to_prefix", None)
+    if (
+        not callable(branch)
+        and reported is not None
+        and comparison.status == "backend-behind"
+        and reported.cache_reusable
+    ):
+        evaluate = getattr(backend, "eval", None)
+        suffix = prefix[comparison.common_prefix_length:]
+        if callable(evaluate) and suffix:
+            evaluate(suffix)
+            return True
     if not callable(branch):
         return False
     branch(prefix)

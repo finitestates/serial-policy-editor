@@ -24,7 +24,7 @@ from .core.backend import (
     InferenceBackend,
     require_inference_backend,
 )
-from .core.backend_position import position_backend
+from .core.backend_position import position_backend, position_report
 from .core.candidates import Candidate
 from .candidate_columns import CandidateViewPlan
 from .core.errors import EditorError
@@ -614,6 +614,38 @@ class EpisodeEngine:
             tuple(sorted(self._ephemeral_logit_biases.items())),
         )
 
+    def _cached_observation_is_current(self) -> bool:
+        """Check whether reusable logits still belong to this engine's prefixes.
+
+        Backends can be shared by live engines. Their position is therefore
+        part of observation validity, even when this engine's semantic key is
+        unchanged.
+        """
+
+        primary_prefix = tuple(self.token_ids)
+        if self._speculative_accept_prefix is not None:
+            prepared = self._prepared_accept
+            if (
+                prepared is None
+                or prepared.prefix_token_ids != primary_prefix
+            ):
+                return False
+            primary_prefix = (*primary_prefix, prepared.token_id)
+        if callable(getattr(self.backend, "position", None)):
+            if position_report(self.backend, primary_prefix).status != "aligned":
+                return False
+        if self._cfg_active():
+            guidance_prefix = (
+                *self._guidance_prompt_tokens(), *self.visible_token_ids
+            )
+            if callable(getattr(self.guidance_backend, "position", None)):
+                guidance_position = position_report(
+                    self.guidance_backend, guidance_prefix
+                )
+                if guidance_position.status != "aligned":
+                    return False
+        return True
+
     def _validate_observation(self, observation: Observation) -> None:
         if (
             self.ended or self.checkpointed
@@ -627,7 +659,15 @@ class EpisodeEngine:
             raise EditorError("the episode has no live decision boundary")
         key = self._decision_key()
         if self._observation is not None and self._observation_key == key:
-            return self._observation
+            if self._cached_observation_is_current():
+                return self._observation
+            # A different engine may have moved a shared backend. Drop local
+            # warm bookkeeping without issuing a rollback against that other
+            # engine's active position; normal positioning below reconciles it.
+            self._observation = None
+            self._observation_key = None
+            self._prepared_accept = None
+            self._speculative_accept_prefix = None
         self._ensure_backend_positioned()
         self._prepare_activation_runtime()
         # Make one owned float64 snapshot here. ObservationStatistics validates
