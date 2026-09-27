@@ -181,7 +181,7 @@ def test_bias_feedback_is_in_next_choice_request():
         engine, engine.observe(),
     )
     assert action.rank == 1
-    assert terminal.states[1].feedback.title == "STEERING UPDATED"
+    assert terminal.states[1].feedback.title == "BIAS UPDATED"
     assert terminal.states[1].choice != terminal.states[0].choice
 
 

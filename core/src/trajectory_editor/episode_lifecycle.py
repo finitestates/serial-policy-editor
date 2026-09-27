@@ -32,7 +32,7 @@ def _model_change_sampling(
     """Retain token-ID controls only when their tokenizer identity is unchanged."""
     return replace(
         sampling,
-        bias_rules=sampling.bias_rules if same_tokenizer else (),
+        token_biases=sampling.token_biases if same_tokenizer else (),
         bias_groups=sampling.bias_groups if same_tokenizer else (),
         activation_vector=(),
         activation_vector_strength=0.0,

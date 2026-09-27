@@ -543,7 +543,7 @@ def main(
                 or saved_tokenizer_id != destination_tokenizer_id
             )
             if tokenizer_changed:
-                args.bias_rules = ()
+                args.token_biases = ()
                 args.bias_groups = ()
                 io.write("Tokenizer changed: token-ID biases reset; load a matching preset to apply biases.")
 

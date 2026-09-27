@@ -227,7 +227,7 @@ def action_preview(
                              detail=detail, command=command)
 
     effects = {
-        CommandKind.BIAS: ("token bias", "Update this bias rule; stay at this step."),
+        CommandKind.BIAS: ("token bias", "Update a group or token bias; stay at this step."),
         CommandKind.SAMPLER: (
             "sampler settings",
             (

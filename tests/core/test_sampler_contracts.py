@@ -6,7 +6,14 @@ import numpy as np
 import pytest
 
 from tests.fakes import ConformingFakeBackend
-from trajectory_editor.bias_rules import BiasMatcher, BiasRule
+from trajectory_editor.bias_commands import format_group_report, format_token_report
+from trajectory_editor.bias_groups import (
+    BiasGroup,
+    BiasMember,
+    BiasRoute,
+    BiasToken,
+    member_surfaces,
+)
 from trajectory_editor.core.actions import (
     Accept,
     EndGeneration,
@@ -57,15 +64,6 @@ def test_s01_sampler_config_accepts_rejects_and_round_trips_core_state():
             SamplerConfig(temperature=invalid)
     with pytest.raises(ValueError, match="decoder logits"):
         ObservationStatistics(np.asarray([0.0, math.nan]), SamplerConfig(), [])
-
-
-@pytest.mark.parametrize(
-    "bias_step", [0, -0.5, math.nan, math.inf, -math.inf, True]
-)
-@pytest.mark.invariant
-def test_s01b_bias_step_must_be_finite_positive_and_non_boolean(bias_step):
-    with pytest.raises(EditorError, match="bias_step must be a finite positive number"):
-        SamplerConfig(bias_step=bias_step)
 
 
 @pytest.mark.invariant
@@ -522,28 +520,76 @@ def test_s04g_logit_z_score_uses_full_vocab_mean_std_without_softmax_wake():
     assert f"{rows[0].logit_z:+.2f}" in rendered
 
 @pytest.mark.invariant
-def test_s05_tail_bias_assigns_multi_token_credit_only_to_final_token():
-    matcher = BiasMatcher((BiasRule(routes=((10, 11),), bias=2.0, mode="tail"),))
-    assert matcher.active_biases([]) == {}
-    assert matcher.active_biases([10]) == {11: 2.0}
+def test_s05_group_member_biases_only_its_final_token_after_exact_prefix():
+    member = BiasMember(
+        text="the steamship",
+        routes=(BiasRoute((10, 11, 12), ("the steamship",)),),
+    )
+    config = SamplerConfig(bias_groups=(BiasGroup("ships", (member,), 0.5),))
+    assert config.active_biases([]) == {}
+    assert config.active_biases([10]) == {}
+    assert config.active_biases([10, 11]) == {12: 0.5}
+    assert config.active_biases([7, 10, 11]) == {12: 0.5}
+    assert config.active_biases([10, 9, 11]) == {}
 
-    tail = BiasMatcher((BiasRule(routes=((10, 11, 12),), bias=3.0, mode="tail"),))
-    assert tail.active_biases([10]) == {}
-    assert tail.active_biases([10, 11]) == {12: 3.0}
+    single = BiasMember("ship", (BiasRoute((12,), ("ship",)),))
+    single_config = SamplerConfig(
+        bias_groups=(BiasGroup("ships", (single,), 0.5),)
+    )
+    assert single_config.active_biases([]) == {12: 0.5}
 
 
 @pytest.mark.invariant
-def test_s06_conditional_bias_waits_for_trigger_and_stops_at_terminator():
-    matcher = BiasMatcher((BiasRule(
-        routes=((20,),),
-        bias=2.0,
-        mode="tail",
-        triggers=((7, 1, 2),),
-        until=6,
-    ),))
-    assert matcher.active_biases([7, 1]) == {}
-    assert matcher.active_biases([7, 1, 2]) == {20: 2.0}
-    assert matcher.active_biases([7, 1, 2, 6]) == {}
+def test_s06_surface_variants_are_bounded_and_bias_sources_are_explainable():
+    assert member_surfaces("my favorite couch") == (
+        "my favorite couch",
+        " my favorite couch",
+        "My favorite couch",
+        " My favorite couch",
+        "MY FAVORITE COUCH",
+        " MY FAVORITE COUCH",
+    )
+    assert member_surfaces("my favorite couch", literal=True) == (
+        "my favorite couch",
+    )
+
+    member = BiasMember(
+        "steamship", (BiasRoute((1, 2, 3), ("steamship",)),)
+    )
+    overlapping_member = BiasMember(
+        "steamship suffix", (BiasRoute((2, 3), ("steamship suffix",)),)
+    )
+    config = SamplerConfig(
+        bias_groups=(
+            BiasGroup("nautical", (member, overlapping_member), 0.5),
+            BiasGroup("ships", (member,), 0.25),
+        ),
+        token_biases=(BiasToken(3, 0.125),),
+    )
+    assert config.active_biases([1, 2]) == {3: 0.875}
+    sources = config.bias_contributions([1, 2], include_inactive=True)
+    assert sum(item.amount for item in sources if item.active) == pytest.approx(0.875)
+    assert {item.source for item in sources if item.active} == {
+        "group 'nautical'",
+        "group 'ships'",
+        "token #3",
+    }
+    inactive = config.bias_contributions([1], include_inactive=True)
+    assert sum(item.amount for item in inactive if item.active) == pytest.approx(0.125)
+    assert sum(item.amount for item in inactive if not item.active) == pytest.approx(0.75)
+
+    backend = ConformingFakeBackend()
+    group_view = format_group_report(config, "nautical", [1, 2], backend)
+    assert "token total now: +0.875" in group_view
+    assert "group 'ships'" in group_view
+    assert "'steamship suffix'" in group_view
+    token_view = format_token_report(config, 3, [1, 2], backend)
+    assert "active total: +0.875" in token_view
+    assert "token #3" in token_view
+    dormant_view = format_token_report(config, 3, [1], backend)
+    assert "active total: +0.125" in dormant_view
+    assert "inactive until its prefix matches" in dormant_view
+    assert SamplerConfig.from_record(config.to_dict()) == config
 
 
 @pytest.mark.parametrize(

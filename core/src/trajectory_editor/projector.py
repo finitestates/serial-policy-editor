@@ -540,7 +540,7 @@ def project_procedure(store: EpisodeStore, episode_id: str) -> str:
     fields = {
         key: getattr(initial, key)
         for key in initial.__dataclass_fields__
-        if key not in {"bias_rules", "bias_groups"}
+        if key not in {"token_biases", "bias_groups"}
     }
     lines = [
         f"MODEL   : {_procedure_text(model)}",
@@ -553,8 +553,8 @@ def project_procedure(store: EpisodeStore, episode_id: str) -> str:
     current = initial
     boundary = 0
 
-    if initial.bias_rules:
-        lines.insert(3, f"RULES   : logical bias rules {[r.to_dict() for r in initial.bias_rules]!r}")
+    if initial.token_biases:
+        lines.insert(3, f"TOKENS  : {[item.to_dict() for item in initial.token_biases]!r}")
     if initial.bias_groups:
         lines.insert(4, f"GROUPS  : {[group.to_dict() for group in initial.bias_groups]!r}")
 

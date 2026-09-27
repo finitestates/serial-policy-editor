@@ -293,13 +293,14 @@ class EpisodeEngine:
             self._activation_backend_key_for(previous)
             if previous is not None else None
         )
-        bias_tokens = []
-        for rule in (*value.bias_rules,
-                     *(rule for group in value.bias_groups for rule in group.rules)):
-            bias_tokens.extend(token for route in rule.routes for token in route)
-            bias_tokens.extend(token for trigger in rule.triggers for token in trigger)
-            if type(rule.until) is int:
-                bias_tokens.append(rule.until)
+        bias_tokens = [item.token_id for item in value.token_biases]
+        bias_tokens.extend(
+            token
+            for group in value.bias_groups
+            for member in group.members
+            for route in member.routes
+            for token in route.token_ids
+        )
         if any(token >= self.backend.vocabulary_size() for token in bias_tokens):
             raise EditorError("bias token id is outside the model vocabulary")
         self._sampling = value

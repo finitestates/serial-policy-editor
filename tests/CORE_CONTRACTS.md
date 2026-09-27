@@ -22,8 +22,8 @@ Core tests assert observable state, persisted records, replay results, and may a
 | S02 | deterministic categorical and Gumbel draws obey seed/tie rules | `test_sampler_contracts.py` |
 | S03 | CFG evaluates `P + V[:n]` and `U + V[:n]` with exact shared continuation IDs; standalone guidance uses `add_bos=True, special=True` independently of primary representation. Only retained visible tokens count toward the cutoff; new/resumed/replayed/forked/switched states are equivalent. Guidance reuses evaluation on forward append and unchanged decisions, catches up lazily, and rebuilds once on divergence, prompt change, or ownership loss. No warming past cutoff. | `test_cfg_contracts.py`, `test_sampler_contracts.py` |
 | S04 | history penalties change policy selection without changing raw rank | `test_sampler_contracts.py` |
-| S05 | naive multi-token bias credits only the final entered edge | `test_sampler_contracts.py` |
-| S06 | conditional bias activates after its trigger and stops at its terminator | `test_sampler_contracts.py` |
+| S05 | a group member biases only its final token after its exact token prefix matches; the rule is identical for words and phrases | `test_sampler_contracts.py` |
+| S06 | finite case/spacing variants and overlapping group/direct-token sources produce an attributable sum | `test_sampler_contracts.py` |
 | S07 | every core action and replay expectation serializes canonically | `test_sampler_contracts.py` |
 | S08 | llama and Transformers backends consume the same core sampler contract | `test_vector_contracts.py`, sampler smoke tests |
 

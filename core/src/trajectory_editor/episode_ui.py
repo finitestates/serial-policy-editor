@@ -819,18 +819,35 @@ class InteractivePolicy:
                 review_boundary = None
                 continue
             if command.kind == CommandKind.BIAS:
-                from .bias_commands import apply_bias_command
+                from .bias_commands import (
+                    apply_bias_command,
+                    format_bias_status,
+                    format_group_report,
+                    format_token_report,
+                )
 
                 if command.bias_status:
-                    lines = [
-                        f"{group.name}: shared amount {group.bias:+g}; "
-                        f"{len(group.members)} terms; "
-                        f"{'enabled' if group.enabled else 'disabled'}"
-                        for group in engine.sampling.bias_groups
-                    ]
-                    self.io.page("\n".join(lines) or "No active bias groups.")
+                    self.io.page(format_bias_status(engine.sampling))
                     continue
                 try:
+                    if command.bias_inspect_group is not None:
+                        report = format_group_report(
+                            engine.sampling,
+                            command.bias_inspect_group,
+                            observation.prefix_token_ids,
+                            engine.backend,
+                        )
+                        self.io.page(report)
+                        continue
+                    if command.bias_inspect_token is not None:
+                        report = format_token_report(
+                            engine.sampling,
+                            command.bias_inspect_token,
+                            observation.prefix_token_ids,
+                            engine.backend,
+                        )
+                        self.io.page(report)
+                        continue
                     updated, updates = apply_bias_command(
                         command, engine.backend, engine.sampling, observation,
                         resolve_candidate,
@@ -860,7 +877,7 @@ class InteractivePolicy:
                 )
                 choice_view = self._view_plan(engine)
                 lines = tuple(f"{label}: {value:+g}" for label, value in updates)
-                feedback = ChoiceFeedback("status", "STEERING UPDATED", lines)
+                feedback = ChoiceFeedback("status", "BIAS UPDATED", lines)
                 continue
             if command.kind == CommandKind.SAMPLER:
                 payload = command.sampler_text

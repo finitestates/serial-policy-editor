@@ -1,9 +1,9 @@
 """The core sampler configuration contract.
 
 ``SamplerConfig`` owns settings needed to produce and replay a token draw:
-candidate filters, CFG, history penalties, manual/conditional bias rules,
-and optional steering-vector application. Research controls are deliberately
-not fields here. Persisted records must match the current core contract.
+candidate filters, CFG, history penalties, grouped phrase biases, direct token
+biases, and optional steering-vector application. Research controls are
+deliberately not fields here. Persisted records must match the current contract.
 """
 
 from __future__ import annotations
@@ -24,9 +24,8 @@ SAMPLING_POLICY_SCHEME = "spe-history-aware-decoder-policy-v1"
 class SamplerConfig:
     """Core, replayable sampler settings.
 
-    The tuple fields intentionally accept the serialized rule records used by
-    the existing project format.  They are normalized to canonical rule and
-    group objects during validation.
+    Bias tuples accept serialized group/member/token records and normalize
+    them to canonical immutable objects during validation.
     """
 
     temperature: float = 1.0
@@ -44,8 +43,7 @@ class SamplerConfig:
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
     seed: int = 12345
-    bias_step: float = 0.5
-    bias_rules: tuple = ()
+    token_biases: tuple = ()
     bias_groups: tuple = ()
     activation_vector: tuple = ()
     activation_vector_strength: float = 0.0
@@ -56,25 +54,18 @@ class SamplerConfig:
     activation_vector_digest: str = ""
 
     def __post_init__(self) -> None:
-        from ..bias_rules import BiasGroup, BiasRule
+        from ..bias_groups import BiasGroup, BiasToken
 
-        if (
-            type(self.bias_step) not in (int, float)
-            or not math.isfinite(self.bias_step)
-            or self.bias_step <= 0
-        ):
-            raise EditorError("bias_step must be a finite positive number")
         try:
-            rules = tuple(BiasRule.from_record(rule) for rule in self.bias_rules)
+            token_biases = tuple(BiasToken.from_record(item) for item in self.token_biases)
         except TypeError as exc:
-            raise EditorError("bias_rules must be a list of rules") from exc
-        if len({rule.key for rule in rules}) != len(rules):
-            raise EditorError("duplicate bias rule")
-        object.__setattr__(
-            self,
-            "bias_rules",
-            tuple(sorted((rule for rule in rules if rule.bias != 0), key=lambda rule: rule.sort_key)),
-        )
+            raise EditorError("token_biases must be a list of token biases") from exc
+        if len({item.token_id for item in token_biases}) != len(token_biases):
+            raise EditorError("duplicate token bias")
+        object.__setattr__(self, "token_biases", tuple(sorted(
+            (item for item in token_biases if item.bias != 0),
+            key=lambda item: item.token_id,
+        )))
         try:
             groups = tuple(BiasGroup.from_record(group) for group in self.bias_groups)
         except TypeError as exc:
@@ -188,23 +179,25 @@ class SamplerConfig:
     def policy_active(self) -> bool:
         return (
             self.history_penalties_active
-            or bool(self.bias_rules)
-            or any(group.enabled and group.bias != 0.0 for group in self.bias_groups)
+            or bool(self.token_biases)
+            or any(group.bias != 0.0 for group in self.bias_groups)
             or (bool(self.activation_vector) and self.activation_vector_strength != 0.0)
         )
 
-    @property
-    def effective_bias_rules(self) -> tuple:
-        from ..bias_rules import merge_bias_rules
-
-        return merge_bias_rules(
-            (*self.bias_rules, *(rule for group in self.bias_groups for rule in group.effective_rules()))
-        )
-
     def active_biases(self, history) -> dict[int, float]:
-        from ..bias_rules import BiasMatcher
+        from ..bias_groups import active_biases
 
-        return BiasMatcher(self.effective_bias_rules).active_biases(history)
+        return active_biases(self.bias_groups, self.token_biases, history)
+
+    def bias_contributions(self, history, *, include_inactive: bool = False):
+        from ..bias_groups import bias_contributions
+
+        return bias_contributions(
+            self.bias_groups,
+            self.token_biases,
+            history,
+            include_inactive=include_inactive,
+        )
 
     @property
     def history_penalties_active(self) -> bool:
@@ -230,7 +223,7 @@ class SamplerConfig:
             "presence_penalty", "frequency_penalty", "history_scope",
             "policy_scheme", "seed", "rng_scheme",
         }
-        optional = {"bias_rules", "bias_groups", "bias_step"}
+        optional = {"token_biases", "bias_groups"}
         steering = {
             "steering_vector", "steering_strength", "steering_kind",
             "steering_position", "steering_layer_start", "steering_layer_end",
@@ -282,8 +275,7 @@ class SamplerConfig:
             presence_penalty=value["presence_penalty"],
             frequency_penalty=value["frequency_penalty"],
             seed=value["seed"],
-            bias_step=value.get("bias_step", 0.5),
-            bias_rules=value.get("bias_rules", ()),
+            token_biases=value.get("token_biases", ()),
             bias_groups=value.get("bias_groups", ()),
             activation_vector=value.get("steering_vector", ()),
             activation_vector_strength=value.get("steering_strength", 0.0),
@@ -315,12 +307,10 @@ class SamplerConfig:
             "seed": self.seed,
             "rng_scheme": RNG_SCHEME,
         }
-        if self.bias_rules:
-            result["bias_rules"] = [rule.to_dict() for rule in self.bias_rules]
+        if self.token_biases:
+            result["token_biases"] = [item.to_dict() for item in self.token_biases]
         if self.bias_groups:
             result["bias_groups"] = [group.to_dict() for group in self.bias_groups]
-        if self.bias_step != 0.5:
-            result["bias_step"] = self.bias_step
         if (
             self.activation_vector
             or self.activation_vector_strength != 0.0

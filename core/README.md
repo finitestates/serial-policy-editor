@@ -2,7 +2,7 @@
 
 This subproject contains the standalone runtime: the menu-driven episode
 editor, replay/resume/fork/rewind behavior, persistence, supported model
-backends, core sampler, bias rules, and episode projector.
+backends, core sampler, grouped phrase biases, and episode projector.
 
 Install it directly from this repository with:
 

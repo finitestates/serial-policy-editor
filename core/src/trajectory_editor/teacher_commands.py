@@ -77,16 +77,15 @@ class TeacherCommand:
     bias_status: bool = False
     bias_amount: float | None = None
     bias_targets: tuple[str, ...] | None = None
-    bias_target_bare: tuple[bool, ...] | None = None
-    bias_prefix: str | None = None
-    bias_last: int | None = None
-    bias_triggers: tuple[str, ...] | None = None
-    bias_trigger_bare: tuple[bool, ...] | None = None
-    bias_stop_text: str | None = None
-    bias_stop_token: int | None = None
     bias_group_name: str | None = None
     bias_group_members: tuple[str, ...] | None = None
-    bias_group_member_bare: tuple[bool, ...] | None = None
+    bias_group_member_literal: tuple[bool, ...] | None = None
+    bias_group_remove_name: str | None = None
+    bias_group_remove_members: tuple[str, ...] | None = None
+    bias_group_remove_member_literal: tuple[bool, ...] | None = None
+    bias_inspect_group: str | None = None
+    bias_inspect_token: int | None = None
+    bias_token_id: int | None = None
     chord_ranks: tuple[int, ...] | None = None
     sampler_text: str | None = None
     reroll_seed: int | None = None
@@ -116,23 +115,23 @@ HELP_TEXT = """Commands:
                     Enter remains the only commit action
                     --manual-acceptance leaves the command blank instead
   accept             commit the sampled proposal
-  b wings + / - / =  adapt group appearance: promote / suppress / maintain
+  groups               list groups; groups NAME shows members and token routes
+  b NAME -> {terms}    create or add members to a named group
+  b NAME remove {terms} remove members from a group
+  b NAME +0.5          add 0.5 logit to each matching member
+  b NAME =-0.5         set the group's total adjustment; off sets it to zero
+  b {NAME, OTHER} +     adjust several existing groups by the default 0.5
+                      each group contributes once per token; groups and direct tokens add
+  b token #ID          explain active and inactive sources for one token
+  RANK+ / RANK-        adjust a selected token directly by the default 0.5
+  RANK=VALUE           set or clear a direct token adjustment
+  terms add one-space, lowercase, sentence-case, and uppercase variants
+                      no plural or generated title-case variants
+                      use literal:"text" in a group to disable surface variants
+  multi-token terms bias only the final token after an exact prefix match
   s top_k=20      change sampler settings; changes are part of the action tape
   s {JSON}        replace all sampler settings from a complete SamplerConfig record
   reroll [SEED]   change the draw seed as a replayable action
-  b wings off        disable this target (optional after/until scope)
-  b {wings, scales, claws} +0.5          bias several targets at once
-  b {wings, scales} + after {dragon, wyvern} until "."
-                    braces are comma-separated human text; quoted items stay exact
-                    omit until ... to stop at the exact period token
-  b nautical -> {anchor, steamship, wharf}
-                    create or append a durable runtime bias group
-  N- after dragon until "\n"            ranked target with an exact one-token stop
-  b " TEXT" +/-[N]  quoted text remains exact; explicit amounts apply manual bias
-  bl X +/-[N]       bias the last X context tokens; bl 1 is a single-token bias
-  N+/-[X] ... " P"  bias ranked token N only after the tokenized prefix P
-  N+ / N-           adjust token bias by the default step without advancing
-  N+0.5 / N-0.5     adjust by an explicit amount; N= clears that token bias
   1..N              commit a candidate; the proposal rank records acceptance
   chord RANK RANK... preview temporary continuations; choose a letter or starting rank
                     to commit its actions and drop the other previews
@@ -320,169 +319,181 @@ def _split_human_bias_group(raw: str) -> tuple[str, ...]:
     return tuple(items)
 
 
-def _parse_bias_text(raw: str, *, label: str, return_bare: bool = False):
-    """Decode exact quoted text or friendlier bare/braced text.
-
-    Bare text is continuation-oriented: surrounding whitespace is stripped and a
-    single leading space is supplied automatically. Quoted JSON strings are exact.
-    """
+def _decode_bias_member(raw: str, *, label: str) -> tuple[str, bool]:
     value = raw.strip()
-    if not value:
-        raise EditorError(f"{label} cannot be empty")
-    bare_flags: tuple[bool, ...]
-    if value.startswith('{'):
-        if not value.endswith('}'):
-            raise EditorError(f"unterminated {label} group")
-        result_list = []
-        bare_list = []
-        for item in _split_human_bias_group(value):
-            item = item.strip()
-            if item.startswith('"'):
-                try:
-                    decoded = json.loads(item)
-                except ValueError as exc:
-                    raise EditorError(f"quoted {label} must be a valid JSON string") from exc
-                if not isinstance(decoded, str):
-                    raise EditorError(f"quoted {label} must be a JSON string")
-                result_list.append(decoded)
-                bare_list.append(False)
-            else:
-                if '"' in item or any(character in item for character in '{}[]'):
-                    raise EditorError(f"invalid bare {label}: {item!r}")
-                result_list.append(' ' + item)
-                bare_list.append(True)
-        result = tuple(result_list)
-        bare_flags = tuple(bare_list)
-    elif value.startswith('"'):
+    literal = value.startswith("literal:")
+    if literal:
+        value = value[len("literal:"):].strip()
+        if not value.startswith('"'):
+            raise EditorError('literal members use literal:"text"')
+    if value.startswith('"'):
         try:
             decoded = json.loads(value)
         except ValueError as exc:
             raise EditorError(f"{label} must be a valid JSON string") from exc
         if not isinstance(decoded, str):
             raise EditorError(f"{label} must be a JSON string")
-        result = (decoded,)
-        bare_flags = (False,)
+        text = decoded
     else:
         if any(character in value for character in '{}[]"'):
-            raise EditorError(f"invalid bare {label}")
-        result = (' ' + value.strip(),)
-        bare_flags = (True,)
-    if not result or any(not item for item in result):
-        raise EditorError(f"{label} alternatives cannot be empty")
-    return (result, bare_flags) if return_bare else result
+            raise EditorError(f"invalid bare {label}: {value!r}")
+        text = value.strip()
+    if not text:
+        raise EditorError(f"{label} cannot be empty")
+    return text, literal
 
 
-def _parse_bias_stop(raw: str, *, vocabulary_size: int) -> tuple[str | None, int | None]:
-    """Return (exact stop text, explicit stop token)."""
+def _parse_bias_members(raw: str, *, label: str) -> tuple[tuple[str, ...], tuple[bool, ...]]:
     value = raw.strip()
-    if value.startswith('#'):
-        try:
-            token = int(value[1:])
-        except ValueError as exc:
-            raise EditorError("stop token IDs use until #N") from exc
-        if not 0 <= token < vocabulary_size:
-            raise EditorError("stop token ID is outside the vocabulary")
-        return None, token
-    if value.startswith('"'):
-        try:
-            decoded = json.loads(value)
-        except ValueError as exc:
-            raise EditorError("until must be a valid JSON string, ., |, or #N") from exc
-        if not isinstance(decoded, str) or not decoded:
-            raise EditorError("stop text must be a nonempty JSON string")
-        return decoded, None
-    raise EditorError('use until "TOKEN" or until #N')
+    if value.startswith("{"):
+        if not value.endswith("}"):
+            raise EditorError(f"unterminated {label} group")
+        items = _split_human_bias_group(value)
+    else:
+        items = (value,)
+    decoded = tuple(_decode_bias_member(item, label=label) for item in items)
+    members = tuple(text for text, _literal in decoded)
+    literal = tuple(is_literal for _text, is_literal in decoded)
+    if len({(text, mode) for text, mode in zip(members, literal)}) != len(members):
+        raise EditorError(f"{label} cannot contain duplicate entries")
+    return members, literal
+
+
+def _bias_adjustment(raw: str) -> tuple[str, float | None] | None:
+    match = re.fullmatch(
+        r"(?P<op>off|[+\-=])\s*(?P<amount>[+-]?(?:\d+(?:\.\d*)?|\.\d+))?",
+        raw,
+    )
+    if match is None:
+        return None
+    operator, amount_text = match.group("op"), match.group("amount")
+    if operator == "off":
+        if amount_text is not None:
+            raise EditorError("use off without an amount")
+        return operator, None
+    amount = None if amount_text is None else float(amount_text)
+    if amount is not None and not math.isfinite(amount):
+        raise EditorError("bias amount must be finite")
+    if operator == "=":
+        if amount is None:
+            raise EditorError("setting a bias requires an amount, for example =0.5")
+    elif amount is not None and amount <= 0:
+        raise EditorError("bias adjustment must be finite and positive")
+    return operator, amount
 
 
 def parse_bias_command(raw: str, *, vocabulary_size: int) -> TeacherCommand | None:
-    """Parse bias edits without interpreting quoted text as another command."""
-    if raw.strip() in {"b", "groups"}:
+    """Parse group, member, token, and attribution commands."""
+    value = raw.strip()
+    if value in {"b", "groups"}:
         return TeacherCommand(CommandKind.BIAS, bias_status=True)
-    quoted = r'"(?:[^"\\]|\\.)*"'
-    group_match = re.fullmatch(
-        r"b\s+(?P<name>[A-Za-z_][A-Za-z0-9_.-]*)\s*->\s*(?P<members>\{.*\})",
-        raw.strip(),
+
+    inspect_group = re.fullmatch(
+        r"(?:groups|b\s+group)\s+(?P<name>[A-Za-z_][A-Za-z0-9_.-]*)", value
     )
-    if group_match is not None:
-        members, bare_flags = _parse_bias_text(
-            group_match.group("members"), label="bias group members", return_bare=True
+    if inspect_group:
+        return TeacherCommand(
+            CommandKind.BIAS,
+            bias_inspect_group=inspect_group.group("name"),
+        )
+
+    inspect_token = re.fullmatch(r"b\s+token\s+#(?P<token>[0-9]+)", value)
+    if inspect_token:
+        token_id = int(inspect_token.group("token"))
+        if token_id >= vocabulary_size:
+            raise EditorError("token ID is outside the vocabulary")
+        return TeacherCommand(CommandKind.BIAS, bias_inspect_token=token_id)
+
+    add_group = re.fullmatch(
+        r"b\s+(?P<name>[A-Za-z_][A-Za-z0-9_.-]*)\s*->\s*(?P<members>\{.*\})",
+        value,
+    )
+    if add_group:
+        members, literals = _parse_bias_members(
+            add_group.group("members"), label="bias group members"
         )
         return TeacherCommand(
             CommandKind.BIAS,
-            bias_group_name=group_match.group("name"),
+            bias_group_name=add_group.group("name"),
             bias_group_members=members,
-            bias_group_member_bare=bare_flags,
+            bias_group_member_literal=literals,
         )
-    adjustment = r"(?P<op>off|[+\-=])\s*(?P<amount>\d+(?:\.\d*)?|\.\d+)?"
-    stop = rf"(?:{quoted}|\#[0-9]+)"
-    scope = rf"(?:\s+after\s+(?P<triggers>.+?)(?:\s+until\s+(?P<until>{stop}))?)?"
-    patterns = (
-        rf"b\s+(?P<text>.+?)\s*{adjustment}{scope}",
-        rf"bl\s+(?P<last>\d+)\s*{adjustment}",
-        rf"(?P<rank>\d+)\s*{adjustment}(?:\s*\.\.\.\s*(?P<prefix>{quoted}))?{scope}",
+
+    remove_group = re.fullmatch(
+        r"b\s+(?P<name>[A-Za-z_][A-Za-z0-9_.-]*)\s+remove\s+(?P<members>\{.*\})",
+        value,
     )
-    for pattern in patterns:
-        match = re.fullmatch(pattern, raw.strip())
-        if match is None:
-            continue
-        fields = match.groupdict()
-        operator, amount = fields["op"], fields["amount"]
-        rank = int(fields["rank"]) if fields.get("rank") is not None else None
-        last = int(fields["last"]) if fields.get("last") is not None else None
-        if rank is not None and not 1 <= rank <= vocabulary_size:
+    if remove_group:
+        members, literals = _parse_bias_members(
+            remove_group.group("members"), label="bias group members"
+        )
+        return TeacherCommand(
+            CommandKind.BIAS,
+            bias_group_remove_name=remove_group.group("name"),
+            bias_group_remove_members=members,
+            bias_group_remove_member_literal=literals,
+        )
+
+    direct_token = re.fullmatch(
+        r"b\s+token\s+#(?P<token>[0-9]+)(?:\s+(?P<adjustment>off|[+\-=].*))?",
+        value,
+    )
+    if direct_token:
+        token_id = int(direct_token.group("token"))
+        if token_id >= vocabulary_size:
+            raise EditorError("token ID is outside the vocabulary")
+        adjustment = direct_token.group("adjustment")
+        if adjustment is None:
+            return TeacherCommand(CommandKind.BIAS, bias_inspect_token=token_id)
+        operator, amount = _bias_adjustment(adjustment)
+        if operator is None:
+            raise EditorError("use +[amount], -[amount], =[amount], or off")
+        return TeacherCommand(
+            CommandKind.BIAS,
+            bias_operator=operator,
+            bias_amount=amount,
+            bias_token_id=token_id,
+        )
+
+    group_adjust = re.fullmatch(
+        r"b\s+(?P<targets>\{.*\}|[A-Za-z_][A-Za-z0-9_.-]*)\s+"
+        r"(?P<adjustment>off|[+\-=].*|[+\-])",
+        value,
+    )
+    if group_adjust:
+        target_text = group_adjust.group("targets")
+        names, literals = _parse_bias_members(target_text, label="bias group target")
+        if any(literals):
+            raise EditorError("bias adjustments target group names, not literal text")
+        if any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", name) for name in names):
+            raise EditorError("bias group names must be simple names")
+        operator, amount = _bias_adjustment(group_adjust.group("adjustment"))
+        if operator is None:
+            raise EditorError("use +[amount], -[amount], =[amount], or off")
+        return TeacherCommand(
+            CommandKind.BIAS,
+            bias_operator=operator,
+            bias_amount=amount,
+            bias_targets=names,
+        )
+
+    rank_adjust = re.fullmatch(
+        r"(?P<rank>[0-9]+)\s*(?P<adjustment>off|[+\-=].*|[+\-])",
+        value,
+    )
+    if rank_adjust:
+        rank = int(rank_adjust.group("rank"))
+        if not 1 <= rank <= vocabulary_size:
             raise EditorError("bias rank is outside the vocabulary")
-        if last is not None and last < 1:
-            raise EditorError("bl requires a positive token count")
-        if operator in {"=", "off"} and amount is not None:
-            raise EditorError("use = or off without an amount")
-        value = float(amount) if amount is not None else None
-        if value is not None and (not math.isfinite(value) or value <= 0):
-            raise EditorError("bias adjustment must be finite and positive")
-
-        targets = None
-        target_bare = None
-        if fields.get("text") is not None:
-            targets, target_bare = _parse_bias_text(
-                fields["text"], label="bias target", return_bare=True
-            )
-            if len(set(targets)) != len(targets):
-                raise EditorError("bias target alternatives cannot contain duplicates")
-
-        prefix = None
-        if fields.get("prefix") is not None:
-            try:
-                prefix = json.loads(fields["prefix"])
-            except ValueError as exc:
-                raise EditorError("bias prefix must be a valid JSON string") from exc
-            if not isinstance(prefix, str) or not prefix:
-                raise EditorError("bias prefix cannot be empty")
-
-        triggers = None
-        trigger_bare = None
-        until = None
-        stop_text = None
-        stop_token = None
-        if fields.get("triggers") is not None:
-            if prefix is not None:
-                raise EditorError("Use a b target for scoped multi-token rules")
-            if re.search(r"\s+until\s+[.|]\s*$", fields["triggers"], re.IGNORECASE):
-                raise EditorError('use until "TOKEN" or until #N')
-            triggers, trigger_bare = _parse_bias_text(
-                fields["triggers"], label="bias trigger", return_bare=True
-            )
-            if fields.get("until") is None:
-                # Scoped rules default to the exact period token.
-                stop_text = "."
-            else:
-                stop_text, stop_token = _parse_bias_stop(
-                    fields["until"], vocabulary_size=vocabulary_size)
-
-        return TeacherCommand(CommandKind.BIAS, search_rank=rank,
-            bias_operator=operator, bias_amount=value, bias_last=last,
-            bias_targets=targets, bias_target_bare=target_bare,
-            bias_prefix=prefix, bias_triggers=triggers,
-            bias_trigger_bare=trigger_bare,
-            bias_stop_text=stop_text, bias_stop_token=stop_token)
+        operator, amount = _bias_adjustment(rank_adjust.group("adjustment"))
+        if operator is None:
+            raise EditorError("use +[amount], -[amount], =[amount], or off")
+        return TeacherCommand(
+            CommandKind.BIAS,
+            search_rank=rank,
+            bias_operator=operator,
+            bias_amount=amount,
+        )
     return None
 
 

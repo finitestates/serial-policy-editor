@@ -53,7 +53,10 @@ def _preview(raw, choice, candidates, **kwargs):
     "m", "more", "m10", "ms", "ms 8", "ms+2", "ms-2", "/A", '/"\\n"',
     "context", "c 200", "c all", "c900", "f", "f-1", "[", "]", "b",
     "s", "s temperature=0.7", "reroll", "reroll 42",
-    "b A +", "bl 1 +", "1+", "v", "V", "l", "L", "%", "c", "C",
+    "groups", "groups ships", 'b ships -> {steamship, "my favorite couch"}',
+    'b ships remove {steamship}', "b ships +0.5", "b {ships, sky} +",
+    "b token #4", "b token #4 +0.5", "b A +", "1+", "1-", "1=0.5",
+    "v", "V", "l", "L", "%", "c", "C",
     "overlay pct", "n note", "p note", "q", "e", "e!", "?",
     "chord 1 2", "chord\t1 2",
 ])
@@ -145,9 +148,9 @@ def test_submit_reinterprets_the_actual_buffer_and_blank_accepts_proposal():
 
 def test_syntax_ready_runtime_rejection_keeps_choice_editable():
     engine, choice, candidates = _decision()
-    preview = _preview("bl 5 +", choice, candidates)
+    preview = _preview("b ships +", choice, candidates)
     assert preview.state == "ready"
-    io = ScriptedIO(["bl 5 +", "8"])
+    io = ScriptedIO(["b ships +", "8"])
     action = InteractivePolicy(io=io).choose(engine, engine.observe())
     assert action.rank == 8
     assert "INVALID BIAS" in "".join(io.output)

@@ -122,9 +122,8 @@ for ordinary and replay-derived forks; and mixed `None`/`False` creation keys
 sorting deterministically without raising. A separate contract decision from
 replay triage: a replay can remain related to its family through
 `spr_source_id` when ordinary provenance metadata is missing. That resilience
-is intentional. Other reviewed boundaries include strict finite-positive
-`SamplerConfig.bias_step` validation, exact versus over-limit phrase lengths,
-refusing observations after terminal states,
+is intentional. Other reviewed boundaries include exact versus over-limit
+phrase lengths, refusing observations after terminal states,
 `EpisodeHistory.truncate` boundary validation, and replay source selection
 through a requested boundary.
 

@@ -36,9 +36,8 @@ CORE_SAMPLER_FIELDS = (
     "presence_penalty",
     "frequency_penalty",
     "seed",
-    "bias_rules",
+    "token_biases",
     "bias_groups",
-    "bias_step",
 )
 
 SAMPLER_ALIASES = {
@@ -90,11 +89,6 @@ def add_core_sampler_arguments(
         type=int,
         help="number of generated prefix tokens to guide with CFG",
     )
-    sampling.add_argument(
-        "--bias-step",
-        type=float,
-        help="default positive bias adjustment (default: 0.5)",
-    )
     if include_vector:
         sampling.add_argument(
             "--steering-vector",
@@ -110,7 +104,7 @@ def add_core_sampler_arguments(
             metavar="VALUE",
             help="override the steering vector artifact strength",
         )
-    parser.set_defaults(bias_rules=None, bias_groups=None)
+    parser.set_defaults(token_biases=None, bias_groups=None)
     seeds = sampling.add_mutually_exclusive_group()
     seeds.add_argument("--seed", type=int)
     seeds.add_argument(
@@ -132,7 +126,7 @@ def sampler_from_args(
     base = source if source is not None else SamplerConfig()
     if getattr(args, "_model_changed", False):
         updates: dict[str, Any] = {
-            "bias_rules": (),
+            "token_biases": (),
             "bias_groups": (),
         }
         if hasattr(base, "activation_vector"):
@@ -189,7 +183,7 @@ def sampler_override(current: SamplerConfig, raw: str) -> SamplerConfig:
             raise EditorError("sampler changes use key=value (for example top_k=20)")
         key, value = piece.split("=", 1)
         key = SAMPLER_ALIASES.get(key.strip().lower(), key.strip().lower())
-        if key not in values or key in {"bias_rules", "bias_groups"}:
+        if key not in values or key in {"token_biases", "bias_groups"}:
             raise EditorError(f"unknown sampler field {key!r}")
         try:
             if key in {"top_k", "repeat_last_n", "cfg_prefix_tokens", "seed"}:

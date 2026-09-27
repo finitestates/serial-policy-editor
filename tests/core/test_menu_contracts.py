@@ -138,25 +138,28 @@ def test_m03_text_commands_keep_exact_payload_whitespace():
     assert (phrase.phrase_text, phrase.phrase_mode) == (" exact  ", "exact")
 
 
-def test_m03_bias_group_scope_and_rank_prefix_syntax():
-    scoped = parse('b {wings, " claws"} +0.5 after {dragon, " wyvern"} until "."')
-    assert scoped.kind == CommandKind.BIAS
-    assert (scoped.bias_targets, scoped.bias_target_bare) == (
-        (" wings", " claws"), (True, False),
-    )
-    assert (scoped.bias_triggers, scoped.bias_trigger_bare) == (
-        (" dragon", " wyvern"), (True, False),
-    )
-    assert (scoped.bias_operator, scoped.bias_amount, scoped.bias_stop_text) == (
-        "+", .5, ".",
-    )
-
-    group = parse('b nautical -> {anchor, " steamship"}')
+def test_m03_bias_groups_members_sources_and_direct_tokens():
+    group = parse('b nautical -> {anchor, "my favorite couch", literal:" exact"}')
     assert (group.bias_group_name, group.bias_group_members) == (
-        "nautical", (" anchor", " steamship"),
+        "nautical", ("anchor", "my favorite couch", " exact"),
     )
-    ranked = parse('1+0.5 ... " P"')
-    assert (ranked.search_rank, ranked.bias_prefix, ranked.bias_amount) == (1, " P", .5)
+    assert group.bias_group_member_literal == (False, False, True)
+
+    adjustment = parse("b {nautical, sky} +0.5")
+    assert (adjustment.bias_targets, adjustment.bias_operator, adjustment.bias_amount) == (
+        ("nautical", "sky"), "+", .5,
+    )
+    set_amount = parse("b nautical =-0.5")
+    assert (set_amount.bias_operator, set_amount.bias_amount) == ("=", -.5)
+    removed = parse('b nautical remove {"my favorite couch"}')
+    assert removed.bias_group_remove_members == ("my favorite couch",)
+
+    group_view = parse("groups nautical")
+    assert group_view.bias_inspect_group == "nautical"
+    token_view = parse("b token #42")
+    assert token_view.bias_inspect_token == 42
+    ranked = parse("1+0.5")
+    assert (ranked.search_rank, ranked.bias_amount) == (1, .5)
 
 
 @pytest.mark.parametrize(

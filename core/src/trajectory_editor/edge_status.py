@@ -20,6 +20,10 @@ def sampler_summary(config: SamplerConfig) -> str:
         summary += " groups=" + ",".join(
             f"{group.name}:{group.bias:g}" for group in config.bias_groups
         )
+    if config.token_biases:
+        summary += " token_biases=" + ",".join(
+            f"#{item.token_id}:{item.bias:g}" for item in config.token_biases
+        )
     if config.activation_vector or config.activation_vector_digest:
         norm = sum(value * value for value in config.activation_vector) ** 0.5
         summary += (
