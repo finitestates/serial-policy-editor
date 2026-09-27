@@ -370,6 +370,8 @@ class BranchBackend(ConformingFakeBackend):
         if self.tokens[:len(prefix)] == prefix:
             self.tokens = prefix
             self.work.append(("branch", tuple(prefix)))
+        elif self.tokens and prefix[:len(self.tokens)] == self.tokens:
+            self.eval(prefix[len(self.tokens):])
         else:
             self.reset(prefix)
 

@@ -17,6 +17,7 @@ import numpy as np
 
 from .core.errors import EditorError
 from .core.backend import CacheMode, validate_cache_mode
+from .core.backend_position import BackendPosition, compare_backend_position
 from .model_hash import sha256_path
 
 
@@ -282,6 +283,95 @@ def _cache_length(cache: Any) -> int:
         if isinstance(first_layer, (tuple, list)) and first_layer:
             return int(first_layer[0].shape[-2])
     raise _CacheUnavailable("Transformers cache has no readable sequence length")
+
+
+def _cache_layer_cursor(layer: Any) -> int | None:
+    get_length = getattr(layer, "get_seq_length", None)
+    if not callable(get_length):
+        return None
+    try:
+        return int(get_length())
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        try:
+            return int(get_length(0))
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return None
+
+
+def _cache_layer_start(layer: Any, cursor: int, torch: Any) -> int | None:
+    """Read the retained absolute position range for one Transformers cache layer."""
+    if bool(getattr(layer, "record_past", False)):
+        return 0
+    get_mask_sizes = getattr(layer, "get_mask_sizes", None)
+    if not callable(get_mask_sizes):
+        length = _cache_layer_cursor(layer)
+        return 0 if length == cursor else None
+    try:
+        parameters = list(inspect.signature(get_mask_sizes).parameters.values())
+    except (TypeError, ValueError):
+        return None
+    if not parameters:
+        return None
+    first = parameters[0].name
+    if first == "query_length":
+        arguments: list[Any] = [0]
+    elif first == "cache_position":
+        arguments = [torch.empty((0,), dtype=torch.long, device="cpu")]
+    else:
+        return None
+    for parameter in parameters[1:]:
+        if parameter.kind not in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            continue
+        if parameter.default is not inspect.Parameter.empty:
+            continue
+        if parameter.name == "layer_idx":
+            arguments.append(0)
+        else:
+            return None
+    try:
+        mask_length, offset = (int(value) for value in get_mask_sizes(*arguments))
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        return None
+    if offset < 0 or offset > cursor:
+        return None
+    layer_cursor = _cache_layer_cursor(layer)
+    # Static caches may report their reserved capacity as mask length. Their
+    # sequence counter still identifies the live end of the retained range.
+    if offset == 0 and layer_cursor == cursor and mask_length >= cursor:
+        return 0
+    if offset + mask_length == cursor:
+        return offset
+    return None
+
+
+def _cache_position_range(cache: Any, cursor: int, torch: Any) -> tuple[int, int] | None:
+    """Return the retained absolute range only when every cache layer agrees."""
+    layers = getattr(cache, "layers", None)
+    if isinstance(layers, (tuple, list)) and layers:
+        cache_layers = list(layers)
+    else:
+        cache_layers = [cache]
+    starts: list[int] = []
+    for layer in cache_layers:
+        layer_cursor = _cache_layer_cursor(layer)
+        if layer_cursor is not None and layer_cursor != cursor:
+            return None
+        start = _cache_layer_start(layer, cursor, torch)
+        if start is None:
+            # Legacy tuples and full-context caches have no mask-offset API.
+            if layer is cache and not callable(getattr(layer, "get_mask_sizes", None)):
+                try:
+                    if _cache_length(cache) == cursor:
+                        start = 0
+                except (AttributeError, RuntimeError, TypeError, ValueError, _CacheUnavailable):
+                    pass
+        if start is None:
+            return None
+        starts.append(start)
+    return max(starts), cursor - 1
 
 
 def _crop_cache(cache: Any, target_length: int) -> Any:
@@ -664,6 +754,98 @@ class TransformersBackend:
         probe = getattr(self, "_real_model_probe", None)
         return probe.model_call(kind, positions, context_length) if probe is not None else nullcontext()
 
+    def position(self) -> BackendPosition:
+        """Report the submitted prefix and Transformers' live cache range."""
+        cursor = len(self._tokens)
+        cache_start = cache_end = None
+        cache_reusable = False
+        if self._cache_active and self._past_key_values is not None:
+            try:
+                cursor = _cache_length(self._past_key_values)
+                cache_range = _cache_position_range(
+                    self._past_key_values, cursor, self._torch
+                )
+                can_crop = callable(getattr(self._past_key_values, "crop", None)) or (
+                    isinstance(self._past_key_values, (tuple, list))
+                )
+                if cache_range is not None and cursor > 0 and can_crop:
+                    cache_start, cache_end = cache_range
+                    cache_reusable = True
+            except (AttributeError, TypeError, ValueError, _CacheUnavailable):
+                pass
+        return BackendPosition(
+            token_ids=tuple(self._tokens),
+            cursor=cursor,
+            cache_start=cache_start,
+            cache_end=cache_end,
+            cache_reusable=cache_reusable,
+            logits_valid=self._last_logits is not None,
+        )
+
+    def _truncate_cache_to_cursor(self, cursor: int, cache_start: int) -> None:
+        if not self._cache_active or self._past_key_values is None:
+            raise RuntimeError("Transformers cache is not active")
+        if cursor <= cache_start:
+            raise RuntimeError("target prefix is outside the retained cache range")
+        self._past_key_values = _crop_cache(self._past_key_values, cursor)
+        self._tokens = self._tokens[:cursor]
+        self._last_logits = None
+
+    def branch_to_prefix(self, prefix_token_ids: list[int]) -> None:
+        """Align to any related prefix by cropping at the longest shared prefix."""
+        if self._speculation_prefix is not None:
+            self.rollback_speculation()
+        values = [int(v) for v in prefix_token_ids]
+        if not values:
+            raise RuntimeError("decoder prefix cannot be empty")
+        position = self.position()
+        comparison = compare_backend_position(position, values)
+        if comparison.status == "aligned":
+            return
+        if (
+            comparison.status == "unknown"
+            or not position.cache_reusable
+            or position.cache_start is None
+        ):
+            self.reset(values)
+            return
+        shared = comparison.common_prefix_length
+        if (
+            shared <= position.cache_start
+            or (
+                shared == len(values)
+                and position.cursor >= len(values)
+                and shared - 1 <= position.cache_start
+            )
+        ):
+            # A windowed cache may no longer contain the history needed by a
+            # shortened or divergent prefix.
+            self.reset(values)
+            return
+        try:
+            if shared == len(values) and position.cursor >= len(values):
+                if position.cursor == len(values) and position.logits_valid:
+                    self._tokens = values
+                    return
+                # A shortened prefix needs fresh final-position logits. Keep
+                # its parent cache and evaluate the last retained token again.
+                self._truncate_cache_to_cursor(shared - 1, position.cache_start)
+                self._eval_tokens([values[-1]])
+                return
+            retained = min(position.cursor, shared)
+            if position.cursor > retained:
+                self._truncate_cache_to_cursor(retained, position.cache_start)
+            else:
+                self._tokens = values[:position.cursor]
+            suffix = values[retained:]
+            if suffix:
+                self._eval_tokens(suffix)
+        except (AttributeError, RuntimeError, TypeError, ValueError, _CacheUnavailable):
+            probe = getattr(self, "_real_model_probe", None)
+            if probe is not None:
+                probe.cache_fallback("branch-cache-unavailable")
+            self.reset(values)
+
     def truncate_to(self, length: int) -> bool:
         if not self._cache_active or self._past_key_values is None:
             return False
@@ -673,40 +855,22 @@ class TransformersBackend:
             self.rollback_speculation()
         if length == len(self._tokens):
             return True
-        self._past_key_values = _crop_cache(self._past_key_values, length)
-        self._tokens = self._tokens[:length]
-        self._last_logits = None
+        position = self.position()
+        if position.cache_start is None or length <= position.cache_start:
+            return False
+        layers = getattr(self._past_key_values, "layers", ())
+        for layer in layers:
+            window = getattr(layer, "sliding_window", None)
+            if (
+                bool(getattr(layer, "is_sliding", False))
+                and type(window) is int
+                and _cache_layer_cursor(layer) is not None
+                and _cache_layer_cursor(layer) >= window
+                and not bool(getattr(layer, "record_past", False))
+            ):
+                return False
+        self._truncate_cache_to_cursor(length, position.cache_start)
         return True
-
-    def branch_to_prefix(self, prefix_token_ids: list[int]) -> None:
-        """Move to an existing prefix, reusing and cropping the current cache."""
-        if self._speculation_prefix is not None:
-            self.rollback_speculation()
-        values = [int(v) for v in prefix_token_ids]
-        if not values:
-            raise RuntimeError("decoder prefix cannot be empty")
-        if not self._cache_active:
-            self.reset(values)
-            return
-        if len(values) > len(self._tokens) or self._tokens[: len(values)] != values:
-            self.reset(values)
-            return
-        if len(values) == len(self._tokens):
-            return
-        try:
-            retained_before_last = len(values) - 1
-            self._past_key_values = _crop_cache(
-                self._past_key_values, retained_before_last
-            )
-            self._tokens = values[:-1]
-            self._evaluate_incremental([values[-1]])
-        except (AttributeError, TypeError, ValueError, RuntimeError):
-            # Cache state is an optimization. Rebuild the requested prefix if
-            # the installed model/cache implementation cannot be repositioned.
-            probe = getattr(self, "_real_model_probe", None)
-            if probe is not None:
-                probe.cache_fallback("branch-cache-unavailable")
-            self.reset(values)
 
     def _set_last_logits(self, logits: Any) -> None:
         if logits is None or getattr(logits, "ndim", None) != 3:

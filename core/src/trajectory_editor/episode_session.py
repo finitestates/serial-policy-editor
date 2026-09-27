@@ -384,15 +384,7 @@ class LiveSession:
             self._engine._invalidate_guidance()
         state = self._state(branch_id)
         prefix = state.prefix_token_ids
-        if not self._restore_cache(state.backend_cache_snapshot, prefix):
-            move = getattr(self._backend, "branch_to_prefix", None)
-            if callable(move):
-                try:
-                    move(list(prefix))
-                except (AttributeError, RuntimeError, TypeError, ValueError):
-                    self._backend.reset(list(prefix))
-            else:
-                self._backend.reset(list(prefix))
+        self._restore_cache(state.backend_cache_snapshot, prefix)
         point = self._control_at(state, state.boundary)
         engine = EpisodeEngine(
             self._backend,
@@ -401,7 +393,6 @@ class LiveSession:
             initial_text=self.prompt,
             initial_token_ids=state.initial_token_ids,
             stream_fingerprint=point.stream_fingerprint,
-            backend_positioned=True,
             guidance_backend=self._guidance_backend,
         )
         engine.visible_token_ids = list(state.visible_token_ids)

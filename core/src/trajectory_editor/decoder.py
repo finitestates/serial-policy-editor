@@ -18,6 +18,7 @@ import numpy as np
 
 from .core.errors import EditorError
 from .core.backend import CacheMode, InferenceBackend, validate_cache_mode
+from .core.backend_position import BackendPosition, compare_backend_position
 from .model_hash import sha256_path
 
 
@@ -294,9 +295,7 @@ class LlamaCppDecoder:
             return False
         if self._speculation_prefix is not None:
             self.rollback_speculation()
-        context = getattr(self._model, "_ctx", None)
-        remove = getattr(context, "kv_cache_seq_rm", None)
-        if not callable(remove):
+        if not self._can_remove_cache():
             return False
         logits = getattr(self, "_last_logits_cache", None)
         if logits is None:
@@ -318,11 +317,7 @@ class LlamaCppDecoder:
         prefix = self._speculation_prefix
         if prefix is None:
             return
-        context = getattr(self._model, "_ctx", None)
-        remove = getattr(context, "kv_cache_seq_rm", None)
-        if not callable(remove):
-            raise RuntimeError("llama.cpp cache cannot roll back a speculative token")
-        if not remove(-1, len(prefix), -1):
+        if not self._remove_cache_from(len(prefix)):
             raise RuntimeError("llama.cpp rejected speculative cache rollback")
         self._model.n_tokens = len(prefix)
         self._model._requires_eval = True
@@ -341,12 +336,8 @@ class LlamaCppDecoder:
             self.rollback_speculation()
         if length == len(self._tokens):
             return True
-        context = getattr(self._model, "_ctx", None)
-        remove = getattr(context, "kv_cache_seq_rm", None)
-        if not callable(remove):
-            raise RuntimeError("llama.cpp cache cannot be truncated")
-        if not remove(-1, length, -1):
-            raise RuntimeError("llama.cpp rejected cache truncation")
+        if not self._remove_cache_from(length):
+            return False
         self._model.n_tokens = length
         self._model._requires_eval = True
         self._tokens = self._tokens[:length]
@@ -354,41 +345,140 @@ class LlamaCppDecoder:
         self._last_logits_cache = None
         return True
 
+    def position(self) -> BackendPosition:
+        """Report the adapter prefix and llama.cpp's actual sequence range."""
+        cursor = int(self._model.n_tokens)
+        cache_start = cache_end = None
+        get_memory = getattr(self._llama_cpp, "llama_get_memory", None)
+        get_min = getattr(self._llama_cpp, "llama_memory_seq_pos_min", None)
+        get_max = getattr(self._llama_cpp, "llama_memory_seq_pos_max", None)
+        direct_position_api = all(
+            callable(function) for function in (get_memory, get_min, get_max)
+        )
+        if direct_position_api:
+            try:
+                context = self._model._ctx.ctx if hasattr(self._model, "_ctx") else self._model.ctx
+                memory = get_memory(context)
+                minimum = int(get_min(memory, 0))
+                maximum = int(get_max(memory, 0))
+                if maximum >= 0 and minimum >= 0:
+                    cursor = maximum + 1
+                    cache_start, cache_end = minimum, maximum
+                else:
+                    cursor = 0
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                direct_position_api = False
+        if not direct_position_api and cursor > 0:
+            # Older llama-cpp-python bindings expose the maintained input count
+            # but not the per-sequence memory-position functions.
+            cache_start, cache_end = 0, cursor - 1
+        logits_valid = bool(
+            self._restored_logits is not None
+            or self._last_logits_cache is not None
+            or not getattr(self._model, "_requires_eval", False)
+        )
+        return BackendPosition(
+            token_ids=tuple(self._tokens),
+            cursor=cursor,
+            cache_start=cache_start,
+            cache_end=cache_end,
+            cache_reusable=self._cache_enabled and cache_end is not None,
+            logits_valid=logits_valid,
+        )
+
+    def _remove_cache_from(self, cursor: int) -> bool:
+        context_wrapper = getattr(self._model, "_ctx", None)
+        context = (
+            context_wrapper.ctx
+            if context_wrapper is not None and hasattr(context_wrapper, "ctx")
+            else getattr(self._model, "ctx", None)
+        )
+        get_memory = getattr(self._llama_cpp, "llama_get_memory", None)
+        remove_memory = getattr(self._llama_cpp, "llama_memory_seq_rm", None)
+        if context is not None and callable(get_memory) and callable(remove_memory):
+            memory = get_memory(context)
+            if memory is not None:
+                return bool(remove_memory(memory, -1, cursor, -1))
+        remove_legacy = getattr(context_wrapper, "kv_cache_seq_rm", None)
+        if callable(remove_legacy):
+            return bool(remove_legacy(-1, cursor, -1))
+        return False
+
+    def _can_remove_cache(self) -> bool:
+        context_wrapper = getattr(self._model, "_ctx", None)
+        context = (
+            context_wrapper.ctx
+            if context_wrapper is not None and hasattr(context_wrapper, "ctx")
+            else getattr(self._model, "ctx", None)
+        )
+        return (
+            context is not None
+            and callable(getattr(self._llama_cpp, "llama_get_memory", None))
+            and callable(getattr(self._llama_cpp, "llama_memory_seq_rm", None))
+        ) or callable(getattr(context_wrapper, "kv_cache_seq_rm", None))
+
+    def _truncate_cache_to_cursor(self, cursor: int) -> None:
+        if not self._remove_cache_from(cursor):
+            raise RuntimeError("llama.cpp rejected cache truncation")
+        self._model.n_tokens = cursor
+        self._model._requires_eval = True
+        self._tokens = self._tokens[:cursor]
+        self._restored_logits = None
+        self._last_logits_cache = None
+
     def branch_to_prefix(self, prefix_token_ids: list[int]) -> None:
-        """Move to an existing prefix, reusing the current cache when possible."""
+        """Align to any related prefix by cropping at the longest shared prefix."""
         if self._speculation_prefix is not None:
             self.rollback_speculation()
         values = [int(value) for value in prefix_token_ids]
         if not values:
             raise RuntimeError("decoder prefix cannot be empty")
-        if not self._cache_enabled:
+        position = self.position()
+        comparison = compare_backend_position(position, values)
+        if comparison.status == "aligned":
+            return
+        if (
+            comparison.status == "unknown"
+            or not position.cache_reusable
+            or position.cache_start is None
+        ):
             self.reset(values)
             return
-        if len(values) > len(self._tokens) or self._tokens[: len(values)] != values:
+        shared = comparison.common_prefix_length
+        if shared <= position.cache_start or (
+            shared == len(values)
+            and position.cursor >= len(values)
+            and shared - 1 <= position.cache_start
+        ):
+            # A windowed cache may no longer contain the history needed by a
+            # shortened or divergent prefix.
             self.reset(values)
-            return
-        if len(values) == len(self._tokens):
             return
         try:
-            # Keep the cache through the token before the final retained token,
-            # then evaluate that one token again to refresh final-position logits.
-            retained_before_last = len(values) - 1
-            removed = self._model._ctx.kv_cache_seq_rm(
-                -1, retained_before_last, -1
-            )
-            if not removed:
-                probe = getattr(self, "_real_model_probe", None)
-                if probe is not None:
-                    probe.cache_fallback("branch-cache-remove-rejected")
-                self.reset(values)
+            if shared == len(values) and position.cursor >= len(values):
+                if position.cursor == len(values) and position.logits_valid:
+                    self._model.n_tokens = position.cursor
+                    self._tokens = values
+                    return
+                # A shortened prefix needs fresh final-position logits. Keep
+                # its parent cache and evaluate the last retained token again.
+                self._truncate_cache_to_cursor(shared - 1)
+                self._measured_eval([values[-1]], "branch", len(values))
+                self._tokens = values
                 return
-            self._model.n_tokens = retained_before_last
-            self._model._requires_eval = True
-            self._measured_eval([values[-1]], "branch", len(values))
-            self._tokens = values
-        except (AttributeError, RuntimeError, TypeError):
-            # Cache positioning is an optimization. If the installed binding
-            # cannot safely truncate its sequence, preserve semantics via reset.
+            retained = min(position.cursor, shared)
+            if position.cursor > retained:
+                self._truncate_cache_to_cursor(retained)
+            else:
+                if position.cursor != len(self._tokens):
+                    self._model._requires_eval = True
+                self._model.n_tokens = position.cursor
+                self._tokens = values[:position.cursor]
+            suffix = values[retained:]
+            if suffix:
+                self._measured_eval(suffix, "branch", len(values))
+                self._tokens = values
+        except (AttributeError, RuntimeError, TypeError, ValueError):
             probe = getattr(self, "_real_model_probe", None)
             if probe is not None:
                 probe.cache_fallback("branch-cache-unavailable")

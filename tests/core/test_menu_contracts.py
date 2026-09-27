@@ -35,10 +35,11 @@ def parse(raw: str):
 
 def test_m01_full_vocabulary_search_is_nonmutating():
     episode = runtime()
+    observation = episode.observe()
     before = list(episode.backend.tokens)
     policy = InteractivePolicy(io=ScriptedIO(["/P", "8"]), menu_size=1, search_radius=1)
 
-    action = policy.choose(episode, episode.observe())
+    action = policy.choose(episode, observation)
 
     assert action.kind == "select-raw-rank"
     assert episode.backend.tokens == before
@@ -68,10 +69,11 @@ def test_m02_rank_navigation_resolves_absolute_raw_rank_without_commit(
     responses, expected_rank
 ):
     episode = runtime()
+    observation = episode.observe()
     before = list(episode.backend.tokens)
     policy = InteractivePolicy(io=ScriptedIO(responses), menu_size=1)
 
-    action = policy.choose(episode, episode.observe())
+    action = policy.choose(episode, observation)
 
     assert action.rank == expected_rank
     assert episode.boundary == 0

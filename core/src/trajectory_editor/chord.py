@@ -21,10 +21,16 @@ class ChordRequested(Exception):
 
 def _position(backend, base: list[int], suffix: list[int]) -> None:
     truncate = getattr(backend, "truncate_to", None)
-    if callable(truncate) and truncate(len(base)) is not False:
-        if suffix:
-            backend.eval(suffix)
-        return
+    if callable(truncate):
+        try:
+            if truncate(len(base)) is not False:
+                if suffix:
+                    backend.eval(suffix)
+                return
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            # Cache truncation is an optimization; reconcile the full prefix
+            # below when the adapter cannot safely crop this cache instance.
+            pass
     branch = getattr(backend, "branch_to_prefix", None)
     if callable(branch):
         branch(base)
@@ -116,7 +122,6 @@ class Chord:
                     initial_text=engine.initial_text,
                     initial_token_ids=engine.initial_token_ids,
                     stream_fingerprint=engine.stream_fingerprint,
-                    backend_positioned=True,
                     guidance_backend=engine.guidance_backend,
                 )
                 preview.visible_token_ids = self.base_visible
@@ -150,17 +155,12 @@ class Chord:
         self._active_path = None
         suffix = list(path.engine.visible_token_ids[len(self.base_visible):])
         _position(self.original.backend, self.base_prefix, suffix)
-        path.engine._backend_positioned = True
         if path.engine._cfg_active() and path.engine.guidance_backend is not None:
             prompt = list(path.engine._guidance_prompt_tokens())
             _position(
                 path.engine.guidance_backend,
                 [*prompt, *self.base_visible], suffix,
             )
-            path.engine._guidance_evaluated_prefix = tuple(
-                [*prompt, *path.engine.visible_token_ids]
-            )
-            path.engine.guidance_backend._spe_cfg_owner = path.engine._guidance_owner
         self._active_path = path
 
     def advance(self) -> bool:
@@ -218,19 +218,17 @@ class Chord:
         if self.closed:
             raise EditorError("chord is already closed")
         path = self._find_path(label)
-        backend_positioned = self._active_path is path
         observation_is_current = (
             path.engine._observation is not None
             and path.engine._observation_key == path.engine._decision_key()
         )
-        if backend_positioned:
+        if self._active_path is path:
             if path.state == "live":
                 path.engine.observe()
         elif path.state == "live" and not observation_is_current:
             # Rebuild only if a control edit or rewind invalidated the cached
             # boundary. The ordinary path selection case stays display-only.
             self._activate(path)
-            backend_positioned = True
         boundary = len(self.base_visible)
         for outcome in path.outcomes:
             if outcome.boundary_before != boundary:
@@ -242,9 +240,7 @@ class Chord:
             != tuple(self.base_visible)
         ):
             raise EditorError("chord outcomes do not match the selected preview boundary")
-        self.original.adopt_preview_state(
-            path.engine, backend_positioned=backend_positioned
-        )
+        self.original.adopt_preview_state(path.engine)
         self.selected_outcomes = tuple(path.outcomes)
         self.closed = True
         return tuple(path.actions)
@@ -264,7 +260,6 @@ class Chord:
             return
         self.closed = True
         _position(self.original.backend, self.base_prefix, [])
-        self.original._backend_positioned = True
         self.original._invalidate_observation()
         self.original._invalidate_guidance()
         if self.original._cfg_active() and self.original.guidance_backend is not None:
@@ -273,10 +268,6 @@ class Chord:
                 self.original.guidance_backend,
                 [*prompt, *self.base_visible], [],
             )
-            self.original._guidance_evaluated_prefix = tuple(
-                [*prompt, *self.base_visible]
-            )
-            self.original.guidance_backend._spe_cfg_owner = self.original._guidance_owner
 
     def display(self, *, width: int = 100) -> str:
         width = max(1, width)

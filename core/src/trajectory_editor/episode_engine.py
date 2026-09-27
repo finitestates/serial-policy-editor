@@ -24,6 +24,7 @@ from .core.backend import (
     InferenceBackend,
     require_inference_backend,
 )
+from .core.backend_position import position_backend, position_report
 from .core.candidates import Candidate
 from .candidate_columns import CandidateViewPlan
 from .core.errors import EditorError
@@ -188,7 +189,6 @@ class EpisodeEngine:
         add_bos: bool = True,
         special: bool = True,
         stream_fingerprint: str | None = None,
-        backend_positioned: bool = False,
         guidance_backend: InferenceBackend | None = None,
     ) -> None:
         if max_tokens is not None and (type(max_tokens) is not int or max_tokens < 1):
@@ -216,10 +216,7 @@ class EpisodeEngine:
             if stream_fingerprint is None
             else validate_fingerprint(stream_fingerprint)
         )
-        if not backend_positioned:
-            backend.reset(list(tokens))
         self.backend = backend
-        self._backend_positioned = True
         self.sampling = sampling
         initial_text_value = (
             initial_text
@@ -237,10 +234,8 @@ class EpisodeEngine:
         self._prefix_snapshot_boundary = 0
         self._prefix_snapshot_dirty = False
         self.guidance_backend = guidance_backend
-        self._guidance_owner = object()
         self._guidance_prompt_key: tuple | None = None
         self._guidance_prompt_ids: tuple[int, ...] = ()
-        self._guidance_evaluated_prefix: tuple[int, ...] | None = None
         if sampling.cfg_unconditional_prompt is not None:
             self._guidance_prompt_tokens()
         self._observation: Observation | None = None
@@ -384,12 +379,11 @@ class EpisodeEngine:
             self.sampling = sampling
 
     def rewind_to(self, boundary: int, *, _defer_backend_positioning: bool = False) -> None:
-        """Discard visible state after a token boundary and reposition the backend.
+        """Discard visible state after a token boundary and reconcile the backend.
 
         The checkpoint boundary is kept intact. The caller restores historical
         sampler settings and stream identity from the episode store; the retained
         visible-token boundary determines the next sampling boundary.
-        This method only repositions token/backend state and clears cached evidence.
         """
         if type(boundary) is not int or boundary < 0 or boundary > self.boundary:
             raise EditorError(
@@ -400,16 +394,10 @@ class EpisodeEngine:
         self._invalidate_observation()
         self._prefix_snapshot_dirty = True
         self._ephemeral_logit_biases = {}
-        if _defer_backend_positioning:
-            self._backend_positioned = False
-        else:
+        if not _defer_backend_positioning:
             prefix = [*self.initial_token_ids, *retained]
-            branch = getattr(self.backend, "branch_to_prefix", None)
-            if callable(branch):
-                branch(prefix)
-            else:
+            if not position_backend(self.backend, prefix):
                 self.backend.reset(prefix)
-            self._backend_positioned = True
         self.trajectory.rewind_to(boundary)
 
     def terminate(self, reason: str = "menu-end") -> None:
@@ -448,19 +436,12 @@ class EpisodeEngine:
         self._prepared_accept = None
 
     def _ensure_backend_positioned(self) -> None:
-        """Backfill a deferred preview cache before the next model mutation."""
+        """Reconcile the backend's reported cache position with the token ledger."""
         if self._speculative_accept_prefix is not None:
             self._rollback_speculative_accept()
             return
-        if self._backend_positioned:
-            return
-        prefix = list(self.token_ids)
-        branch = getattr(self.backend, "branch_to_prefix", None)
-        if callable(branch):
-            branch(prefix)
-        else:
-            self.backend.reset(prefix)
-        self._backend_positioned = True
+        if not position_backend(self.backend, self.token_ids):
+            self.backend.reset(self.token_ids)
 
     def discard_speculative_accept(self) -> None:
         """Drop a prepared continuation and restore the committed backend prefix."""
@@ -473,7 +454,6 @@ class EpisodeEngine:
         self.backend.rollback_speculation()
         self._speculative_accept_prefix = None
         self._prepared_accept = None
-        self._backend_positioned = True
 
     def has_prepared_accept(
         self, observation: Observation, raw_rank: int, token_id: int
@@ -546,14 +526,11 @@ class EpisodeEngine:
         ):
             return False
 
-        if not self._backend_positioned:
-            self._ensure_backend_positioned()
+        self._ensure_backend_positioned()
         prefix = tuple(self.token_ids)
         self._speculative_accept_prefix = prefix
-        self._backend_positioned = False
         if not self.backend.speculate(token_id):
             self._speculative_accept_prefix = None
-            self._backend_positioned = True
             return False
         if is_cancelled():
             self._rollback_speculative_accept()
@@ -637,6 +614,38 @@ class EpisodeEngine:
             tuple(sorted(self._ephemeral_logit_biases.items())),
         )
 
+    def _cached_observation_is_current(self) -> bool:
+        """Check whether reusable logits still belong to this engine's prefixes.
+
+        Backends can be shared by live engines. Their position is therefore
+        part of observation validity, even when this engine's semantic key is
+        unchanged.
+        """
+
+        primary_prefix = tuple(self.token_ids)
+        if self._speculative_accept_prefix is not None:
+            prepared = self._prepared_accept
+            if (
+                prepared is None
+                or prepared.prefix_token_ids != primary_prefix
+            ):
+                return False
+            primary_prefix = (*primary_prefix, prepared.token_id)
+        if callable(getattr(self.backend, "position", None)):
+            if position_report(self.backend, primary_prefix).status != "aligned":
+                return False
+        if self._cfg_active():
+            guidance_prefix = (
+                *self._guidance_prompt_tokens(), *self.visible_token_ids
+            )
+            if callable(getattr(self.guidance_backend, "position", None)):
+                guidance_position = position_report(
+                    self.guidance_backend, guidance_prefix
+                )
+                if guidance_position.status != "aligned":
+                    return False
+        return True
+
     def _validate_observation(self, observation: Observation) -> None:
         if (
             self.ended or self.checkpointed
@@ -649,12 +658,16 @@ class EpisodeEngine:
         if self.ended or self.checkpointed:
             raise EditorError("the episode has no live decision boundary")
         key = self._decision_key()
-        if self._cfg_active() and self.guidance_backend is not None and (
-            getattr(self.guidance_backend, "_spe_cfg_owner", None) is not self._guidance_owner
-        ):
-            self._invalidate_guidance()
         if self._observation is not None and self._observation_key == key:
-            return self._observation
+            if self._cached_observation_is_current():
+                return self._observation
+            # A different engine may have moved a shared backend. Drop local
+            # warm bookkeeping without issuing a rollback against that other
+            # engine's active position; normal positioning below reconciles it.
+            self._observation = None
+            self._observation_key = None
+            self._prepared_accept = None
+            self._speculative_accept_prefix = None
         self._ensure_backend_positioned()
         self._prepare_activation_runtime()
         # Make one owned float64 snapshot here. ObservationStatistics validates
@@ -746,23 +759,11 @@ class EpisodeEngine:
         return observation
 
     def _invalidate_guidance(self) -> None:
-        """Release knowledge of shared guidance state before backend reuse."""
-        self._guidance_evaluated_prefix = None
+        """Invalidate CFG-derived evidence; the backend reports its own position."""
         self._invalidate_observation()
 
-    def adopt_preview_state(
-        self, preview: "EpisodeEngine", *, backend_positioned: bool = True
-    ) -> None:
-        """Adopt a speculative engine that has already advanced this trajectory.
-
-        Chord previews use the same backend instances and the same starting
-        token ledger. Once one preview is selected, its semantic engine state
-        can become the live engine directly; replaying its actions would repeat
-        decoding and evidence work. The preview's mutable trajectory and
-        incremental snapshots are transferred by reference. Keep the live
-        metric sink, which belongs to the durable/runtime owner rather than to
-        speculative work.
-        """
+    def adopt_preview_state(self, preview: "EpisodeEngine") -> None:
+        """Adopt a preview's semantic state; align shared backends on next use."""
         if not isinstance(preview, EpisodeEngine):
             raise TypeError("preview must be an EpisodeEngine")
         if preview is self:
@@ -777,11 +778,6 @@ class EpisodeEngine:
         metric_sink = self._metric_sink
         self.__dict__.update(preview.__dict__)
         self._metric_sink = metric_sink
-        self._backend_positioned = backend_positioned
-        if not backend_positioned:
-            # The selected observation is still exact, but the shared primary
-            # and CFG caches belong to another preview until the next action.
-            self._guidance_evaluated_prefix = None
 
     def _guidance_prompt_tokens(self) -> tuple[int, ...]:
         backend = self.guidance_backend
@@ -801,27 +797,13 @@ class EpisodeEngine:
                 raise EditorError("CFG unconditional prompt contains an invalid token id")
             self._guidance_prompt_key = key
             self._guidance_prompt_ids = tokens
-            self._guidance_evaluated_prefix = None
         return self._guidance_prompt_ids
 
     def _position_guidance(self) -> None:
-        """Synchronize U + V lazily; append-only decisions reuse evaluation."""
+        """Reconcile the guidance backend against its own token prefix."""
         desired = (*self._guidance_prompt_tokens(), *self.visible_token_ids)
-        evaluated = self._guidance_evaluated_prefix
-        if getattr(self.guidance_backend, "_spe_cfg_owner", None) is not self._guidance_owner:
-            evaluated = None
-        # Clear our claim before calling the backend: failed evaluation must
-        # not leave a prefix marked as successfully positioned.
-        self._guidance_evaluated_prefix = None
-        self.guidance_backend._spe_cfg_owner = None
-        if evaluated is None or desired[:len(evaluated)] != evaluated:
+        if not position_backend(self.guidance_backend, desired):
             self.guidance_backend.reset(list(desired))
-        elif len(desired) > len(evaluated):
-            self.guidance_backend.eval(list(desired[len(evaluated):]))
-        self._guidance_evaluated_prefix = desired
-        # A token, not an engine reference: shared adapters do not keep old
-        # sessions alive. Every guidance evaluation is owned by this helper.
-        self.guidance_backend._spe_cfg_owner = self._guidance_owner
 
     def _cfg_active(self) -> bool:
         prefix_tokens = self.sampling.cfg_prefix_tokens
@@ -1022,7 +1004,6 @@ class EpisodeEngine:
         if promoted:
             self.backend.commit_speculation()
             self._speculative_accept_prefix = None
-            self._backend_positioned = True
         else:
             self.discard_speculative_accept()
         self._invalidate_observation()
@@ -1034,7 +1015,6 @@ class EpisodeEngine:
             if not promoted:
                 self._ensure_backend_positioned()
                 self.backend.eval([token_id])
-                self._backend_positioned = True
             self.visible_token_ids.append(token_id)
         return evidence
 
@@ -1073,7 +1053,6 @@ class EpisodeEngine:
             return
         self._ensure_backend_positioned()
         self.backend.eval(committed)
-        self._backend_positioned = True
         self._invalidate_observation()
         base = self.boundary
         for offset, token_id in enumerate(committed):

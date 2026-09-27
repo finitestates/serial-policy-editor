@@ -50,7 +50,10 @@ def test_observe_budget(guard):
         mark = backend.mark()
         engine.observe()
         cost = backend.since(mark)
-    assert cost["model_calls"] == 0 and cost["calls"]["last_logits"] == 1, cost
+    # Backend prefill is lazy and happens at the first observation boundary.
+    # The next observation of this unchanged decision must then be free.
+    assert cost["calls"]["reset"] == 1 and cost["full_prefills"] == 1, cost
+    assert cost["model_calls"] == 1 and cost["calls"]["last_logits"] == 1, cost
     with guard.interactive("repeat observe"):
         mark = backend.mark()
         engine.observe()

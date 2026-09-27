@@ -174,12 +174,6 @@ def model_change_session(
         allowance = budget["max_tokens"]
 
     if same_tokenizer:
-        prefix = [*episode["initial_token_ids"], *visible[:boundary]]
-        branch = getattr(backend, "branch_to_prefix", None)
-        if callable(branch):
-            branch(prefix)
-        else:
-            backend.reset(prefix)
         engine = EpisodeEngine(
             backend,
             sampling=safe_sampling,
@@ -187,7 +181,6 @@ def model_change_session(
             initial_text=root_text,
             initial_token_ids=episode["initial_token_ids"],
             stream_fingerprint=segment["stream_fingerprint"],
-            backend_positioned=True,
             guidance_backend=guidance_backend,
         )
         engine.visible_token_ids = list(visible[:boundary])

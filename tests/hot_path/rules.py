@@ -155,10 +155,6 @@ ALLOW = {
         "why": "Only reached for backends without branch_to_prefix.",
         "test": _FALLBACK_TEST,
     },
-    ("no-full-prefill", "episode_engine:EpisodeEngine.__init__", "reset"): {
-        "why": "Construction without backend_positioned; chord previews pass backend_positioned=True.",
-        "test": _FALLBACK_TEST,
-    },
     ("no-full-prefill", "episode_engine:EpisodeEngine._position_guidance", "reset"): {
         "why": "CFG guidance prompt changed; the unconditional context genuinely differs.",
         "test": _FALLBACK_TEST,

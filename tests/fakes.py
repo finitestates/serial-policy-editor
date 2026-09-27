@@ -5,6 +5,8 @@ from contextlib import contextmanager
 
 import numpy as np
 
+from trajectory_editor.core.backend_position import BackendPosition, longest_common_prefix
+
 
 class ConformingFakeBackend:
     pieces = {
@@ -23,6 +25,30 @@ class ConformingFakeBackend:
 
     def reset(self, prefix_token_ids: list[int]) -> None:
         self.tokens = list(prefix_token_ids)
+
+    def position(self) -> BackendPosition:
+        cursor = len(self.tokens)
+        return BackendPosition(
+            token_ids=tuple(self.tokens),
+            cursor=cursor,
+            cache_start=0 if cursor else None,
+            cache_end=cursor - 1 if cursor else None,
+            cache_reusable=cursor > 0,
+            logits_valid=cursor > 0,
+        )
+
+    def branch_to_prefix(self, prefix_token_ids: list[int]) -> None:
+        values = [int(value) for value in prefix_token_ids]
+        if self.tokens == values:
+            return
+        shared = longest_common_prefix(tuple(self.tokens), tuple(values))
+        if shared == 0:
+            self.reset(values)
+        elif shared == len(values):
+            self.tokens = values
+        else:
+            self.tokens = self.tokens[:shared]
+            self.eval(values[shared:])
 
     def vocabulary_size(self) -> int:
         return len(self.pieces)
