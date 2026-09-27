@@ -151,10 +151,6 @@ ALLOW = {
         "why": "Only reached for backends without branch_to_prefix.",
         "test": _FALLBACK_TEST,
     },
-    ("no-full-prefill", "episode_engine:EpisodeEngine._ensure_backend_positioned", "reset"): {
-        "why": "Only reached for backends without branch_to_prefix.",
-        "test": _FALLBACK_TEST,
-    },
     ("no-full-prefill", "episode_engine:EpisodeEngine._position_guidance", "reset"): {
         "why": "CFG guidance prompt changed; the unconditional context genuinely differs.",
         "test": _FALLBACK_TEST,
