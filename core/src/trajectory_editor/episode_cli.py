@@ -321,7 +321,7 @@ def build_parser(
         action="store_true",
         default=False,
         help=(
-            "include soft-max %% overlays (raw-p / decode-p [/ pol-p]); "
+            "include soft-max %% overlays (model-p / decode-p [/ pol-p]); "
             "default identity-only table; %% toggles during the session"
         ),
     )

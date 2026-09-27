@@ -90,6 +90,9 @@ _COLUMN_WIDTHS: Mapping[str, int] = {
     "token-id": 8,
 }
 
+# Keep the internal column key stable while naming its user-facing meaning.
+_COLUMN_DISPLAY_LABELS: Mapping[str, str] = {"raw-p": "model-p"}
+
 
 def overlays_from_preferences(
     *,
@@ -194,7 +197,10 @@ class CandidateColumns:
 
     @property
     def heading(self) -> str:
-        return "".join(f"  {label:>{width}}" for label, width in self.columns)
+        return "".join(
+            f"  {_COLUMN_DISPLAY_LABELS.get(label, label):>{width}}"
+            for label, width in self.columns
+        )
 
     def values(self, candidate: Candidate) -> str:
         def value(label: str) -> str:

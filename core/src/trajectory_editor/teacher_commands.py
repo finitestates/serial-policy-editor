@@ -167,7 +167,7 @@ HELP_TEXT = """Commands:
   V                  toggle policy diagnostics independently of ordering
   l                  cycle logits: none / model / gap@raw1
   L                  toggle model logits + gap@raw1 together
-  %                  toggle model soft-max % overlays (raw-p / decode-p [/ pol-p])
+  %                  toggle model soft-max % overlays (model-p / decode-p [/ pol-p])
                      default table is identity-only: rank | token-id | text
                      overlays combine with l / % shortcuts and column focus
                      Δrank = backend rank - policy rank; positive means promoted.
