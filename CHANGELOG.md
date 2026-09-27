@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.8.0 — 2026-09-26
+
+- Unify interactive, replayed, and restored episodes around one in-memory
+  runtime. New sessions no longer create a SQLite workspace by default;
+  `--workspace`, `save`, and `save-family` provide explicit persistence.
+- Tighten replay and branch continuity across rewinds, forks, and backend or
+  tokenizer changes. Unsupported replay actions now stop at a clear live-edge
+  handoff while preserving the unexecuted plan.
+- Improve terminal search and chord navigation, batch multi-token writes into
+  one backend evaluation, and add a reference sampler plus hot-path checks for
+  reproducible correctness and performance monitoring.
+- Add EDGE seed rerolls and simplify command/export behavior. Harden token and
+  steering-artifact identity checks, and streamline vector production around
+  Transformers prompt pairs and llama.cpp cvector import.
+
+## 0.7.5 — 2026-09-23
+
+- Add an opt-in performance harness and mutation-testing workflow for the core
+  contracts.
+- Make historical replay execute the supported prefix of a plan, then yield at
+  the live edge with a warning before the first unsupported action.
+
 ## 0.7.0 — 2026-09-23
 
 - **Terminal UI:** Consolidate durable, ephemeral, and live terminal flows
@@ -192,9 +214,6 @@
 - Apply explicit reference and preset imports across every replay segment while
   preserving other source transitions. Clear token-based steering on model change.
 - Support references/presets and shared steering commands in the HTTP adapter.
-
-See the archived [Steering guide](archive/research/docs/STEERING.md) for
-historical interfaces, limitations, and migration details.
 
 ## 0.3.8 — 2026-09-14
 

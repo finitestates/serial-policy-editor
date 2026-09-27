@@ -24,8 +24,8 @@
 
 ## Documentation and release readiness
 
-- [ ] Remove or correct references to the removed `archive/` tree in the [README](README.md#L7), test inventory, an old [changelog entry](CHANGELOG.md#L196), and a [sampling module comment](core/src/trajectory_editor/core/sampling.py#L1).
-- [ ] Reconcile the release history: the packages and `main` identify as `0.7.5`, while the changelog begins at `0.7.0`. Add missing release notes or explain which versions were not separate releases. The [README](README.md#L193) also says 55 core test slots, while the contract document adds four terminal slots to the original 55.
+- [x] Remove or correct references to the removed `archive/` tree in the [README](README.md), test inventory, old changelog link, and sampling module comment.
+- [x] Reconcile the release history and prepare the packages, changelog, and README for `0.8.0`; document the `0.7.5` release line and link the test count to the contract matrix.
 - [ ] Choose the Python and operating-system support matrix, then make CI match it. Current test jobs cover Ubuntu with Python 3.10 and the latest Python; real-model checks are opt-in. See [ci.yml](.github/workflows/ci.yml#L17).
 - [ ] Write down the release steps: update the changelog and synchronized versions, build both packages, install the built artifacts in a clean environment, and smoke-test their commands. CI already builds wheels and source archives, checks them with Twine, and runs command help checks ([ci.yml](.github/workflows/ci.yml#L53)); there is no tag-triggered publishing workflow.
 

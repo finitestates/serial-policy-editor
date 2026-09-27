@@ -6,8 +6,8 @@ slot may cover many actions, sampler configurations, boundaries, or backend
 implementations.
 
 Every retained core test must map to one of these slots. Tests with no slot
-are moved to `vectors` or the archive, deleted as obsolete, or added here only
-after deliberately changing the contract budget.
+are moved to `vectors`, deleted as obsolete, or added here only after
+deliberately changing the contract budget.
 
 The terminal extraction adds four active UI lifecycle slots, T01-T04, beyond
 the original 55 engine/storage slots. They use pipe input and in-memory output;

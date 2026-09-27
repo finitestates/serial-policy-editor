@@ -48,11 +48,11 @@ policy-editor --workspace --model model.gguf --new-prompt 'Tell a story'
 ```
 
 At EDGE, `fork N` creates and selects a live branch, `rewind N` changes the
-selected branch, and `branches`/`switch ID` navigate retained branches.
+selected branch, and `branches`/`switch N` navigate retained branches.
 `export FILE` writes the selected portable teacher tape without opening a
 workspace. `save [WORKSPACE [ID]]` materializes just that branch as one durable
 episode; without a workspace argument it uses the `--workspace` selection or
 defaults to `episodes.sqlite3`. `save-family [WORKSPACE [ROOT_ID]]` materializes
 all retained branches and their lineage using the same workspace selection.
-`quit` discards the entire in-memory session. The live terminal interface is
-the same whether or not a workspace is open.
+`quit` and process exit discard unsaved in-memory history. The live terminal
+interface is the same whether or not a workspace is open.

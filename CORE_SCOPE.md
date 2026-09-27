@@ -88,7 +88,7 @@ child's runtime boundaries follow that destination representation, while
 ## Core-only acceptance gate
 
 The core distribution must be independently buildable and runnable without
-vector-production or archived extension files. A clean core-only environment must be
+vector-production or research-extension files. A clean core-only environment must be
 able to import the package, run `policy-editor -h`, create and replay a minimal
 episode with a supported backend, and export that episode through `projector`.
 Optional entry points may be unavailable without their extensions; their

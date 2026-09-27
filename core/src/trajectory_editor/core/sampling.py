@@ -3,8 +3,7 @@
 This module contains the numeric sampling kernels: candidate filtering, rank
 calculations, stable quantiles derived from draw coordinates, and the final token draw.
 The core observer in observation.py assembles policy surfaces and controller
-traces. Research-only policy surfaces live in the separate archive/research
-package.
+traces. Research-only policy surfaces are outside the core package.
 """
 
 from __future__ import annotations

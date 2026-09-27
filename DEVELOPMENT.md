@@ -1,8 +1,8 @@
 # Development branches
 
-`main` is the current release line for `0.7.5`. It includes teacher replay
-plans, storage-independent runtime seams, ephemeral runs, shared live/durable
-execution, and root-relative episode/replay semantics.
+`main` is being prepared for `0.8.0`. It unifies interactive and replayed
+execution around an in-memory runtime, with SQLite workspaces used for explicit
+restoration and saving.
 
 Develop experimental work in a separate checkout. Promote individual features
 with focused changes and tests; do not merge the entire experimental branch

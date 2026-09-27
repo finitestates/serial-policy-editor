@@ -7,10 +7,7 @@ replayed, rewound, forked, searched, and exported through the projector.
 The active project is intentionally small:
 
 - `core/` — the standalone runtime and `policy-editor` command;
-- `vector/` — optional conventional activation/steering-vector production;
-- `archive/` — historical material, optional experiments, and retired tests.
-
-The archive is not an install root and is not part of the normal test suite.
+- `vector/` — optional conventional activation/steering-vector production.
 
 ## Get only the files you need
 
@@ -124,9 +121,10 @@ no-policy-view: true
 policy-editor --profile profile.yaml --new-prompt 'Once upon a time'
 ```
 
-The editor supports sequential token selection, full-vocabulary search,
-check/force actions, conditional and naive bias rules, CFG and Gumbel draws,
-raw/model/gap logit views, replay, rewind, fork, and live-edge continuation.
+The editor supports sequential token selection, full-vocabulary search, text
+writes, check/force actions, chord previews, reusable profiles, bias and history
+controls, CFG and Gumbel draws, rerolls, raw/model/gap logit views, teacher
+replay, rewind, fork, and live-edge continuation.
 
 ## Vectors
 
@@ -169,12 +167,17 @@ backend remains responsible for whether a vector can be applied.
 
 ## Replay and persistence
 
-Episodes are stored in an SQLite workspace. The replay tape is deliberately
-small: a step number, teacher action, and an optional result used to detect
-handoff divergence. Forks, rewinds, searches, and menus are editorial moves;
-they are not replay tape entries. Handoff stops at the first divergence, while
-ballistic replay continues with teacher actions and yields at the live edge
-when the tape is exhausted.
+New sessions run in memory and do not create a database. Pass `--workspace`
+(optionally followed by a path) to open or create an SQLite workspace for
+saved-episode operations. At EDGE, `save` materializes the selected branch and
+`save-family` materializes all retained branches; unsaved session history is
+discarded when the process exits.
+
+Replay tapes are storage-independent sequences of teacher actions with
+optional expected results. Forks, rewinds, searches, and menus are editorial
+moves, not tape entries. Handoff replay yields at the first divergence;
+ballistic replay continues with teacher actions until the tape ends. Both modes
+yield at the first unsupported action while preserving the remaining plan.
 
 The `projector` command and the live edge expose plain-text, procedure, fork
 map, and episode metadata views without making cache state part of the replay
@@ -189,15 +192,11 @@ python -m pytest -q tests/core
 python -m pytest -q tests/vectors
 ```
 
-Core tests cover the 55 contract slots for sampling, actions, replay,
-lifecycle, menus, vector loading, persistence, and generated cases. Vector
-tests cover artifact interpretation, Transformers-based vector creation,
-cvector import, portable artifact application, and optional production
-behavior. Real-model backend checks are opt-in and skip when their local model
-is absent.
-
-Historical tests and experimental material are retained under `archive/` and
-are not collected by these commands.
+Core tests cover the contracts documented in
+[`tests/CORE_CONTRACTS.md`](tests/CORE_CONTRACTS.md). Vector tests cover artifact
+interpretation, Transformers-based vector creation, cvector import, portable
+artifact application, and optional production behavior. Real-model backend
+checks are opt-in and skip when their local model is absent.
 
 ## Project documents
 
@@ -206,6 +205,6 @@ are not collected by these commands.
 - [Core package](core/README.md) — standalone core installation;
 - [Vector package](vector/README.md) — optional steering-vector tooling;
 - [Core contract matrix](tests/CORE_CONTRACTS.md) — the reduced test budget;
-- [Test inventory](tests/TEST_INVENTORY.md) — active and archived test buckets.
+- [Test inventory](tests/TEST_INVENTORY.md) — active test buckets and their history.
 
-The version currently represented by the active package manifests is `0.7.5`.
+The version currently represented by the active package manifests is `0.8.0`.

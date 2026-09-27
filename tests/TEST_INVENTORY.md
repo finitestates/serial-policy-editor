@@ -8,16 +8,12 @@ the old module is removed.
 At the original bucket split, the checkout had 74 test modules, 970 tests collected,
 and 8 collection errors. The first active split had 18 test modules: 128 core tests
 and 32 vector tests. Those counts are historical; the active suite has grown.
-The 11-module backend/UI integration bucket and the
-15-module experimental bucket are archived under `archive/tests/` and no
-longer collected by default. All active test buckets collect without errors;
-coverage and mutation tooling are not yet configured in the test environment.
+The former 11-module backend/UI integration bucket and 15-module experimental
+bucket were removed from the active source tree. All active test buckets live
+under `tests/core` and `tests/vectors`; shared fakes and numerical references
+remain at the `tests` root.
 
-The active package buckets now exist under `tests/core` and `tests/vectors`;
-archived experimental and integration tests live under
-`archive/tests/research` and `archive/tests/integration`. Shared fakes and
-numerical references remain at the `tests` root. The first obsolete-test purge
-removed the
+The first obsolete-test purge removed the
 compatibility modules that asserted retired sampler recovery, replay override,
 replay-plan, and sampler-segment implementation details. Current
 rewind/sampler state is covered by the core lifecycle bucket.
@@ -91,8 +87,8 @@ The following are the first known obsolete or replacement targets:
 - core construction calls for removed prompt-pair/vector helpers in
   `test_activation_vectors.py` and `test_transformers_hidden_state.py`;
 - root vector-CLI forwarding assumptions in `test_vector_command_boundary.py`;
-- learner/controller internals that are already covered by the archived
-  adapter or are no longer part of the supported runtime;
+- learner/controller internals already covered by adapter contracts or no
+  longer part of the supported runtime;
 - repeated parser/round-trip cases that duplicate the sampler and replay
   contract tests.
 
@@ -104,7 +100,7 @@ compatibility edge, duplicate, or obsolete.
 
 The same artifact can therefore have two different test responsibilities:
 
-| Concern | Core | Optional vectors/archive |
+| Concern | Core | Optional vectors |
 | --- | --- | --- |
 | Recognize supported artifact format | yes | yes |
 | Read vector values and available metadata | yes | yes |
@@ -113,7 +109,7 @@ The same artifact can therefore have two different test responsibilities:
 | Enforce compatibility labels before loading | no | no |
 | Reject an unknown-provenance artifact | no | no |
 | Apply a vector and report dimension or runtime failures | yes | yes |
-| Create, compare, blend, or analyze vectors | no | vectors or archive |
+| Create, compare, blend, or analyze vectors | no | vectors |
 
 Core and vector tests should use provenance-light artifacts and verify numeric
 dimensions, cvector layer translation, and backend runtime behavior. Model labels
