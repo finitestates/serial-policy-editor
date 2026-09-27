@@ -21,6 +21,7 @@ from .core.candidates import Candidate
 from .core.cli_config import sampler_override
 from .core.errors import EditorError
 from .core.episode_observation import EpisodeObservation
+from .core.sampling import find_seed_for_token
 from .core.ui import ChoiceSet, ContextText
 from .core.actions import (
     EndGeneration,
@@ -927,6 +928,41 @@ class InteractivePolicy:
                     if command.reroll_seed is not None
                     else random_seed()
                 )
+            if command.kind == CommandKind.DRAW:
+                assert command.draw_raw_rank is not None
+                try:
+                    if command.draw_raw_rank > len(observation.logits):
+                        raise EditorError("draw raw rank is outside the current vocabulary")
+                    target_token_id = int(
+                        observation.policy_calculations.top_raw_ids(
+                            command.draw_raw_rank
+                        )[-1]
+                    )
+                    if not any(observation.distribution.ids == target_token_id):
+                        raise EditorError(
+                            f"raw rank {command.draw_raw_rank} selects token "
+                            f"{target_token_id}, outside the active truncated candidate set"
+                        )
+                    seed, _ = find_seed_for_token(
+                        observation.distribution,
+                        target_token_id,
+                        current_seed=engine.sampling.seed,
+                        stream_fingerprint=engine.stream_fingerprint,
+                        aligned_step=observation.sampling_boundary,
+                        kernel=engine.sampling.draw_kernel,
+                        next_seed=random_seed,
+                    )
+                except KeyboardInterrupt:
+                    feedback = ChoiceFeedback(
+                        "status",
+                        "DRAW SEARCH CANCELLED",
+                        ("No sampler action was recorded.",),
+                    )
+                    continue
+                except EditorError as exc:
+                    feedback = ChoiceFeedback("error", "DRAW UNAVAILABLE", (str(exc),))
+                    continue
+                return Reroll(seed)
             if command.kind == CommandKind.HELP:
                 self.io.page(HELP_TEXT)
                 continue

@@ -32,6 +32,7 @@ from trajectory_editor.core.sampling import (
     MIN_SEED,
     SparseDistribution,
     draw_token,
+    find_seed_for_token,
     position_uniform_token,
     raw_rank,
     top_raw_ids,
@@ -103,6 +104,48 @@ def test_s02_sampler_draws_and_candidate_filters_are_deterministic():
         distribution, kernel="gumbel-max", **kwargs
     )
     assert 0.0 < position_uniform_token(17, "a" * 64, 3, 4) < 1.0
+
+
+def test_targeted_seed_search_finds_only_active_candidates():
+    distribution = SparseDistribution(
+        np.asarray([1, 4, 7], dtype=np.int64),
+        np.asarray([0.2, 0.5, 0.3], dtype=np.float64),
+        np.asarray([0.1, 0.9, 0.4], dtype=np.float64),
+    )
+    fingerprint = "a" * 64
+    target = 4
+    draw = lambda seed: draw_token(
+        distribution,
+        seed=seed,
+        stream_fingerprint=fingerprint,
+        aligned_step=3,
+    )
+    nonmatching = next(seed for seed in range(1000) if draw(seed) != target)
+    matching = next(seed for seed in range(1000) if draw(seed) == target)
+    candidate_seeds = iter((12345, nonmatching, matching))
+
+    found, checked = find_seed_for_token(
+        distribution,
+        target,
+        current_seed=12345,
+        stream_fingerprint=fingerprint,
+        aligned_step=3,
+        kernel="categorical",
+        next_seed=lambda: next(candidate_seeds),
+    )
+
+    assert found == matching
+    assert checked == 3
+    with pytest.raises(EditorError, match="outside the active truncated candidate set"):
+        find_seed_for_token(
+            distribution,
+            2,
+            current_seed=12345,
+            stream_fingerprint=fingerprint,
+            aligned_step=3,
+            kernel="categorical",
+            next_seed=lambda: pytest.fail("ineligible targets must not search seeds"),
+        )
 
 
 @pytest.mark.invariant

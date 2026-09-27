@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -321,6 +322,50 @@ def draw_token(
     return int(distribution.ids[min(index, len(distribution.ids) - 1)])
 
 
+def find_seed_for_token(
+    distribution: SparseDistribution,
+    token_id: int,
+    *,
+    current_seed: int,
+    stream_fingerprint: str,
+    aligned_step: int,
+    kernel: str,
+    next_seed: Callable[[], int],
+) -> tuple[int, int]:
+    """Find a fresh seed whose normal draw selects an eligible token.
+
+    Returns the seed and the number of candidate seeds checked.  The caller
+    supplies seed generation so this numeric kernel stays independent of
+    runtime configuration and can be exercised with deterministic sequences.
+    """
+
+    if type(token_id) is not int or token_id < 0:
+        raise EditorError("draw token id must be a nonnegative integer")
+    if not np.any(distribution.ids == token_id):
+        raise EditorError(
+            f"token {token_id} is outside the active truncated candidate set"
+        )
+    if kernel == "categorical" and distribution.probability(token_id) <= 0.0:
+        raise EditorError(f"token {token_id} has no selectable categorical mass")
+
+    checked = 0
+    while True:
+        seed = next_seed()
+        checked += 1
+        if type(seed) is not int or not MIN_SEED <= seed <= MAX_SEED:
+            raise EditorError("draw seed generator returned an invalid signed-64-bit seed")
+        if seed == current_seed:
+            continue
+        if draw_token(
+            distribution,
+            seed=seed,
+            stream_fingerprint=stream_fingerprint,
+            aligned_step=aligned_step,
+            kernel=kernel,
+        ) == token_id:
+            return seed, checked
+
+
 __all__ = [
     "CandidateFilterResult",
     "MAX_SEED",
@@ -334,6 +379,7 @@ __all__ = [
     "_validated_logits",
     "apply_candidate_filter",
     "draw_token",
+    "find_seed_for_token",
     "position_uniform",
     "position_uniform_token",
     "raw_rank",

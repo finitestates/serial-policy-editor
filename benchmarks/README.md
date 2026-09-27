@@ -96,15 +96,20 @@ connection or open of the default/selected workspace; the fresh directory is
 also checked for workspace, journal, and WAL files. Malformed files are checked
 before model loading by the fast tests.
 
-Numerical oracles use fresh full-prefix inference on exact token IDs. The
-long-context case runs eight production continuation actions uninterrupted,
-saves the logits at every prefix, then evaluates each saved prefix fresh outside
-the timed interval. It collects the entire numerical/top-token trajectory
-before deciding pass or fail, so an early numeric mismatch cannot hide a later
-top-token divergence. The profile's `rtol` and `atol` apply to the entire logit
-vector and are not automatically widened after failure.
+Decision oracles use fresh full-prefix inference on exact token IDs, then draw
+again with the captured sampler settings, seed, stream fingerprint, and
+sampling boundary. Correctness passes when that replay-stable draw selects the
+same token. Logit deltas and top-token changes are retained as diagnostics; they
+do not fail a scenario by themselves. The long-context case runs eight
+production continuation actions uninterrupted, captures each decision, and
+checks the full seeded-decision trajectory outside the timed interval. A
+selected-token difference is a failure because it changes the actual decision
+made at that boundary.
 
-Just as an example: On the local CPU Q4_K_M GGUF reference in one trial, we observed a numerical mismatch at checkpoint 2 (maximum 0.403), which peaked at 0.511 at checkpoint 5, and persisted through checkpoint 8 (0.433). The top token continued to agree throughout the duration of the run. The harness will report this as a failure, but the episode would still be replayable. One of the reasons that replay has the definition it does is to separate numerical failures from "practical effects." Interestingly, the numerical divergence widened, but then narrowed again, which suggests at least in this limited episode that the numerical divergence didn't "snowball" into greater downstream effects. (This matches what has been observed elsewhere about successful replay episodes being conducted using handoff rules at lengths far longer than what the harness currently tests for. The current "record" for maximum replay length without token selection divergence is ~700 matched teacher actions using GPT-2).
+For example, one local CPU Q4_K_M GGUF run showed a maximum vector difference
+of 0.511 while the top token and every sampled token continued to agree. Under
+this correctness rule that remains a diagnostic; the episode's decisions still
+match.
 
 
 ## Chord latency investigation

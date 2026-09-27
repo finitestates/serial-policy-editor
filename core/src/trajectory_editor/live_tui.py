@@ -245,6 +245,12 @@ def action_preview(
                 else "Enter chooses a fresh draw seed and records it in the action tape."
             ),
         ),
+        CommandKind.DRAW: (
+            "targeted draw",
+            f"Enter searches for a seed that draws the token at raw rank "
+            f"{command.draw_raw_rank}; "
+            "the resulting seed is recorded as a reroll.",
+        ),
         CommandKind.PHRASE: (
             "phrase action",
             (

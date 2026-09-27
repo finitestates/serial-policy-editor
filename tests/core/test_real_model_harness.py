@@ -11,7 +11,15 @@ import pytest
 
 from benchmarks.real_model import ProfileError, compare, load_profile
 from benchmarks.real_model_metrics import Measurement, union_ns
-from benchmarks.real_model_scenarios import compare_prefix_trajectory
+from benchmarks.real_model_scenarios import (
+    _capture_decision,
+    _require_matching_decisions,
+    compare_decision_trajectory,
+    save_resume,
+)
+from tests.fakes import ConformingFakeBackend
+from trajectory_editor.core.sampler_config import SamplerConfig
+from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_cli import main
 
 
@@ -49,28 +57,58 @@ def test_nested_service_intervals_count_once_and_keep_residuals():
     assert union_ns([(0, 10), (5, 20), (30, 35)]) == 25
 
 
-def test_prefix_trajectory_collects_later_top_token_divergence():
-    class FreshBackend:
-        def reset(self, prefix):
-            self.prefix = tuple(prefix)
+def test_seeded_decision_parity_ignores_logit_deltas_and_catches_draw_changes():
+    class OffsetBackend(ConformingFakeBackend):
+        logit_offset = 0.0
+        logits_override = None
 
         def last_logits(self):
-            return {
-                (1,): np.array([4.0, 1.0]),
-                (1, 2): np.array([1.0, 4.0]),
-                (1, 2, 3): np.array([1.0, 4.0]),
-            }[self.prefix]
+            if self.logits_override is not None:
+                return self.logits_override.copy()
+            return super().last_logits() + np.float32(self.logit_offset)
 
-    captures = [
-        ((1,), np.array([4.2, 1.0]), None),
-        ((1, 2), np.array([4.0, 1.0]), 2),
-        ((1, 2, 3), np.array([1.0, 4.0]), 3),
-    ]
-    points = compare_prefix_trajectory(FreshBackend(), captures, rtol=0.0, atol=0.01)
-    assert len(points) == 3
-    assert [point["within_tolerance"] for point in points] == [False, False, True]
-    assert [point["top_token_agrees"] for point in points] == [True, False, True]
-    assert points[0]["next_committed_token_id"] == 2
+    backend = OffsetBackend()
+    engine = EpisodeEngine(
+        backend,
+        initial_text="P",
+        initial_token_ids=[7],
+        sampling=SamplerConfig(temperature=1.0, seed=19),
+    )
+    capture = _capture_decision(engine, engine.observe())
+
+    # A constant offset produces a large vector delta while preserving the
+    # normalized sampling distribution and its replay-stable draw.
+    backend.logit_offset = 50.0
+    points = compare_decision_trajectory(backend, [capture])
+    assert len(points) == 1
+    assert points[0]["max_abs_logit_delta"] == pytest.approx(50.0)
+    assert points[0]["top_token_agrees"]
+    assert points[0]["selected_token_agrees"]
+    _require_matching_decisions(points, "test")
+
+    alternate_token = next(
+        token_id for token_id in (1, 2, 3)
+        if token_id != capture["observed_token_id"]
+    )
+    backend.logits_override = np.full(backend.vocabulary_size(), -1e6, dtype=np.float32)
+    backend.logits_override[alternate_token] = 0.0
+    changed_points = compare_decision_trajectory(backend, [capture])
+    assert changed_points[0]["fresh_selected_token_id"] == alternate_token
+    assert not changed_points[0]["selected_token_agrees"]
+    with pytest.raises(AssertionError, match="sampled different tokens"):
+        _require_matching_decisions(changed_points, "test")
+
+
+def test_save_resume_compares_same_seeded_token_decision():
+    backend = ConformingFakeBackend()
+    result = save_resume(
+        backend,
+        SamplerConfig(temperature=0.0, seed=17),
+        provenance=backend.provenance(),
+    )
+    assert result["resumed_visible_token_ids"][:len(result["saved_visible_token_ids"])] == result["saved_visible_token_ids"]
+    assert result["decision_trajectory"]
+    assert all(point["selected_token_agrees"] for point in result["decision_trajectory"])
 
 
 def test_attach_preserves_optional_branch_capability():
@@ -120,8 +158,8 @@ def test_invalid_teacher_plan_fails_before_backend_load(tmp_path, content, reaso
 
 
 def test_compare_rejects_changed_model_and_workload(tmp_path, capsys):
-    base = {"format": "spe-real-model-report-v1", "harness_version": 2,
-            "scenario_fixture_version": 2, "model": {"model_sha256": "first"}, "hardware": {"cpu": "same"},
+    base = {"format": "spe-real-model-report-v2", "harness_version": 3,
+            "scenario_fixture_version": 3, "model": {"model_sha256": "first"}, "hardware": {"cpu": "same"},
             "profile": {"backend": "llama.cpp", "launch": {}, "scenarios": ["continuation"]},
             "samples": [{"scenario": "continuation", "status": "passed", "result": {"visible_token_ids": [1]}}],
             "summary": {}}
@@ -134,3 +172,48 @@ def test_compare_rejects_changed_model_and_workload(tmp_path, capsys):
     second.write_text(json.dumps(changed), encoding="utf-8")
     assert compare(first, second) == 2
     assert "model identity" in capsys.readouterr().out
+
+
+def test_compare_ignores_logit_diagnostics_but_tracks_sampled_decisions(tmp_path, capsys):
+    base = {
+        "format": "spe-real-model-report-v2",
+        "harness_version": 3,
+        "scenario_fixture_version": 3,
+        "model": {"model_sha256": "same"},
+        "runtime_identity": {},
+        "hardware": {"cpu": "same"},
+        "profile": {"backend": "llama.cpp", "launch": {}, "scenarios": ["fork-switch"]},
+        "counts": {"failed": 0},
+        "samples": [{
+            "scenario": "fork-switch",
+            "status": "passed",
+            "result": {
+                "child_visible_token_ids": [1],
+                "decision_trajectory": [{
+                    "boundary": 0,
+                    "selected_token_id": 7,
+                    "fresh_selected_token_id": 7,
+                    "max_abs_logit_delta": 0.0,
+                    "top_token_agrees": True,
+                }],
+            },
+        }],
+        "summary": {},
+    }
+    first = tmp_path / "first-decisions.json"
+    second = tmp_path / "second-decisions.json"
+    first.write_text(json.dumps(base), encoding="utf-8")
+    diagnostic_change = json.loads(json.dumps(base))
+    point = diagnostic_change["samples"][0]["result"]["decision_trajectory"][0]
+    point["max_abs_logit_delta"] = 50.0
+    point["top_token_agrees"] = False
+    second.write_text(json.dumps(diagnostic_change), encoding="utf-8")
+    assert compare(first, second) == 0
+
+    draw_change = json.loads(json.dumps(diagnostic_change))
+    point = draw_change["samples"][0]["result"]["decision_trajectory"][0]
+    point["selected_token_id"] = 8
+    point["fresh_selected_token_id"] = 8
+    second.write_text(json.dumps(draw_change), encoding="utf-8")
+    assert compare(first, second) == 2
+    assert "fork-switch realized workload" in capsys.readouterr().out

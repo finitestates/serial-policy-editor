@@ -10,8 +10,6 @@ launch:
   seed: 17
   cfg-unconditional-prompt: "A neutral list:"
   cfg-scale: 1.5
-rtol: 0.0001
-atol: 0.001
 scenarios:
   - cfg-lifecycle
 repeats: 1

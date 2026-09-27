@@ -17,6 +17,7 @@ class CommandKind(str, Enum):
     BIAS = "bias"
     SAMPLER = "sampler"
     REROLL = "reroll"
+    DRAW = "draw"
     EDIT = "edit"
     PHRASE = "phrase"
     HOLD = "hold"
@@ -89,6 +90,7 @@ class TeacherCommand:
     chord_ranks: tuple[int, ...] | None = None
     sampler_text: str | None = None
     reroll_seed: int | None = None
+    draw_raw_rank: int | None = None
 
 
 class CommandState(str, Enum):
@@ -132,6 +134,7 @@ HELP_TEXT = """Commands:
   s top_k=20      change sampler settings; changes are part of the action tape
   s {JSON}        replace all sampler settings from a complete SamplerConfig record
   reroll [SEED]   change the draw seed as a replayable action
+  draw RAW_RANK   find a seed that draws the token at this raw rank
   1..N              commit a candidate; the proposal rank records acceptance
   chord RANK RANK... preview temporary continuations; choose a letter or starting rank
                     to commit its actions and drop the other previews
@@ -582,6 +585,17 @@ def parse_command(
             CommandKind.SAMPLER,
             sampler_text=payload or None,
         )
+    if re.match(r"draw(?:\s|$)", lower):
+        rank_text = command[4:].strip()
+        if not rank_text:
+            raise EditorError("draw requires a raw rank; usage: draw RAW_RANK")
+        if not rank_text.isdecimal():
+            raise EditorError("draw raw rank must be a positive integer")
+        rank = int(rank_text)
+        if rank < 1 or (vocabulary_size is not None and rank > vocabulary_size):
+            maximum = vocabulary_size if vocabulary_size is not None else "the vocabulary size"
+            raise EditorError(f"draw raw rank must be between 1 and {maximum}")
+        return TeacherCommand(CommandKind.DRAW, draw_raw_rank=rank)
     reroll_match = re.fullmatch(r"reroll(?:\s+([+-]?\d+))?", command, re.IGNORECASE)
     if reroll_match is not None:
         seed_text = reroll_match.group(1)
@@ -793,6 +807,8 @@ def interpret_command(
         return CommandInterpretation(raw, CommandState.INCOMPLETE, message="Type phrase text after the command.")
     if lower == "overlay":
         return CommandInterpretation(raw, CommandState.INCOMPLETE, message="Type a wired overlay name.")
+    if lower == "draw":
+        return CommandInterpretation(raw, CommandState.INCOMPLETE, message="Type a token ID after draw.")
     chord_parts = stripped.split()
     if chord_parts and chord_parts[0].lower() == "chord" and len(chord_parts) < 3:
         if len(chord_parts) == 1:

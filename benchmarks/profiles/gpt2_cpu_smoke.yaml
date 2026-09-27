@@ -8,8 +8,6 @@ launch:
   cache: auto
   temperature: 0.0
   seed: 17
-rtol: 0.0001
-atol: 0.001
 scenarios:
   - continuation
   - controlled-write

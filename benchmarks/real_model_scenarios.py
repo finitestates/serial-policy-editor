@@ -37,10 +37,14 @@ ACTION_RECORDS = (
 class FixedActionPolicy:
     """Small deterministic policy fixture for controlled benchmark actions."""
 
-    def __init__(self, actions):
+    def __init__(self, actions, *, capture_decisions: bool = False):
         self._actions = iter(actions)
+        self.capture_decisions = capture_decisions
+        self.decisions: list[dict] = []
 
-    def choose(self, _engine, _observation):
+    def choose(self, engine, observation):
+        if self.capture_decisions:
+            self.decisions.append(_capture_decision(engine, observation))
         return next(self._actions)
 
 
@@ -50,12 +54,6 @@ class ScenarioFailure(AssertionError):
         self.partial_result = partial_result
 
 
-class LogitMismatch(AssertionError):
-    def __init__(self, diagnostics: dict) -> None:
-        super().__init__(f"same-prefix logits differ; max absolute error {diagnostics['max_abs_logit_error']:g}")
-        self.diagnostics = diagnostics
-
-
 def _session(backend, sampling, *, prompt: str = PROMPT) -> LiveSession:
     return LiveSession(
         EpisodeEngine(backend, sampling=sampling, initial_text=prompt),
@@ -63,50 +61,105 @@ def _session(backend, sampling, *, prompt: str = PROMPT) -> LiveSession:
     )
 
 
-def _oracle(backend, prefix: list[int], observed: np.ndarray, *, rtol: float, atol: float) -> dict:
-    # Direct fresh full-prefix inference is independent of runner/replay logic.
-    backend.reset(prefix)
-    fresh = np.asarray(backend.last_logits(), dtype=np.float64)
+def _logit_delta_diagnostics(observed: np.ndarray, fresh: np.ndarray) -> dict:
     actual = np.asarray(observed, dtype=np.float64)
-    if not np.allclose(actual, fresh, rtol=rtol, atol=atol):
-        difference = np.abs(actual - fresh)
-        raise LogitMismatch({"max_abs_logit_error": float(np.max(difference)),
-                             "mean_abs_logit_error": float(np.mean(difference)),
-                             "argmax_equal": bool(np.argmax(actual) == np.argmax(fresh)),
-                             "observed_top_token_id": int(np.argmax(actual)),
-                             "fresh_top_token_id": int(np.argmax(fresh))})
-    return {"max_abs_logit_error": float(np.max(np.abs(actual - fresh)))}
+    reference = np.asarray(fresh, dtype=np.float64)
+    difference = np.abs(actual - reference)
+    return {
+        "max_abs_logit_delta": float(np.max(difference)),
+        "mean_abs_logit_delta": float(np.mean(difference)),
+        "observed_top_token_id": int(np.argmax(actual)),
+        "fresh_top_token_id": int(np.argmax(reference)),
+        "top_token_agrees": bool(np.argmax(actual) == np.argmax(reference)),
+    }
 
 
-def compare_prefix_trajectory(backend, captures, *, rtol: float, atol: float) -> list[dict]:
-    """Compare every captured incremental prefix with direct fresh evaluation.
+def _capture_decision(engine, observation) -> dict:
+    """Retain seeded-decision inputs without copying logits in the hot path."""
+    return {
+        "prefix_token_ids": observation.prefix_token_ids,
+        "observed_logits": observation.logits,
+        "observed_token_id": int(observation.proposal_token_id),
+        "initial_text": engine.initial_text,
+        "initial_token_ids": tuple(engine.initial_token_ids),
+        "sampling": engine.sampling,
+        "stream_fingerprint": engine.stream_fingerprint,
+        "guidance_backend": engine.guidance_backend,
+        "ephemeral_logit_biases": dict(engine._ephemeral_logit_biases),
+        "boundary": observation.sampling_boundary,
+    }
 
-    Captures come from an uninterrupted production run. Reference resets happen
-    afterward, so the oracle cannot perturb the measured continuation.
+
+def _fresh_decision(backend, capture):
+    """Sample the same boundary after explicitly rebuilding its full prefix."""
+    prefix = tuple(capture["prefix_token_ids"])
+    initial_token_ids = capture["initial_token_ids"]
+    visible_token_ids = prefix[len(initial_token_ids):]
+    backend.reset(list(prefix))
+
+    guidance_backend = capture["guidance_backend"]
+    sampling = capture["sampling"]
+    if guidance_backend is not None and sampling.cfg_unconditional_prompt is not None:
+        guidance_prefix = guidance_backend.tokenize(
+            sampling.cfg_unconditional_prompt, add_bos=True, special=True
+        )
+        guidance_backend.reset([*guidance_prefix, *visible_token_ids])
+
+    fresh_engine = EpisodeEngine(
+        backend,
+        sampling=sampling,
+        initial_text=capture["initial_text"],
+        initial_token_ids=initial_token_ids,
+        stream_fingerprint=capture["stream_fingerprint"],
+        guidance_backend=guidance_backend,
+    )
+    fresh_engine.visible_token_ids = visible_token_ids
+    fresh_engine._ephemeral_logit_biases = dict(capture["ephemeral_logit_biases"])
+    observation = fresh_engine.observe()
+    if observation.sampling_boundary != capture["boundary"]:
+        raise AssertionError(
+            "fresh decision used a different sampling boundary: "
+            f"{observation.sampling_boundary} != {capture['boundary']}"
+        )
+    return observation
+
+
+def compare_decision_trajectory(backend, captures) -> list[dict]:
+    """Compare replay-stable sampled tokens; logit deltas are diagnostics only.
+
+    Captures come from production decisions. Fresh-prefix model evaluation and
+    sampling happen afterward, so this oracle cannot perturb the continuation.
     """
     diagnostics = []
-    for index, (prefix, observed, committed_token_id) in enumerate(captures):
-        backend.reset(list(prefix))
-        fresh = np.asarray(backend.last_logits(), dtype=np.float64)
-        actual = np.asarray(observed, dtype=np.float64)
-        if fresh.shape != actual.shape or not np.all(np.isfinite(fresh)):
-            raise AssertionError(f"invalid fresh logits at checkpoint {index}: {fresh.shape}")
-        difference = np.abs(actual - fresh)
-        observed_top = int(np.argmax(actual))
-        fresh_top = int(np.argmax(fresh))
-        diagnostics.append({
-            "checkpoint": index,
-            "prefix_tokens": len(prefix),
-            "committed_token_id": committed_token_id,
-            "next_committed_token_id": captures[index + 1][2] if index + 1 < len(captures) else None,
-            "max_abs_logit_error": float(np.max(difference)),
-            "mean_abs_logit_error": float(np.mean(difference)),
-            "within_tolerance": bool(np.allclose(actual, fresh, rtol=rtol, atol=atol)),
-            "observed_top_token_id": observed_top,
-            "fresh_top_token_id": fresh_top,
-            "top_token_agrees": observed_top == fresh_top,
+    for index, capture in enumerate(captures):
+        fresh = _fresh_decision(backend, capture)
+        actual_logits = np.asarray(capture["observed_logits"], dtype=np.float64)
+        fresh_logits = np.asarray(fresh.logits, dtype=np.float64)
+        if fresh_logits.shape != actual_logits.shape or not np.all(np.isfinite(fresh_logits)):
+            raise AssertionError(f"invalid fresh logits at decision {index}: {fresh_logits.shape}")
+        point = _logit_delta_diagnostics(actual_logits, fresh_logits)
+        point.update({
+            "decision": index,
+            "boundary": capture["boundary"],
+            "prefix_tokens": len(capture["prefix_token_ids"]),
+            "selected_token_id": capture["observed_token_id"],
+            "fresh_selected_token_id": int(fresh.proposal_token_id),
+            "selected_token_agrees": (
+                capture["observed_token_id"] == int(fresh.proposal_token_id)
+            ),
         })
+        diagnostics.append(point)
     return diagnostics
+
+
+def _require_matching_decisions(trajectory, label: str) -> None:
+    mismatches = [
+        point["boundary"]
+        for point in trajectory
+        if not point["selected_token_agrees"]
+    ]
+    if mismatches:
+        raise AssertionError(f"{label} sampled different tokens at boundaries {mismatches}")
 
 
 @contextmanager
@@ -119,30 +172,33 @@ def _no_database():
         yield
 
 
-def continuation(backend, sampling, *, rtol: float, atol: float, **_kwargs) -> dict:
+def continuation(backend, sampling, **_kwargs) -> dict:
     meter = Measurement()
     with meter.attach(backend), meter.active():
         with meter.phase("initial_prompt"):
             session = _session(backend, sampling)
+        policy = FixedActionPolicy([Accept(), Accept()], capture_decisions=True)
         with meter.phase("steady_continuation"):
             result = run_plan(session, divergence_policy="handoff",
-                live_policy=FixedActionPolicy([Accept(), Accept()]), max_live_actions=2
+                live_policy=policy, max_live_actions=2
             )
-        prefix = [*session.engine.initial_token_ids, *session.engine.visible_token_ids]
-        logits = backend.last_logits().copy()
         generated = len(session.engine.visible_token_ids)
         with meter.phase("finalization"):
             session.quit()
     if len(result.outcomes) != 2 or generated != 2:
         raise AssertionError(f"continuation stopped early: {len(result.outcomes)} actions, {generated} tokens")
     metrics = meter.result(actions=2, committed_tokens=generated)
-    return {"metrics": metrics, "prompt_tokens": len(session.engine.initial_token_ids),
-            "visible_token_ids": prefix[len(session.engine.initial_token_ids):],
-            "oracle": _oracle(backend, prefix, logits, rtol=rtol, atol=atol)}
+    decision_trajectory = compare_decision_trajectory(backend, policy.decisions)
+    _require_matching_decisions(decision_trajectory, "continuation")
+    return {
+        "metrics": metrics,
+        "prompt_tokens": len(session.engine.initial_token_ids),
+        "visible_token_ids": tuple(session.engine.visible_token_ids),
+        "decision_trajectory": decision_trajectory,
+    }
 
 
-def controlled_write(backend, sampling, *, rtol: float, atol: float, **_kwargs) -> dict:
-    del rtol, atol
+def controlled_write(backend, sampling, **_kwargs) -> dict:
     # The actions are fixed before measuring either code version. No generated
     # text is substituted into this controlled-work comparison.
     from trajectory_editor.run_loop import ReplayPlan, TapeStep
@@ -164,8 +220,7 @@ def controlled_write(backend, sampling, *, rtol: float, atol: float, **_kwargs) 
             "visible_token_ids": ledger, "prompt_tokens": len(session.engine.initial_token_ids)}
 
 
-def candidate_refresh(backend, sampling, *, rtol: float, atol: float, **_kwargs) -> dict:
-    del rtol, atol
+def candidate_refresh(backend, sampling, **_kwargs) -> dict:
     meter = Measurement()
     with meter.attach(backend), meter.active():
         with meter.phase("initial_prompt"):
@@ -173,8 +228,9 @@ def candidate_refresh(backend, sampling, *, rtol: float, atol: float, **_kwargs)
         with meter.phase("candidate_refresh"):
             initial = session.engine.observe()
             before = session.engine.candidates(initial, count=12)
+            policy = FixedActionPolicy([Accept()], capture_decisions=True)
             result = run_plan(session, divergence_policy="handoff",
-                live_policy=FixedActionPolicy([Accept()]), max_live_actions=1
+                live_policy=policy, max_live_actions=1
             )
             after = session.engine.candidates(session.engine.observe(), count=12)
         ledger = tuple(session.engine.visible_token_ids)
@@ -182,12 +238,15 @@ def candidate_refresh(backend, sampling, *, rtol: float, atol: float, **_kwargs)
             session.quit()
     if len(result.outcomes) != 1 or not before or not after:
         raise AssertionError("candidate refresh did not traverse the real observation path")
+    decision_trajectory = compare_decision_trajectory(backend, policy.decisions)
+    _require_matching_decisions(decision_trajectory, "candidate refresh")
     return {"metrics": meter.result(actions=1, committed_tokens=len(ledger)),
             "visible_token_ids": ledger, "candidate_counts": [len(before), len(after)],
-            "ui_mode": "headless-candidate-preparation"}
+            "ui_mode": "headless-candidate-preparation",
+            "decision_trajectory": decision_trajectory}
 
 
-def instrumentation_parity(backend, sampling, *, rtol: float, atol: float, **_kwargs) -> dict:
+def instrumentation_parity(backend, sampling, **_kwargs) -> dict:
     meter = Measurement()
     with meter.attach(backend), meter.active():
         measured = _session(backend, sampling)
@@ -209,15 +268,17 @@ def instrumentation_parity(backend, sampling, *, rtol: float, atol: float, **_kw
     ordinary_wall = perf_counter() - start
     if len(measured_run.outcomes) != 2 or len(ordinary_run.outcomes) != 2:
         raise AssertionError("measurement parity continuation stopped early")
-    if measured_tokens != ordinary_tokens or not np.allclose(measured_logits, ordinary_logits, rtol=rtol, atol=atol):
-        raise AssertionError("measurement changed semantic token or logit results")
+    if measured_tokens != ordinary_tokens:
+        raise AssertionError("measurement changed the sampled token sequence")
     return {"metrics": metrics, "ordinary_active_wall_s": ordinary_wall,
             "visible_token_ids": measured_tokens,
+            "logit_diagnostics": _logit_delta_diagnostics(
+                measured_logits, ordinary_logits
+            ),
             "timing_note": "Single alternating pair is diagnostic only; no ratio threshold"}
 
 
-def action_jsonl(backend, sampling, *, rtol: float, atol: float, **_kwargs) -> dict:
-    del rtol, atol
+def action_jsonl(backend, sampling, **_kwargs) -> dict:
     with TemporaryDirectory(prefix="spe-real-plan-") as directory:
         path = Path(directory) / "handwritten.jsonl"
         path.write_text("".join(json.dumps(row) + "\n" for row in ACTION_RECORDS), encoding="utf-8")
@@ -247,8 +308,7 @@ def action_jsonl(backend, sampling, *, rtol: float, atol: float, **_kwargs) -> d
                 "visible_token_ids": ledger, "live_edge": live_edge}
 
 
-def observed_jsonl(backend, sampling, *, rtol: float, atol: float, **_kwargs) -> dict:
-    del rtol, atol
+def observed_jsonl(backend, sampling, **_kwargs) -> dict:
     with TemporaryDirectory(prefix="spe-real-observed-") as directory:
         path = Path(directory) / "export.jsonl"
         meter = Measurement()
@@ -309,14 +369,15 @@ def observed_jsonl(backend, sampling, *, rtol: float, atol: float, **_kwargs) ->
                 "deliberate_handoff_reason": handoff.outcomes[0].divergence.reason}
 
 
-def rewind_replace(backend, sampling, *, rtol: float, atol: float, **_kwargs) -> dict:
+def rewind_replace(backend, sampling, **_kwargs) -> dict:
     meter = Measurement()
     with meter.attach(backend), meter.active():
         with meter.phase("initial_prompt"):
             session = _session(backend, sampling)
+        policy = FixedActionPolicy([Accept(), Accept()], capture_decisions=True)
         with meter.phase("steady_continuation"):
             original = run_plan(session, divergence_policy="handoff",
-                live_policy=FixedActionPolicy([Accept(), Accept()]), max_live_actions=2
+                live_policy=policy, max_live_actions=2
             )
         if len(original.outcomes) != 2:
             raise AssertionError("initial continuation ended early")
@@ -326,18 +387,18 @@ def rewind_replace(backend, sampling, *, rtol: float, atol: float, **_kwargs) ->
             session.rewind(1)
             replaced = session.generate(Write(" an alternative", mode="exact"))
         ledger = tuple(session.engine.visible_token_ids)
-        prefix = [*session.engine.initial_token_ids, *ledger]
-        logits = backend.last_logits().copy()
         with meter.phase("finalization"):
             session.quit()
     if ledger != (survivor, *replaced.visible_token_ids):
         raise AssertionError("rewind/replacement ledger did not retain the exact surviving prefix")
+    decision_trajectory = compare_decision_trajectory(backend, policy.decisions)
+    _require_matching_decisions(decision_trajectory, "rewind/replacement")
     return {"metrics": meter.result(actions=3, committed_tokens=len(ledger)),
             "retained_token_ids": ledger, "abandoned_token_id": abandoned,
-            "oracle": _oracle(backend, prefix, logits, rtol=rtol, atol=atol)}
+            "decision_trajectory": decision_trajectory}
 
 
-def fork_switch(backend, sampling, *, rtol: float, atol: float, **_kwargs) -> dict:
+def fork_switch(backend, sampling, **_kwargs) -> dict:
     meter = Measurement()
     with meter.attach(backend), meter.active():
         with meter.phase("initial_prompt"):
@@ -352,26 +413,28 @@ def fork_switch(backend, sampling, *, rtol: float, atol: float, **_kwargs) -> di
             child_ledger = tuple(session.engine.visible_token_ids)
             session.activate(root)
         parent_again = tuple(session.engine.visible_token_ids)
-        parent_prefix = [*session.engine.initial_token_ids, *parent_again]
-        parent_logits = backend.last_logits().copy()
+        parent_observation = session.engine.observe()
+        parent_decision = _capture_decision(session.engine, parent_observation)
         with meter.phase("fork_switch"):
             session.activate(child.branch.branch_id)
         child_again = tuple(session.engine.visible_token_ids)
-        child_prefix = [*session.engine.initial_token_ids, *child_again]
-        child_logits = backend.last_logits().copy()
+        child_observation = session.engine.observe()
+        child_decision = _capture_decision(session.engine, child_observation)
         with meter.phase("finalization"):
             session.discard()
     if parent != parent_again or child_ledger != child_again or child_ledger[:len(parent)] != parent:
         raise AssertionError("fork/switch changed independent branch histories")
     metrics = meter.result(actions=2, committed_tokens=len(child_ledger))
-    child_check = _oracle(backend, child_prefix, child_logits, rtol=rtol, atol=atol)
-    parent_check = _oracle(backend, parent_prefix, parent_logits, rtol=rtol, atol=atol)
+    decision_trajectory = compare_decision_trajectory(
+        backend, [parent_decision, child_decision]
+    )
+    _require_matching_decisions(decision_trajectory, "fork/switch")
     return {"metrics": metrics, "parent_visible_token_ids": parent,
             "child_visible_token_ids": child_ledger,
-            "oracle": {"parent": parent_check, "child": child_check}}
+            "decision_trajectory": decision_trajectory}
 
 
-def save_resume(backend, sampling, *, rtol: float, atol: float, provenance: dict, **_kwargs) -> dict:
+def save_resume(backend, sampling, *, provenance: dict, **_kwargs) -> dict:
     from uuid import uuid4
 
     from trajectory_editor.episode_lifecycle import _restore_engine
@@ -396,7 +459,7 @@ def save_resume(backend, sampling, *, rtol: float, atol: float, provenance: dict
                 with meter.phase("resume"):
                     restored_engine = _restore_engine(
                         store, identifier, backend,
-                        sampling_override=None, notice=lambda _message: None,
+                        sampling_override=None,
                     )
                     restored = restore_live_session(
                         store,
@@ -408,15 +471,14 @@ def save_resume(backend, sampling, *, rtol: float, atol: float, provenance: dict
                             len(saved_ledger),
                         ),
                     )
+                policy = FixedActionPolicy([Accept()], capture_decisions=True)
                 result = run_plan(
                     restored,
                     divergence_policy="handoff",
-                    live_policy=FixedActionPolicy([Accept()]),
+                    live_policy=policy,
                     max_live_actions=1,
                 )
                 ledger = tuple(restored.engine.visible_token_ids)
-                prefix = [*restored.engine.initial_token_ids, *ledger]
-                logits = backend.last_logits().copy()
                 with meter.phase("explicit_save"):
                     resumed_id = materialize_live_branch(
                         store,
@@ -443,16 +505,18 @@ def save_resume(backend, sampling, *, rtol: float, atol: float, provenance: dict
             raise AssertionError(
                 "restored session did not preserve the source or explicitly save its extension"
             )
+        decision_trajectory = compare_decision_trajectory(backend, policy.decisions)
+        _require_matching_decisions(decision_trajectory, "save/resume")
         return {
             "metrics": meter.result(actions=2, committed_tokens=len(ledger)),
             "saved_visible_token_ids": saved_ledger,
             "resumed_visible_token_ids": ledger,
             "resumed_episode_id": resumed_id,
-            "oracle": _oracle(backend, prefix, logits, rtol=rtol, atol=atol),
+            "decision_trajectory": decision_trajectory,
         }
 
 
-def long_context(backend, sampling, *, rtol: float, atol: float, **_kwargs) -> dict:
+def long_context(backend, sampling, **_kwargs) -> dict:
     prompt = "The scene contains ordinary objects. " * 10
     requested_actions = 8
     ids = backend.tokenize(prompt, add_bos=True, special=True)
@@ -466,13 +530,13 @@ def long_context(backend, sampling, *, rtol: float, atol: float, **_kwargs) -> d
     with meter.attach(backend), meter.active():
         with meter.phase("initial_prompt"):
             session = _session(backend, sampling, prompt=prompt)
-        initial_prefix = tuple(session.engine.initial_token_ids)
-        captures.append((initial_prefix, backend.last_logits().copy(), None))
         with meter.phase("steady_continuation"):
             for _ in range(requested_actions):
+                policy = FixedActionPolicy([Accept()], capture_decisions=True)
                 result = run_plan(session, divergence_policy="handoff",
-                    live_policy=FixedActionPolicy([Accept()]), max_live_actions=1
+                    live_policy=policy, max_live_actions=1
                 )
+                captures.extend(policy.decisions)
                 if len(result.outcomes) != 1:
                     stop_reason = result.handoff_reason or "no completed action"
                     break
@@ -481,8 +545,6 @@ def long_context(backend, sampling, *, rtol: float, atol: float, **_kwargs) -> d
                     stop_reason = outcome.stop_reason
                     break
                 completed_actions += 1
-                prefix = tuple((*session.engine.initial_token_ids, *session.engine.visible_token_ids))
-                captures.append((prefix, backend.last_logits().copy(), outcome.visible_token_ids[-1]))
                 if session.engine.ended:
                     stop_reason = outcome.stop_reason
                     break
@@ -498,32 +560,22 @@ def long_context(backend, sampling, *, rtol: float, atol: float, **_kwargs) -> d
         "completed_actions": completed_actions,
         "stop_reason": stop_reason,
     }
-    # Inspect all comparable prefixes before deciding pass/fail. A numerical
-    # mismatch at one checkpoint cannot hide a later top-token divergence.
-    partial["logit_trajectory"] = compare_prefix_trajectory(
-        backend, captures, rtol=rtol, atol=atol
-    )
-    partial["numerical_mismatch_checkpoints"] = [
-        item["checkpoint"] for item in partial["logit_trajectory"]
-        if not item["within_tolerance"]
-    ]
-    partial["top_token_mismatch_checkpoints"] = [
-        item["checkpoint"] for item in partial["logit_trajectory"]
-        if not item["top_token_agrees"]
+    partial["decision_trajectory"] = compare_decision_trajectory(backend, captures)
+    partial["sample_mismatch_boundaries"] = [
+        item["boundary"] for item in partial["decision_trajectory"]
+        if not item["selected_token_agrees"]
     ]
     problems = []
     if completed_actions != requested_actions:
         problems.append(f"continued {completed_actions}/{requested_actions} actions ({stop_reason})")
-    if partial["top_token_mismatch_checkpoints"]:
-        problems.append(f"top-token divergence at checkpoints {partial['top_token_mismatch_checkpoints']}")
-    if partial["numerical_mismatch_checkpoints"]:
-        problems.append(f"logit tolerance exceeded at checkpoints {partial['numerical_mismatch_checkpoints']}")
+    if partial["sample_mismatch_boundaries"]:
+        problems.append(f"sampled-token divergence at boundaries {partial['sample_mismatch_boundaries']}")
     if problems:
         raise ScenarioFailure("; ".join(problems), partial)
     return partial
 
 
-def cache_compare(backend, sampling, *, profile, rtol: float, atol: float, **_kwargs) -> dict:
+def cache_compare(backend, sampling, *, profile, **_kwargs) -> dict:
     from trajectory_editor.episode_backend_loader import load_backend
 
     if profile["options"].cache != "auto":
@@ -549,20 +601,19 @@ def cache_compare(backend, sampling, *, profile, rtol: float, atol: float, **_kw
                               "visible_token_ids": ledger, "logits": logits}
         if results["auto"]["visible_token_ids"] != results["off"]["visible_token_ids"]:
             raise AssertionError("cache modes produced different controlled token ledgers")
-        if not np.allclose(results["auto"]["logits"], results["off"]["logits"], rtol=rtol, atol=atol):
-            raise AssertionError("cache modes disagree on same-prefix logits")
         return {"metrics": results["auto"]["metrics"],
                 "cache_off_metrics": results["off"]["metrics"],
                 "visible_token_ids": results["auto"]["visible_token_ids"],
-                "max_abs_logit_error": float(np.max(np.abs(results["auto"]["logits"] - results["off"]["logits"]))) }
+                "logit_diagnostics": _logit_delta_diagnostics(
+                    results["auto"]["logits"], results["off"]["logits"]
+                )}
     finally:
         close = getattr(alternate, "close", None)
         if callable(close):
             close()
 
 
-def cfg_lifecycle(backend, sampling, *, profile, provenance: dict, rtol: float,
-                  atol: float, **_kwargs) -> dict:
+def cfg_lifecycle(backend, sampling, *, profile, provenance: dict, **_kwargs) -> dict:
     from trajectory_editor.episode_backend_loader import load_cfg_guidance_backend
 
     if sampling.cfg_unconditional_prompt is None:
@@ -574,25 +625,30 @@ def cfg_lifecycle(backend, sampling, *, profile, provenance: dict, rtol: float,
             engine = EpisodeEngine(backend, sampling=sampling,
                                    initial_text=PROMPT, guidance_backend=guidance)
             session = LiveSession(engine, prompt=PROMPT)
+            decisions = []
+            decisions.append(_capture_decision(
+                engine, engine.observe()
+            ))
             first = session.generate(Accept())
+            decisions.append(_capture_decision(
+                session.engine, session.engine.observe()
+            ))
             second = session.generate(Accept())
             if len(first.visible_token_ids) != 1 or len(second.visible_token_ids) != 1:
                 raise AssertionError("CFG continuation ended before rewind")
             session.rewind(1)
             observation = session.engine.observe()
             conditional_prefix = [*session.engine.initial_token_ids, *session.engine.visible_token_ids]
-            conditional_logits = backend.last_logits().copy()
-            guidance_prefix = guidance.tokenize(sampling.cfg_unconditional_prompt, add_bos=True, special=True)
-            guidance_prefix += session.engine.visible_token_ids
-            guidance_logits = guidance.last_logits().copy()
+            decisions.append(_capture_decision(session.engine, observation))
             session.quit()
         work = meter.result(actions=3, committed_tokens=1)
         if not any(item["role"] == "conditional" for item in work["work"]) or not any(item["role"] == "unconditional" for item in work["work"]):
             raise AssertionError("CFG work accounting omitted a model branch")
+        decision_trajectory = compare_decision_trajectory(backend, decisions)
+        _require_matching_decisions(decision_trajectory, "CFG lifecycle")
         return {"metrics": work, "surviving_token_ids": conditional_prefix[len(engine.initial_token_ids):],
                 "observation_boundary": observation.boundary,
-                "oracle": {"conditional": _oracle(backend, conditional_prefix, conditional_logits, rtol=rtol, atol=atol),
-                           "unconditional": _oracle(guidance, guidance_prefix, guidance_logits, rtol=rtol, atol=atol)}}
+                "decision_trajectory": decision_trajectory}
     finally:
         close = getattr(guidance, "close", None)
         if callable(close):

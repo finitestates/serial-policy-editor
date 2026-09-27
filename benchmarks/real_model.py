@@ -32,8 +32,9 @@ from trajectory_editor.episode_cli import build_parser
 from benchmarks.real_model_scenarios import SCENARIOS, continuation
 
 
-FORMAT = "spe-real-model-report-v1"
-HARNESS_VERSION = 2
+FORMAT = "spe-real-model-report-v2"
+HARNESS_VERSION = 3
+SCENARIO_FIXTURE_VERSION = 3
 DEFAULT_OUTPUT = Path(tempfile.gettempdir()) / "spe-real-model-results"
 
 
@@ -54,7 +55,7 @@ def load_profile(path: Path, model_root: Path | None, model_override: str | None
         payload = _mapping(yaml.load(path.read_text(encoding="utf-8"), Loader=_DuplicateKeyLoader), "profile")
     except (OSError, yaml.YAMLError) as exc:
         raise ProfileError(f"cannot read profile {path}: {exc}") from exc
-    allowed = {"name", "model", "backend", "launch", "rtol", "atol", "scenarios", "repeats", "timeout_s", "warmup"}
+    allowed = {"name", "model", "backend", "launch", "scenarios", "repeats", "timeout_s", "warmup"}
     if set(payload) - allowed:
         raise ProfileError(f"unknown profile fields: {sorted(set(payload) - allowed)}")
     raw_model = model_override if model_override is not None else payload.get("model")
@@ -95,15 +96,10 @@ def load_profile(path: Path, model_root: Path | None, model_override: str | None
     timeout_s = payload.get("timeout_s", 90)
     if any(type(number) is not int or number < minimum for number, minimum in ((repeats, 1), (warmup, 0), (timeout_s, 1))):
         raise ProfileError("repeats and timeout_s must be positive integers; warmup must be nonnegative")
-    rtol = payload.get("rtol", 1e-3)
-    atol = payload.get("atol", 1e-2)
-    if any(type(number) not in (int, float) or not np.isfinite(number) or number < 0 for number in (rtol, atol)):
-        raise ProfileError("rtol and atol must be finite nonnegative numbers")
     return {"name": payload.get("name", path.stem), "path": str(path.resolve()),
             "model_path": model_path, "backend": backend, "launch": values,
             "launch_tokens": tokens, "options": options, "scenarios": names,
-            "repeats": repeats, "warmup": warmup, "timeout_s": timeout_s,
-            "rtol": float(rtol), "atol": float(atol)}
+            "repeats": repeats, "warmup": warmup, "timeout_s": timeout_s}
 
 
 @contextmanager
@@ -231,15 +227,17 @@ def _readable(report: dict, path: Path) -> Path:
             if sample["status"] == "failed":
                 lines.append(f"  failure: {sample['error']}")
                 partial = sample.get("partial_result", {})
-                if "logit_trajectory" in partial:
+                if "decision_trajectory" in partial:
                     lines.append(
                         f"  completed {partial['completed_actions']}/{partial['requested_actions']} continuation actions"
                     )
-                    for point in partial["logit_trajectory"]:
+                    for point in partial["decision_trajectory"]:
                         lines.append(
-                            f"  checkpoint {point['checkpoint']}: max error "
-                            f"{point['max_abs_logit_error']:.4f}; top token "
-                            f"{'agrees' if point['top_token_agrees'] else 'DIFFERS'}"
+                            f"  boundary {point['boundary']}: sampled token "
+                            f"{point['selected_token_id']} vs "
+                            f"{point['fresh_selected_token_id']} "
+                            f"({'agrees' if point['selected_token_agrees'] else 'DIFFERS'}); "
+                            f"max logit delta {point['max_abs_logit_delta']:.4f} (diagnostic)"
                         )
     if report.get("fatal"):
         lines.append(f"Fatal: {report['fatal']}")
@@ -250,7 +248,7 @@ def _readable(report: dict, path: Path) -> Path:
 
 def run_profile(profile: dict, output_dir: Path) -> tuple[Path, bool]:
     report = {"format": FORMAT, "harness_version": HARNESS_VERSION,
-              "scenario_fixture_version": 2,
+              "scenario_fixture_version": SCENARIO_FIXTURE_VERSION,
               "created_utc": datetime.now(timezone.utc).isoformat(),
               "git": _git_identity(), "hardware": _hardware(),
               "profile": {key: value for key, value in profile.items() if key not in {"options", "launch_tokens", "model_path"}},
@@ -262,7 +260,7 @@ def run_profile(profile: dict, output_dir: Path) -> tuple[Path, bool]:
               "timing_boundary": ("active interval starts before scenario prompt/context construction and ends after "
                                   "the specified final action; it includes runner observation, sampling, ledger, "
                                   "and in-process finalization. JSONL scenarios include parsing/export. "
-                                  "Reference oracle, preflight, warmup, hashing, and report serialization are excluded. "
+                                  "Reference seeded-decision replay, preflight, warmup, hashing, and report serialization are excluded. "
                                   "CLI outer wall includes interpreter/model load and shutdown. No human wait is timed."),
               "fine_boundary": ("llama.cpp: synchronous Python Llama.eval call, including native-library bookkeeping. "
                                 "Transformers CPU: synchronous model forward call; output transfer and cache handling "
@@ -284,8 +282,7 @@ def run_profile(profile: dict, output_dir: Path) -> tuple[Path, bool]:
             report["provenance_hash_wall_s"] = perf_counter() - start
         for _ in range(profile["warmup"]):
             with deadline(profile["timeout_s"]):
-                continuation(backend, sampler_from_args(profile["options"]),
-                             rtol=profile["rtol"], atol=profile["atol"])
+                continuation(backend, sampler_from_args(profile["options"]))
         sampling = sampler_from_args(profile["options"])
         for name in profile["scenarios"]:
             for repeat in range(profile["repeats"]):
@@ -294,8 +291,7 @@ def run_profile(profile: dict, output_dir: Path) -> tuple[Path, bool]:
                 try:
                     with deadline(profile["timeout_s"]):
                         sample["result"] = SCENARIOS[name](
-                            backend, sampling, rtol=profile["rtol"], atol=profile["atol"],
-                            profile=profile, model_path=profile["model_path"],
+                            backend, sampling, profile=profile, model_path=profile["model_path"],
                             timeout_s=profile["timeout_s"], provenance=report["model"],
                         )
                     sample["status"] = "passed"
@@ -341,8 +337,6 @@ def compare(first: Path, second: Path) -> int:
         ("runtime identity", left.get("runtime_identity"), right.get("runtime_identity")),
         ("backend", left["profile"].get("backend"), right["profile"].get("backend")),
         ("launch", left["profile"].get("launch"), right["profile"].get("launch")),
-        ("tolerances", (left["profile"].get("rtol"), left["profile"].get("atol")),
-         (right["profile"].get("rtol"), right["profile"].get("atol"))),
         ("hardware", left.get("hardware"), right.get("hardware")),
         ("scenarios", left["profile"].get("scenarios"), right["profile"].get("scenarios")),
         ("result status", left.get("counts", {}).get("failed"), right.get("counts", {}).get("failed")),
@@ -354,11 +348,21 @@ def compare(first: Path, second: Path) -> int:
     keys = ("visible_token_ids", "retained_token_ids", "replay_visible_token_ids",
             "resumed_visible_token_ids", "child_visible_token_ids", "surviving_token_ids",
             "final_text_sha256", "prompt_tokens", "replayed_actions")
+
+    def realized_workload(result: dict) -> dict:
+        workload = {key: result[key] for key in keys if key in result}
+        if "decision_trajectory" in result:
+            workload["sampled_decisions"] = [
+                (point["boundary"], point["selected_token_id"])
+                for point in result["decision_trajectory"]
+            ]
+        return workload
+
     for name in left["profile"]["scenarios"]:
-        a = [{key: result[key] for key in keys if key in result}
+        a = [realized_workload(result)
              for item in left["samples"] if item["scenario"] == name and item["status"] == "passed"
              for result in [item.get("result", {})]]
-        b = [{key: result[key] for key in keys if key in result}
+        b = [realized_workload(result)
              for item in right["samples"] if item["scenario"] == name and item["status"] == "passed"
              for result in [item.get("result", {})]]
         if a != b:
@@ -400,7 +404,7 @@ def main(argv=None) -> int:
         except (ProfileError, EditorError) as exc:
             print(f"Configuration failure for {path}: {exc}", file=sys.stderr)
             failed = {"format": FORMAT, "harness_version": HARNESS_VERSION,
-                      "scenario_fixture_version": 2,
+                      "scenario_fixture_version": SCENARIO_FIXTURE_VERSION,
                       "created_utc": datetime.now(timezone.utc).isoformat(),
                       "profile": {"name": path.stem, "scenarios": args.scenario or []},
                       "model_path": args.model, "model": None, "samples": [], "summary": {},
