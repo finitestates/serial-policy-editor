@@ -21,9 +21,17 @@ from .backend import (
     IncrementalTextBackend,
     IncrementalTextStream,
     InferenceBackend,
+    PositionAwareInferenceBackend,
     SnapshotableInferenceBackend,
     require_inference_backend,
     validate_cache_mode,
+)
+from .backend_position import (
+    BackendPosition,
+    PositionComparison,
+    compare_backend_position,
+    position_backend,
+    position_report,
 )
 from .candidates import Candidate
 from .errors import EditorError
@@ -50,6 +58,7 @@ __all__ = [
     "CandidateFilterResult",
     "Candidate",
     "BackendStateSnapshot",
+    "BackendPosition",
     "CacheMode",
     "ActionKind",
     "ChoiceSet",
@@ -63,6 +72,8 @@ __all__ = [
     "IncrementalTextBackend",
     "IncrementalTextStream",
     "InferenceBackend",
+    "PositionAwareInferenceBackend",
+    "PositionComparison",
     "SnapshotableInferenceBackend",
     "ObservationStatistics",
     "Phrase",
@@ -79,6 +90,9 @@ __all__ = [
     "action_from_dict",
     "apply_candidate_filter",
     "draw_token",
+    "position_backend",
+    "compare_backend_position",
+    "position_report",
     "position_uniform",
     "position_uniform_token",
     "raw_rank",

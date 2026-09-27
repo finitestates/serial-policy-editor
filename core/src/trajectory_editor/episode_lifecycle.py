@@ -8,6 +8,7 @@ from typing import Any, Callable
 from .core.errors import EditorError
 from .core.sampler_config import SamplerConfig
 from .episode_engine import EpisodeEngine
+from .core.backend_position import position_backend
 from .spr_recipe import (
     ReplayControlPolicy,
     ReplayPlacement,
@@ -104,11 +105,11 @@ def _restore_engine(
         stream_fingerprint=segment["stream_fingerprint"],
         guidance_backend=guidance_backend,
     )
-    # These tokens are already known; only the final-position logits are needed.
-    # Let the backend batch reconstruction without replaying individual moves.
-    if visible:
-        backend.eval(visible)
-        runtime.trajectory.visible_token_ids.extend(visible)
+    # Position against the complete ledger so a related live cache can be
+    # cropped to its shared prefix instead of rebuilding the full episode.
+    runtime.trajectory.visible_token_ids.extend(visible)
+    if not position_backend(runtime.backend, runtime.token_ids):
+        runtime.backend.reset(runtime.token_ids)
     if max_tokens is None:
         _inherit_budget(store, episode_id, runtime, len(visible), notice=notice)
     else:

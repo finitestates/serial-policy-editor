@@ -14,6 +14,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 import numpy as np
 
 from .errors import EditorError
+from .backend_position import BackendPosition
 
 
 CacheMode = Literal["auto", "off"]
@@ -99,6 +100,15 @@ class SnapshotableInferenceBackend(Protocol):
     def snapshot_state(self) -> BackendStateSnapshot | None: ...
 
     def restore_state(self, snapshot: BackendStateSnapshot) -> bool: ...
+
+
+@runtime_checkable
+class PositionAwareInferenceBackend(Protocol):
+    """Optional cache-position query and prefix-reconciliation capability."""
+
+    def position(self) -> BackendPosition: ...
+
+    def branch_to_prefix(self, prefix_token_ids: list[int]) -> None: ...
 
 
 def require_inference_backend(backend: InferenceBackend) -> None:

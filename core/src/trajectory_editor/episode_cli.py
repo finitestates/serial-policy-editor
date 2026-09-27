@@ -681,16 +681,13 @@ def main(
                         max_tokens=args.max_tokens, guidance_backend=guidance,
                     )
                 else:
-                    prefix = [*source["initial_token_ids"], *visible[:target]]
-                    branch = getattr(backend, "branch_to_prefix", None)
-                    branch(prefix) if callable(branch) else backend.reset(prefix)
                     engine = EpisodeEngine(
                         backend, sampling=sampling,
                         max_tokens=source["max_tokens"] if args.max_tokens is None else args.max_tokens,
                         initial_text=str(source["initial_text"]),
                         initial_token_ids=source["initial_token_ids"],
                         stream_fingerprint=segment["stream_fingerprint"],
-                        backend_positioned=True, guidance_backend=guidance,
+                        guidance_backend=guidance,
                     )
                     engine.visible_token_ids = list(visible[:target])
                     if args.max_tokens is None:
@@ -737,16 +734,13 @@ def main(
                         raise EditorError(
                             "episode tokenizer identity differs from the loaded backend; use a model-change continuation"
                         )
-                    prefix = [*target_episode["initial_token_ids"], *visible]
-                    branch = getattr(new_backend, "branch_to_prefix", None)
-                    branch(prefix) if callable(branch) else new_backend.reset(prefix)
                     engine = EpisodeEngine(
                         new_backend, sampling=sampling,
                         max_tokens=target_episode["max_tokens"] or None,
                         initial_text=str(target_episode["initial_text"]),
                         initial_token_ids=target_episode["initial_token_ids"],
                         stream_fingerprint=state["stream_fingerprint"],
-                        backend_positioned=True, guidance_backend=guidance,
+                        guidance_backend=guidance,
                     )
                     engine.visible_token_ids = list(visible)
                     _inherit_budget(store, episode_id, engine, boundary)
