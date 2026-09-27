@@ -3,7 +3,7 @@
 This is the budget and source of truth for the reduced core test suite. The
 numbers below are contract slots. Every retained core test must map to one of these slots. Additional slots may be added on an as-needed basis, but only after consultation with the code owner.
 
-Core tests assert observable state, persisted records, replay results, and may also check for patterns associated with performance regression (many of those are in `hot_path/` but may also appear here).
+Core tests assert observable state, persisted records, replay results, and may also check for patterns associated with performance regression.
 
 ## Terminal contracts
 
