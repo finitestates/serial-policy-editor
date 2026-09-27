@@ -333,8 +333,6 @@ class LiveSession:
         """Reactivate a retained branch on this session's one backend."""
         return self._activate(branch_id)
 
-    switch = activate
-
     def branch_state(self, branch_id: str | None = None) -> BranchState:
         identifier = self._active_id if branch_id is None else branch_id
         if not self._discarded and not self._detached and identifier == self._active_id:
@@ -372,8 +370,6 @@ class LiveSession:
         else:
             state = self._branches[self._active_id]
         return state
-
-    detach = suspend
 
     @property
     def branch(self) -> BranchIdentity:

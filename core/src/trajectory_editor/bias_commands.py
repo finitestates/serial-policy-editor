@@ -75,7 +75,7 @@ def _format_contribution(item, backend) -> str:
     return f"{item.amount:+g} from {item.source}{suffix}"
 
 
-def apply_bias_command(command, backend, sampling, observation, resolve_candidate):
+def apply_bias_command(command, backend, sampling, resolve_candidate):
     """Return an updated sampler and concise user-facing change labels."""
     if command.bias_status or command.bias_inspect_group or command.bias_inspect_token is not None:
         return sampling, []

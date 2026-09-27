@@ -849,8 +849,7 @@ class InteractivePolicy:
                         self.io.page(report)
                         continue
                     updated, updates = apply_bias_command(
-                        command, engine.backend, engine.sampling, observation,
-                        resolve_candidate,
+                        command, engine.backend, engine.sampling, resolve_candidate,
                     )
                 except EditorError as exc:
                     feedback = ChoiceFeedback("error", "INVALID BIAS", (str(exc),))

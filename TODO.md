@@ -6,7 +6,7 @@
 - [ ] Bring non-runtime menus into line with the main runtime menu’s visual conventions. Review screens such as EDGE, search/review, and setup; make selection, context, status, and available commands easy to read in the same way.
 - [x] Add an end-to-end regression for Tab/Enter through `run_plan()`, checking the recorded action and next view. The [selection test](tests/core/test_selection_warm_terminal.py) checks the ordinary selection flow and confirms that candidate navigation does not trigger speculative warming.
 - [ ] Remove stale functions/data fields/tests/aliases; cut-down on processes that make reads/writes/copies for no obvious purpose.
-- [ ] Fix the bias system. Right now, it is a lot of residual complexity lacking a clear identity about what it is trying to accomplish.
+- [x] Fix the bias system. Right now, it is a lot of residual complexity lacking a clear identity about what it is trying to accomplish.
 
 ## Replay authoring and independent correctness
 

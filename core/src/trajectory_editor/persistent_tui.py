@@ -364,9 +364,6 @@ class PersistentTerminalSession(AbstractContextManager):
             before_render=self._before_render,
             after_render=self._rendered,
         )
-        # Kept as a watched hot-path hook; candidate movement no longer starts
-        # or retargets speculation. Search warms are scheduled per choice view.
-        self.application.key_processor.after_key_press += self._after_key_press
         await self.application.run_async(
             set_exception_handler=False, handle_sigint=False
         )
@@ -379,9 +376,6 @@ class PersistentTerminalSession(AbstractContextManager):
             self._refresh_warm_target(request)
         if self._closing:
             self._stop()
-
-    def _after_key_press(self, key_processor):
-        del key_processor
 
     @staticmethod
     def _is_search_warm_promotion(request: _Request) -> bool:
