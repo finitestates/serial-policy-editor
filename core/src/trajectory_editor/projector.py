@@ -119,14 +119,14 @@ def _recompute_missing_metrics(
             token = missing.get((observation.boundary, token_id))
             if token is None:
                 return
-            stats = observation.statistics
+            policy_calculations = observation.policy_calculations
             fields = required_by_boundary[observation.boundary]
             if "raw_model_nll" in fields and token.get("raw_model_nll") is None:
-                token["raw_model_nll"] = stats.raw_nll(token_id)
+                token["raw_model_nll"] = policy_calculations.raw_nll(token_id)
             if "raw_rank" in fields and token.get("raw_rank") is None:
-                token["raw_rank"] = stats.raw_rank(token_id)
+                token["raw_rank"] = policy_calculations.raw_rank(token_id)
             if "policy_rank" in fields and token.get("policy_rank") is None:
-                token["policy_rank"] = stats.policy_rank(token_id)
+                token["policy_rank"] = policy_calculations.policy_rank(token_id)
 
         engine._metric_sink = capture
 

@@ -26,40 +26,40 @@ def test_candidate_view_computes_only_visible_metrics_and_reuses_normalizer(monk
         initial_token_ids=[7],
     )
     observation = engine.observe()
-    stats = observation.statistics
-    plain = engine.candidates(observation, count=3, view=CandidateColumns().plan)
+    calculations = observation.policy_calculations
+    plain = engine.candidates(observation, count=3, metrics=CandidateColumns().plan.metrics)
     assert [row.rank for row in plain] == [1, 2, 3]
     assert all(row.raw_probability is None for row in plain)
-    assert not stats._raw_logsumexp_ready
+    assert not calculations._raw_logsumexp_ready
 
     sparse = engine.candidates(
         observation, count=3,
-        view=CandidateColumns(overlays=frozenset({"decode_pct"})).plan,
+        metrics=CandidateColumns(overlays=frozenset({"decode_pct"})).plan.metrics,
     )
     assert sparse[0].decoder_probability == observation.distribution.probability(sparse[0].token_id)
-    assert not stats._raw_logsumexp_ready
+    assert not calculations._raw_logsumexp_ready
 
     original_exp = np.exp
     dense_calls = 0
 
     def counted_exp(values, *args, **kwargs):
         nonlocal dense_calls
-        if np.size(values) == len(stats.logits):
+        if np.size(values) == len(calculations.logits):
             dense_calls += 1
         return original_exp(values, *args, **kwargs)
 
     monkeypatch.setattr(np, "exp", counted_exp)
     pct = CandidateColumns(show_model_probabilities=True).plan
-    first = engine.candidates(observation, count=3, view=pct)
-    second = engine.candidates(observation, start_rank=2, count=2, view=pct)
+    first = engine.candidates(observation, count=3, metrics=pct.metrics)
+    second = engine.candidates(observation, start_rank=2, count=2, metrics=pct.metrics)
     assert dense_calls == 1
     assert first[1].raw_probability == second[0].raw_probability
     assert [row.token_id for row in first] == [row.token_id for row in plain]
-    assert not stats._policy_logsumexp_ready
+    assert not calculations._policy_logsumexp_ready
     with_policy = CandidateColumns(policy=True, show_model_probabilities=True).plan
-    policy_rows = engine.candidates(observation, count=3, view=with_policy)
+    policy_rows = engine.candidates(observation, count=3, metrics=with_policy.metrics)
     assert all(row.policy_probability is not None for row in policy_rows)
-    assert stats._policy_logsumexp_ready
+    assert calculations._policy_logsumexp_ready
     assert dense_calls == 2
 
 
@@ -78,7 +78,7 @@ def test_named_overlays_combine_and_default_table_is_identity_only():
     assert "rank  token-id  text" in output
     assert "Δrank" not in output
     assert "decode-p" in output and "z" in output
-    assert not observation.statistics._raw_logsumexp_ready
+    assert not observation.policy_calculations._raw_logsumexp_ready
 
 
 def test_projector_replays_missing_metrics_without_persisting_them(tmp_path):
@@ -88,7 +88,7 @@ def test_projector_replays_missing_metrics_without_persisting_them(tmp_path):
     )
     observation = engine.observe()
     outcome = engine.apply(Accept())
-    assert not observation.statistics._raw_logsumexp_ready
+    assert not observation.policy_calculations._raw_logsumexp_ready
     assert outcome.evidence[0].raw_model_nll is None
 
     with EpisodeStore(tmp_path / "episode.db") as store:
@@ -153,7 +153,7 @@ def test_projector_replays_sampler_changes_as_ordered_actions(tmp_path):
             SetSampler(SamplerConfig(temperature=0.0, presence_penalty=100.0))
         )
         store.record_action(episode_id, 1, sampler_outcome)
-        expected_policy_rank = engine.observe().statistics.policy_rank(1)
+        expected_policy_rank = engine.observe().policy_calculations.policy_rank(1)
         assert expected_policy_rank > 3
         store.record_action(episode_id, 2, engine.apply(SelectRawRank(3)))
         report = project_episode(

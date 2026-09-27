@@ -110,7 +110,7 @@ def main():
                     observation = engine.observe()
                     ranks, selected_index = (1, 2, 3), 0
                     if args.one_live_path:
-                        eog_rank = observation.statistics.raw_rank(backend.eog_token_ids()[0])
+                        eog_rank = observation.policy_calculations.raw_rank(backend.eog_token_ids()[0])
                         if eog_rank == 1:
                             raise RuntimeError('rank 1 is EOG; choose another prompt fixture')
                         ranks, selected_index = (eog_rank, 1), 1

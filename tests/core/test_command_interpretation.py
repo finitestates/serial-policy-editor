@@ -26,7 +26,9 @@ def _decision():
     candidates = engine.candidates(observation, count=4)
     choice = _choice_from_observation(
         engine, observation, candidates,
-        context_text_tail=observation.context_text[-1:],
+        context_text_tail=engine.backend.render(
+            list(observation.prefix_token_ids), special=True
+        )[-1:],
         context_token_sha256=token_prefix_sha256(list(observation.prefix_token_ids)),
         serial=1,
     )

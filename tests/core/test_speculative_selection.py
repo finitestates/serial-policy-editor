@@ -168,7 +168,7 @@ def test_selected_eog_token_is_not_warmed():
     backend = SpeculativeFakeBackend()
     episode = engine(backend)
     observation = episode.observe()
-    eog_rank = observation.statistics.raw_rank(0)
+    eog_rank = observation.policy_calculations.raw_rank(0)
 
     assert not episode.speculate_accept(observation, raw_rank=eog_rank, token_id=0)
     assert backend.eval_calls == []

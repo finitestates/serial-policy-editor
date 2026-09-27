@@ -98,8 +98,8 @@ def test_choice_requests_preserve_actions_feedback_and_lazy_statistics():
         action = InteractivePolicy(io=terminal, menu_size=1).choose(engine, observation)
         assert action.rank == 1
         assert backend.positions == positions_before
-        assert not observation.statistics._raw_logsumexp_ready
-        assert not observation.statistics._policy_logsumexp_ready
+        assert not observation.policy_calculations._raw_logsumexp_ready
+        assert not observation.policy_calculations._policy_logsumexp_ready
         requests.append(terminal.states)
 
     assert len(requests[0]) == len(requests[1]) == 4

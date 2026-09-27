@@ -15,7 +15,8 @@ from .core.candidates import Candidate
 from .core.errors import EditorError
 from .core.results import ActionOutcome, Divergence, ReplayExpectation, TokenEvidence
 from .core.sampler_config import SamplerConfig
-from .episode_engine import EpisodeEngine, Observation
+from .core.episode_observation import EpisodeObservation
+from .episode_engine import EpisodeEngine
 from .run_loop import RunResult, TapeStep
 from .episode_session import (
     BranchIdentity,
@@ -43,7 +44,7 @@ __all__ = [
     "BranchIdentity",
     "BranchState",
     "LiveBranch",
-    "Observation",
+    "EpisodeObservation",
     "LiveRosterEntry",
     "LiveSession",
     "LiveSessionRoster",

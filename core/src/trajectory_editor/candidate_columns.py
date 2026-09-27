@@ -121,13 +121,12 @@ class CandidateViewPlan:
 
     columns: tuple[tuple[str, int], ...]
     metrics: frozenset[str]
-    order: str = "raw"
 
     def needs(self, metric: str) -> bool:
         return metric in self.metrics
 
-    def policy_ordered(self) -> CandidateViewPlan:
-        return CandidateViewPlan(self.columns, self.metrics | {"policy_rank"}, "policy")
+    def with_policy_rank(self) -> CandidateViewPlan:
+        return CandidateViewPlan(self.columns, self.metrics | {"policy_rank"})
 
 
 @dataclass(frozen=True)

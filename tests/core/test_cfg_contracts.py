@@ -121,7 +121,7 @@ def assert_context(runtime, unconditional=(1, 5)):
 
 def raw_token(runtime, token=7):
     observation = runtime.observe()
-    return runtime.apply(SelectRawRank(observation.statistics.raw_rank(token)))
+    return runtime.apply(SelectRawRank(observation.policy_calculations.raw_rank(token)))
 
 
 def save(store, runtime, name='source'):
@@ -184,7 +184,7 @@ def test_l04_live_forks_keep_the_cfg_window_at_each_boundary(boundary):
     live = LiveSession(engine(sampling=config(cfg_prefix_tokens=2)), prompt='conditional')
     for token in (7, 9):
         observation = live.engine.observe()
-        live.generate(SelectRawRank(observation.statistics.raw_rank(token)))
+        live.generate(SelectRawRank(observation.policy_calculations.raw_rank(token)))
 
     child = live.fork(boundary=boundary)
 
@@ -203,7 +203,7 @@ def test_s03_cutoff_rewind_and_lazy_catchup():
     first = assert_context(runtime)
     assert runtime.observe() is first
     observation = runtime.observe()
-    session.generate(SelectRawRank(observation.statistics.raw_rank(7)))
+    session.generate(SelectRawRank(observation.policy_calculations.raw_rank(7)))
     assert_context(runtime)  # N-1
     session.generate(Write('y', mode='exact'))
     assert_context(runtime)  # Reaching the cutoff does not restart CFG.
@@ -237,7 +237,7 @@ def test_s03_append_only_evaluation_and_sampler_changes():
         assert_context(runtime)
     assert guidance.work == [('reset', (1, 5))]
     observation = runtime.observe()
-    session.generate(SelectRawRank(observation.statistics.raw_rank(7)))
+    session.generate(SelectRawRank(observation.policy_calculations.raw_rank(7)))
     assert_context(runtime)
     session.generate(Write('xy', mode='exact'))
     assert_context(runtime)

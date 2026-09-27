@@ -69,7 +69,7 @@ def _search_state(
     calls: list | None = None,
     completed: dict[int, Event] | None = None,
 ):
-    rank = observation.statistics.raw_rank(token_id)
+    rank = observation.policy_calculations.raw_rank(token_id)
     target = (rank, token_id)
     menu = tuple(engine.candidates(observation, count=3))
     start = max(1, rank - 2) if search_lens_active else 1
@@ -78,7 +78,9 @@ def _search_state(
     by_rank = {candidate.rank: candidate for candidate in (*menu, *rows)}
     choice = _choice_from_observation(
         engine, observation, menu,
-        context_text_tail=observation.context_text,
+        context_text_tail=engine.backend.render(
+            list(observation.prefix_token_ids), special=True
+        ),
         context_token_sha256=token_prefix_sha256(list(observation.prefix_token_ids)),
         serial=1,
     )
@@ -137,7 +139,7 @@ def test_exact_search_warms_before_tab_and_rank_commit_promotes_it():
     backend = SearchBackend()
     engine = _engine(backend)
     observation = engine.observe()
-    rank = observation.statistics.raw_rank(3)
+    rank = observation.policy_calculations.raw_rank(3)
     errors = []
 
     with create_pipe_input() as pipe:
@@ -190,7 +192,7 @@ def test_multi_token_search_warms_first_result_and_preserves_it_through_suggesti
     backend = SearchBackend()
     engine = _engine(backend)
     observation = engine.observe()
-    first_rank = observation.statistics.raw_rank(3)
+    first_rank = observation.policy_calculations.raw_rank(3)
     first_suggestion = '/"TERM"'
     errors = []
 
@@ -306,8 +308,8 @@ def test_new_search_replaces_the_previous_search_warm():
     backend = SearchBackend()
     engine = _engine(backend)
     observation = engine.observe()
-    first_rank = observation.statistics.raw_rank(3)
-    second_rank = observation.statistics.raw_rank(4)
+    first_rank = observation.policy_calculations.raw_rank(3)
+    second_rank = observation.policy_calculations.raw_rank(4)
     errors = []
 
     with create_pipe_input() as pipe:

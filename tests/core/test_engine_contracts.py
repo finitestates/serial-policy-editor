@@ -150,7 +150,26 @@ def test_e05_force_phrase_uses_temporary_bias_without_persistent_residue():
 
     assert outcome.resolved_token_ids == (3, 5)
     assert runtime._ephemeral_logit_biases == {}
-    assert runtime.observe().statistics.ephemeral_logit_biases == {}
+    assert runtime.observe().policy_calculations.ephemeral_logit_biases == {}
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_e05b_phrase_does_not_compute_unused_dense_probabilities(force, monkeypatch):
+    runtime = engine(PhraseBackend())
+    dense_softmax_sizes = []
+    original_exp = np.exp
+
+    def track_dense_exp(values, *args, **kwargs):
+        if np.ndim(values) == 1 and np.size(values) == runtime.backend.vocabulary_size():
+            dense_softmax_sizes.append(np.size(values))
+        return original_exp(values, *args, **kwargs)
+
+    monkeypatch.setattr(np, "exp", track_dense_exp)
+    runtime.apply(
+        Phrase("C!", mode="exact", force=force, max_shift=0.5 if force else 100.0)
+    )
+
+    assert dense_softmax_sizes == []
 
 
 @pytest.mark.parametrize(

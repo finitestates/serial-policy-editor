@@ -48,7 +48,8 @@ from .sampling import (
     top_raw_ids,
 )
 from .sampler_config import SAMPLING_POLICY_SCHEME, SamplerConfig
-from .observation import ObservationStatistics
+from .policy_calculations import PolicyCalculations
+from .episode_observation import EpisodeObservation
 from .trajectory import TrajectoryState
 from .ui import ActionKind, ChoiceSet, ContextText, EditAction, InsertMode
 
@@ -57,6 +58,7 @@ __all__ = [
     "ActionOutcome",
     "CandidateFilterResult",
     "Candidate",
+    "EpisodeObservation",
     "BackendStateSnapshot",
     "BackendPosition",
     "CacheMode",
@@ -75,7 +77,7 @@ __all__ = [
     "PositionAwareInferenceBackend",
     "PositionComparison",
     "SnapshotableInferenceBackend",
-    "ObservationStatistics",
+    "PolicyCalculations",
     "Phrase",
     "PolicyAction",
     "ReplayExpectation",

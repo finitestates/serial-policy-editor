@@ -20,6 +20,7 @@ from .chord import ChordRequested
 from .core.candidates import Candidate
 from .core.cli_config import sampler_override
 from .core.errors import EditorError
+from .core.episode_observation import EpisodeObservation
 from .core.ui import ChoiceSet, ContextText
 from .core.actions import (
     EndGeneration,
@@ -33,9 +34,8 @@ from .core.actions import (
     Write,
 )
 from .core.cli_config import random_seed
-from .episode_engine import EpisodeEngine, Observation, TokenPrefixSnapshot
+from .episode_engine import EpisodeEngine, TokenPrefixSnapshot
 from .run_loop import EdgeRequested, ForkRequested, SeamlessRewindRequested
-from .core.sampling import raw_rank
 from .teacher_commands import HELP_TEXT, CommandKind, CommandState, ForkAddressKind, interpret_command
 from .terminal_contracts import (
     BoundaryReview, ChoiceFeedback, ChoiceViewState, PromptRequest, SEAMLESS_REACTIVATE,
@@ -128,7 +128,7 @@ class _ContextRenderCursor:
     ) -> tuple[ContextText | None, ...] | list[ContextText | None]:
         return self._snapshots if self._engine is engine else ()
 
-    def update(self, engine: EpisodeEngine, observation: Observation) -> tuple[ContextText, str]:
+    def update(self, engine: EpisodeEngine, observation: EpisodeObservation) -> tuple[ContextText, str]:
         prefix = observation.prefix_token_ids
         if self._engine is engine and self._prefix is not None:
             chunks = (
@@ -240,7 +240,7 @@ class _SeamlessActionIndex:
 
 def _choice_from_observation(
     engine: EpisodeEngine,
-    observation: Observation,
+    observation: EpisodeObservation,
     candidates: tuple[Candidate, ...],
     *,
     context_text_tail: str | ContextText,
@@ -270,7 +270,7 @@ def _choice_from_observation(
         ),
         proposal_policy_probability=None,
         raw_k1_logit=(
-            float(observation.statistics.maximum) if view and view.needs("top_raw_logit") else None
+            float(observation.policy_calculations.maximum) if view and view.needs("top_raw_logit") else None
         ),
     )
 
@@ -386,7 +386,7 @@ class InteractivePolicy:
     def _choice_for_observation(
         self,
         engine: EpisodeEngine,
-        observation: Observation,
+        observation: EpisodeObservation,
         candidates: tuple[Candidate, ...],
         *,
         view: CandidateViewPlan | None = None,
@@ -450,7 +450,7 @@ class InteractivePolicy:
             column_focus=self.view_preferences.column_focus,
             overlays=self.view_preferences.overlays,
         ).plan
-        return plan.policy_ordered() if self.view_preferences.sort_by_policy else plan
+        return plan.with_policy_rank() if self.view_preferences.sort_by_policy else plan
 
     def action_rejected(self, action: PolicyAction, reason: str) -> None:
         """Receive a live action rejection without leaving the current edge."""
@@ -466,7 +466,7 @@ class InteractivePolicy:
     def _search(
         self,
         engine: EpisodeEngine,
-        observation: Observation,
+        observation: EpisodeObservation,
         query: str,
         invoked_as: str,
     ) -> tuple[SearchLens | None, ChoiceFeedback, tuple[int, int] | None]:
@@ -507,7 +507,7 @@ class InteractivePolicy:
             )
             first_token_id = pieces[0][0]
             return None, feedback, (
-                raw_rank(observation.logits, first_token_id), first_token_id
+                observation.policy_calculations.raw_rank(first_token_id), first_token_id
             )
         token_id = int(token_ids[0])
         if not 0 <= token_id < len(observation.logits):
@@ -519,7 +519,7 @@ class InteractivePolicy:
                 f"no exact single-token form exists for {query!r}; token id "
                 f"{token_id} renders as {rendered!r}. Search it with {suggestion}"
             )
-        rank = raw_rank(observation.logits, token_id)
+        rank = observation.policy_calculations.raw_rank(token_id)
         lens = SearchLens(
             query=query,
             token_id=token_id,
@@ -553,14 +553,14 @@ class InteractivePolicy:
     def _lens_candidates(
         self,
         engine: EpisodeEngine,
-        observation: Observation,
+        observation: EpisodeObservation,
         lens: SearchLens,
     ) -> tuple[Candidate, ...]:
         return engine.candidates(
             observation,
             start_rank=lens.lower_rank,
             count=lens.upper_rank - lens.lower_rank + 1,
-            view=self._view_plan(engine),
+            metrics=self._view_plan(engine).metrics,
         )
 
 
@@ -613,14 +613,14 @@ class InteractivePolicy:
             context_boundary=context_boundary,
         )
 
-    def choose(self, engine: EpisodeEngine, observation: Observation) -> PolicyAction:
+    def choose(self, engine: EpisodeEngine, observation: EpisodeObservation) -> PolicyAction:
         self._prepare_seamless_action_index(engine, observation.boundary)
         self.choice_serial += 1
         view = self._view_plan(engine)
         candidates = engine.candidates(
             observation,
             count=min(self.menu_size, len(observation.logits)),
-            view=view,
+            metrics=view.metrics,
         )
         choice = self._choice_for_observation(
             engine, observation, candidates, view=view
@@ -636,7 +636,7 @@ class InteractivePolicy:
                     observation,
                     start_rank=rank,
                     count=1,
-                    view=self._view_plan(engine),
+                    metrics=self._view_plan(engine).metrics,
                 )[0]
             return preview_candidates[rank]
 
@@ -655,7 +655,7 @@ class InteractivePolicy:
                 refreshed = engine.candidates(
                     observation,
                     count=len(choice.candidates),
-                    view=view,
+                    metrics=view.metrics,
                 )
                 choice = replace(
                     choice,
@@ -669,12 +669,17 @@ class InteractivePolicy:
                         observation.proposal_policy_rank if view.needs("policy_rank") else None
                     ),
                     raw_k1_logit=(
-                        float(observation.statistics.maximum)
+                        float(observation.policy_calculations.maximum)
                         if view.needs("top_raw_logit") else None
                     ),
                 )
                 exposed = {
-                    rank: engine.candidates(observation, start_rank=rank, count=1, view=view)[0]
+                    rank: engine.candidates(
+                        observation,
+                        start_rank=rank,
+                        count=1,
+                        metrics=view.metrics,
+                    )[0]
                     for rank in exposed
                 }
                 exposed.update((candidate.rank, candidate) for candidate in refreshed)
@@ -687,7 +692,7 @@ class InteractivePolicy:
                     engine.policy_candidates(
                         observation,
                         count=len(choice.candidates),
-                        view=view,
+                        metrics=view.metrics,
                     )
                     if policy_sort
                     else choice.candidates
@@ -865,7 +870,7 @@ class InteractivePolicy:
                         observation,
                         start_rank=rank,
                         count=1,
-                        view=self._view_plan(engine),
+                        metrics=self._view_plan(engine).metrics,
                     )[0]
                     for rank in ranks
                 }
@@ -902,7 +907,7 @@ class InteractivePolicy:
                         observation,
                         start_rank=rank,
                         count=1,
-                        view=self._view_plan(engine),
+                        metrics=self._view_plan(engine).metrics,
                     )[0]
                     for rank in ranks
                 }
@@ -973,7 +978,7 @@ class InteractivePolicy:
                 candidates = engine.candidates(
                     observation,
                     count=target,
-                    view=view,
+                    metrics=view.metrics,
                 )
                 choice = self._choice_for_observation(
                     engine,
@@ -1065,7 +1070,8 @@ class InteractivePolicy:
                 continue
             if command.kind == CommandKind.CONTEXT:
                 extent = command.context_characters
-                text = observation.context_text
+                context, _ = self._context_cursor.update(engine, observation)
+                text = context.materialize()
                 shown = text if extent == "all" else text[-int(extent or 2000) :]
                 self.io.page(shown)
                 continue

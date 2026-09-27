@@ -279,7 +279,9 @@ def test_live_choice_preview_recognizes_chord_and_validates_ranks():
     candidates = runtime.candidates(observation, count=4)
     choice = _choice_from_observation(
         runtime, observation, candidates,
-        context_text_tail=observation.context_text,
+        context_text_tail=runtime.backend.render(
+            list(observation.prefix_token_ids), special=True
+        ),
         context_token_sha256=token_prefix_sha256(list(observation.prefix_token_ids)),
         serial=1,
     )

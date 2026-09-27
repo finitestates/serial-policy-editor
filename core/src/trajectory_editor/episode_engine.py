@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from functools import cached_property
 from typing import Any
 
 import numpy as np
@@ -27,8 +26,8 @@ from .core.backend import (
 )
 from .core.backend_position import position_backend, position_report
 from .core.candidates import Candidate
-from .candidate_columns import CandidateViewPlan
 from .core.errors import EditorError
+from .core.episode_observation import EpisodeObservation
 from .core.results import ActionOutcome, Divergence, ReplayExpectation, TokenEvidence
 from .core.sampler_config import SamplerConfig
 from .core.trajectory import TrajectoryState
@@ -37,9 +36,8 @@ from .episode_hash import (
     validate_fingerprint,
     validate_token_ids,
 )
-from .core.observation import ObservationStatistics
+from .core.policy_calculations import PolicyCalculations
 from .core.sampling import (
-    SparseDistribution,
     draw_token,
 )
 
@@ -130,37 +128,8 @@ class TokenPrefixSnapshot(Sequence[int]):
 
 
 @dataclass(frozen=True)
-class Observation:
-    boundary: int
-    sampling_boundary: int
-    prefix_token_ids: Sequence[int] = field(repr=False)
-    _render_context: Callable[..., str] = field(repr=False, compare=False)
-    logits: np.ndarray = field(repr=False, compare=False)
-    distribution: SparseDistribution = field(repr=False, compare=False)
-    proposal_token_id: int
-    proposal_text: str
-    proposal_raw_rank: int
-    proposal_decoder_probability: float
-    statistics: ObservationStatistics = field(repr=False, compare=False)
-
-    @cached_property
-    def context_text(self) -> str:
-        """Render this captured boundary once, only when display needs it."""
-        return self._render_context(list(self.prefix_token_ids), special=True)
-
-    @cached_property
-    def proposal_raw_probability(self) -> float:
-        """Model soft-max mass for the proposal; computed on first read."""
-        return float(self.statistics.raw_probabilities([self.proposal_token_id])[0])
-
-    @cached_property
-    def proposal_policy_rank(self) -> int:
-        return self.statistics.policy_rank(self.proposal_token_id)
-
-
-@dataclass(frozen=True)
 class _PreparedAccept:
-    observation: Observation = field(repr=False, compare=False)
+    observation: EpisodeObservation = field(repr=False, compare=False)
     raw_rank: int
     token_id: int
     generation: int
@@ -230,7 +199,7 @@ class EpisodeEngine:
         self._guidance_prompt_ids: tuple[int, ...] = ()
         if sampling.cfg_unconditional_prompt is not None:
             self._guidance_prompt_tokens()
-        self._observation: Observation | None = None
+        self._observation: EpisodeObservation | None = None
         self._observation_key: tuple | None = None
         self._latest_speculation_generation = -1
         self._speculative_accept_prefix: tuple[int, ...] | None = None
@@ -239,7 +208,7 @@ class EpisodeEngine:
         # This engine owns one backend/tokenizer. Sampler changes and rewinds
         # do not change token spellings, so their classifications remain valid.
         self._token_boundaries: dict[int, frozenset[str]] = {}
-        self._metric_sink: Callable[[Observation, int], None] | None = None
+        self._metric_sink: Callable[[EpisodeObservation, int], None] | None = None
 
     @property
     def initial_token_ids(self) -> tuple[int, ...]:
@@ -392,7 +361,7 @@ class EpisodeEngine:
         self._prepared_accept = None
 
     def has_prepared_accept(
-        self, observation: Observation, raw_rank: int, token_id: int
+        self, observation: EpisodeObservation, raw_rank: int, token_id: int
     ) -> bool:
         """Return whether an exact warm is ready for this decision and target."""
         prepared = self._prepared_accept
@@ -407,7 +376,7 @@ class EpisodeEngine:
 
     def speculate_accept(
         self,
-        observation: Observation,
+        observation: EpisodeObservation,
         *,
         raw_rank: int | None = None,
         token_id: int | None = None,
@@ -431,10 +400,10 @@ class EpisodeEngine:
         elif raw_rank is None:
             if type(token_id) is not int or not 0 <= token_id < len(observation.logits):
                 return False
-            raw_rank = observation.statistics.raw_rank(token_id)
+            raw_rank = observation.policy_calculations.raw_rank(token_id)
         if type(raw_rank) is not int or not 1 <= raw_rank <= len(observation.logits):
             return False
-        selected_token_id = int(observation.statistics.top_raw_ids(raw_rank)[-1])
+        selected_token_id = int(observation.policy_calculations.top_raw_ids(raw_rank)[-1])
         if token_id is not None and (
             type(token_id) is not int or token_id != selected_token_id
         ):
@@ -581,7 +550,7 @@ class EpisodeEngine:
                     return False
         return True
 
-    def _validate_observation(self, observation: Observation) -> None:
+    def _validate_observation(self, observation: EpisodeObservation) -> None:
         if (
             self.ended
             or observation is not self._observation
@@ -589,7 +558,7 @@ class EpisodeEngine:
         ):
             raise EditorError("request refers to a stale observation")
 
-    def observe(self) -> Observation:
+    def observe(self) -> EpisodeObservation:
         if self.ended:
             raise EditorError("the episode has no live decision boundary")
         key = self._decision_key()
@@ -605,7 +574,7 @@ class EpisodeEngine:
             self._speculative_accept_prefix = None
         self._ensure_backend_positioned()
         self._prepare_activation_runtime()
-        # Make one owned float64 snapshot here. ObservationStatistics validates
+        # Make one owned float64 snapshot here. PolicyCalculations validates
         # and freezes this same array instead of copying the full vocabulary again.
         logits = np.array(self.backend.last_logits(), dtype=np.float64, copy=True)
         if logits.ndim != 1 or len(logits) != self.backend.vocabulary_size():
@@ -658,7 +627,7 @@ class EpisodeEngine:
                 )
             if not np.all(np.isfinite(activation_logit_adjustments)):
                 raise RuntimeError("output-head steering adjustments are not finite")
-        statistics = ObservationStatistics(
+        policy_calculations = PolicyCalculations(
             logits,
             self.sampling,
             key[0],
@@ -666,8 +635,7 @@ class EpisodeEngine:
             ephemeral_logit_biases=self._ephemeral_logit_biases,
             take_logits_ownership=True,
         )
-        logits = statistics.logits
-        distribution = statistics.distribution
+        distribution = policy_calculations.distribution
         sampling_boundary = self.boundary
         proposal = draw_token(
             distribution,
@@ -676,18 +644,15 @@ class EpisodeEngine:
             aligned_step=sampling_boundary,
             kernel=self.sampling.draw_kernel,
         )
-        observation = Observation(
+        observation = EpisodeObservation(
             boundary=self.boundary,
             sampling_boundary=sampling_boundary,
             prefix_token_ids=self._observation_prefix_snapshot(),
-            _render_context=self.backend.render,
-            logits=logits,
-            distribution=distribution,
             proposal_token_id=proposal,
             proposal_text=self.backend.token_text(proposal),
-            proposal_raw_rank=statistics.raw_rank(proposal),
+            proposal_raw_rank=policy_calculations.raw_rank(proposal),
             proposal_decoder_probability=distribution.probability(proposal),
-            statistics=statistics,
+            policy_calculations=policy_calculations,
         )
         self._observation = observation
         self._observation_key = key
@@ -752,11 +717,11 @@ class EpisodeEngine:
 
     def candidates(
         self,
-        observation: Observation,
+        observation: EpisodeObservation,
         *,
         start_rank: int = 1,
         count: int = 12,
-        view: CandidateViewPlan | None = None,
+        metrics: frozenset[str] = frozenset(),
     ) -> tuple[Candidate, ...]:
         if start_rank < 1 or count < 1:
             raise EditorError("candidate rank and count must be positive")
@@ -764,45 +729,44 @@ class EpisodeEngine:
         end = min(len(observation.logits), start_rank + count - 1)
         if start_rank > end:
             return ()
-        statistics = observation.statistics
-        ordered = statistics.top_raw_ids(end)[start_rank - 1 : end]
-        return self._candidates_for_tokens(observation, ordered, view=view)
+        policy_calculations = observation.policy_calculations
+        ordered = policy_calculations.top_raw_ids(end)[start_rank - 1 : end]
+        return self._candidates_for_tokens(observation, ordered, metrics=metrics)
 
     def policy_candidates(
         self,
-        observation: Observation,
+        observation: EpisodeObservation,
         *,
         count: int = 12,
-        view: CandidateViewPlan | None = None,
+        metrics: frozenset[str] = frozenset(),
     ) -> tuple[Candidate, ...]:
         """Full-vocabulary policy top-N; selections still use absolute raw rank."""
         if count < 1:
             raise EditorError("candidate count must be positive")
         self._validate_observation(observation)
-        ordered = observation.statistics.top_policy_ids(min(count, len(observation.logits)))
+        ordered = observation.policy_calculations.top_policy_ids(min(count, len(observation.logits)))
         return self._candidates_for_tokens(
             observation, ordered,
-            view=(view or CandidateViewPlan((), frozenset())).policy_ordered(),
+            metrics=metrics | frozenset({"policy_rank"}),
         )
 
     def _candidates_for_tokens(
         self,
-        observation: Observation,
+        observation: EpisodeObservation,
         ordered: list[int],
         *,
-        view: CandidateViewPlan | None = None,
+        metrics: frozenset[str] = frozenset(),
     ) -> tuple[Candidate, ...]:
-        statistics = observation.statistics
-        metrics = view.metrics if view is not None else frozenset()
+        policy_calculations = observation.policy_calculations
         probabilities = (
-            statistics.raw_probabilities(ordered)
+            policy_calculations.raw_probabilities(ordered)
             if "raw_probability" in metrics else [None] * len(ordered)
         )
         policy_probabilities = (
-            statistics.policy_probabilities_at(ordered)
+            policy_calculations.policy_probabilities_at(ordered)
             if "policy_probability" in metrics else [None] * len(ordered)
         )
-        logits = [float(statistics.logits[token_id]) for token_id in ordered]
+        logits = [float(policy_calculations.logits[token_id]) for token_id in ordered]
         if "neighbor_margin" in metrics and ordered:
             # Uniform consecutive margin over the ordered menu list:
             # logit[i] - logit[i+1] (advantage over next-worse). Last row: None.
@@ -814,12 +778,12 @@ class EpisodeEngine:
         if "logit_z" in metrics and ordered:
             # Full-vocab logit z-score: (logit - mean) / std (population ddof=0).
             # O(V) mean/std once; does not wake soft-max / logsumexp.
-            zs = statistics.logit_z_scores(ordered)
+            zs = policy_calculations.logit_z_scores(ordered)
         else:
             zs = [None] * len(ordered)
         return tuple(
             Candidate(
-                rank=statistics.raw_rank(int(token_id)),
+                rank=policy_calculations.raw_rank(int(token_id)),
                 token_id=int(token_id),
                 text=self.backend.token_text(int(token_id)),
                 raw_probability=(
@@ -830,8 +794,8 @@ class EpisodeEngine:
                     if "decoder_probability" in metrics else None
                 ),
                 is_eog=self.backend.is_eog(int(token_id)),
-                bias=statistics.active_biases.get(int(token_id), 0.0),
-                policy_rank=(statistics.policy_rank(int(token_id))
+                bias=policy_calculations.active_biases.get(int(token_id), 0.0),
+                policy_rank=(policy_calculations.policy_rank(int(token_id))
                              if "policy_rank" in metrics else None),
                 policy_probability=(
                     None
@@ -874,7 +838,7 @@ class EpisodeEngine:
         if isinstance(action, SelectRawRank):
             if action.rank > len(observation.logits):
                 raise InstructionRejected("raw rank is outside the current vocabulary")
-            token_id = int(observation.statistics.top_raw_ids(action.rank)[-1])
+            token_id = int(observation.policy_calculations.top_raw_ids(action.rank)[-1])
             return [token_id], self.backend.token_text(token_id)
         if isinstance(action, Write):
             return self._write_tokens(action)
@@ -886,7 +850,7 @@ class EpisodeEngine:
         ]
         if not eog_ids:
             raise InstructionRejected("the backend exposes no selectable EOG token")
-        token_id = min(eog_ids, key=lambda value: observation.statistics.raw_rank(value))
+        token_id = min(eog_ids, key=lambda value: observation.policy_calculations.raw_rank(value))
         return [token_id], self.backend.token_text(token_id)
 
     @staticmethod
@@ -904,7 +868,7 @@ class EpisodeEngine:
             actual_token_id=actual,
         )
 
-    def _evidence(self, observation: Observation, token_id: int) -> TokenEvidence:
+    def _evidence(self, observation: EpisodeObservation, token_id: int) -> TokenEvidence:
         is_eog = self.backend.is_eog(token_id)
         if self._metric_sink is not None:
             self._metric_sink(observation, token_id)
@@ -923,7 +887,7 @@ class EpisodeEngine:
             realized_visible=not is_eog,
         )
 
-    def _commit_token(self, observation: Observation, token_id: int) -> TokenEvidence:
+    def _commit_token(self, observation: EpisodeObservation, token_id: int) -> TokenEvidence:
         self._validate_observation(observation)
         if not 0 <= token_id < self.backend.vocabulary_size():
             raise EditorError("action resolved outside the vocabulary")
@@ -1016,9 +980,9 @@ class EpisodeEngine:
             resolved.append(token_id)
 
     @staticmethod
-    def _phrase_required_shift(observation: Observation, token_id: int) -> float:
+    def _phrase_required_shift(observation: EpisodeObservation, token_id: int) -> float:
         """Return the additive policy shift needed to make ``token_id`` rank 1."""
-        values = np.asarray(observation.statistics.policy_logits, dtype=np.float64)
+        values = np.asarray(observation.policy_calculations.adjusted, dtype=np.float64)
         target = float(values[token_id])
         if len(values) <= 1:
             return 0.0
@@ -1026,19 +990,17 @@ class EpisodeEngine:
         return max(0.0, float(np.max(competitors)) - target + 1e-6)
 
     def _phrase_step_diagnostic(
-        self, observation: Observation, token_id: int, required_shift: float,
+        self, observation: EpisodeObservation, token_id: int, required_shift: float,
         *, applied_shift: float = 0.0,
     ) -> dict[str, Any]:
-        statistics = observation.statistics
+        policy_calculations = observation.policy_calculations
         return {
             "boundary": observation.boundary,
             "sampling_boundary": observation.sampling_boundary,
             "token_id": int(token_id),
             "text": self.backend.token_text(token_id),
-            "model_rank": int(statistics.model_rank(token_id)),
-            "policy_rank": int(statistics.policy_rank(token_id)),
-            "model_probability": float(statistics.model_probabilities([token_id])[0]),
-            "policy_probability": float(statistics.policy_probabilities_at([token_id])[0]),
+            "model_rank": int(policy_calculations.raw_rank(token_id)),
+            "policy_rank": int(policy_calculations.policy_rank(token_id)),
             "sampler_eligible": bool(np.any(observation.distribution.ids == int(token_id))),
             "sampler_probability": float(observation.distribution.probability(token_id)),
             "required_policy_shift": float(required_shift),

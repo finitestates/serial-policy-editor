@@ -26,7 +26,7 @@ from trajectory_editor.core.actions import (
 from trajectory_editor.core.errors import EditorError
 from trajectory_editor.core.results import ReplayExpectation
 from trajectory_editor.core.sampler_config import SamplerConfig
-from trajectory_editor.core.observation import ObservationStatistics
+from trajectory_editor.core.policy_calculations import PolicyCalculations
 from trajectory_editor.core.sampling import (
     MAX_SEED,
     MIN_SEED,
@@ -63,27 +63,27 @@ def test_s01_sampler_config_accepts_rejects_and_round_trips_core_state():
         with pytest.raises(EditorError):
             SamplerConfig(temperature=invalid)
     with pytest.raises(ValueError, match="decoder logits"):
-        ObservationStatistics(np.asarray([0.0, math.nan]), SamplerConfig(), [])
+        PolicyCalculations(np.asarray([0.0, math.nan]), SamplerConfig(), [])
 
 
 @pytest.mark.invariant
 def test_s02_sampler_draws_and_candidate_filters_are_deterministic():
     logits = np.asarray([4.0, 3.0, 2.0, 1.0, 0.0])
-    baseline = ObservationStatistics(
+    baseline = PolicyCalculations(
         logits, SamplerConfig(top_k=5, top_p=1.0, min_p=0.0), []
     )
-    neutral = ObservationStatistics(
+    neutral = PolicyCalculations(
         logits,
         SamplerConfig(top_k=5, top_p=1.0, min_p=0.0, typical_p=1.0, tail_free_z=1.0),
         [],
     )
     assert neutral.distribution.ids.tolist() == baseline.distribution.ids.tolist()
-    typical = ObservationStatistics(
+    typical = PolicyCalculations(
         np.asarray([6.0, 3.0, 2.0, 1.0, 0.0, -1.0]),
         SamplerConfig(top_k=6, top_p=1.0, min_p=0.0, typical_p=0.35),
         [],
     )
-    tail_free = ObservationStatistics(
+    tail_free = PolicyCalculations(
         np.asarray([6.0, 3.0, 2.0, 1.0, 0.0, -1.0]),
         SamplerConfig(top_k=6, top_p=1.0, min_p=0.0, tail_free_z=0.35),
         [],
@@ -140,22 +140,22 @@ def test_s04_history_penalties_change_policy_order_not_raw_rank():
         presence_penalty=0.5,
         frequency_penalty=0.25,
     )
-    observation = ObservationStatistics(logits, config, [0, 0, 1])
-    assert [observation.policy_rank(token) for token in [0, 1, 2]] == [1, 3, 2]
-    np.testing.assert_allclose(observation.policy_logits - observation.backend_logits,
+    policy_calculations = PolicyCalculations(logits, config, [0, 0, 1])
+    assert [policy_calculations.policy_rank(token) for token in [0, 1, 2]] == [1, 3, 2]
+    np.testing.assert_allclose(policy_calculations.adjusted - policy_calculations.logits,
                                [-2.0, -1.25, 0.0, 0.0])
-    assert observation.raw_rank(1) == 2
-    assert observation.distribution.ids.tolist() == [0, 2]
+    assert policy_calculations.raw_rank(1) == 2
+    assert policy_calculations.distribution.ids.tolist() == [0, 2]
     with pytest.raises(ValueError, match="exact prefix token ids"):
-        ObservationStatistics(np.asarray([1.0, 0.0]), SamplerConfig(repeat_penalty=1.1), None)
+        PolicyCalculations(np.asarray([1.0, 0.0]), SamplerConfig(repeat_penalty=1.1), None)
 
 
 @pytest.mark.current_workflow
-def test_s04b_observation_probabilities_are_on_demand_not_dense():
+def test_s04b_policy_probabilities_are_on_demand_not_dense():
     """Dense vocabulary soft-max is not stored; on-demand probs match logsumexp."""
 
     logits = np.asarray([2.0, 1.0, 0.0, -1.0])
-    plain = ObservationStatistics(
+    plain = PolicyCalculations(
         logits, SamplerConfig(temperature=1.0, top_k=4, top_p=1.0, min_p=0.0), []
     )
     assert "policy_probabilities" not in plain.__dict__
@@ -172,7 +172,7 @@ def test_s04b_observation_probabilities_are_on_demand_not_dense():
     assert plain.distribution.probabilities.shape == plain.distribution.ids.shape
     np.testing.assert_allclose(plain.distribution.probabilities.sum(), 1.0, atol=1e-12)
 
-    penalized = ObservationStatistics(
+    penalized = PolicyCalculations(
         logits,
         SamplerConfig(
             temperature=1.0,
@@ -187,7 +187,7 @@ def test_s04b_observation_probabilities_are_on_demand_not_dense():
         [0, 0, 1],
     )
     assert "policy_probabilities" not in penalized.__dict__
-    adjusted = np.asarray(penalized.policy_logits, dtype=np.float64)
+    adjusted = np.asarray(penalized.adjusted, dtype=np.float64)
     policy_max = float(np.max(adjusted))
     expected_policy = np.exp(adjusted - policy_max) / float(np.sum(np.exp(adjusted - policy_max)))
     np.testing.assert_allclose(
@@ -203,11 +203,11 @@ def test_s04b_observation_probabilities_are_on_demand_not_dense():
         initial_token_ids=[7],
     )
     observation = runtime.observe()
-    assert "policy_probabilities" not in observation.statistics.__dict__
+    assert "policy_probabilities" not in observation.policy_calculations.__dict__
     assert 0 <= observation.proposal_token_id < len(observation.logits)
     np.testing.assert_allclose(
         observation.proposal_raw_probability,
-        float(observation.statistics.raw_probabilities([observation.proposal_token_id])[0]),
+        float(observation.policy_calculations.raw_probabilities([observation.proposal_token_id])[0]),
     )
 
 
@@ -216,29 +216,29 @@ def test_s04c_logsumexp_deferred_until_nll_or_probabilities():
     """Draw / ranks / top-ids work without dense V exp+sum; NLL triggers once."""
 
     logits = np.asarray([2.0, 1.0, 0.0, -1.0])
-    stats = ObservationStatistics(
+    policy_calculations = PolicyCalculations(
         logits, SamplerConfig(temperature=1.0, top_k=2, top_p=1.0, min_p=0.0), []
     )
-    assert stats._raw_logsumexp_ready is False
-    assert stats._log_z is None
-    assert stats.top_raw_ids(2) == [0, 1]
-    assert stats.raw_rank(1) == 2
-    assert stats._raw_logsumexp_ready is False
-    assert len(stats.distribution.ids) >= 1
-    np.testing.assert_allclose(stats.distribution.probabilities.sum(), 1.0, atol=1e-12)
-    assert stats._raw_logsumexp_ready is False
+    assert policy_calculations._raw_logsumexp_ready is False
+    assert policy_calculations._log_z is None
+    assert policy_calculations.top_raw_ids(2) == [0, 1]
+    assert policy_calculations.raw_rank(1) == 2
+    assert policy_calculations._raw_logsumexp_ready is False
+    assert len(policy_calculations.distribution.ids) >= 1
+    np.testing.assert_allclose(policy_calculations.distribution.probabilities.sum(), 1.0, atol=1e-12)
+    assert policy_calculations._raw_logsumexp_ready is False
 
     # Cheap top-logit peek must not force exp+sum.
-    assert stats.maximum == 2.0
-    assert stats._raw_logsumexp_ready is False
+    assert policy_calculations.maximum == 2.0
+    assert policy_calculations._raw_logsumexp_ready is False
 
     expected_log_z = 2.0 + float(np.log(float(np.sum(np.exp(logits - 2.0)))))
-    nll = stats.raw_nll(0)
-    assert stats._raw_logsumexp_ready is True
-    np.testing.assert_allclose(stats.log_z, expected_log_z)
+    nll = policy_calculations.raw_nll(0)
+    assert policy_calculations._raw_logsumexp_ready is True
+    np.testing.assert_allclose(policy_calculations.log_z, expected_log_z)
     np.testing.assert_allclose(nll, expected_log_z - 2.0)
     # Second access reuses the same scalars.
-    assert stats.raw_nll(0) == nll
+    assert policy_calculations.raw_nll(0) == nll
 
     runtime = EpisodeEngine(
         ConformingFakeBackend(),
@@ -246,13 +246,13 @@ def test_s04c_logsumexp_deferred_until_nll_or_probabilities():
         initial_token_ids=[7],
     )
     observation = runtime.observe()
-    assert observation.statistics._raw_logsumexp_ready is False
+    assert observation.policy_calculations._raw_logsumexp_ready is False
     proposal = observation.proposal_token_id
     assert observation.proposal_raw_rank >= 1
-    assert observation.statistics._raw_logsumexp_ready is False
+    assert observation.policy_calculations._raw_logsumexp_ready is False
     # A commit records the decision without calculating report statistics.
     outcome = runtime.apply(Accept())
-    assert observation.statistics._raw_logsumexp_ready is False
+    assert observation.policy_calculations._raw_logsumexp_ready is False
     assert outcome.evidence and outcome.evidence[0].raw_model_nll is None
     assert outcome.evidence[0].raw_rank is None
 
@@ -331,10 +331,10 @@ def test_s04d_candidates_skip_probabilities_until_requested():
         initial_token_ids=[7],
     )
     observation = runtime.observe()
-    assert observation.statistics._raw_logsumexp_ready is False
+    assert observation.policy_calculations._raw_logsumexp_ready is False
 
     lean = runtime.candidates(observation, count=3)
-    assert observation.statistics._raw_logsumexp_ready is False
+    assert observation.policy_calculations._raw_logsumexp_ready is False
     assert len(lean) == 3
     assert all(row.raw_probability is None for row in lean)
     assert all(row.policy_probability is None for row in lean)
@@ -343,9 +343,9 @@ def test_s04d_candidates_skip_probabilities_until_requested():
 
     filled = runtime.candidates(
         observation, count=3,
-        view=CandidateColumns(show_model_probabilities=True).plan,
+        metrics=CandidateColumns(show_model_probabilities=True).plan.metrics,
     )
-    assert observation.statistics._raw_logsumexp_ready is True
+    assert observation.policy_calculations._raw_logsumexp_ready is True
     assert all(row.raw_probability is not None and row.raw_probability > 0 for row in filled)
     assert [row.token_id for row in filled] == [row.token_id for row in lean]
 
@@ -360,11 +360,11 @@ def test_s04d_candidates_skip_probabilities_until_requested():
         sampling=SamplerConfig(temperature=0.0),
     )
     observed = episode.observe()
-    assert observed.statistics._raw_logsumexp_ready is False
+    assert observed.policy_calculations._raw_logsumexp_ready is False
     policy = InteractivePolicy(io=ScriptedIO(["m 4", "1"]), menu_size=2, logit_view="raw")
     action = policy.choose(episode, observed)
     assert action.kind == "select-raw-rank"
-    assert observed.statistics._raw_logsumexp_ready is False
+    assert observed.policy_calculations._raw_logsumexp_ready is False
 
 
 @pytest.mark.current_workflow
@@ -432,15 +432,16 @@ def test_s04f_neighbor_margin_matches_consecutive_logit_gaps():
         initial_token_ids=[7],
     )
     observation = runtime.observe()
-    assert observation.statistics._raw_logsumexp_ready is False
+    assert observation.policy_calculations._raw_logsumexp_ready is False
 
     lean = runtime.candidates(observation, count=4)
     assert all(row.neighbor_margin is None for row in lean)
 
     rows = runtime.candidates(
-        observation, count=4, view=CandidateColumns(column_focus="margin_neighbor").plan
+        observation, count=4,
+        metrics=CandidateColumns(column_focus="margin_neighbor").plan.metrics,
     )
-    assert observation.statistics._raw_logsumexp_ready is False
+    assert observation.policy_calculations._raw_logsumexp_ready is False
     assert len(rows) == 4
     for i in range(len(rows) - 1):
         expected = float(observation.logits[rows[i].token_id] - observation.logits[rows[i + 1].token_id])
@@ -461,31 +462,31 @@ def test_s04g_logit_z_score_uses_full_vocab_mean_std_without_softmax_wake():
     from trajectory_editor.candidate_columns import CandidateColumns
 
     logits = np.asarray([1.0, 2.0, 3.0, 4.0], dtype=np.float64)
-    stats = ObservationStatistics(
+    policy_calculations = PolicyCalculations(
         logits, SamplerConfig(temperature=1.0, top_k=4, top_p=1.0, min_p=0.0), []
     )
-    assert stats._raw_logsumexp_ready is False
+    assert policy_calculations._raw_logsumexp_ready is False
     expected_mean = float(np.mean(logits))
     expected_std = float(np.std(logits, ddof=0))
     assert expected_std > 0.0
-    pair = stats._ensure_logit_mean_std()
+    pair = policy_calculations._ensure_logit_mean_std()
     assert pair is not None
     mean, std = pair
     assert mean == pytest.approx(expected_mean)
     assert std == pytest.approx(expected_std)
-    assert stats._raw_logsumexp_ready is False
+    assert policy_calculations._raw_logsumexp_ready is False
 
     for token_id, logit in enumerate(logits):
         expected_z = (float(logit) - expected_mean) / expected_std
-        assert stats.logit_z(token_id) == pytest.approx(expected_z)
-    zs = stats.logit_z_scores([0, 3, 1])
+        assert policy_calculations.logit_z(token_id) == pytest.approx(expected_z)
+    zs = policy_calculations.logit_z_scores([0, 3, 1])
     assert zs[0] == pytest.approx((1.0 - expected_mean) / expected_std)
     assert zs[1] == pytest.approx((4.0 - expected_mean) / expected_std)
     assert zs[2] == pytest.approx((2.0 - expected_mean) / expected_std)
-    assert stats._raw_logsumexp_ready is False
+    assert policy_calculations._raw_logsumexp_ready is False
 
     # Degenerate vocab (std ~ 0) → undefined z.
-    flat = ObservationStatistics(
+    flat = PolicyCalculations(
         np.asarray([5.0, 5.0, 5.0]), SamplerConfig(temperature=1.0, top_k=3, top_p=1.0, min_p=0.0), []
     )
     assert flat._ensure_logit_mean_std() is None
@@ -499,22 +500,23 @@ def test_s04g_logit_z_score_uses_full_vocab_mean_std_without_softmax_wake():
         initial_token_ids=[7],
     )
     observation = runtime.observe()
-    assert observation.statistics._raw_logsumexp_ready is False
+    assert observation.policy_calculations._raw_logsumexp_ready is False
 
     lean = runtime.candidates(observation, count=4)
     assert all(row.logit_z is None for row in lean)
-    assert observation.statistics._raw_logsumexp_ready is False
-    assert observation.statistics._logit_mean_std_ready is False
+    assert observation.policy_calculations._raw_logsumexp_ready is False
+    assert observation.policy_calculations._logit_mean_std_ready is False
 
     rows = runtime.candidates(
-        observation, count=4, view=CandidateColumns(column_focus="z").plan
+        observation, count=4,
+        metrics=CandidateColumns(column_focus="z").plan.metrics,
     )
-    assert observation.statistics._raw_logsumexp_ready is False
-    assert observation.statistics._logit_mean_std_ready is True
+    assert observation.policy_calculations._raw_logsumexp_ready is False
+    assert observation.policy_calculations._logit_mean_std_ready is True
     assert len(rows) == 4
     assert all(row.logit_z is not None for row in rows)
     for row in rows:
-        assert row.logit_z == pytest.approx(observation.statistics.logit_z(row.token_id))
+        assert row.logit_z == pytest.approx(observation.policy_calculations.logit_z(row.token_id))
 
     rendered = CandidateColumns(column_focus="z").values(rows[0])
     assert f"{rows[0].logit_z:+.2f}" in rendered

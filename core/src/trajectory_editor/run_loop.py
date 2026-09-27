@@ -7,8 +7,9 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from .core.actions import Phrase, PolicyAction
+from .core.episode_observation import EpisodeObservation
 from .core.results import ActionOutcome, ReplayExpectation
-from .episode_engine import InstructionRejected, Observation
+from .episode_engine import InstructionRejected
 
 
 class EdgeRequested(Exception):
@@ -32,7 +33,7 @@ class SeamlessRewindRequested(Exception):
 
 
 class LivePolicy(Protocol):
-    def choose(self, engine, observation: Observation) -> PolicyAction: ...
+    def choose(self, engine, observation: EpisodeObservation) -> PolicyAction: ...
 
 
 @dataclass(frozen=True)

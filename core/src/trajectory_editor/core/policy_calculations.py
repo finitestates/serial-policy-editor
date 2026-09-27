@@ -1,11 +1,4 @@
-"""Core model-observation and policy-surface calculations.
-
-The core observer owns the surfaces required by the interactive projector:
-raw model logits, history penalties, grouped phrase and direct-token biases, optional
-output-head steering, candidate filtering, and replay-stable draw metadata.
-Research actuators are intentionally absent. The core episode engine uses
-this observer for all policy calculations.
-"""
+"""Numeric model and policy surfaces derived from one logits vector."""
 
 from __future__ import annotations
 
@@ -77,8 +70,8 @@ def _history_penalty_surface(
     return adjusted
 
 
-class ObservationStatistics:
-    """Core numeric snapshot used by the interactive projector."""
+class PolicyCalculations:
+    """Validated logits, policy adjustments, draw distribution, and metrics."""
 
     def __init__(
         self,
@@ -328,26 +321,6 @@ class ObservationStatistics:
         assert self._policy_maximum is not None and self._policy_denominator is not None
         return np.exp(self.adjusted[ids] - self._policy_maximum) / self._policy_denominator
 
-    @property
-    def backend_logits(self):
-        return self.logits
-
-    @property
-    def policy_logits(self):
-        return self.adjusted
-
-    def model_probabilities(self, token_ids):
-        return self.raw_probabilities(token_ids)
-
-    def model_nll(self, token_id: int) -> float:
-        return self.raw_nll(token_id)
-
-    def model_rank(self, token_id: int) -> int:
-        return self.raw_rank(token_id)
-
-    def top_model_ids(self, count: int) -> list[int]:
-        return self.top_raw_ids(count)
-
     def raw_nll(self, token_id: int) -> float:
         return self.log_z - float(self.logits[token_id])
 
@@ -380,4 +353,4 @@ class ObservationStatistics:
         return self._policy_ordered[:count]
 
 
-__all__ = ["ObservationStatistics"]
+__all__ = ["PolicyCalculations"]
