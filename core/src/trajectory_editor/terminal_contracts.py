@@ -96,6 +96,8 @@ class BeamViewRow:
     model_rank: int | None = None
     step_log_probability: float | None = None
     model_log_probability: float | None = None
+    protected: bool = False
+    family_metadata: str = ""
 
 
 @dataclass(frozen=True)
@@ -107,6 +109,7 @@ class BeamViewState:
     notice: str = ""
     at_edge: bool = False
     stochastic: bool = False
+    show_family_metadata: bool = False
 
 
 @dataclass(frozen=True)

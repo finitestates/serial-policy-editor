@@ -878,9 +878,26 @@ class InteractivePolicy:
                     )
                     continue
                 assert command.beam_width is not None
+                if command.beam_add_model_ranks:
+                    highest_add_rank = max(command.beam_add_model_ranks)
+                    root_token_ids = observation.policy_calculations.top_raw_ids(
+                        highest_add_rank
+                    )
+                    added_token_ids = {
+                        root_token_ids[rank - 1]
+                        for rank in command.beam_add_model_ranks
+                    }
+                    if added_token_ids.intersection(engine.backend.eog_token_ids()):
+                        feedback = ChoiceFeedback(
+                            "error", "INVALID COMMAND",
+                            ("beam add cannot include an EOG root because it has no continuation",),
+                        )
+                        continue
                 raise BeamRequested(
                     command.beam_width,
                     stochastic=command.beam_stochastic,
+                    skip_root_rank_ranges=command.beam_skip_rank_ranges,
+                    add_root_model_ranks=command.beam_add_model_ranks,
                 )
             if review_boundary is not None:
                 if command.kind == CommandKind.REVIEW_BACK:

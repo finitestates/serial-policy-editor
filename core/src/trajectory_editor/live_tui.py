@@ -21,7 +21,8 @@ from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.styles import Style
 
 from .teacher_commands import (
-    CommandKind, CommandState, ForkAddressKind, TeacherCommand, interpret_command,
+    CommandKind, CommandState, ForkAddressKind, TeacherCommand,
+    format_beam_rank_ranges, interpret_command,
 )
 from .candidate_columns import CandidateColumns
 from .core.candidates import Candidate
@@ -145,10 +146,24 @@ def action_preview(
             if command.beam_stochastic else
             "cumulative log-p"
         )
+        root_skip = (
+            f" Skip first-step model ranks {format_beam_rank_ranges(command.beam_skip_rank_ranges)}; "
+            "they remain available later."
+            if command.beam_skip_rank_ranges else ""
+        )
+        root_add = (
+            " Force and protect first-step model ranks "
+            + ", ".join(str(rank) for rank in command.beam_add_model_ranks)
+            + "; beam width stays fixed."
+            if command.beam_add_model_ranks else ""
+        )
         return ActionPreview(
             kind="effect",
             label=("stochastic beam preview" if command.beam_stochastic else "beam search preview"),
-            detail=f"Open a width-{width} {mode} beam; select a branch to commit.",
+            detail=(
+                f"Open a width-{width} {mode} beam.{root_skip}{root_add} "
+                "Select a branch to commit."
+            ),
             command=command,
         )
 
@@ -249,7 +264,7 @@ def action_preview(
         CommandKind.BIAS: ("token bias", "Update a group or token bias; stay at this step."),
         CommandKind.BEAM: (
             "beam search",
-            "Open the temporary deterministic or stochastic branch leaderboard on Enter.",
+            "Open the temporary branch leaderboard; root-rank skips apply only to step one.",
         ),
         CommandKind.SAMPLER: (
             "sampler settings",
@@ -938,6 +953,8 @@ LIVE_STYLES = {
             "beam-selected": "ansicyan bold",
             "beam-score": "ansibrightblack",
             "beam-continuation": "",
+            "beam-family": "ansiyellow",
+            "beam-protected": "ansibrightyellow bold",
             "beam-pane": "",
         }
     ),
@@ -968,6 +985,8 @@ LIVE_STYLES = {
             "beam-selected": "bold underline",
             "beam-score": "",
             "beam-continuation": "",
+            "beam-family": "bold",
+            "beam-protected": "bold underline",
             "beam-pane": "",
         }
     ),
@@ -998,6 +1017,8 @@ LIVE_STYLES = {
             "beam-selected": "ansicyan bold",
             "beam-score": "ansibrightblack",
             "beam-continuation": "",
+            "beam-family": "ansibrightyellow",
+            "beam-protected": "ansibrightyellow bold",
             "beam-pane": "",
         }
     ),

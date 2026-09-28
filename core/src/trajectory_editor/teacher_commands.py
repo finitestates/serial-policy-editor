@@ -91,6 +91,8 @@ class TeacherCommand:
     chord_ranks: tuple[int, ...] | None = None
     beam_width: int | None = None
     beam_stochastic: bool = False
+    beam_skip_rank_ranges: tuple[tuple[int, int], ...] = ()
+    beam_add_model_ranks: tuple[int, ...] = ()
     sampler_text: str | None = None
     reroll_seed: int | None = None
     draw_raw_rank: int | None = None
@@ -145,11 +147,20 @@ HELP_TEXT = """Commands:
   1..N              commit a candidate; the proposal rank records acceptance
   chord RANK RANK... preview temporary continuations; choose a letter or starting rank
                     to commit its actions and drop the other previews
-  beam [WIDTH]       cumulative log-p beam (default width: 5; maximum: 100)
-  beam stochastic [WIDTH]
+  beam [WIDTH] [skip RANKS] [add RANKS]
+                    cumulative log-p beam (default width: 5; maximum: 100)
+  beam stochastic [WIDTH] [skip RANKS]
                     open Gumbel-Top-k sampling without replacement
-  gbeam [WIDTH]     short form for stochastic beam
-                    Enter expands; k/Backspace kills the selected path; kill ID targets one;
+  gbeam [WIDTH] [skip RANKS]
+                    short form for stochastic beam
+                    skip filters one-based model ranks at the first step only;
+                    the beam fills to its requested width from remaining candidates
+                    when available, and skipped tokens remain available later.
+                    RANKS accepts forms such as 1-5 or 1 3 10.
+                    In deterministic beam, add forces root model ranks into the
+                    initial beam and reserves one slot for each lineage; width stays fixed.
+                    In the viewer, p protects a deterministic lineage and f shows family
+                    metadata. Enter expands; k/Backspace kills the selected path; kill ID targets one;
                     select ID commits a path
   t TEXT            insert continuation text (adds a joining space if needed)
   x TEXT            insert exact text
@@ -559,33 +570,113 @@ def parse_chord(raw: str, vocabulary_size: int) -> tuple[int, ...] | None:
     return ranks
 
 
-def parse_beam(raw: str) -> tuple[int, bool] | None:
-    """Recognize deterministic and stochastic beam forms."""
+def _parse_beam_rank_ranges(
+    parts: list[str], *, option: str = "skip"
+) -> tuple[tuple[int, int], ...]:
+    ranges: list[tuple[int, int]] = []
+    for part in parts:
+        match = re.fullmatch(r"(\d+)(?:-(\d+))?", part)
+        if match is None:
+            raise EditorError(
+                f"beam {option} ranks must be positive integers or ranges such as 1-5"
+            )
+        first = int(match.group(1))
+        last = int(match.group(2) or first)
+        if first < 1 or last < first:
+            raise EditorError(f"beam {option} ranges must be positive and ascend")
+        ranges.append((first, last))
+
+    merged: list[tuple[int, int]] = []
+    for first, last in sorted(ranges):
+        if merged and first <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], last))
+        else:
+            merged.append((first, last))
+    return tuple(merged)
+
+
+def format_beam_rank_ranges(ranges: tuple[tuple[int, int], ...]) -> str:
+    return " ".join(
+        str(first) if first == last else f"{first}-{last}"
+        for first, last in ranges
+    )
+
+
+def parse_beam(
+    raw: str,
+    *,
+    vocabulary_size: int | None = None,
+) -> tuple[int, bool, tuple[tuple[int, int], ...], tuple[int, ...]] | None:
+    """Recognize deterministic and stochastic beam forms with root controls."""
     parts = raw.strip().split()
     if not parts or parts[0].lower() not in {"beam", "gbeam"}:
         return None
     short_stochastic = parts[0].lower() == "gbeam"
-    stochastic = (
-        short_stochastic
-        or (len(parts) >= 2 and parts[1].lower() == "stochastic")
-    )
-    width_parts = (
-        parts[1:]
-        if short_stochastic
-        else parts[2:] if stochastic else parts[1:]
-    )
-    if len(width_parts) > 1:
-        raise EditorError(
-            "use beam [WIDTH], beam stochastic [WIDTH], or gbeam [WIDTH]"
-        )
+    stochastic = short_stochastic
+    cursor = 1
+    if (
+        not short_stochastic
+        and cursor < len(parts)
+        and parts[cursor].lower() == "stochastic"
+    ):
+        stochastic = True
+        cursor += 1
+
     width = 5
-    if width_parts and not width_parts[0].isdecimal():
-        raise EditorError("beam width must be a positive integer")
-    if width_parts:
-        width = int(width_parts[0])
+    if cursor < len(parts) and parts[cursor].isdecimal():
+        width = int(parts[cursor])
+        cursor += 1
     if not 1 <= width <= 100:
         raise EditorError("beam width must be between 1 and 100")
-    return width, stochastic
+    rank_options: dict[str, tuple[tuple[int, int], ...]] = {}
+    while cursor < len(parts):
+        option = parts[cursor].lower()
+        if option not in {"skip", "add"}:
+            raise EditorError(
+                "use beam [WIDTH] [skip RANKS] [add RANKS], beam stochastic "
+                "[WIDTH] [skip RANKS], or gbeam [WIDTH] [skip RANKS]"
+            )
+        if option in rank_options:
+            raise EditorError(f"beam {option} may be specified only once")
+        cursor += 1
+        rank_start = cursor
+        while cursor < len(parts) and parts[cursor].lower() not in {"skip", "add"}:
+            cursor += 1
+        if rank_start == cursor:
+            raise EditorError(f"beam {option} needs one or more model ranks")
+        rank_options[option] = _parse_beam_rank_ranges(
+            parts[rank_start:cursor], option=option
+        )
+
+    skip_ranges = rank_options.get("skip", ())
+    add_ranges = rank_options.get("add", ())
+    if stochastic and add_ranges:
+        raise EditorError("beam add is available only in deterministic beam mode")
+    for option, ranges in (("skip", skip_ranges), ("add", add_ranges)):
+        if vocabulary_size is not None and any(
+            last > vocabulary_size for _, last in ranges
+        ):
+            raise EditorError(
+                f"beam {option} ranks must be between 1 and {vocabulary_size}"
+            )
+    if (
+        vocabulary_size is not None
+        and skip_ranges == ((1, vocabulary_size),)
+    ):
+        raise EditorError("beam root skip ranks cannot exclude the whole vocabulary")
+
+    add_count = sum(last - first + 1 for first, last in add_ranges)
+    if add_count > width:
+        raise EditorError("beam add cannot reserve more roots than the beam width")
+    add_ranks = tuple(
+        rank
+        for first, last in add_ranges
+        for rank in range(first, last + 1)
+    )
+    for rank in add_ranks:
+        if any(first <= rank <= last for first, last in skip_ranges):
+            raise EditorError(f"model rank {rank} cannot be both skipped and added")
+    return width, stochastic, skip_ranges, add_ranks
 
 
 def _beam_prefix_message(raw: str) -> str | None:
@@ -605,6 +696,32 @@ def _beam_prefix_message(raw: str) -> str | None:
         option = parts[1]
         if option and "stochastic".startswith(option) and option != "stochastic":
             return "Finish typing stochastic, or enter a beam width."
+    if parts[0] in {"beam", "gbeam"}:
+        option_prefixes = {
+            "skip": {"s", "sk", "ski", "skip"},
+            "add": {"a", "ad", "add"},
+        }
+        partial = next(
+            (name for name, forms in option_prefixes.items() if parts[-1] in forms),
+            None,
+        )
+        if partial is not None:
+            prefix = parts[:-1]
+            if prefix[0] == "beam" and len(prefix) > 1 and prefix[1] == "stochastic":
+                prefix = [prefix[0], *prefix[2:]]
+            header_ok = len(prefix) in {1, 2} and (
+                len(prefix) == 1
+                or (prefix[1].isdecimal() and 1 <= int(prefix[1]) <= 100)
+            )
+            # An `add` clause may follow a complete skip list.
+            if partial == "add" and len(prefix) >= 3 and prefix[1].isdecimal():
+                header_ok = prefix[2] == "skip" and len(prefix) >= 4 and all(
+                    re.fullmatch(r"\d+(?:-\d+)?", item) for item in prefix[3:]
+                )
+            if header_ok:
+                if parts[-1] == partial:
+                    return f"Type one or more one-based model ranks to {partial} at the first step."
+                return f"Finish typing {partial}, then enter one or more one-based model ranks."
     return None
 
 
@@ -616,13 +733,20 @@ def parse_command(
     vocabulary_size: int | None = None,
     default_search_radius: int = 3,
 ) -> TeacherCommand:
-    beam = parse_beam(raw)
+    beam = parse_beam(raw, vocabulary_size=vocabulary_size)
     if beam is not None:
-        beam_width, beam_stochastic = beam
+        (
+            beam_width,
+            beam_stochastic,
+            beam_skip_rank_ranges,
+            beam_add_model_ranks,
+        ) = beam
         return TeacherCommand(
             CommandKind.BEAM,
             beam_width=beam_width,
             beam_stochastic=beam_stochastic,
+            beam_skip_rank_ranges=beam_skip_rank_ranges,
+            beam_add_model_ranks=beam_add_model_ranks,
         )
     chord_ranks = parse_chord(raw, vocabulary_size or menu_size)
     if chord_ranks is not None:

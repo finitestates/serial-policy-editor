@@ -142,6 +142,28 @@ class LiveBeamView(ViewLifecycle):
             self._submit_command(event, command)
 
         @self.bindings.add(
+            "p",
+            filter=Condition(
+                lambda: (
+                    not self.state.at_edge
+                    and not self.state.stochastic
+                    and not self.command_buffer.text
+                )
+            ),
+        )
+        def _protect_selected(event):
+            self._submit_command(event, "protect")
+
+        @self.bindings.add(
+            "f",
+            filter=Condition(
+                lambda: not self.state.at_edge and not self.command_buffer.text
+            ),
+        )
+        def _toggle_families(event):
+            self._submit_command(event, "families")
+
+        @self.bindings.add(
             "right",
             filter=Condition(lambda: not self.command_buffer.text.strip()),
         )
@@ -212,10 +234,18 @@ class LiveBeamView(ViewLifecycle):
             fragments.extend(
                 [
                     (style, f"{marker} {rank:>2} {row.label:<4} "),
+                    (
+                        "class:beam-protected" if row.protected else style,
+                        "◆ " if row.protected else "",
+                    ),
                     (style, continuation),
                     ("class:beam-score", f"  {score:>8}{status}\n"),
                 ]
             )
+            if row.family_metadata:
+                fragments.append(
+                    ("class:beam-family", f"      {row.family_metadata}\n")
+                )
         return fragments
 
     def _survivor_cursor_position(self) -> Point:
@@ -227,8 +257,15 @@ class LiveBeamView(ViewLifecycle):
             ),
             None,
         )
-        # The heading and selection summary occupy the first logical line.
-        return Point(0, 1 if selected_index is None else selected_index + 1)
+        # The heading occupies the first logical line; family metadata adds a
+        # second line under each survivor when enabled.
+        if selected_index is None:
+            return Point(0, 1)
+        row_offset = sum(
+            1 + bool(row.family_metadata)
+            for row in self.state.rows[:selected_index]
+        )
+        return Point(0, 1 + row_offset)
 
     def _details(self) -> StyleAndTextTuples:
         label = self.selected_label or "—"
@@ -238,8 +275,14 @@ class LiveBeamView(ViewLifecycle):
         )
         continuation = row.continuation if row is not None else "(no retained branch)"
         recent_steps = row.recent_steps if row is not None else ()
+        protected = " · PROTECTED" if row is not None and row.protected else ""
         fragments: StyleAndTextTuples = [
-            ("class:section", f"SELECTED: {label}\n"),
+            ("class:section", f"SELECTED: {label}{protected}\n"),
+            (
+                "class:beam-family",
+                (row.family_metadata + "\n")
+                if row is not None and row.family_metadata else "",
+            ),
             ("class:beam-continuation", continuation + "\n\n"),
             ("class:section", "Recent steps:\n"),
         ]
@@ -280,9 +323,10 @@ class LiveBeamView(ViewLifecycle):
         if self.state.at_edge:
             text = "Enter/→ resume · discard restore episode · Esc return · q quit editor"
         else:
+            protection = " · p protect" if not self.state.stochastic else ""
             text = (
-                "↑↓ inspect · Backspace kill · → step · ← rewind · Enter commit · "
-                "Esc return · advance/hold N · kill ID · q options"
+                f"↑↓ inspect · Backspace kill{protection} · f family · → step · "
+                "← rewind · Enter commit · Esc return · advance N · kill ID · q options"
             )
         return [("class:hint", text)]
 

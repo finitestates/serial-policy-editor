@@ -231,6 +231,7 @@ def read_beam(io: IO, state: BeamViewState) -> BeamInput | None:
         rows.append("  No retained branches.")
     for rank, row in enumerate(state.rows, 1):
         marker = ">" if row.label == state.selected_label else " "
+        protected = " protected" if row.protected else ""
         model_rank = "—" if row.model_rank is None else str(row.model_rank)
         step_logp = (
             "—" if row.step_log_probability is None
@@ -243,29 +244,37 @@ def read_beam(io: IO, state: BeamViewState) -> BeamInput | None:
             )
             rows.append(
                 f"{marker}{rank:>2} {row.label:<3} {row.state:<4} "
-                f"model-rank {model_rank:<7} step-logp {step_logp:<10} "
+                f"model-rank {model_rank:<7} step-logp {step_logp:<10}{protected} "
                 f"gumbel-score {row.score} model-logp {model_logp}"
             )
         else:
             rows.append(
                 f"{marker}{rank:>2} {row.label:<3} {row.state:<4} "
-                f"model-rank {model_rank:<7} step-logp {step_logp:<10} "
+                f"model-rank {model_rank:<7} step-logp {step_logp:<10}{protected} "
                 f"beam-logp {row.score}"
             )
         rows.extend(f"   {line}" for line in row.continuation.split("\n"))
+        if row.family_metadata:
+            rows.append(f"   {row.family_metadata}")
     selected = next(
         (row for row in state.rows if row.label == state.selected_label),
         None,
     )
     if selected is not None:
         rows.extend(["", f"Selected: {selected.label}", selected.continuation, "Recent steps:"])
+        if selected.protected:
+            rows.insert(-1, "Protected lineage: yes")
+        if selected.family_metadata:
+            rows.insert(-1, selected.family_metadata)
         rows.extend(f"  {step}" for step in selected.recent_steps)
     if state.notice:
         rows.extend(["", state.notice])
     prompt = (
         "Beam EDGE: c resume | discard restore episode | q quit editor > "
         if state.at_edge else
-        "Beam: Enter expand | k kill selected | advance N | rewind | kill ID | "
+        "Beam: Enter expand | k kill selected | "
+        + ("p protect | " if not state.stochastic else "")
+        + "f family | advance N | rewind | kill ID | "
         "ID/select ID commit | q options | ? help > "
     )
     raw = io.prompt(PromptRequest(prompt, body="\n".join(rows), isolated=True))

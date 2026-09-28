@@ -25,10 +25,14 @@ class BeamRequested(Exception):
         width: int,
         *,
         stochastic: bool = False,
+        skip_root_rank_ranges: tuple[tuple[int, int], ...] = (),
+        add_root_model_ranks: tuple[int, ...] = (),
     ) -> None:
-        super().__init__(width, stochastic)
+        super().__init__(width, stochastic, skip_root_rank_ranges, add_root_model_ranks)
         self.width = width
         self.stochastic = stochastic
+        self.skip_root_rank_ranges = skip_root_rank_ranges
+        self.add_root_model_ranks = add_root_model_ranks
 
 
 @dataclass(frozen=True)
@@ -49,6 +53,7 @@ class BeamPath:
     node: BeamNode | None
     score: float
     model_log_probability: float
+    search_log_probability: float
     model_rank: int | None
     step_log_probability: float | None
     lane_id: int | None
@@ -67,6 +72,7 @@ class _Candidate:
     model_rank: int
     log_probability: float
     model_log_probability: float
+    search_log_probability: float
     score: float
     is_eog: bool
     parent_order: int
@@ -80,6 +86,7 @@ class _Candidate:
 class _Checkpoint:
     active: tuple[BeamPath, ...]
     finished: tuple[BeamPath, ...]
+    protected_prefixes: tuple[tuple[int, ...], ...]
 
 
 class BeamSearch:
@@ -91,6 +98,8 @@ class BeamSearch:
         width: int = 5,
         *,
         stochastic: bool = False,
+        skip_root_rank_ranges: tuple[tuple[int, int], ...] = (),
+        add_root_model_ranks: tuple[int, ...] = (),
     ) -> None:
         if type(width) is not int or not 1 <= width <= 100:
             raise EditorError("beam width must be between 1 and 100")
@@ -102,6 +111,27 @@ class BeamSearch:
         self.original = engine
         self.width = width
         self.stochastic = bool(stochastic)
+        self.skip_root_rank_ranges = tuple(skip_root_rank_ranges)
+        self.add_root_model_ranks = tuple(add_root_model_ranks)
+        if self.stochastic and self.add_root_model_ranks:
+            raise EditorError("beam add is available only in deterministic beam mode")
+        if len(self.add_root_model_ranks) > self.width:
+            raise EditorError("beam add cannot reserve more roots than the beam width")
+        if (
+            any(type(rank) is not int or rank < 1 for rank in self.add_root_model_ranks)
+            or len(set(self.add_root_model_ranks)) != len(self.add_root_model_ranks)
+        ):
+            raise EditorError("beam add ranks must be distinct positive model ranks")
+        for rank_range in self.skip_root_rank_ranges:
+            if (
+                not isinstance(rank_range, tuple)
+                or len(rank_range) != 2
+                or type(rank_range[0]) is not int
+                or type(rank_range[1]) is not int
+                or rank_range[0] < 1
+                or rank_range[1] < rank_range[0]
+            ):
+                raise EditorError("beam root skip ranks must be positive ascending ranges")
         self.base_visible = list(engine.visible_token_ids)
         self.base_prefix = list(engine.token_ids)
         self.shared_context = engine.backend.render(self.base_prefix, special=True)
@@ -110,14 +140,69 @@ class BeamSearch:
         self.finished: list[BeamPath] = []
         self._history: list[_Checkpoint] = []
         self._killed_paths: set[tuple[int, ...]] = set()
+        self._protected_prefixes: set[tuple[int, ...]] = set()
+        self.show_family_metadata = False
         self._next_label = 0
         self._primary_batch: BatchedInferenceSession | None = None
         self._guidance_batch: BatchedInferenceSession | None = None
         self._context_tail = _recent_context(self.shared_context)
         self.selected_label: str | None = None
         self.closed = False
+        self._root_skip_token_mask: np.ndarray | None = None
+        self._root_add_token_ids: set[int] = set()
 
         shared_observation = engine.observe()
+        vocabulary_size = len(shared_observation.policy_calculations.adjusted)
+        if any(last > vocabulary_size for _, last in self.skip_root_rank_ranges):
+            raise EditorError(
+                f"beam root skip ranks must be between 1 and {vocabulary_size}"
+            )
+        if any(rank > vocabulary_size for rank in self.add_root_model_ranks):
+            raise EditorError(
+                f"beam add ranks must be between 1 and {vocabulary_size}"
+            )
+        skipped_ranks = {
+            rank
+            for first, last in self.skip_root_rank_ranges
+            for rank in range(first, last + 1)
+        }
+        if skipped_ranks.intersection(self.add_root_model_ranks):
+            raise EditorError("a beam model rank cannot be both skipped and added")
+        requested_ranks = [
+            *(last for _, last in self.skip_root_rank_ranges),
+            *self.add_root_model_ranks,
+        ]
+        if requested_ranks:
+            highest_rank = max(requested_ranks)
+            top_ids = shared_observation.policy_calculations.top_raw_ids(
+                highest_rank
+            )
+            rank_to_id = {
+                rank: int(token_id)
+                for rank, token_id in enumerate(top_ids, start=1)
+            }
+        else:
+            rank_to_id = {}
+        if self.skip_root_rank_ranges:
+            skipped = np.zeros(vocabulary_size, dtype=bool)
+            for first, last in self.skip_root_rank_ranges:
+                skipped[np.asarray(
+                    [rank_to_id[rank] for rank in range(first, last + 1)],
+                    dtype=np.int64,
+                )] = True
+            if np.all(skipped):
+                raise EditorError("beam root skip ranks cannot exclude the whole vocabulary")
+            self._root_skip_token_mask = skipped
+        if self.add_root_model_ranks:
+            self._root_add_token_ids = {
+                rank_to_id[rank] for rank in self.add_root_model_ranks
+            }
+            eog_ids = set(engine.backend.eog_token_ids())
+            if self._root_add_token_ids.intersection(eog_ids):
+                raise EditorError("beam add cannot force an EOG root that has no continuation")
+            self._protected_prefixes = {
+                (token_id,) for token_id in self._root_add_token_ids
+            }
         try:
             primary_factory = getattr(engine.backend, "create_batch", None)
             guidance_active = engine._cfg_active()
@@ -157,7 +242,7 @@ class BeamSearch:
                 observation=shared_observation,
             )
             self.active = [BeamPath(
-                "root", root_engine, None, 0.0, 0.0, None, None,
+                "root", root_engine, None, 0.0, 0.0, 0.0, None, None,
                 0 if self._primary_batch else None,
             )]
             self.expand()
@@ -220,26 +305,42 @@ class BeamSearch:
             if adjusted.ndim != 1 or not np.all(np.isfinite(adjusted)):
                 raise RuntimeError("beam policy logits are invalid")
             log_normalizer = float(np.logaddexp.reduce(adjusted))
-            log_probabilities = adjusted - log_normalizer
+            model_log_probabilities = adjusted - log_normalizer
             ids = np.arange(len(adjusted), dtype=np.int64)
+            allowed_ids = ids
+            is_root = path.node is None
+            if is_root and self._root_skip_token_mask is not None:
+                # This local support mask is a one-step -infinity bias; it does
+                # not alter the observation or the vocabulary at descendants.
+                allowed_ids = ids[~self._root_skip_token_mask]
+                if not len(allowed_ids):
+                    raise EditorError("beam root skip ranks leave no first-token candidates")
+            search_log_probabilities = model_log_probabilities[allowed_ids].copy()
+            if is_root and self.skip_root_rank_ranges:
+                # Renormalize the allowed root support. Descendant Gumbel splits
+                # then use probability mass from the same constrained sequence
+                # distribution while model log-p remains the unmasked value.
+                allowed_log_mass = float(np.logaddexp.reduce(search_log_probabilities))
+                search_log_probabilities -= allowed_log_mass
             eog_ids = set(path.engine.backend.eog_token_ids())
             path_tokens = self._path_token_ids(path)
             is_eog = np.isin(ids, tuple(eog_ids)) if eog_ids else np.zeros(ids.shape, dtype=bool)
 
             if self.stochastic:
-                for token_id, score in conditional_gumbel_top_k(
-                    log_probabilities,
+                for candidate_index, score in conditional_gumbel_top_k(
+                    search_log_probabilities,
                     count=self.width,
                     parent_score=path.score,
-                    parent_log_probability=path.model_log_probability,
+                    parent_log_probability=path.search_log_probability,
                     seed=path.engine.sampling.seed,
                     stream_fingerprint=path.engine.stream_fingerprint,
                     aligned_step=observation.sampling_boundary,
                     prefix_token_ids=path_tokens,
                 ):
+                    token_id = int(allowed_ids[candidate_index])
                     if (*path_tokens, token_id) in self._killed_paths:
                         continue
-                    log_probability = float(log_probabilities[token_id])
+                    log_probability = float(model_log_probabilities[token_id])
                     candidates.append(self._candidate(
                         path,
                         observation,
@@ -247,37 +348,82 @@ class BeamSearch:
                         log_probability,
                         bool(is_eog[token_id]),
                         parent_order,
+                        search_step_log_probability=float(
+                            search_log_probabilities[candidate_index]
+                        ),
                         score=score,
                     ))
                 continue
 
-            order = np.lexsort((ids, -log_probabilities))
+            order = allowed_ids[np.lexsort((
+                allowed_ids, -model_log_probabilities[allowed_ids]
+            ))]
 
             live_count = 0
-            for index in order:
-                token_id = int(ids[index])
-                log_probability = float(log_probabilities[index])
+            live_candidate_ids: set[int] = set()
+            for token_id in order:
+                token_id = int(token_id)
+                log_probability = float(model_log_probabilities[token_id])
                 if (
-                    is_eog[index]
+                    is_eog[token_id]
                     or (*path_tokens, token_id) in self._killed_paths
                 ):
                     continue
                 candidates.append(self._candidate(
-                    path, observation, token_id, log_probability, False, parent_order
+                    path,
+                    observation,
+                    token_id,
+                    log_probability,
+                    False,
+                    parent_order,
+                    search_step_log_probability=float(
+                        search_log_probabilities[
+                            int(np.searchsorted(allowed_ids, token_id))
+                        ]
+                    ),
                 ))
+                live_candidate_ids.add(token_id)
                 live_count += 1
                 if live_count == self.width:
                     break
 
+            if is_root and self._root_add_token_ids:
+                for token_id in sorted(self._root_add_token_ids - live_candidate_ids):
+                    if (*path_tokens, token_id) in self._killed_paths:
+                        continue
+                    candidates.append(self._candidate(
+                        path,
+                        observation,
+                        token_id,
+                        float(model_log_probabilities[token_id]),
+                        False,
+                        parent_order,
+                        search_step_log_probability=float(
+                            search_log_probabilities[
+                                int(np.searchsorted(allowed_ids, token_id))
+                            ]
+                        ),
+                    ))
+
             # Keep terminal candidates available even when their log-probability
             # is below this parent's top-width live continuations.
-            for index in np.flatnonzero(is_eog):
-                token_id = int(ids[index])
-                log_probability = float(log_probabilities[index])
+            for token_id in allowed_ids[is_eog[allowed_ids]]:
+                token_id = int(token_id)
+                log_probability = float(model_log_probabilities[token_id])
                 if (*path_tokens, token_id) in self._killed_paths:
                     continue
                 candidates.append(self._candidate(
-                    path, observation, token_id, log_probability, True, parent_order
+                    path,
+                    observation,
+                    token_id,
+                    log_probability,
+                    True,
+                    parent_order,
+                    search_step_log_probability=float(
+                        search_log_probabilities[
+                            int(np.searchsorted(allowed_ids, token_id))
+                        ]
+                    ),
                 ))
         return candidates
 
@@ -290,10 +436,19 @@ class BeamSearch:
         is_eog: bool,
         parent_order: int,
         *,
+        search_step_log_probability: float | None = None,
         score: float | None = None,
     ) -> _Candidate:
         model_rank = observation.policy_calculations.raw_rank(token_id)
         model_log_probability = parent.model_log_probability + log_probability
+        search_step_log_probability = (
+            log_probability
+            if search_step_log_probability is None
+            else search_step_log_probability
+        )
+        cumulative_search_log_probability = (
+            parent.search_log_probability + search_step_log_probability
+        )
         return _Candidate(
             parent=parent,
             observation=observation,
@@ -301,6 +456,7 @@ class BeamSearch:
             model_rank=model_rank,
             log_probability=log_probability,
             model_log_probability=model_log_probability,
+            search_log_probability=cumulative_search_log_probability,
             score=(parent.score + log_probability if score is None else score),
             is_eog=is_eog,
             parent_order=parent_order,
@@ -312,7 +468,10 @@ class BeamSearch:
             raise EditorError("beam search is already closed")
         if not self.active:
             return False
-        self._history.append(_Checkpoint(tuple(self.active), tuple(self.finished)))
+        self._history.append(_Checkpoint(
+            tuple(self.active), tuple(self.finished),
+            tuple(sorted(self._protected_prefixes)),
+        ))
         return self._expand_one()
 
     def advance(self, steps: int) -> bool:
@@ -323,7 +482,10 @@ class BeamSearch:
             raise EditorError("beam advance must be between 1 and 256 steps")
         if not self.active:
             return False
-        self._history.append(_Checkpoint(tuple(self.active), tuple(self.finished)))
+        self._history.append(_Checkpoint(
+            tuple(self.active), tuple(self.finished),
+            tuple(sorted(self._protected_prefixes)),
+        ))
         for _ in range(steps):
             if not self._expand_one():
                 break
@@ -336,10 +498,11 @@ class BeamSearch:
             return False
         previous_active = tuple(self.active)
         candidates = self._candidates()
-        live_candidates = sorted(
+        ordered_live_candidates = sorted(
             (candidate for candidate in candidates if not candidate.is_eog),
             key=lambda candidate: candidate.ordering,
-        )[:self.width]
+        )
+        live_candidates = self._reserve_protected_candidates(ordered_live_candidates)
 
         finished_pool: list[tuple[tuple, BeamPath | _Candidate]] = []
         for path in self.finished:
@@ -369,6 +532,43 @@ class BeamSearch:
             path.engine._invalidate_observation()
         self._retain_selection()
         return bool(self.active)
+
+    def _reserve_protected_candidates(
+        self, ordered_candidates: list[_Candidate]
+    ) -> list[_Candidate]:
+        """Keep one best live child for each pinned prefix, then fill normally."""
+        if not self._protected_prefixes:
+            return ordered_candidates[:self.width]
+
+        reserved: list[_Candidate] = []
+        selected_paths: set[tuple[int, ...]] = set()
+        for prefix in sorted(self._protected_prefixes, key=lambda item: (len(item), item)):
+            candidate = next((
+                item for item in ordered_candidates
+                if self._candidate_token_ids(item)[:len(prefix)] == prefix
+            ), None)
+            if candidate is None:
+                continue
+            token_path = self._candidate_token_ids(candidate)
+            if token_path not in selected_paths:
+                reserved.append(candidate)
+                selected_paths.add(token_path)
+
+        remaining = self.width - len(reserved)
+        if remaining < 0:
+            raise EditorError("protected beam families exceed the beam width")
+        for candidate in ordered_candidates:
+            if len(reserved) >= self.width:
+                break
+            token_path = self._candidate_token_ids(candidate)
+            if token_path in selected_paths:
+                continue
+            reserved.append(candidate)
+            selected_paths.add(token_path)
+        return sorted(reserved, key=lambda candidate: candidate.ordering)
+
+    def _candidate_token_ids(self, candidate: _Candidate) -> tuple[int, ...]:
+        return (*self._path_token_ids(candidate.parent), candidate.token_id)
 
     def _expand_stochastic_one(self) -> bool:
         """Keep one Gumbel-ranked frontier of live prefixes and finished leaves."""
@@ -439,6 +639,7 @@ class BeamSearch:
             self._new_finished.append(BeamPath(
                 self._new_label(), engine, node, candidate.score,
                 candidate.model_log_probability,
+                candidate.search_log_probability,
                 candidate.model_rank, candidate.log_probability, None,
                 pre_terminal_engine,
             ))
@@ -491,6 +692,7 @@ class BeamSearch:
             next_active.append(BeamPath(
                 self._new_label(), engine, node, candidate.score,
                 candidate.model_log_probability,
+                candidate.search_log_probability,
                 candidate.model_rank, candidate.log_probability,
                 lane_id if self._primary_batch is not None else None,
             ))
@@ -545,6 +747,14 @@ class BeamSearch:
             path for path in checkpoint.finished
             if self._path_token_ids(path) not in self._killed_paths
         ]
+        self._protected_prefixes = {
+            prefix for prefix in checkpoint.protected_prefixes
+            if not any(
+                len(killed) <= len(prefix)
+                and prefix[:len(killed)] == killed
+                for killed in self._killed_paths
+            )
+        }
         if self._primary_batch is not None:
             self._rebuild_batches()
         else:
@@ -621,10 +831,71 @@ class BeamSearch:
             (len(self._path_actions(path)) for path in paths),
             default=0,
         )
-        rows: list[BeamViewRow] = []
+        continuations: dict[str, str] = {}
+        roots: dict[str, str] = {}
+        root_token_ids: dict[str, int | None] = {}
         for path in paths:
             generated = path.engine.visible_token_ids[len(self.base_visible):]
-            continuation = self._safe_text(path.engine.backend.render(generated))
+            continuations[path.label] = self._safe_text(
+                path.engine.backend.render(generated)
+            )
+            root_node = path.node
+            while root_node is not None and root_node.parent is not None:
+                root_node = root_node.parent
+            if root_node is None:
+                roots[path.label] = "—"
+                root_token_ids[path.label] = None
+            elif root_node.is_eog:
+                roots[path.label] = "EOG"
+                root_token_ids[path.label] = root_node.token_id
+            else:
+                root_text = self._safe_text(
+                    path.engine.backend.render([root_node.token_id])
+                ).replace("\n", " ").strip()
+                root_text = root_text or f"token {root_node.token_id}"
+                roots[path.label] = (
+                    f"r{root_node.model_rank} “{root_text[:16]}”"
+                )
+                root_token_ids[path.label] = root_node.token_id
+
+        family_metadata: dict[str, str] = {}
+        if self.show_family_metadata:
+            for path in paths:
+                peers = [
+                    peer for peer in paths
+                    if peer.label != path.label
+                    and root_token_ids[peer.label] == root_token_ids[path.label]
+                ]
+                if not peers:
+                    family_metadata[path.label] = f"root {roots[path.label]} · alone"
+                    continue
+                text = continuations[path.label]
+                peer = max(
+                    peers,
+                    key=lambda candidate: (
+                        self._common_prefix_length(
+                            text, continuations[candidate.label]
+                        )
+                    ),
+                )
+                peer_text = continuations[peer.label]
+                shared = self._common_prefix_length(text, peer_text)
+                if shared == len(text) == len(peer_text):
+                    relation = f"same visible text as {peer.label}"
+                elif shared == min(len(text), len(peer_text)):
+                    relation = f"shares prefix with {peer.label}"
+                elif shared:
+                    snippet = " ".join(text[:shared].split())[-24:]
+                    relation = f"{peer.label} splits after “…{snippet}”"
+                else:
+                    relation = f"diverges at start from {peer.label}"
+                family_metadata[path.label] = (
+                    f"root {roots[path.label]} · {relation}"
+                )
+
+        rows: list[BeamViewRow] = []
+        for path in paths:
+            continuation = continuations[path.label]
             if path.engine.ended:
                 continuation = (
                     f"{continuation} [EOG {path.engine.terminal_token_id}]"
@@ -654,6 +925,14 @@ class BeamSearch:
                 model_rank=path.model_rank,
                 step_log_probability=path.step_log_probability,
                 model_log_probability=path.model_log_probability,
+                protected=(
+                    not path.engine.ended
+                    and any(
+                        self._path_token_ids(path)[:len(prefix)] == prefix
+                        for prefix in self._protected_prefixes
+                    )
+                ),
+                family_metadata=family_metadata.get(path.label, ""),
             ))
 
         if self.stochastic:
@@ -666,6 +945,17 @@ class BeamSearch:
                 f"BEAM   width {self.width} · depth {depth} · "
                 "score: cumulative model log-p"
             )
+        if self.skip_root_rank_ranges:
+            skipped = " ".join(
+                str(first) if first == last else f"{first}-{last}"
+                for first, last in self.skip_root_rank_ranges
+            )
+            title += f" · root skip model ranks {skipped}"
+        if self.add_root_model_ranks:
+            added = " ".join(str(rank) for rank in self.add_root_model_ranks)
+            title += f" · root add ranks {added}"
+        if self._protected_prefixes:
+            title += f" · protected {len(self._protected_prefixes)}"
         return BeamViewState(
             title=title,
             shared_context=self._context_tail,
@@ -674,11 +964,28 @@ class BeamSearch:
             notice=notice,
             at_edge=at_edge,
             stochastic=self.stochastic,
+            show_family_metadata=self.show_family_metadata,
         )
+
+    @staticmethod
+    def _common_prefix_length(left: str, right: str) -> int:
+        index = 0
+        limit = min(len(left), len(right))
+        while index < limit and left[index] == right[index]:
+            index += 1
+        return index
 
     def kill(self, label: str) -> bool:
         """Remove a branch like SIGKILL, without recording an episode action."""
         path = self._find_path(label)
+        token_path = self._path_token_ids(path)
+        self._protected_prefixes = {
+            prefix for prefix in self._protected_prefixes
+            if not (
+                len(prefix) >= len(token_path)
+                and prefix[:len(token_path)] == token_path
+            )
+        }
         active_index = next(
             (index for index, active in enumerate(self.active) if active is path),
             None,
@@ -700,6 +1007,49 @@ class BeamSearch:
             self.discard()
             return False
         return True
+
+    def toggle_protection(self, label: str | None) -> str:
+        """Toggle a one-slot reservation for the selected live lineage."""
+        if self.stochastic:
+            raise EditorError("branch protection is available only in deterministic beam mode")
+        if label is None:
+            raise EditorError("select a live branch before protecting it")
+        path = self._find_path(label)
+        if path.engine.ended:
+            raise EditorError("only live branches can be protected")
+        token_path = self._path_token_ids(path)
+        if not token_path:
+            raise EditorError("select a generated live branch before protecting it")
+
+        covering = sorted(
+            (
+                prefix for prefix in self._protected_prefixes
+                if token_path[:len(prefix)] == prefix
+            ),
+            key=lambda prefix: (len(prefix), prefix),
+            reverse=True,
+        )
+        if covering:
+            self._protected_prefixes.remove(covering[0])
+            return f"Removed protection from lineage at {label}."
+
+        descendants = {
+            prefix for prefix in self._protected_prefixes
+            if prefix[:len(token_path)] == token_path
+        }
+        if len(self._protected_prefixes - descendants) + 1 > self.width:
+            raise EditorError("protected beam families cannot exceed the beam width")
+        self._protected_prefixes.difference_update(descendants)
+        self._protected_prefixes.add(token_path)
+        return f"Protected {label}'s lineage with one beam slot."
+
+    def toggle_family_metadata(self) -> str:
+        self.show_family_metadata = not self.show_family_metadata
+        return (
+            "Family metadata shown."
+            if self.show_family_metadata else
+            "Family metadata hidden."
+        )
 
     def promote(self, label: str) -> tuple[PolicyAction, ...]:
         if self.closed:
@@ -859,6 +1209,15 @@ def beam_menu(
             if command in {"return", "esc"}:
                 beam.discard()
                 return "discard", None
+            if command in {"p", "protect"}:
+                try:
+                    notice = beam.toggle_protection(beam.selected_label)
+                except EditorError as exc:
+                    notice = str(exc)
+                continue
+            if command in {"f", "families"}:
+                notice = beam.toggle_family_metadata()
+                continue
             if command in {"", "]"}:
                 if not advance_at_cursor(beam.expand):
                     notice = "No live branches remain; choose an EOS branch or open Beam EDGE."
@@ -919,6 +1278,9 @@ def beam_menu(
                     "`k` kills the selected branch. Select a branch to commit; EOS commits text "
                     "before the EOG token; q opens options."
                 )
+                if not beam.stochastic:
+                    notice += " `p` toggles a reserved slot for the selected lineage."
+                notice += " `f` toggles root and visible-text family details."
                 continue
             target = command[7:].strip() if command.startswith("select ") else command
             if command == "select":
