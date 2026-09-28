@@ -100,13 +100,17 @@ def action_preview(
         default_search_radius=default_search_radius,
     )
     if interpretation.state != CommandState.READY:
+        first_word = raw.strip().split(maxsplit=1)[0].lower() if raw.strip() else ""
+        is_invalid = interpretation.state == CommandState.INVALID
+        if is_invalid and first_word == "chord":
+            label = "invalid chord"
+        elif is_invalid and first_word in {"beam", "gbeam"}:
+            label = "invalid beam"
+        else:
+            label = "command"
         return ActionPreview(
             kind=interpretation.state.value,
-            label=("invalid chord" if [part.lower() for part in raw.strip().split()[:1]] == ["chord"]
-                   and interpretation.state == CommandState.INVALID
-                   else "invalid beam" if [part.lower() for part in raw.strip().split()[:1]] == ["beam"]
-                   and interpretation.state == CommandState.INVALID
-                   else interpretation.state.value + " command"),
+            label=label,
             detail=interpretation.message,
             valid=False,
             state=interpretation.state.value,
@@ -136,12 +140,15 @@ def action_preview(
     if command.kind == CommandKind.BEAM:
         width = command.beam_width
         assert width is not None
+        mode = (
+            "stochastic Gumbel-Top-k"
+            if command.beam_stochastic else
+            "cumulative log-p"
+        )
         return ActionPreview(
-            kind="effect", label="beam search preview",
-            detail=(
-                f"Press Enter to open a temporary beam leaderboard with width {width}. "
-                "Beam expansions remain outside episode history until a branch is selected."
-            ),
+            kind="effect",
+            label=("stochastic beam preview" if command.beam_stochastic else "beam search preview"),
+            detail=f"Open a width-{width} {mode} beam; select a branch to commit.",
             command=command,
         )
 
@@ -240,7 +247,10 @@ def action_preview(
 
     effects = {
         CommandKind.BIAS: ("token bias", "Update a group or token bias; stay at this step."),
-        CommandKind.BEAM: ("beam search", "Open the temporary branch leaderboard on Enter."),
+        CommandKind.BEAM: (
+            "beam search",
+            "Open the temporary deterministic or stochastic branch leaderboard on Enter.",
+        ),
         CommandKind.SAMPLER: (
             "sampler settings",
             (

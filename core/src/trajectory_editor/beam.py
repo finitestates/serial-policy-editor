@@ -1,4 +1,4 @@
-"""Interactive, temporary beam search over the editor's policy scores."""
+"""Interactive deterministic and stochastic beams over policy scores."""
 
 from __future__ import annotations
 
@@ -14,14 +14,21 @@ from .core.backend import BatchedInferenceSession
 from .core.episode_observation import EpisodeObservation
 from .core.errors import EditorError
 from .core.results import ActionOutcome
+from .core.sampling import conditional_gumbel_top_k
 from .episode_engine import EpisodeEngine
 from .terminal_contracts import BeamViewRow, BeamViewState
 
 
 class BeamRequested(Exception):
-    def __init__(self, width: int) -> None:
-        super().__init__(width)
+    def __init__(
+        self,
+        width: int,
+        *,
+        stochastic: bool = False,
+    ) -> None:
+        super().__init__(width, stochastic)
         self.width = width
+        self.stochastic = stochastic
 
 
 @dataclass(frozen=True)
@@ -41,6 +48,7 @@ class BeamPath:
     engine: EpisodeEngine
     node: BeamNode | None
     score: float
+    model_log_probability: float
     model_rank: int | None
     step_log_probability: float | None
     lane_id: int | None
@@ -58,6 +66,7 @@ class _Candidate:
     token_id: int
     model_rank: int
     log_probability: float
+    model_log_probability: float
     score: float
     is_eog: bool
     parent_order: int
@@ -74,11 +83,17 @@ class _Checkpoint:
 
 
 class BeamSearch:
-    """Maintain a live frontier without writing previews to episode history."""
+    """Maintain a temporary deterministic or Gumbel-Top-k frontier."""
 
-    def __init__(self, engine: EpisodeEngine, width: int = 5) -> None:
-        if type(width) is not int or not 1 <= width <= 26:
-            raise EditorError("beam width must be between 1 and 26")
+    def __init__(
+        self,
+        engine: EpisodeEngine,
+        width: int = 5,
+        *,
+        stochastic: bool = False,
+    ) -> None:
+        if type(width) is not int or not 1 <= width <= 100:
+            raise EditorError("beam width must be between 1 and 100")
         if engine.ended:
             raise EditorError("beam search requires a live decision boundary")
         if engine._speculative_accept_prefix is not None:
@@ -86,6 +101,7 @@ class BeamSearch:
             engine._ensure_backend_positioned()
         self.original = engine
         self.width = width
+        self.stochastic = bool(stochastic)
         self.base_visible = list(engine.visible_token_ids)
         self.base_prefix = list(engine.token_ids)
         self.shared_context = engine.backend.render(self.base_prefix, special=True)
@@ -140,7 +156,10 @@ class BeamSearch:
                 ),
                 observation=shared_observation,
             )
-            self.active = [BeamPath("root", root_engine, None, 0.0, None, None, 0 if self._primary_batch else None)]
+            self.active = [BeamPath(
+                "root", root_engine, None, 0.0, 0.0, None, None,
+                0 if self._primary_batch else None,
+            )]
             self.expand()
             self._retain_selection()
         except BaseException:
@@ -206,6 +225,32 @@ class BeamSearch:
             eog_ids = set(path.engine.backend.eog_token_ids())
             path_tokens = self._path_token_ids(path)
             is_eog = np.isin(ids, tuple(eog_ids)) if eog_ids else np.zeros(ids.shape, dtype=bool)
+
+            if self.stochastic:
+                for token_id, score in conditional_gumbel_top_k(
+                    log_probabilities,
+                    count=self.width,
+                    parent_score=path.score,
+                    parent_log_probability=path.model_log_probability,
+                    seed=path.engine.sampling.seed,
+                    stream_fingerprint=path.engine.stream_fingerprint,
+                    aligned_step=observation.sampling_boundary,
+                    prefix_token_ids=path_tokens,
+                ):
+                    if (*path_tokens, token_id) in self._killed_paths:
+                        continue
+                    log_probability = float(log_probabilities[token_id])
+                    candidates.append(self._candidate(
+                        path,
+                        observation,
+                        token_id,
+                        log_probability,
+                        bool(is_eog[token_id]),
+                        parent_order,
+                        score=score,
+                    ))
+                continue
+
             order = np.lexsort((ids, -log_probabilities))
 
             live_count = 0
@@ -244,15 +289,19 @@ class BeamSearch:
         log_probability: float,
         is_eog: bool,
         parent_order: int,
+        *,
+        score: float | None = None,
     ) -> _Candidate:
         model_rank = observation.policy_calculations.raw_rank(token_id)
+        model_log_probability = parent.model_log_probability + log_probability
         return _Candidate(
             parent=parent,
             observation=observation,
             token_id=token_id,
             model_rank=model_rank,
             log_probability=log_probability,
-            score=parent.score + log_probability,
+            model_log_probability=model_log_probability,
+            score=(parent.score + log_probability if score is None else score),
             is_eog=is_eog,
             parent_order=parent_order,
         )
@@ -281,6 +330,8 @@ class BeamSearch:
         return bool(self.active)
 
     def _expand_one(self) -> bool:
+        if self.stochastic:
+            return self._expand_stochastic_one()
         if not self.active:
             return False
         previous_active = tuple(self.active)
@@ -319,6 +370,44 @@ class BeamSearch:
         self._retain_selection()
         return bool(self.active)
 
+    def _expand_stochastic_one(self) -> bool:
+        """Keep one Gumbel-ranked frontier of live prefixes and finished leaves."""
+        if not self.active:
+            return False
+        previous_active = tuple(self.active)
+        candidates = self._candidates()
+        frontier: list[tuple[tuple, BeamPath | _Candidate]] = [
+            ((-path.score, 0, path.label), path)
+            for path in self.finished
+        ]
+        frontier.extend(
+            (
+                (-candidate.score, 1, *candidate.ordering[1:]),
+                candidate,
+            )
+            for candidate in candidates
+        )
+        frontier.sort(key=lambda entry: entry[0])
+        kept = [entry[1] for entry in frontier[:self.width]]
+
+        selected_candidates = [
+            item for item in kept if isinstance(item, _Candidate)
+        ]
+        self._expand_finished([
+            candidate for candidate in selected_candidates if candidate.is_eog
+        ])
+        self._expand_live([
+            candidate for candidate in selected_candidates if not candidate.is_eog
+        ])
+        kept_finished = [item for item in kept if isinstance(item, BeamPath)]
+        self.finished = [*kept_finished, *self._new_finished]
+        self.finished.sort(key=lambda path: (-path.score, path.label))
+
+        for path in previous_active:
+            path.engine._invalidate_observation()
+        self._retain_selection()
+        return bool(self.active)
+
     def _expand_finished(self, candidates: list[_Candidate]) -> None:
         self._new_finished: list[BeamPath] = []
         for candidate in candidates:
@@ -349,6 +438,7 @@ class BeamSearch:
             node = self._new_node(candidate, action, outcome)
             self._new_finished.append(BeamPath(
                 self._new_label(), engine, node, candidate.score,
+                candidate.model_log_probability,
                 candidate.model_rank, candidate.log_probability, None,
                 pre_terminal_engine,
             ))
@@ -400,6 +490,7 @@ class BeamSearch:
             node = self._new_node(candidate, action, outcome)
             next_active.append(BeamPath(
                 self._new_label(), engine, node, candidate.score,
+                candidate.model_log_probability,
                 candidate.model_rank, candidate.log_probability,
                 lane_id if self._primary_batch is not None else None,
             ))
@@ -562,15 +653,27 @@ class BeamSearch:
                 recent_steps=tuple(recent),
                 model_rank=path.model_rank,
                 step_log_probability=path.step_log_probability,
+                model_log_probability=path.model_log_probability,
             ))
 
+        if self.stochastic:
+            title = (
+                f"BEAM   STOCHASTIC · width {self.width} · depth {depth} · "
+                "sequence Gumbel-Top-k"
+            )
+        else:
+            title = (
+                f"BEAM   width {self.width} · depth {depth} · "
+                "score: cumulative model log-p"
+            )
         return BeamViewState(
-            title=f"BEAM   width {self.width} · depth {depth} · score: cumulative model log-p",
+            title=title,
             shared_context=self._context_tail,
             rows=tuple(rows),
             selected_label=self.selected_label,
             notice=notice,
             at_edge=at_edge,
+            stochastic=self.stochastic,
         )
 
     def kill(self, label: str) -> bool:
@@ -716,6 +819,22 @@ def beam_menu(
             beam.set_selection(paths[min(cursor_row, len(paths) - 1)].label)
         return has_live_paths
 
+    def kill_path(label: str) -> bool:
+        """Keep the highlight in place when pruning its selected branch."""
+        paths = beam.ordered_paths()
+        cursor_row = next(
+            (index for index, path in enumerate(paths)
+             if path.label == beam.selected_label),
+            0,
+        )
+        was_selected = label == beam.selected_label
+        if not beam.kill(label):
+            return False
+        paths = beam.ordered_paths()
+        if was_selected and paths:
+            beam.set_selection(paths[min(cursor_row, len(paths) - 1)].label)
+        return True
+
     while True:
         response = io.read_beam(beam.view_state(notice=notice, at_edge=at_edge))
         notice = ""
@@ -744,6 +863,16 @@ def beam_menu(
                 if not advance_at_cursor(beam.expand):
                     notice = "No live branches remain; choose an EOS branch or open Beam EDGE."
                 continue
+            if command == "k":
+                if beam.selected_label is None:
+                    notice = "Select a branch before killing it."
+                    continue
+                try:
+                    if not kill_path(beam.selected_label):
+                        return "discard", None
+                except EditorError as exc:
+                    notice = str(exc)
+                continue
             if command.startswith(("advance ", "hold ", "a ")):
                 _, _, count = command.partition(" ")
                 try:
@@ -768,20 +897,27 @@ def beam_menu(
                 continue
             if command.startswith("kill "):
                 try:
-                    if not beam.kill(command.split(maxsplit=1)[1]):
+                    if not kill_path(command.split(maxsplit=1)[1]):
                         return "discard", None
                 except (EditorError, IndexError) as exc:
                     notice = str(exc)
                 continue
             if command in {"?", "help"}:
+                if beam.stochastic:
+                    ranking = (
+                        "Gumbel-Top-k samples without replacement; live and EOS share width. "
+                        "Uses policy softmax; sampler temperature, filters, and draw settings are ignored. "
+                    )
+                else:
+                    ranking = (
+                        "Ranks by cumulative policy log-p; sampler temperature, "
+                        "filters, and draw noise are ignored. "
+                    )
                 notice = (
-                    "Enter or ] expands the live beam by one token and prunes globally by cumulative log probability "
-                    "from full-vocabulary log-softmax scores after policy logit adjustments; temperature, "
-                    "truncation filters, and the draw kernel's noise are not applied. "
-                    "`advance N` or `hold N` expands up to N tokens and is undone by one rewind. "
-                    "`kill ID` permanently removes a branch lineage without writing episode history. "
-                    "Choose a stable ID or use `select ID` to commit its visible continuation. "
-                    "Selecting an EOS branch stops immediately before its EOG action. q opens Beam EDGE options."
+                    "Enter/ ] expands one token; " + ranking
+                    + "`advance N` steps and `rewind` undo them. `kill ID` removes a branch; "
+                    "`k` kills the selected branch. Select a branch to commit; EOS commits text "
+                    "before the EOG token; q opens options."
                 )
                 continue
             target = command[7:].strip() if command.startswith("select ") else command

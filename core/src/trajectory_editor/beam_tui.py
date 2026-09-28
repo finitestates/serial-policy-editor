@@ -129,6 +129,19 @@ class LiveBeamView(ViewLifecycle):
             self._move_selection(1, event)
 
         @self.bindings.add(
+            "backspace",
+            filter=Condition(
+                lambda: not self.state.at_edge and not self.command_buffer.text
+            ),
+        )
+        def _kill_selected(event):
+            command = (
+                f"kill {self.selected_label}"
+                if self.selected_label is not None else "k"
+            )
+            self._submit_command(event, command)
+
+        @self.bindings.add(
             "right",
             filter=Condition(lambda: not self.command_buffer.text.strip()),
         )
@@ -189,6 +202,12 @@ class LiveBeamView(ViewLifecycle):
             marker = ">" if selected_row else " "
             status = f" · {row.state}"
             score = row.score.replace("-", "−")
+            if self.state.stochastic:
+                model_logp = (
+                    "—" if row.model_log_probability is None
+                    else f"{row.model_log_probability:.3f}"
+                )
+                score = f"G {score} · log-p {model_logp}"
             continuation = row.continuation.replace("\n", " ↵ ")
             fragments.extend(
                 [
@@ -239,7 +258,7 @@ class LiveBeamView(ViewLifecycle):
             fragments.append(
                 (
                     "class:muted",
-                    "\nEOS likelihood is scored; selection commits text before EOS.\n",
+                    "\nEOS is scored; selecting it commits text before EOS.\n",
                 )
             )
         return fragments
@@ -262,8 +281,8 @@ class LiveBeamView(ViewLifecycle):
             text = "Enter/→ resume · discard restore episode · Esc return · q quit editor"
         else:
             text = (
-                "↑↓ inspect · → step · ← rewind · Enter commit · Esc return · "
-                "advance/hold N · kill ID · q options"
+                "↑↓ inspect · Backspace kill · → step · ← rewind · Enter commit · "
+                "Esc return · advance/hold N · kill ID · q options"
             )
         return [("class:hint", text)]
 

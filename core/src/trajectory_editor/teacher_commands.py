@@ -90,6 +90,7 @@ class TeacherCommand:
     bias_token_id: int | None = None
     chord_ranks: tuple[int, ...] | None = None
     beam_width: int | None = None
+    beam_stochastic: bool = False
     sampler_text: str | None = None
     reroll_seed: int | None = None
     draw_raw_rank: int | None = None
@@ -144,8 +145,12 @@ HELP_TEXT = """Commands:
   1..N              commit a candidate; the proposal rank records acceptance
   chord RANK RANK... preview temporary continuations; choose a letter or starting rank
                     to commit its actions and drop the other previews
-  beam [WIDTH]      open an interactive beam leaderboard (default width: 5)
-                    Enter expands one token; kill ID prunes a branch; select ID commits it
+  beam [WIDTH]       cumulative log-p beam (default width: 5; maximum: 100)
+  beam stochastic [WIDTH]
+                    open Gumbel-Top-k sampling without replacement
+  gbeam [WIDTH]     short form for stochastic beam
+                    Enter expands; k/Backspace kills the selected path; kill ID targets one;
+                    select ID commits a path
   t TEXT            insert continuation text (adds a joining space if needed)
   x TEXT            insert exact text
                     after `t ` or `x `, Tab inserts a literal tab character
@@ -393,6 +398,31 @@ def _bias_adjustment(raw: str) -> tuple[str, float | None] | None:
     return operator, amount
 
 
+def _bias_prefix_message(raw: str) -> str | None:
+    """Keep partial group creation in the editor's incomplete state."""
+    value = raw.strip()
+    group_prefix = re.fullmatch(
+        r"b\s+[A-Za-z_][A-Za-z0-9_.-]*\s*->(?:\s*(?P<members>\{.*))?",
+        value,
+    )
+    if group_prefix is None:
+        return None
+    members = group_prefix.group("members")
+    if members is None:
+        return "Type group members after `->`, for example `{term}`."
+    if not members.endswith("}"):
+        return "Finish the bias group with `}`."
+    return None
+
+
+def _required_bias_adjustment(raw: str) -> tuple[str, float | None]:
+    """Parse a captured adjustment and turn malformed operators into input errors."""
+    parsed = _bias_adjustment(raw)
+    if parsed is None:
+        raise EditorError("use +[amount], -[amount], =[amount], or off")
+    return parsed
+
+
 def parse_bias_command(raw: str, *, vocabulary_size: int) -> TeacherCommand | None:
     """Parse group, member, token, and attribution commands."""
     value = raw.strip()
@@ -456,7 +486,7 @@ def parse_bias_command(raw: str, *, vocabulary_size: int) -> TeacherCommand | No
         adjustment = direct_token.group("adjustment")
         if adjustment is None:
             return TeacherCommand(CommandKind.BIAS, bias_inspect_token=token_id)
-        operator, amount = _bias_adjustment(adjustment)
+        operator, amount = _required_bias_adjustment(adjustment)
         if operator is None:
             raise EditorError("use +[amount], -[amount], =[amount], or off")
         return TeacherCommand(
@@ -478,7 +508,9 @@ def parse_bias_command(raw: str, *, vocabulary_size: int) -> TeacherCommand | No
             raise EditorError("bias adjustments target group names, not literal text")
         if any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", name) for name in names):
             raise EditorError("bias group names must be simple names")
-        operator, amount = _bias_adjustment(group_adjust.group("adjustment"))
+        operator, amount = _required_bias_adjustment(
+            group_adjust.group("adjustment")
+        )
         if operator is None:
             raise EditorError("use +[amount], -[amount], =[amount], or off")
         return TeacherCommand(
@@ -496,7 +528,9 @@ def parse_bias_command(raw: str, *, vocabulary_size: int) -> TeacherCommand | No
         rank = int(rank_adjust.group("rank"))
         if not 1 <= rank <= vocabulary_size:
             raise EditorError("bias rank is outside the vocabulary")
-        operator, amount = _bias_adjustment(rank_adjust.group("adjustment"))
+        operator, amount = _required_bias_adjustment(
+            rank_adjust.group("adjustment")
+        )
         if operator is None:
             raise EditorError("use +[amount], -[amount], =[amount], or off")
         return TeacherCommand(
@@ -525,21 +559,53 @@ def parse_chord(raw: str, vocabulary_size: int) -> tuple[int, ...] | None:
     return ranks
 
 
-def parse_beam(raw: str) -> int | None:
-    """Recognize ``beam [WIDTH]`` before generic command parsing."""
+def parse_beam(raw: str) -> tuple[int, bool] | None:
+    """Recognize deterministic and stochastic beam forms."""
     parts = raw.strip().split()
-    if not parts or parts[0].lower() != "beam":
+    if not parts or parts[0].lower() not in {"beam", "gbeam"}:
         return None
-    if len(parts) > 2:
-        raise EditorError("use beam [WIDTH]")
-    if len(parts) == 1:
-        return 5
-    if not parts[1].isdecimal():
+    short_stochastic = parts[0].lower() == "gbeam"
+    stochastic = (
+        short_stochastic
+        or (len(parts) >= 2 and parts[1].lower() == "stochastic")
+    )
+    width_parts = (
+        parts[1:]
+        if short_stochastic
+        else parts[2:] if stochastic else parts[1:]
+    )
+    if len(width_parts) > 1:
+        raise EditorError(
+            "use beam [WIDTH], beam stochastic [WIDTH], or gbeam [WIDTH]"
+        )
+    width = 5
+    if width_parts and not width_parts[0].isdecimal():
         raise EditorError("beam width must be a positive integer")
-    width = int(parts[1])
-    if not 1 <= width <= 26:
-        raise EditorError("beam width must be between 1 and 26")
-    return width
+    if width_parts:
+        width = int(width_parts[0])
+    if not 1 <= width <= 100:
+        raise EditorError("beam width must be between 1 and 100")
+    return width, stochastic
+
+
+def _beam_prefix_message(raw: str) -> str | None:
+    """Return guidance while a beam command is still being typed."""
+    parts = raw.strip().lower().split()
+    if not parts:
+        return None
+    if len(parts) == 1:
+        word = parts[0]
+        if word == "g":
+            return "Continue typing gbeam or groups."
+        if len(word) >= 2:
+            for candidate in ("beam", "gbeam", "groups"):
+                if candidate.startswith(word) and candidate != word:
+                    return f"Continue typing {candidate}."
+    if parts[0] == "beam" and len(parts) == 2:
+        option = parts[1]
+        if option and "stochastic".startswith(option) and option != "stochastic":
+            return "Finish typing stochastic, or enter a beam width."
+    return None
 
 
 def parse_command(
@@ -550,9 +616,14 @@ def parse_command(
     vocabulary_size: int | None = None,
     default_search_radius: int = 3,
 ) -> TeacherCommand:
-    beam_width = parse_beam(raw)
-    if beam_width is not None:
-        return TeacherCommand(CommandKind.BEAM, beam_width=beam_width)
+    beam = parse_beam(raw)
+    if beam is not None:
+        beam_width, beam_stochastic = beam
+        return TeacherCommand(
+            CommandKind.BEAM,
+            beam_width=beam_width,
+            beam_stochastic=beam_stochastic,
+        )
     chord_ranks = parse_chord(raw, vocabulary_size or menu_size)
     if chord_ranks is not None:
         return TeacherCommand(CommandKind.CHORD, chord_ranks=chord_ranks)
@@ -824,6 +895,12 @@ def interpret_command(
 
     stripped = raw.strip()
     lower = stripped.lower()
+    beam_prefix = _beam_prefix_message(raw)
+    if beam_prefix is not None:
+        return CommandInterpretation(raw, CommandState.INCOMPLETE, message=beam_prefix)
+    bias_prefix = _bias_prefix_message(raw)
+    if bias_prefix is not None:
+        return CommandInterpretation(raw, CommandState.INCOMPLETE, message=bias_prefix)
     if raw == "/":
         return CommandInterpretation(raw, CommandState.INCOMPLETE, message="Type token text after /.")
     if lower in {"t", "x"} or (len(raw) == 2 and raw[:2].lower() in {"t ", "x "}):
@@ -853,4 +930,13 @@ def interpret_command(
         )
     except EditorError as exc:
         return CommandInterpretation(raw, CommandState.INVALID, message=str(exc))
+    except (TypeError, ValueError, IndexError):
+        # The draft is untrusted text. If a parser branch misses an input
+        # validation case, keep it in the normal feedback path instead of
+        # letting malformed input terminate the interactive UI.
+        return CommandInterpretation(
+            raw,
+            CommandState.INVALID,
+            message="malformed command input; use ? for help",
+        )
     return CommandInterpretation(raw, CommandState.READY, command)

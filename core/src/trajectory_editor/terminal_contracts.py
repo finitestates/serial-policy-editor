@@ -95,6 +95,7 @@ class BeamViewRow:
     recent_steps: tuple[str, ...]
     model_rank: int | None = None
     step_log_probability: float | None = None
+    model_log_probability: float | None = None
 
 
 @dataclass(frozen=True)
@@ -105,6 +106,7 @@ class BeamViewState:
     selected_label: str | None
     notice: str = ""
     at_edge: bool = False
+    stochastic: bool = False
 
 
 @dataclass(frozen=True)

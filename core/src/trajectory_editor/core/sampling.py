@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -335,6 +335,110 @@ def position_uniform_model_rank(
     ).encode()
     value = int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big")
     return (value + 0.5) / float(1 << 64)
+
+
+def conditional_gumbel_top_k(
+    log_probabilities: np.ndarray,
+    *,
+    count: int,
+    parent_score: float,
+    parent_log_probability: float,
+    seed: int,
+    stream_fingerprint: str,
+    aligned_step: int,
+    prefix_token_ids: Sequence[int],
+) -> tuple[tuple[int, float], ...]:
+    """Return top child Gumbel scores conditioned on their maximum.
+
+    This is the top-down Gumbel split used by stochastic beam search.  In
+    exponential-race coordinates, the winning child is sampled from the
+    conditional distribution and every later child arrives after an
+    exponential waiting time over the remaining child mass.  The returned
+    scores are therefore the highest ``count`` child scores conditioned on
+    their maximum being exactly ``parent_score``.
+    """
+
+    values = np.asarray(log_probabilities, dtype=np.float64)
+    if values.ndim != 1 or not len(values) or not np.all(np.isfinite(values)):
+        raise ValueError("conditional Gumbel sampling requires finite log probabilities")
+    if type(count) is not int or count < 1:
+        raise EditorError("conditional Gumbel sample count must be a positive integer")
+    if (
+        type(parent_score) not in {int, float}
+        or not math.isfinite(float(parent_score))
+        or type(parent_log_probability) not in {int, float}
+        or not math.isfinite(float(parent_log_probability))
+    ):
+        raise EditorError("conditional Gumbel parent scores must be finite")
+    if type(seed) is not int or not MIN_SEED <= seed <= MAX_SEED:
+        raise EditorError("seed must be a signed-64-bit integer")
+    _validate_fingerprint(stream_fingerprint)
+    _validate_boundary(aligned_step, "sampling boundary")
+    if isinstance(prefix_token_ids, (str, bytes)):
+        raise EditorError("stochastic beam prefixes must be token ID sequences")
+    prefix = tuple(prefix_token_ids)
+    if any(
+        type(token_id) is not int
+        or token_id < 0
+        or token_id >= (1 << 64)
+        for token_id in prefix
+    ):
+        raise EditorError("stochastic beam prefixes must contain nonnegative token IDs")
+
+    log_normalizer = float(np.logaddexp.reduce(values))
+    normalized = values - log_normalizer
+    weights = np.exp(normalized)
+    total_weight = float(np.sum(weights))
+    if not math.isfinite(total_weight) or total_weight <= 0.0:
+        raise ValueError("conditional Gumbel child mass is invalid")
+    weights /= total_weight
+
+    prefix_bytes = len(prefix).to_bytes(8, "big") + b"".join(
+        token_id.to_bytes(8, "big") for token_id in prefix
+    )
+    address = (
+        f"{RNG_SCHEME}:stochastic-beam-gumbel-top-k-v1:"
+        f"{seed}:{stream_fingerprint}:{aligned_step}:"
+    ).encode() + prefix_bytes
+    parent_key = hashlib.blake2b(address, digest_size=16).digest()
+
+    def uniform(lane: bytes, ordinal: int) -> float:
+        payload = (
+            b"stochastic-beam-child-v1:" + parent_key + b":" + lane + b":"
+            + ordinal.to_bytes(8, "big")
+        )
+        value = int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big")
+        return (value + 0.5) / float(1 << 64)
+
+    def choose(remaining: np.ndarray, remaining_mass: float, quantile: float) -> int:
+        target = quantile * remaining_mass
+        index = int(np.searchsorted(np.cumsum(remaining), target, side="right"))
+        if index >= len(remaining):
+            index = int(np.flatnonzero(remaining > 0.0)[-1])
+        return index
+
+    remaining = weights.copy()
+    remaining_mass = float(np.sum(remaining))
+    winner = choose(remaining, remaining_mass, uniform(b"winner", 0))
+    result: list[tuple[int, float]] = [(winner, float(parent_score))]
+    remaining[winner] = 0.0
+
+    for ordinal in range(1, min(count, len(values))):
+        remaining_mass = float(np.sum(remaining))
+        if remaining_mass <= 0.0:
+            break
+        log_rate = float(parent_log_probability) + math.log(remaining_mass)
+        exponential_wait = -math.log(uniform(b"wait", ordinal))
+        log_wait = math.log(exponential_wait) - log_rate
+        log_arrival = float(np.logaddexp(-float(parent_score), log_wait))
+        child_score = -log_arrival
+        token_id = choose(
+            remaining, remaining_mass, uniform(b"winner", ordinal)
+        )
+        result.append((token_id, child_score))
+        remaining[token_id] = 0.0
+
+    return tuple(result)
 
 
 def gaussian_ranking_scores(

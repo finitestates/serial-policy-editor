@@ -850,7 +850,13 @@ class InteractivePolicy:
             )
             if interpretation.state != CommandState.READY:
                 feedback = ChoiceFeedback(
-                    "error", "INVALID COMMAND", (interpretation.message,)
+                    "info" if interpretation.state == CommandState.INCOMPLETE else "error",
+                    (
+                        "INCOMPLETE COMMAND"
+                        if interpretation.state == CommandState.INCOMPLETE
+                        else "INVALID COMMAND"
+                    ),
+                    (interpretation.message,),
                 )
                 continue
             command = interpretation.command
@@ -872,7 +878,10 @@ class InteractivePolicy:
                     )
                     continue
                 assert command.beam_width is not None
-                raise BeamRequested(command.beam_width)
+                raise BeamRequested(
+                    command.beam_width,
+                    stochastic=command.beam_stochastic,
+                )
             if review_boundary is not None:
                 if command.kind == CommandKind.REVIEW_BACK:
                     review_boundary = max(0, review_boundary - 1)

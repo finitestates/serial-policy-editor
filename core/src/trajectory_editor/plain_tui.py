@@ -209,17 +209,24 @@ def read_edge(io: IO, state: EdgeViewState) -> str | None:
 
 
 def read_beam(io: IO, state: BeamViewState) -> BeamInput | None:
-    rows = [
-        state.title,
-        "Scores use full-vocabulary log-softmax after policy logit adjustments.",
-        "Temperature, truncation filters, and draw noise do not affect beam ordering.",
-        "Model-rank remains the left-column candidate address.",
+    rows = [state.title]
+    if state.stochastic:
+        rows.extend([
+            "Gumbel-Top-k samples without replacement; live and EOS share the beam width.",
+            "Uses policy-adjusted full softmax; sampler temperature, filters, and draw settings are ignored.",
+        ])
+    else:
+        rows.extend([
+            "Cumulative log-p uses full-vocabulary softmax after policy adjustments.",
+            "Sampler temperature, filters, and draw noise do not affect the beam.",
+        ])
+    rows.extend([
         "",
         "Shared context (last 4 lines):",
         state.shared_context,
         "",
         "Survivors:",
-    ]
+    ])
     if not state.rows:
         rows.append("  No retained branches.")
     for rank, row in enumerate(state.rows, 1):
@@ -229,11 +236,22 @@ def read_beam(io: IO, state: BeamViewState) -> BeamInput | None:
             "—" if row.step_log_probability is None
             else f"{row.step_log_probability:.6f}"
         )
-        rows.append(
-            f"{marker}{rank:>2} {row.label:<3} {row.state:<4} "
-            f"model-rank {model_rank:<7} step-logp {step_logp:<10} "
-            f"beam-logp {row.score}"
-        )
+        if state.stochastic:
+            model_logp = (
+                "—" if row.model_log_probability is None
+                else f"{row.model_log_probability:.6f}"
+            )
+            rows.append(
+                f"{marker}{rank:>2} {row.label:<3} {row.state:<4} "
+                f"model-rank {model_rank:<7} step-logp {step_logp:<10} "
+                f"gumbel-score {row.score} model-logp {model_logp}"
+            )
+        else:
+            rows.append(
+                f"{marker}{rank:>2} {row.label:<3} {row.state:<4} "
+                f"model-rank {model_rank:<7} step-logp {step_logp:<10} "
+                f"beam-logp {row.score}"
+            )
         rows.extend(f"   {line}" for line in row.continuation.split("\n"))
     selected = next(
         (row for row in state.rows if row.label == state.selected_label),
@@ -247,7 +265,7 @@ def read_beam(io: IO, state: BeamViewState) -> BeamInput | None:
     prompt = (
         "Beam EDGE: c resume | discard restore episode | q quit editor > "
         if state.at_edge else
-        "Beam: Enter expand | advance N | rewind | kill ID | "
+        "Beam: Enter expand | k kill selected | advance N | rewind | kill ID | "
         "ID/select ID commit | q options | ? help > "
     )
     raw = io.prompt(PromptRequest(prompt, body="\n".join(rows), isolated=True))

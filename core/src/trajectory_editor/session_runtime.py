@@ -385,7 +385,11 @@ def run_session_roster(
                 continue
         except BeamRequested as request:
             pending_tape = None
-            beam = BeamSearch(session.engine, request.width)
+            beam = BeamSearch(
+                session.engine,
+                request.width,
+                stochastic=request.stochastic,
+            )
             try:
                 beam_action, actions = beam_menu(
                     io, beam, promote_on_select=True
