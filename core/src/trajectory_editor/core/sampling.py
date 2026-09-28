@@ -20,6 +20,7 @@ from .errors import EditorError
 
 
 RNG_SCHEME = "blake2b64-token-prefix-quantile-v2"
+GUMBEL_NOISE_ADDRESSES = ("token-id", "model-rank")
 MIN_SEED = -(1 << 63)
 MAX_SEED = (1 << 63) - 1
 
@@ -314,6 +315,28 @@ def position_uniform_token(
     return (value + 0.5) / float(1 << 64)
 
 
+def position_uniform_model_rank(
+    seed: int,
+    stream_fingerprint: str,
+    aligned_step: int,
+    model_rank: int,
+) -> float:
+    """Return a stable Gumbel quantile addressed by one-based model rank."""
+
+    if type(model_rank) is not int or model_rank < 1:
+        raise EditorError("model rank must be a positive integer")
+    if type(seed) is not int or not MIN_SEED <= seed <= MAX_SEED:
+        raise EditorError("seed must be a signed-64-bit integer")
+    _validate_fingerprint(stream_fingerprint)
+    _validate_boundary(aligned_step, "sampling boundary")
+    payload = (
+        f"{RNG_SCHEME}:gumbel-max:model-rank:{seed}:{stream_fingerprint}:"
+        f"{aligned_step}:{model_rank}"
+    ).encode()
+    value = int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big")
+    return (value + 0.5) / float(1 << 64)
+
+
 def gaussian_ranking_scores(
     distribution: SparseDistribution,
     *,
@@ -372,6 +395,9 @@ def draw_token(
     aligned_step: int,
     kernel: str = "categorical",
     gaussian_noise_std: float = 1.0,
+    gumbel_noise_address: str = "token-id",
+    candidate_model_ranks: np.ndarray | None = None,
+    gumbel_noise_scale: float = 1.0,
 ) -> int:
     """Draw one token using a replay-stable categorical, Gumbel, or Gaussian kernel."""
 
@@ -383,6 +409,9 @@ def draw_token(
             seed=seed,
             stream_fingerprint=stream_fingerprint,
             aligned_step=aligned_step,
+            noise_address=gumbel_noise_address,
+            candidate_model_ranks=candidate_model_ranks,
+            gumbel_noise_scale=gumbel_noise_scale,
         )
         return gumbel_winner(distribution, scores)
     if kernel == "gaussian-max":
@@ -405,6 +434,9 @@ def gumbel_ranking_scores(
     seed: int,
     stream_fingerprint: str,
     aligned_step: int,
+    noise_address: str = "token-id",
+    candidate_model_ranks: np.ndarray | None = None,
+    gumbel_noise_scale: float = 1.0,
 ) -> np.ndarray:
     """Return effective scores plus the replay-stable Gumbel perturbations."""
 
@@ -416,14 +448,51 @@ def gumbel_ranking_scores(
         raise ValueError("candidate scores do not match candidate IDs")
     if not len(ids):
         raise ValueError("gumbel-max requires at least one candidate")
-    uniforms = np.asarray(
-        [
-            position_uniform_token(seed, stream_fingerprint, aligned_step, int(token_id))
-            for token_id in ids
-        ],
-        dtype=np.float64,
-    )
-    return scores - np.log(-np.log(uniforms))
+    if (
+        type(gumbel_noise_scale) not in {int, float}
+        or not math.isfinite(float(gumbel_noise_scale))
+    ):
+        raise EditorError("gumbel_noise_scale must be finite and nonnegative")
+    if gumbel_noise_scale < 0.0:
+        raise EditorError("gumbel_noise_scale must be finite and nonnegative")
+    if noise_address not in GUMBEL_NOISE_ADDRESSES:
+        raise EditorError("gumbel_noise_address must be token-id or model-rank")
+    if gumbel_noise_scale == 0.0:
+        return scores.copy()
+    if noise_address == "model-rank":
+        if candidate_model_ranks is None:
+            raise ValueError("model-rank Gumbel noise requires candidate model ranks")
+        ranks = np.asarray(candidate_model_ranks)
+        if (
+            ranks.shape != ids.shape
+            or not np.issubdtype(ranks.dtype, np.integer)
+            or np.any(ranks < 1)
+            or len(np.unique(ranks)) != len(ranks)
+        ):
+            raise ValueError("candidate model ranks must be distinct positive integers")
+        uniforms = np.asarray(
+            [
+                position_uniform_model_rank(
+                    seed, stream_fingerprint, aligned_step, int(rank)
+                )
+                for rank in ranks
+            ],
+            dtype=np.float64,
+        )
+    else:
+        uniforms = np.asarray(
+            [
+                position_uniform_token(seed, stream_fingerprint, aligned_step, int(token_id))
+                for token_id in ids
+            ],
+            dtype=np.float64,
+        )
+    if gumbel_noise_scale == 1.0:
+        return scores - np.log(-np.log(uniforms))
+    ranking = scores - float(gumbel_noise_scale) * np.log(-np.log(uniforms))
+    if not np.all(np.isfinite(ranking)):
+        raise ValueError("Gumbel noise produced non-finite ranking scores")
+    return ranking
 
 
 def gumbel_winner(
@@ -462,6 +531,9 @@ def gumbel_ranked_ids(
     seed: int,
     stream_fingerprint: str,
     aligned_step: int,
+    noise_address: str = "token-id",
+    candidate_model_ranks: np.ndarray | None = None,
+    gumbel_noise_scale: float = 1.0,
 ) -> np.ndarray:
     """Return eligible token IDs in deterministic Gumbel-Max order."""
 
@@ -471,6 +543,9 @@ def gumbel_ranked_ids(
         seed=seed,
         stream_fingerprint=stream_fingerprint,
         aligned_step=aligned_step,
+        noise_address=noise_address,
+        candidate_model_ranks=candidate_model_ranks,
+        gumbel_noise_scale=gumbel_noise_scale,
     )
     order = np.lexsort((ids, -ranking))
     return ids[order]
@@ -485,6 +560,9 @@ def find_seed_for_token(
     aligned_step: int,
     kernel: str,
     gaussian_noise_std: float = 1.0,
+    gumbel_noise_address: str = "token-id",
+    candidate_model_ranks: np.ndarray | None = None,
+    gumbel_noise_scale: float = 1.0,
     next_seed: Callable[[], int],
 ) -> tuple[int, int]:
     """Find a fresh seed whose normal draw selects an eligible token.
@@ -510,10 +588,26 @@ def find_seed_for_token(
             aligned_step=aligned_step,
             kernel=kernel,
             gaussian_noise_std=0.0,
+            gumbel_noise_address=gumbel_noise_address,
+            candidate_model_ranks=candidate_model_ranks,
         )
         if proposal != token_id:
             raise EditorError(
                 "gaussian_noise_std=0 makes this token impossible to select"
+            )
+    if kernel == "gumbel-max" and gumbel_noise_scale == 0.0:
+        proposal = draw_token(
+            distribution,
+            seed=current_seed,
+            stream_fingerprint=stream_fingerprint,
+            aligned_step=aligned_step,
+            kernel=kernel,
+            gumbel_noise_address=gumbel_noise_address,
+            gumbel_noise_scale=0.0,
+        )
+        if proposal != token_id:
+            raise EditorError(
+                "gumbel_noise_scale=0 makes this token impossible to select"
             )
 
     checked = 0
@@ -531,12 +625,16 @@ def find_seed_for_token(
             aligned_step=aligned_step,
             kernel=kernel,
             gaussian_noise_std=gaussian_noise_std,
+            gumbel_noise_address=gumbel_noise_address,
+            candidate_model_ranks=candidate_model_ranks,
+            gumbel_noise_scale=gumbel_noise_scale,
         ) == token_id:
             return seed, checked
 
 
 __all__ = [
     "CandidateFilterResult",
+    "GUMBEL_NOISE_ADDRESSES",
     "MAX_SEED",
     "MIN_SEED",
     "RNG_SCHEME",
@@ -555,6 +653,7 @@ __all__ = [
     "gumbel_ranked_ids",
     "gumbel_winner",
     "position_uniform",
+    "position_uniform_model_rank",
     "position_uniform_token",
     "raw_rank",
     "top_raw_ids",

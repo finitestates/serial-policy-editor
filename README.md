@@ -132,6 +132,21 @@ in Gumbel order; the first row remains the proposal, and displayed model ranks
 stay as the candidates' selection addresses. `--gumbel-top-k none` removes this
 menu limit.
 
+By default, each candidate's Gumbel noise is addressed by token ID. Set
+`--gumbel-noise-address model-rank` to address it by the candidate's one-based
+full-vocabulary model rank instead. The option enables Gumbel-Max unless a draw
+kernel is explicitly selected. Candidate filtering and each token's displayed
+model rank stay as before, but the changed noise assignment can change which
+rank wins. Candidates at the same model rank share the same Gumbel variate
+across candidate sets if the seed, stream fingerprint, and boundary stay fixed.
+`--gumbel-noise-scale SCALE` selects Gumbel-Max unless another draw kernel is
+explicitly chosen, and scales perturbations after filtering. A scale of `1` is
+standard Gumbel-Max; `0` removes noise. Larger values strengthen the
+perturbation while leaving the active candidate set fixed. On a fixed set,
+changing the scale is equivalent to changing the scores' effective temperature.
+This separates noise strength from temperature-dependent filters that can
+change candidate eligibility.
+
 For Gaussian-noise argmax, use `--draw-kernel gaussian-max` with the optional
 `--gaussian-noise-std` (default `1.0`). The standard deviation is applied to
 temperature-scaled policy scores; random noise is keyed for deterministic

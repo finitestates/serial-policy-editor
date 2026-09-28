@@ -19,6 +19,13 @@ def sampler_summary(config: SamplerConfig) -> str:
     )
     if config.gumbel_top_k is not None:
         summary += f" gumbel_top_k={config.gumbel_top_k}"
+    if (
+        config.draw_kernel == "gumbel-max"
+        and config.gumbel_noise_address != "token-id"
+    ):
+        summary += f" gumbel_noise_address={config.gumbel_noise_address}"
+    if config.draw_kernel == "gumbel-max" and config.gumbel_noise_scale != 1.0:
+        summary += f" gumbel_noise_scale={config.gumbel_noise_scale:g}"
     if config.draw_kernel == "gaussian-max":
         summary += f" gaussian_noise_std={config.gaussian_noise_std:g}"
     if config.bias_groups:

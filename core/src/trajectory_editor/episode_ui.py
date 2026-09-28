@@ -1012,6 +1012,19 @@ class InteractivePolicy:
                         aligned_step=observation.sampling_boundary,
                         kernel=engine.sampling.draw_kernel,
                         gaussian_noise_std=engine.sampling.gaussian_noise_std,
+                        gumbel_noise_address=engine.sampling.gumbel_noise_address,
+                        gumbel_noise_scale=engine.sampling.gumbel_noise_scale,
+                        candidate_model_ranks=(
+                            observation.policy_calculations.raw_ranks_for(
+                                observation.distribution.ids
+                            )
+                            if (
+                                engine.sampling.draw_kernel == "gumbel-max"
+                                and engine.sampling.gumbel_noise_address == "model-rank"
+                                and engine.sampling.gumbel_noise_scale > 0.0
+                            )
+                            else None
+                        ),
                         next_seed=random_seed,
                     )
                 except KeyboardInterrupt:
