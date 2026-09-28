@@ -132,6 +132,8 @@ HELP_TEXT = """Commands:
                       use literal:"text" in a group to disable surface variants
   multi-token terms bias only the final token after an exact prefix match
   s top_k=20|none change sampler settings; changes are part of the action tape
+  s gumbel_top_k=5 shows five Gumbel-ranked candidates (proposal stays first)
+  s draw_kernel=gaussian-max gaussian_noise_std=1 uses Gaussian-noise argmax
   s {JSON}        replace all sampler settings from a complete SamplerConfig record
   reroll [SEED]   change the draw seed as a replayable action
   draw RAW_RANK   find a seed that draws the token at this raw rank

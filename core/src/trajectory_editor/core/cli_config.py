@@ -28,6 +28,8 @@ CORE_SAMPLER_FIELDS = (
     "typical_p",
     "tail_free_z",
     "draw_kernel",
+    "gaussian_noise_std",
+    "gumbel_top_k",
     "cfg_unconditional_prompt",
     "cfg_scale",
     "cfg_prefix_tokens",
@@ -67,6 +69,14 @@ class _StoreTopK(argparse.Action):
         setattr(namespace, "_top_k_specified", True)
 
 
+class _StoreGumbelTopK(argparse.Action):
+    """Store an optional Gumbel menu size and retain explicit ``none``."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        setattr(namespace, "_gumbel_top_k_specified", True)
+
+
 def add_core_sampler_arguments(
     parser: argparse.ArgumentParser, *, include_vector: bool = True
 ) -> None:
@@ -101,8 +111,28 @@ def add_core_sampler_arguments(
     )
     sampling.add_argument(
         "--draw-kernel",
-        choices=("categorical", "gumbel-max"),
-        help="candidate draw kernel (default: categorical)",
+        choices=("categorical", "gumbel-max", "gaussian-max"),
+        help=(
+            "candidate draw kernel (categorical, gumbel-max, or gaussian-max; "
+            "default: categorical)"
+        ),
+    )
+    sampling.add_argument(
+        "--gumbel-top-k",
+        type=_parse_top_k,
+        action=_StoreGumbelTopK,
+        default=None,
+        metavar="N|none",
+        help=(
+            "use Gumbel-Max and limit the menu to the top N Gumbel-ranked "
+            "candidates; none disables the menu limit"
+        ),
+    )
+    parser.set_defaults(_gumbel_top_k_specified=False)
+    sampling.add_argument(
+        "--gaussian-noise-std",
+        type=float,
+        help="standard deviation for gaussian-max noise in scaled-logit units",
     )
     sampling.add_argument(
         "--cfg-unconditional-prompt",
@@ -166,6 +196,10 @@ def _top_k_was_specified(args: argparse.Namespace) -> bool:
     )
 
 
+def _gumbel_top_k_was_specified(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "_gumbel_top_k_specified", False))
+
+
 def _unfiltered_values(args: argparse.Namespace) -> dict[str, Any]:
     values = dict(_UNFILTERED_VALUES)
     cli_explicit = getattr(args, "_cli_explicit_options", set())
@@ -205,9 +239,27 @@ def sampler_from_args(
                 if _top_k_was_specified(args)
                 else base.top_k
             )
+        elif name == "gumbel_top_k":
+            values[name] = (
+                getattr(args, name, None)
+                if _gumbel_top_k_was_specified(args)
+                else base.gumbel_top_k
+            )
         else:
             value = getattr(args, name, None)
             values[name] = getattr(base, name) if value is None else value
+    if (
+        _gumbel_top_k_was_specified(args)
+        and args.gumbel_top_k is not None
+        and getattr(args, "draw_kernel", None) is None
+    ):
+        values["draw_kernel"] = "gumbel-max"
+    elif (
+        getattr(args, "draw_kernel", None) is not None
+        and args.draw_kernel != "gumbel-max"
+        and not _gumbel_top_k_was_specified(args)
+    ):
+        values["gumbel_top_k"] = None
     if getattr(args, "unfiltered", False):
         values.update(_unfiltered_values(args))
     return SamplerConfig(**values)
@@ -217,6 +269,10 @@ def sampler_overrides_present(args: argparse.Namespace) -> bool:
     for name in CORE_SAMPLER_FIELDS:
         if name == "top_k":
             if _top_k_was_specified(args):
+                return True
+            continue
+        if name == "gumbel_top_k":
+            if _gumbel_top_k_was_specified(args):
                 return True
             continue
         if getattr(args, name, None) is not None:
@@ -236,9 +292,25 @@ def sampler_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
             if _top_k_was_specified(args):
                 values[name] = getattr(args, name, None)
             continue
+        if name == "gumbel_top_k":
+            if _gumbel_top_k_was_specified(args):
+                values[name] = getattr(args, name, None)
+            continue
         value = getattr(args, name, None)
         if value is not None:
             values[name] = value
+    if (
+        _gumbel_top_k_was_specified(args)
+        and args.gumbel_top_k is not None
+        and getattr(args, "draw_kernel", None) is None
+    ):
+        values["draw_kernel"] = "gumbel-max"
+    elif (
+        getattr(args, "draw_kernel", None) is not None
+        and args.draw_kernel != "gumbel-max"
+        and not _gumbel_top_k_was_specified(args)
+    ):
+        values["gumbel_top_k"] = None
     if getattr(args, "unfiltered", False):
         values.update(_unfiltered_values(args))
     return values
@@ -266,26 +338,39 @@ def sampler_override(current: SamplerConfig, raw: str) -> SamplerConfig:
     pieces = payload.replace(",", " ").split()
     if not pieces:
         return current
+    explicit_keys: set[str] = set()
     for piece in pieces:
         if "=" not in piece:
             raise EditorError("sampler changes use key=value (for example top_k=20 or top_k=none)")
         key, value = piece.split("=", 1)
         key = SAMPLER_ALIASES.get(key.strip().lower(), key.strip().lower())
+        explicit_keys.add(key)
         if key not in values or key in {"token_biases", "bias_groups"}:
             raise EditorError(f"unknown sampler field {key!r}")
         try:
-            if key == "top_k" and value.strip().lower() == "none":
+            if key in {"top_k", "gumbel_top_k"} and value.strip().lower() == "none":
                 values[key] = None
-            elif key in {"top_k", "repeat_last_n", "cfg_prefix_tokens", "seed"}:
+            elif key in {
+                "top_k", "gumbel_top_k", "repeat_last_n", "cfg_prefix_tokens", "seed"
+            }:
                 values[key] = int(value)
             elif key == "draw_kernel":
-                if value not in {"categorical", "gumbel-max"}:
+                if value not in {"categorical", "gumbel-max", "gaussian-max"}:
                     raise ValueError
                 values[key] = value
             else:
                 values[key] = float(value)
         except ValueError as exc:
             raise EditorError(f"invalid value for {key}: {value!r}") from exc
+    if "gumbel_top_k" in explicit_keys and values["gumbel_top_k"] is not None:
+        if "draw_kernel" not in explicit_keys:
+            values["draw_kernel"] = "gumbel-max"
+    elif (
+        "draw_kernel" in explicit_keys
+        and values["draw_kernel"] != "gumbel-max"
+        and "gumbel_top_k" not in explicit_keys
+    ):
+        values["gumbel_top_k"] = None
     return replace(current, **values)
 
 

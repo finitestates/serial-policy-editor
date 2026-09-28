@@ -8,6 +8,8 @@ from typing import Any
 
 @dataclass(frozen=True)
 class Candidate:
+    # One-based model rank: the fixed keyboard address, even when rows are
+    # displayed in policy or Gumbel order.
     rank: int
     token_id: int
     text: str
@@ -22,6 +24,7 @@ class Candidate:
     neighbor_margin: float | None = None
     # (logit - mean) / std over full-vocab raw logits; None when unset/undefined.
     logit_z: float | None = None
+    # One-based order within the active filtered candidate set.
     gumbel_rank: int | None = None
 
     @property

@@ -8,6 +8,7 @@ calculations, stable quantiles derived from draw coordinates, and the final toke
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -313,6 +314,56 @@ def position_uniform_token(
     return (value + 0.5) / float(1 << 64)
 
 
+def gaussian_ranking_scores(
+    distribution: SparseDistribution,
+    *,
+    seed: int,
+    stream_fingerprint: str,
+    aligned_step: int,
+    noise_std: float = 1.0,
+) -> np.ndarray:
+    """Add replay-stable, per-token Gaussian noise to the active scores."""
+
+    if distribution.scores is None:
+        raise ValueError("gaussian-max requires candidate scores")
+    scores = np.asarray(distribution.scores, dtype=np.float64)
+    ids = np.asarray(distribution.ids, dtype=np.int64)
+    if scores.shape != ids.shape:
+        raise ValueError("candidate scores do not match candidate IDs")
+    if not len(ids):
+        raise ValueError("gaussian-max requires at least one candidate")
+    if type(noise_std) not in {int, float} or not math.isfinite(float(noise_std)):
+        raise EditorError("gaussian_noise_std must be finite and nonnegative")
+    if noise_std < 0.0:
+        raise EditorError("gaussian_noise_std must be finite and nonnegative")
+    if type(seed) is not int or not MIN_SEED <= seed <= MAX_SEED:
+        raise EditorError("seed must be a signed-64-bit integer")
+    _validate_fingerprint(stream_fingerprint)
+    _validate_boundary(aligned_step, "sampling boundary")
+    if noise_std == 0.0:
+        return scores.copy()
+
+    perturbations = np.empty(len(ids), dtype=np.float64)
+    for index, token_id in enumerate(ids):
+        prefix = (
+            f"{RNG_SCHEME}:gaussian-max:{seed}:{stream_fingerprint}:"
+            f"{aligned_step}:{int(token_id)}:"
+        )
+        uniforms = []
+        for lane in (0, 1):
+            payload = f"{prefix}{lane}".encode()
+            value = int.from_bytes(
+                hashlib.blake2b(payload, digest_size=8).digest(), "big"
+            )
+            uniforms.append((value + 0.5) / float(1 << 64))
+        radius = math.sqrt(-2.0 * math.log(uniforms[0]))
+        perturbations[index] = radius * math.cos(2.0 * math.pi * uniforms[1])
+    ranking = scores + float(noise_std) * perturbations
+    if not np.all(np.isfinite(ranking)):
+        raise ValueError("gaussian noise produced non-finite ranking scores")
+    return ranking
+
+
 def draw_token(
     distribution: SparseDistribution,
     *,
@@ -320,10 +371,11 @@ def draw_token(
     stream_fingerprint: str,
     aligned_step: int,
     kernel: str = "categorical",
+    gaussian_noise_std: float = 1.0,
 ) -> int:
-    """Draw one token using a replay-stable categorical or Gumbel kernel."""
+    """Draw one token using a replay-stable categorical, Gumbel, or Gaussian kernel."""
 
-    if kernel not in {"categorical", "gumbel-max"}:
+    if kernel not in {"categorical", "gumbel-max", "gaussian-max"}:
         raise EditorError("unsupported draw kernel")
     if kernel == "gumbel-max":
         scores = gumbel_ranking_scores(
@@ -333,6 +385,15 @@ def draw_token(
             aligned_step=aligned_step,
         )
         return gumbel_winner(distribution, scores)
+    if kernel == "gaussian-max":
+        scores = gaussian_ranking_scores(
+            distribution,
+            seed=seed,
+            stream_fingerprint=stream_fingerprint,
+            aligned_step=aligned_step,
+            noise_std=gaussian_noise_std,
+        )
+        return gaussian_winner(distribution, scores)
     draw = position_uniform(seed, stream_fingerprint, aligned_step)
     index = int(np.searchsorted(np.cumsum(distribution.probabilities), draw, side="right"))
     return int(distribution.ids[min(index, len(distribution.ids) - 1)])
@@ -380,6 +441,21 @@ def gumbel_winner(
     return int(ids[best[np.argmin(ids[best])]])
 
 
+def gaussian_winner(
+    distribution: SparseDistribution, ranking_scores: np.ndarray
+) -> int:
+    """Return the maximum Gaussian-perturbed score, breaking ties by token ID."""
+
+    ids = np.asarray(distribution.ids, dtype=np.int64)
+    scores = np.asarray(ranking_scores, dtype=np.float64)
+    if scores.shape != ids.shape:
+        raise ValueError("Gaussian scores do not match candidate IDs")
+    if not len(ids):
+        raise ValueError("gaussian-max requires at least one candidate")
+    best = np.flatnonzero(scores == np.max(scores))
+    return int(ids[best[np.argmin(ids[best])]])
+
+
 def gumbel_ranked_ids(
     distribution: SparseDistribution,
     *,
@@ -408,6 +484,7 @@ def find_seed_for_token(
     stream_fingerprint: str,
     aligned_step: int,
     kernel: str,
+    gaussian_noise_std: float = 1.0,
     next_seed: Callable[[], int],
 ) -> tuple[int, int]:
     """Find a fresh seed whose normal draw selects an eligible token.
@@ -425,6 +502,19 @@ def find_seed_for_token(
         )
     if kernel == "categorical" and distribution.probability(token_id) <= 0.0:
         raise EditorError(f"token {token_id} has no selectable categorical mass")
+    if kernel == "gaussian-max" and gaussian_noise_std == 0.0:
+        proposal = draw_token(
+            distribution,
+            seed=current_seed,
+            stream_fingerprint=stream_fingerprint,
+            aligned_step=aligned_step,
+            kernel=kernel,
+            gaussian_noise_std=0.0,
+        )
+        if proposal != token_id:
+            raise EditorError(
+                "gaussian_noise_std=0 makes this token impossible to select"
+            )
 
     checked = 0
     while True:
@@ -440,6 +530,7 @@ def find_seed_for_token(
             stream_fingerprint=stream_fingerprint,
             aligned_step=aligned_step,
             kernel=kernel,
+            gaussian_noise_std=gaussian_noise_std,
         ) == token_id:
             return seed, checked
 
@@ -457,6 +548,8 @@ __all__ = [
     "_validated_logits",
     "apply_candidate_filter",
     "draw_token",
+    "gaussian_ranking_scores",
+    "gaussian_winner",
     "find_seed_for_token",
     "gumbel_ranking_scores",
     "gumbel_ranked_ids",
