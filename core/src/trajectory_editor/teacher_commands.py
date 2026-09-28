@@ -139,6 +139,10 @@ HELP_TEXT = """Commands:
   s gumbel_noise_address=model-rank selects Gumbel-Max and addresses noise by model rank
   s gumbel_noise_scale=0.5 selects Gumbel-Max and scales post-filter noise
   s draw_kernel=gaussian-max gaussian_noise_std=1 uses Gaussian-noise argmax
+  s draw_kernel=logistic-max|student-t-max|laplace-max|uniform-max
+                    select a perturb-and-argmax kernel (Student-t df=3 by default)
+  s perturb_noise_std=1 scales those post-filter perturbations
+  s student_t_df=1 sets Student-t degrees of freedom (any finite value > 0)
   s {JSON}        replace all sampler settings from a complete SamplerConfig record
   reroll [SEED]   change the draw seed as a replayable action
   draw RAW_RANK   find a seed that draws the token at this raw rank

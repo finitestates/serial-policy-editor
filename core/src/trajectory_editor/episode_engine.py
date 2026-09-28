@@ -669,6 +669,8 @@ class EpisodeEngine:
                 aligned_step=sampling_boundary,
                 kernel=self.sampling.draw_kernel,
                 gaussian_noise_std=self.sampling.gaussian_noise_std,
+                perturb_noise_std=self.sampling.perturb_noise_std,
+                student_t_df=self.sampling.student_t_df,
             )
         observation = EpisodeObservation(
             boundary=self.boundary,
