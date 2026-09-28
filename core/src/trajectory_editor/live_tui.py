@@ -2,24 +2,22 @@
 
 from __future__ import annotations
 
-import shutil
-from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
-from functools import lru_cache
 from typing import Callable
 
-from prompt_toolkit.application import get_app
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.data_structures import Point
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
-from prompt_toolkit.layout.containers import HSplit, VSplit, Window
-from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.layout.containers import HSplit, VSplit, VerticalAlign, Window
+from prompt_toolkit.layout.controls import (
+    BufferControl, FormattedTextControl, GetLinePrefixCallable, UIContent, UIControl,
+)
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.layout import Layout
-from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.styles import Style
 
 from .teacher_commands import (
@@ -326,42 +324,19 @@ def _probability(value: float | None) -> str:
     return f"{value:.2%}"
 
 
-def _clipped_repr(value: str, width: int) -> str:
-    rendered = repr(value)
-    if len(rendered) <= width:
-        return rendered
-    if width <= 1:
-        return "…"
-    return rendered[: width - 1] + "…"
+def _preview_status(preview: ActionPreview) -> tuple[str, str]:
+    """Static text and style cues; color is never the only state signal."""
+    if preview.state == "invalid":
+        return "class:invalid", "INVALID · "
+    if preview.state == "incomplete":
+        return "class:hint", "INCOMPLETE · "
+    if preview.state == "pending":
+        return "class:pending", "PENDING · "
+    return "class:effect", "READY · "
 
 
-def _visible_candidates(
-    candidates: tuple[Candidate, ...],
-    selected_rank: int | None,
-    maximum_rows: int,
-    *,
-    sort_by_policy: bool = False,
-    sort_by_gumbel: bool = False,
-) -> tuple[tuple[Candidate, ...], int, int]:
-    ordered = _ordered_candidates(
-        candidates,
-        sort_by_policy=sort_by_policy,
-        sort_by_gumbel=sort_by_gumbel,
-    )
-    if len(ordered) <= maximum_rows:
-        return ordered, 0, 0
-    selected_index = next(
-        (
-            index
-            for index, candidate in enumerate(ordered)
-            if candidate.rank == selected_rank
-        ),
-        0,
-    )
-    start = max(0, selected_index - maximum_rows // 2)
-    start = min(start, len(ordered) - maximum_rows)
-    end = start + maximum_rows
-    return ordered[start:end], start, len(ordered) - end
+def _is_writing(command: str) -> bool:
+    return command[:2].lower() in {"t ", "x "}
 
 
 def _ordered_candidates(
@@ -459,103 +434,32 @@ def _navigation_command_cycle(
     return candidates_cycle[:1] + unique_suggestions + candidates_cycle[1:]
 
 
-def _terminal_size() -> tuple[int, int]:
-    try:
-        app = get_app()
-        size = app.output.get_size()
-        rows = int(size.rows)
-        return int(size.columns), max(1, rows)
-    except Exception:
-        fallback = shutil.get_terminal_size(fallback=(100, 30))
-        return fallback.columns, fallback.lines
+class _ContextLineStore:
+    """Keep logical context lines incrementally, independent of screen width."""
 
-
-def _append_wrapped_text(rows: list[StyleAndTextTuples], column: int,
-                         text: str, style: str, width: int) -> int:
-    for char in text:
-        if char == "\n":
-            rows.append([])
-            column = 0
-            continue
-        rendered = " " * (8 - column % 8) if char == "\t" else char
-        for glyph in rendered:
-            cells = max(0, get_cwidth(glyph))
-            if column + cells > width:
-                rows.append([])
-                column = 0
-            if rows[-1] and rows[-1][-1][0] == style:
-                previous_style, previous_text = rows[-1][-1]
-                rows[-1][-1] = (previous_style, previous_text + glyph)
-            else:
-                rows[-1].append((style, glyph))
-            column += cells
-    return column
-
-
-@dataclass(frozen=True)
-class _ContextRowsView:
-    base_rows: Sequence[StyleAndTextTuples]
-    tail_rows: list[StyleAndTextTuples] | None = None
-
-    @property
-    def base_count(self) -> int:
-        return len(self.base_rows) - (1 if self.tail_rows is not None else 0)
-
-    def __len__(self) -> int:
-        if self.tail_rows is None:
-            return len(self.base_rows)
-        return self.base_count + len(self.tail_rows)
-
-    def __getitem__(self, index: int | slice):
-        if isinstance(index, slice):
-            return [self[position] for position in range(*index.indices(len(self)))]
-        resolved = index + len(self) if index < 0 else index
-        if resolved < 0 or resolved >= len(self):
-            raise IndexError("context row index out of range")
-        if self.tail_rows is not None and resolved >= self.base_count:
-            return self.tail_rows[resolved - self.base_count]
-        return self.base_rows[resolved]
-
-
-@dataclass(frozen=True, slots=True)
-class _ContextLayoutUndo:
-    snapshot: ContextText | None
-    row_count: int
-    last_row: tuple[tuple[str, str], ...]
-    column: int
-
-
-class _IncrementalContextLayout:
-    """Reversible wrapped rows, extended by only newly decoded text chunks."""
-
-    def __init__(self, snapshot: ContextText, width: int) -> None:
+    def __init__(self) -> None:
         self.snapshot: ContextText | None = None
-        self.width = max(1, width)
-        self.rows: list[StyleAndTextTuples] = [[]]
-        self.column = 0
-        self._undo: list[_ContextLayoutUndo] = []
-        self.sync(snapshot, self.width)
+        self.source: str | ContextText | None = None
+        self.rows: list[list[tuple[str, str]]] = [[]]
+        self._undo: list[
+            tuple[ContextText | None, int, tuple[tuple[str, str], ...]]
+        ] = []
 
     def _append_node(self, node: ContextText) -> None:
         self._undo.append(
-            _ContextLayoutUndo(
-                snapshot=self.snapshot,
-                row_count=len(self.rows),
-                last_row=tuple(self.rows[-1]),
-                column=self.column,
-            )
+            (self.snapshot, len(self.rows), tuple(self.rows[-1]))
         )
-        if node.chunk:
-            self.column = _append_wrapped_text(
-                self.rows, self.column, _safe_rendered_text(node.chunk), "", self.width
-            )
+        parts = _safe_rendered_text(node.chunk).split("\n")
+        for index, part in enumerate(parts):
+            if part:
+                self.rows[-1].append(("", part))
+            if index < len(parts) - 1:
+                self.rows.append([])
         self.snapshot = node
 
-    def _rebuild(self, snapshot: ContextText, width: int) -> None:
-        self.width = width
-        self.rows = [[]]
-        self.column = 0
+    def _rebuild(self, snapshot: ContextText) -> None:
         self.snapshot = None
+        self.rows = [[]]
         self._undo.clear()
         nodes = snapshot.nodes_since(None)
         assert nodes is not None
@@ -563,445 +467,220 @@ class _IncrementalContextLayout:
             self._append_node(node)
 
     def _step_back(self) -> None:
-        undo = self._undo.pop()
-        del self.rows[undo.row_count:]
-        self.rows[-1] = list(undo.last_row)
-        self.column = undo.column
-        self.snapshot = undo.snapshot
+        snapshot, row_count, last_row = self._undo.pop()
+        del self.rows[row_count:]
+        self.rows[-1] = list(last_row)
+        self.snapshot = snapshot
 
-    def sync(self, snapshot: ContextText, width: int) -> None:
-        width = max(1, width)
-        if width != self.width:
-            self._rebuild(snapshot, width)
-            return
-        if snapshot is self.snapshot:
-            return
+    def sync(self, source: str | ContextText) -> None:
+        if isinstance(source, str):
+            if source == self.source and self.snapshot is not None:
+                return
+            snapshot = ContextText.root(source)
+        else:
+            snapshot = source
+            if snapshot is self.snapshot:
+                return
+
         if self.snapshot is not None:
             appended = snapshot.nodes_since(self.snapshot)
             if appended is not None:
                 for node in appended:
                     self._append_node(node)
+                self.source = source
                 return
             removed = self.snapshot.nodes_since(snapshot)
             if removed is not None:
                 for _node in reversed(removed):
                     self._step_back()
+                self.source = source
                 return
-        self._rebuild(snapshot, width)
 
-    def rows_with_proposal(self, proposal: str) -> _ContextRowsView:
-        if not proposal:
-            return _ContextRowsView(self.rows)
-        tail = [list(self.rows[-1])]
-        _append_wrapped_text(
-            tail,
-            self.column,
-            _safe_rendered_text(proposal),
-            "class:proposal",
-            self.width,
+        self._rebuild(snapshot)
+        self.source = source
+
+
+class _ContextControl(UIControl):
+    """Supply unwrapped logical context lines to prompt-toolkit's Window."""
+
+    def __init__(self, get_view: Callable[[], tuple[str, str | ContextText, str, bool]]):
+        self.get_view = get_view
+        self.store = _ContextLineStore()
+
+    def create_content(self, width: int, height: int) -> UIContent:
+        del width, height
+        heading, context, proposal, follow_tail = self.get_view()
+        self.store.sync(context)
+        base_rows = self.store.rows
+        base_count = len(base_rows)
+        proposal_parts = (
+            _safe_rendered_text(proposal).split("\n") if proposal else []
         )
-        return _ContextRowsView(self.rows, tail)
+        logical_count = base_count + max(0, len(proposal_parts) - 1)
 
+        def get_line(line_number: int) -> StyleAndTextTuples:
+            if line_number == 0:
+                return [("class:section", heading)]
+            index = line_number - 1
+            if index < base_count - 1 or not proposal_parts:
+                return list(base_rows[index])
+            if index == base_count - 1:
+                line = list(base_rows[-1])
+                if proposal_parts[0]:
+                    line.append(("class:proposal", proposal_parts[0]))
+                return line
+            proposal_index = index - base_count + 1
+            text = proposal_parts[proposal_index]
+            return [("class:proposal", text)] if text else []
 
-@dataclass(frozen=True, slots=True)
-class _ReviewAnchor:
-    boundary: int
-    end_character: int | None = None
-
-
-@dataclass(frozen=True)
-class _ReviewContextPage:
-    rows: tuple[StyleAndTextTuples, ...]
-    top_anchor: _ReviewAnchor
-    more_above: bool
-    more_below: bool
-
-
-def _wrap_review_window(
-    chunks: Iterable[str], start_character: int, width: int
-) -> tuple[list[StyleAndTextTuples], list[int]]:
-    """Wrap a bounded chunk slice while retaining absolute source offsets."""
-    rows: list[StyleAndTextTuples] = [[]]
-    row_starts = [start_character]
-    column = 0
-    width = max(1, width)
-    source_offset = start_character
-    for chunk in chunks:
-        for character in chunk:
-            if character == "\n":
-                rows.append([])
-                source_offset += 1
-                row_starts.append(source_offset)
-                column = 0
-                continue
-            codepoint = ord(character)
-            if character == "\t":
-                rendered = "\\t"
-            elif codepoint < 32 or codepoint == 127:
-                rendered = f"\\x{codepoint:02x}"
-            else:
-                rendered = character
-            for glyph in rendered:
-                cells = max(0, get_cwidth(glyph))
-                if column + cells > width:
-                    rows.append([])
-                    row_starts.append(source_offset)
-                    column = 0
-                if rows[-1] and rows[-1][-1][0] == "":
-                    previous_style, previous_text = rows[-1][-1]
-                    rows[-1][-1] = (previous_style, previous_text + glyph)
-                else:
-                    rows[-1].append(("", glyph))
-                column += cells
-            source_offset += 1
-    return rows, row_starts
-
-
-class _ReviewContextViewport:
-    """A token-boundary anchored review page that wraps only its visible slice."""
-
-    def __init__(self, review: BoundaryReview) -> None:
-        self.review = review
-        self.anchor = _ReviewAnchor(self._review_end_boundary(review))
-        self._forward: list[_ReviewAnchor] = []
-        self._page_cache: tuple[tuple[int, int, int, int], _ReviewContextPage] | None = None
-
-    def update(self, review: BoundaryReview) -> None:
-        same_review = (
-            review.aligned_step == self.review.aligned_step
-            and self._review_end_boundary(review) == self._review_end_boundary(self.review)
-            and review.context_snapshots is self.review.context_snapshots
-            and review.context_text_tail is self.review.context_text_tail
-        )
-        self.review = review
-        if not same_review:
-            self.anchor = _ReviewAnchor(self._review_end_boundary(review))
-            self._forward.clear()
-        self._page_cache = None
-
-    @staticmethod
-    def _review_end_boundary(review: BoundaryReview) -> int:
-        return (
-            review.aligned_step
-            if review.context_boundary is None
-            else review.context_boundary
-        )
-
-    def _context_at(self, boundary: int) -> ContextText | None:
-        snapshots = self.review.context_snapshots
-        if 0 <= boundary < len(snapshots):
-            context = snapshots[boundary]
-            if context is not None:
-                return context
-        if boundary == self._review_end_boundary(self.review):
-            context = self.review.context_text_tail
-            if isinstance(context, ContextText):
-                return context
-            return ContextText.root(context)
-        return None
-
-    def _anchor_for_character(
-        self, character: int, lower_boundary: int, upper_boundary: int
-    ) -> _ReviewAnchor:
-        previous: tuple[int, int] | None = None
-        for boundary in range(lower_boundary, upper_boundary + 1):
-            context = self._context_at(boundary)
-            if context is None:
-                continue
-            count = context.character_count
-            if count == character:
-                return _ReviewAnchor(boundary)
-            if count > character:
-                if previous is None:
-                    return _ReviewAnchor(boundary, character)
-                return _ReviewAnchor(boundary, character)
-            previous = (boundary, count)
-        if previous is not None:
-            boundary, count = previous
-            if count == character:
-                return _ReviewAnchor(boundary)
-            return _ReviewAnchor(upper_boundary, character)
-        return _ReviewAnchor(upper_boundary, character)
-
-    def page(self, width: int, budget: int) -> _ReviewContextPage:
-        width = max(1, width)
-        budget = max(1, budget)
-        key = (
-            self.anchor.boundary,
-            -1 if self.anchor.end_character is None else self.anchor.end_character,
-            width,
-            budget,
-        )
-        if self._page_cache is not None and self._page_cache[0] == key:
-            return self._page_cache[1]
-        end_context = self._context_at(self.anchor.boundary)
-        if end_context is None:
-            result = _ReviewContextPage((), self.anchor, False, False)
-            self._page_cache = (key, result)
-            return result
-
-        end_character = self.anchor.end_character
-        if end_character is None:
-            end_character = end_context.character_count
-        end_character = max(0, min(end_character, end_context.character_count))
-        floor = max(0, min(self.review.context_character_start, end_context.character_count))
-        start_boundary = self.anchor.boundary
-        start_character = end_character
-        target_characters = width * budget
-        selected_newlines = 0
-
-        while (
-            start_character - floor < target_characters
-            and selected_newlines < budget
-        ):
-            needed = target_characters - (end_character - start_character)
-            if start_boundary > 0:
-                previous = self._context_at(start_boundary - 1)
-                current = self._context_at(start_boundary)
-                if (
-                    previous is None
-                    or current is None
-                    or current.nodes_since(previous) is None
-                ):
-                    next_start = max(floor, start_character - needed)
-                    selected_newlines += sum(
-                        chunk.count("\n")
-                        for chunk in current.iter_slices(next_start, start_character)
-                    ) if current is not None else 0
-                    start_character = next_start
-                    break
-                token_start = previous.character_count
-                if start_character - token_start > needed:
-                    next_start = start_character - needed
-                    selected_newlines += sum(
-                        chunk.count("\n")
-                        for chunk in current.iter_slices(next_start, start_character)
-                    )
-                    start_character = next_start
-                    break
-                next_start = max(floor, token_start)
-                selected_newlines += sum(
-                    chunk.count("\n")
-                    for chunk in current.iter_slices(next_start, start_character)
-                )
-                start_boundary -= 1
-                start_character = next_start
-                continue
-            next_start = max(floor, start_character - needed)
-            selected_newlines += sum(
-                chunk.count("\n")
-                for chunk in end_context.iter_slices(next_start, start_character)
-            )
-            start_character = next_start
-            break
-
-        start_character = max(floor, min(start_character, end_character))
-        wrapped, row_starts = _wrap_review_window(
-            end_context.iter_slices(start_character, end_character),
-            start_character,
-            width,
-        )
-        dropped_rows = max(0, len(wrapped) - budget)
-        visible_rows = wrapped[dropped_rows:]
-        top_character = row_starts[dropped_rows]
-        top_anchor = self._anchor_for_character(
-            top_character, start_boundary, self.anchor.boundary
-        )
-        review_context = self._context_at(self._review_end_boundary(self.review))
-        review_end = (
-            review_context.character_count if review_context is not None else end_character
-        )
-        more_above = top_character > floor or (
-            start_boundary > 0
-            and self._context_at(start_boundary - 1) is not None
-        )
-        more_below = (
-            self.anchor.boundary < self._review_end_boundary(self.review)
-            or end_character < review_end
-        )
-        result = _ReviewContextPage(
-            tuple(visible_rows), top_anchor, more_above, more_below
-        )
-        self._page_cache = (key, result)
-        return result
-
-    def page_up(self, width: int, budget: int) -> None:
-        page = self.page(width, budget)
-        if page.top_anchor == self.anchor:
-            if self.anchor.end_character is not None and self.anchor.end_character > 0:
-                next_anchor = _ReviewAnchor(
-                    self.anchor.boundary,
-                    max(0, self.anchor.end_character - max(1, width * budget)),
-                )
-            elif (
-                self.anchor.boundary > 0
-                and self._context_at(self.anchor.boundary - 1) is not None
+        cursor = None
+        if follow_tail:
+            cursor_row = logical_count
+            while cursor_row > 0 and not any(
+                text for _style, text in get_line(cursor_row)
             ):
-                next_anchor = _ReviewAnchor(self.anchor.boundary - 1)
-            else:
-                return
-        else:
-            next_anchor = page.top_anchor
-        self._forward.append(self.anchor)
-        self.anchor = next_anchor
-        self._page_cache = None
+                cursor_row -= 1
+            cursor = Point(0, cursor_row)
+        return UIContent(
+            get_line=get_line,
+            line_count=logical_count + 1,
+            cursor_position=cursor,
+        )
 
-    def page_down(self) -> None:
-        if self._forward:
-            self.anchor = self._forward.pop()
-            self._page_cache = None
-
-
-def _review_scroll_hint(page: _ReviewContextPage) -> str:
-    hints = []
-    if page.more_above:
-        hints.append("More above")
-    if page.more_below:
-        hints.append("More below")
-    if not hints:
-        hints.append("All context shown")
-    return " · ".join((*hints, "PgUp/PgDn scroll"))
-
-
-@lru_cache(maxsize=1)
-def _wrapped_context(context: str, width: int):
-    """Keep only the latest context layout, with immutable cached rows."""
-    rows: list[StyleAndTextTuples] = [[]]
-    column = _append_wrapped_text(rows, 0, context, "", width)
-    return tuple(tuple(row) for row in rows), column
+    def preferred_height(
+        self,
+        width: int,
+        max_available_height: int,
+        wrap_lines: bool,
+        get_line_prefix: GetLinePrefixCallable | None,
+    ) -> int:
+        content = self.create_content(width, max_available_height)
+        if not wrap_lines:
+            return content.line_count
+        height = 0
+        for line_number in range(content.line_count):
+            height += content.get_height_for_line(
+                line_number, width, get_line_prefix
+            )
+            if height >= max_available_height:
+                return max_available_height
+        return height
 
 
-@lru_cache(maxsize=1)
 def _safe_context_text(context: str | ContextText) -> str:
     if isinstance(context, ContextText):
         context = context.materialize()
     return _safe_rendered_text(context)
 
 
-def _context_rows(context: str, proposal: str, width: int) -> list[StyleAndTextTuples]:
-    """Reuse history wrapping while preserving the changing proposal highlight."""
-    cached_rows, column = _wrapped_context(context, width)
-    rows = [list(row) for row in cached_rows]
-    _append_wrapped_text(rows, column, proposal, "class:proposal", width)
-    return rows
-
-
-def _feedback_line_limit(height: int) -> int:
-    return max(1, height // 5 - 1)
-
-
-def _choice_context_budget(height: int, candidate_count: int,
-                           feedback: ChoiceFeedback | None, view_rows: int = 0) -> int:
-    feedback_rows = 0
-    if feedback is not None:
-        shown = min(len(feedback.lines), _feedback_line_limit(height))
-        feedback_rows = 2 + shown + int(shown < len(feedback.lines))
-    # Reserve the input/footer, headings, and candidate overflow indicators first.
-    available = max(2, height - 16 - feedback_rows - view_rows)
-    table = min(candidate_count, max(4, available // 3))
-    return max(1, available - table)
-
-
-def _context_scroll_hint(start: int, end: int, total: int) -> str:
-    hints = []
-    if start > 0:
-        hints.append("More above")
-    if end < total:
-        hints.append("More below")
-    if not hints:
-        hints.append("All context shown")
-    return " · ".join((*hints, "PgUp/PgDn scroll"))
-
-
-def _context_view(context: str | ContextText, proposal: str, width: int, height: int,
-                  offset: int = 0, *, budget: int | None = None,
-                  context_layout: _IncrementalContextLayout | None = None
-                  ) -> tuple[StyleAndTextTuples, int]:
-    rows = (
-        context_layout.rows_with_proposal(proposal)
-        if context_layout is not None
-        else _context_rows(_safe_context_text(context), proposal, max(1, width - 1))
-    )
-    budget = max(1, height // 3) if budget is None else max(1, budget)
-    offset = min(max(0, offset), max(0, len(rows) - budget))
-    end = len(rows) - offset
-    start = max(0, end - budget)
+def _preview_fragments(
+    preview: ActionPreview, *, policy_active: bool
+) -> StyleAndTextTuples:
     fragments: StyleAndTextTuples = []
-    for row in rows[start:end]:
-        fragments.extend(row)
-        fragments.append(("", "\n"))
-    fragments.append(("class:muted", _context_scroll_hint(start, end, len(rows)) + "\n"))
-    return fragments, end - start + 1
-
-
-def _is_writing(command: str) -> bool:
-    return command[:2].lower() in {"t ", "x "}
-
-
-def _writing_sizes(height: int) -> tuple[int, int]:
-    """Reserve a stable editor and context region, independent of draft length."""
-    editor = max(3, height // 3)
-    context = max(1, height - editor - 14)
-    return editor, context
-
-
-def _one_line(text: str, width: int) -> str:
-    text = text.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-    result = ""
-    for char in text:
-        if get_cwidth(result + char) > max(1, width - 2):
-            return result + "…"
-        result += char
-    return result
-
-
-def _preview_status(preview: ActionPreview) -> tuple[str, str]:
-    """Static text and style cues; color is never the only state signal."""
-    if preview.state == "invalid":
-        return "class:invalid", "INVALID · "
-    if preview.state == "incomplete":
-        return "class:hint", "INCOMPLETE · "
-    if preview.state == "pending":
-        return "class:pending", "PENDING · "
-    return "class:effect", "READY · "
-
-
-def _render_writing(choice: ChoiceSet, candidates: tuple[Candidate, ...],
-                    preview: ActionPreview, width: int, height: int,
-                    offset: int, sort_by_policy: bool, sort_by_gumbel: bool,
-                    show_policy_rank: bool = False,
-                    logit_view: str = "none",
-                    show_model_probabilities: bool = False,
-                    column_focus: str | None = None,
-                    overlays: frozenset[str] = frozenset(),
-                    context_layout: _IncrementalContextLayout | None = None
-                    ) -> StyleAndTextTuples:
-    _, budget = _writing_sizes(height)
-    rows = (
-        context_layout.rows_with_proposal(preview.appended_text or "")
-        if context_layout is not None
-        else _context_rows(_safe_context_text(choice.context_text_tail),
-                           _safe_rendered_text(preview.appended_text or ""), width - 1)
-    )
-    end = len(rows) - min(max(0, offset), max(0, len(rows) - budget))
-    start = max(0, end - budget)
-    fragments: StyleAndTextTuples = [
-        ("class:status-strong", f"Step {choice.aligned_step} · Writing\n"),
-        ("class:section", "DECISION BOUNDARY\n"),
-    ]
-    for row in rows[start:end]:
-        fragments.extend(row)
-        fragments.append(("", "\n"))
-    fragments.append(("", "\n" * (budget - (end - start))))
-    fragments.append(("class:muted", _context_scroll_hint(start, end, len(rows)) + "\n"))
-    if preview.kind in {"insertion", "pending"}:
-        text = preview.appended_text or ""
-        effect = f"{preview.label} · {text.count(chr(10)) + 1} lines · {len(text)} characters"
+    if preview.kind == "candidate":
+        rank = (
+            f" · rank {preview.candidate_rank}"
+            if preview.candidate_rank is not None
+            else ""
+        )
+        terminal = " · END" if preview.is_eog else ""
+        fragments.extend(
+            [
+                ("class:proposal-label", "READY · " + preview.label),
+                ("class:muted", rank),
+                ("class:muted", f" · exact {repr(preview.appended_text or '')}"),
+                ("class:muted", f" · token {preview.token_id}"),
+                (
+                    "class:muted",
+                    f" · raw {_probability(preview.raw_probability)}"
+                    if preview.raw_probability is not None else "",
+                ),
+                (
+                    "class:muted",
+                    (
+                        " · decoder "
+                        f"{_probability(preview.decoder_probability)}"
+                        if preview.decoder_probability is not None else ""
+                    ) + terminal,
+                ),
+                (
+                    "class:muted",
+                    f" · policy-rank {preview.policy_rank}"
+                    if policy_active and preview.policy_rank is not None else "",
+                ),
+                ("", "\n"),
+            ]
+        )
     else:
-        effect = f"{preview.label} · {preview.detail}"
-    style, cue = _preview_status(preview)
-    fragments.append((style, _one_line(cue + effect, width) + "\n"))
-    fragments.append(("class:rule", "─" * (width - 1) + "\n"))
+        style, cue = _preview_status(preview)
+        fragments.extend(
+            [
+                (style, cue + preview.label),
+                ("class:muted", f" · {preview.detail}\n"),
+            ]
+        )
+    return fragments
+
+
+def _choice_render_data(
+    choice: ChoiceSet,
+    candidates: tuple[Candidate, ...],
+    command_text: str,
+    resolve_insertion: InsertionResolver,
+    target_token_id: int | None,
+    feedback: ChoiceFeedback | None = None,
+    policy_active: bool = False,
+    show_policy_rank: bool = False,
+    sort_by_policy: bool = False,
+    sort_by_gumbel: bool = False,
+    logit_view: str = "none",
+    show_model_probabilities: bool = False,
+    column_focus: str | None = None,
+    overlays: frozenset[str] = frozenset(),
+    display_candidates: tuple[Candidate, ...] | None = None,
+    search_lens_active: bool = False,
+    resolve_candidate: Callable[[int], Candidate] | None = None,
+    default_hold_tokens: int = 100,
+    default_search_radius: int = 3,
+    preview: ActionPreview | None = None,
+) -> tuple[StyleAndTextTuples, Point]:
+    preview = preview or action_preview(
+        choice,
+        command_text,
+        candidates,
+        resolve_insertion,
+        resolve_candidate=resolve_candidate,
+        default_hold_tokens=default_hold_tokens,
+        default_search_radius=default_search_radius,
+    )
+    fragments: StyleAndTextTuples = [
+        ("class:status-strong", f"Step {choice.aligned_step} · teacher track\n"),
+    ]
+    fragments.extend(_preview_fragments(preview, policy_active=policy_active))
+
+    focus_rank = preview.candidate_rank
+    if not command_text and search_lens_active and target_token_id is not None:
+        focus_rank = next(
+            (
+                candidate.rank
+                for candidate in candidates
+                if candidate.token_id == target_token_id
+            ),
+            focus_rank,
+        )
+    table_candidates = tuple(
+        candidates if display_candidates is None else display_candidates
+    )
+    external_focus = next(
+        (
+            candidate
+            for candidate in candidates
+            if candidate.rank == focus_rank
+            and not any(row.rank == focus_rank for row in table_candidates)
+        ),
+        None,
+    )
+
     columns = CandidateColumns(
         policy=show_policy_rank,
         logit_view=logit_view,
@@ -1010,26 +689,93 @@ def _render_writing(choice: ChoiceSet, candidates: tuple[Candidate, ...],
         overlays=overlays,
         raw_k1_logit=choice.raw_k1_logit,
     )
-    heading = (
-        "Candidates · rank / token ID / text"
-        if columns.columns == (("token-id", 8),)
-        else "Candidates · rank / token ID / overlays / text"
+    fragments.extend(
+        [
+            ("class:section", "Candidates\n"),
+            ("class:table-header", f"    rank{columns.heading}  text\n"),
+        ]
     )
-    fragments.append(("class:table-header", _one_line(heading, width) + "\n"))
-    shown = _ordered_candidates(
-        candidates,
+    ordered = _ordered_candidates(
+        table_candidates,
         sort_by_policy=sort_by_policy,
         sort_by_gumbel=sort_by_gumbel,
-    )[:3]
-    for candidate in shown:
-        fragments.append(("class:table-row", _one_line(
-            f"{candidate.rank:>5}"
-            + columns.values(candidate)
-            + f"  {candidate.text!r}"
-            + (f" [bias {candidate.bias:+g}]" if candidate.bias else ""), width) + "\n"))
-    fragments.append(("", "\n" * (3 - len(shown))))
-    fragments.append(("class:muted", f"{max(0, len(candidates) - 3)} more candidate rows · Ctrl+E restores full table\n"))
-    return fragments
+    )
+    cursor_line = 2
+    for candidate in ordered:
+        marker = "▶" if candidate.rank == focus_rank else " "
+        suffix = " [MATCH]" if candidate.token_id == target_token_id else ""
+        if candidate.bias:
+            suffix += f" [bias {candidate.bias:+g}]"
+        row_style = (
+            "class:selected-row" if candidate.rank == focus_rank
+            else "class:match-row" if candidate.token_id == target_token_id
+            else "class:table-row"
+        )
+        if candidate.rank == focus_rank:
+            cursor_line = sum(text.count("\n") for _style, text in fragments)
+        fragments.append(
+            (
+                row_style,
+                f"{marker} {candidate.rank:>5}{columns.values(candidate)}  "
+                f"{repr(candidate.text)}{suffix}\n",
+            )
+        )
+
+    if external_focus is not None:
+        fragments.append(
+            (
+                "class:feedback-info",
+                (
+                    "PREVIEW OUTSIDE LENS"
+                    if search_lens_active
+                    else "PREVIEW OUTSIDE TABLE"
+                )
+                + f" · raw rank {external_focus.rank}\n",
+            )
+        )
+    if search_lens_active:
+        fragments.append(
+            (
+                "class:feedback-search",
+                "SEARCH LENS · Tab cycles this neighborhood · m/esc main table\n",
+            )
+        )
+
+    if feedback is not None:
+        category = (
+            feedback.category
+            if feedback.category in {"error", "info", "search"}
+            else "info"
+        )
+        fragments.append(
+            (
+                f"class:feedback-{category}",
+                _safe_rendered_text(feedback.title) + "\n",
+            )
+        )
+        for line in feedback.lines:
+            fragments.append(
+                ("class:feedback-detail", "  " + _safe_rendered_text(line) + "\n")
+            )
+        fragments.append(("", "\n"))
+
+    fragments.extend(
+        [
+            ("class:help-key", "accept"),
+            ("class:muted", "  "),
+            ("class:help-key", "rank"),
+            ("class:muted", " choose  "),
+            ("class:help-key", "tab/⇧tab"),
+            ("class:muted", " browse  "),
+            ("class:help-key", "t TEXT"),
+            ("class:muted", " insert  "),
+            ("class:help-key", "h [N]"),
+            ("class:muted", " hold  "),
+            ("class:help-key", "?"),
+            ("class:muted", " help\n"),
+        ]
+    )
+    return fragments, Point(0, cursor_line)
 
 
 def _render_choice(
@@ -1050,274 +796,29 @@ def _render_choice(
     display_candidates: tuple[Candidate, ...] | None = None,
     search_lens_active: bool = False,
     resolve_candidate: Callable[[int], Candidate] | None = None,
-    context_offset: int = 0,
-    expanded_editor: bool = False,
-    terminal_size: tuple[int, int] | None = None,
     default_hold_tokens: int = 100,
     default_search_radius: int = 3,
-    context_layout: _IncrementalContextLayout | None = None,
 ) -> StyleAndTextTuples:
-    width, height = terminal_size or _terminal_size()
-    width = max(width, 36)
-    preview = action_preview(
+    fragments, _cursor = _choice_render_data(
         choice,
-        command_text,
         candidates,
+        command_text,
         resolve_insertion,
-        resolve_candidate=resolve_candidate,
-        default_hold_tokens=default_hold_tokens,
-        default_search_radius=default_search_radius,
-    )
-    if expanded_editor and _is_writing(command_text):
-        return _render_writing(choice, tuple(candidates if display_candidates is None else display_candidates),
-                               preview, width, height, context_offset, sort_by_policy, sort_by_gumbel,
-                               show_policy_rank, logit_view,
-                               show_model_probabilities, column_focus, overlays,
-                               context_layout=context_layout)
-    context = (choice.context_text_tail if context_layout is not None
-               else _safe_context_text(choice.context_text_tail))
-    proposal = (
-        _safe_rendered_text(preview.appended_text)
-        if preview.appended_text is not None
-        else None
-    )
-    feedback_line_limit = _feedback_line_limit(height)
-    displayed_feedback_lines = (
-        ()
-        if feedback is None
-        else feedback.lines[:feedback_line_limit]
-    )
-    hidden_feedback_lines = (
-        0
-        if feedback is None
-        else len(feedback.lines) - len(displayed_feedback_lines)
-    )
-    feedback_rows = (
-        0
-        if feedback is None
-        else 2 + len(displayed_feedback_lines) + bool(hidden_feedback_lines)
-    )
-    focus_rank = preview.candidate_rank
-    if not command_text and search_lens_active and target_token_id is not None:
-        focus_rank = next(
-            (
-                candidate.rank
-                for candidate in candidates
-                if candidate.token_id == target_token_id
-            ),
-            focus_rank,
-        )
-    lens_candidates = tuple(
-        candidates if display_candidates is None else display_candidates
-    )
-    table_candidates = lens_candidates
-    external_focus = next(
-        (
-            candidate
-            for candidate in candidates
-            if candidate.rank == focus_rank
-            and not any(row.rank == focus_rank for row in table_candidates)
-        ),
-        None,
-    )
-    current_view_is_lens = search_lens_active
-    view_status_rows = int(external_focus is not None) + int(current_view_is_lens)
-    context_budget = _choice_context_budget(
-        height, len(table_candidates), feedback, view_status_rows,
-    )
-    context_fragments, approximate_context_lines = _context_view(
-        context, proposal or "", width, height, context_offset, budget=context_budget,
-        context_layout=context_layout,
-    )
-    maximum_rows = max(
-        1,
-        height
-        - approximate_context_lines
-        - 15
-        - feedback_rows
-        - view_status_rows,
-    )
-    shown, hidden_before, hidden_after = _visible_candidates(
-        table_candidates,
-        focus_rank,
-        maximum_rows,
-        sort_by_policy=sort_by_policy,
-        sort_by_gumbel=sort_by_gumbel,
-    )
-    rule = "─" * max(20, width - 1)
-    fragments: StyleAndTextTuples = []
-
-    fragments.extend(
-        [
-            ("class:status-strong", f"Step {choice.aligned_step}"),
-            ("class:muted", " · teacher track"),
-            ("", " " * 3),
-            ("class:rule", rule + "\n"),
-            ("class:section", "DECISION BOUNDARY\n\n"),
-
-        ]
-    )
-    fragments.extend(context_fragments)
-    fragments.append(("", "\n"))
-
-    if preview.kind == "candidate":
-        rank = (
-            f" · rank {preview.candidate_rank}"
-            if preview.candidate_rank is not None
-            else ""
-        )
-        terminal = " · END" if preview.is_eog else ""
-        fragments.extend(
-            [
-                ("class:proposal-label", "READY · " + preview.label),
-                ("class:muted", rank),
-                ("class:muted", f" · exact {repr(preview.appended_text or '')}"),
-                ("class:muted", f" · token {preview.token_id}"),
-                ("class:muted", (
-                    f" · raw {_probability(preview.raw_probability)}"
-                    if preview.raw_probability is not None else ""
-                )),
-                (
-                    "class:muted",
-                    (
-                        " · decoder "
-                        f"{_probability(preview.decoder_probability)}"
-                        if preview.decoder_probability is not None else ""
-                    ) + terminal,
-                ),
-                (
-                    "class:muted",
-                    (
-                        f" · policy-rank {preview.policy_rank}"
-                        if policy_active and preview.policy_rank is not None
-                        else ""
-                    )
-                    + "\n",
-                ),
-            ]
-        )
-    elif preview.kind in {"insertion", "pending"}:
-        style, cue = _preview_status(preview)
-        fragments.extend(
-            [
-                (style if cue else "class:proposal-label", cue + preview.label),
-                ("class:muted", f" · {preview.detail}\n"),
-            ]
-        )
-    else:
-        style, cue = _preview_status(preview)
-        fragments.extend(
-            [
-                (style, cue + preview.label),
-                ("class:muted", f" · {preview.detail}\n"),
-            ]
-        )
-
-    fragments.extend([("class:rule", rule + "\n")])
-    columns = CandidateColumns(
-        policy=show_policy_rank,
-        logit_view=logit_view,
-        show_model_probabilities=show_model_probabilities,
-        column_focus=column_focus,
-        overlays=overlays,
-        raw_k1_logit=choice.raw_k1_logit,
-    )
-    fragments.append((
-        "class:table-header", f"    rank{columns.heading}  text\n",
-    ))
-    if hidden_before:
-        fragments.append(
-            ("class:muted", f"    … {hidden_before} earlier disclosed row(s) …\n")
-        )
-    for candidate in shown:
-        marker = "▶" if candidate.rank == preview.candidate_rank else " "
-        target_suffix = " [MATCH]" if candidate.token_id == target_token_id else ""
-        prefix = f"{marker} {candidate.rank:>5}{columns.values(candidate)}  "
-        if candidate.bias:
-            target_suffix += f" [bias {candidate.bias:+g}]"
-        text_width = max(1, width - len(prefix) - 1)
-        if candidate.rank == preview.candidate_rank:
-            row_style = "class:selected-row"
-        elif candidate.token_id == target_token_id:
-            row_style = "class:match-row"
-        else:
-            row_style = "class:table-row"
-        fragments.append(
-            (
-                row_style,
-                prefix
-                + _clipped_repr(candidate.text, max(1, text_width - len(target_suffix)))
-                + target_suffix
-                + "\n",
-            )
-        )
-    if hidden_after:
-        fragments.append(
-            ("class:muted", f"    … {hidden_after} later disclosed row(s) …\n")
-        )
-    if external_focus is not None:
-        fragments.append(
-            (
-                "class:feedback-info",
-                (
-                    "PREVIEW OUTSIDE LENS"
-                    if search_lens_active
-                    else "PREVIEW OUTSIDE TABLE"
-                )
-                + f" · raw rank {external_focus.rank}\n",
-            )
-        )
-    if current_view_is_lens:
-        fragments.append(
-            (
-                "class:feedback-search",
-                "SEARCH LENS · Tab cycles this neighborhood · m/esc main table\n",
-            )
-        )
-    fragments.extend(
-        [
-            ("class:rule", rule + "\n"),
-        ]
-    )
-    if feedback is not None:
-        category = (
-            feedback.category
-            if feedback.category in {"error", "info", "search"}
-            else "info"
-        )
-        fragments.append(
-            (
-                f"class:feedback-{category}",
-                _safe_rendered_text(feedback.title) + "\n",
-            )
-        )
-        for line in displayed_feedback_lines:
-            fragments.append(
-                ("class:feedback-detail", "  " + _safe_rendered_text(line) + "\n")
-            )
-        if hidden_feedback_lines:
-            fragments.append(
-                (
-                    "class:feedback-detail",
-                    f"  … {hidden_feedback_lines} more; Tab cycles all suggestions.\n",
-                )
-            )
-        fragments.append(("", "\n"))
-    fragments.extend(
-        [
-            ("class:help-key", "accept"),
-            ("class:muted", "  "),
-            ("class:help-key", "rank"),
-            ("class:muted", " choose  "),
-            ("class:help-key", "tab/⇧tab"),
-            ("class:muted", " browse  "),
-            ("class:help-key", "t TEXT"),
-            ("class:muted", " insert  "),
-            ("class:help-key", "h [N]"),
-            ("class:muted", " hold  "),
-            ("class:help-key", "?"),
-            ("class:muted", " help\n"),
-        ]
+        target_token_id,
+        feedback,
+        policy_active,
+        show_policy_rank,
+        sort_by_policy,
+        sort_by_gumbel,
+        logit_view,
+        show_model_probabilities,
+        column_focus,
+        overlays,
+        display_candidates,
+        search_lens_active,
+        resolve_candidate,
+        default_hold_tokens,
+        default_search_radius,
     )
     return fragments
 
@@ -1326,27 +827,16 @@ def _render_review(
     review: BoundaryReview,
     *,
     seamless: bool = False,
-    terminal_size: tuple[int, int] | None = None,
-    context_viewport: _ReviewContextViewport | None = None,
 ) -> StyleAndTextTuples:
-    """Render one journal-backed historical boundary, never a live preview."""
-    width, height = terminal_size or _terminal_size()
-    width = max(width, 36)
-    rule = "─" * max(20, width - 1)
-    viewport = context_viewport or _ReviewContextViewport(review)
-    page = viewport.page(max(1, width - 1), max(1, height - 15))
     position = dict(review.position)
     fragments: StyleAndTextTuples = [
-        ("class:status-strong", f"Review boundary {review.aligned_step}"),
-        ("class:muted", f" · active boundary {review.active_aligned_step}\n"),
-        ("class:rule", rule + "\n"),
-        ("class:section", "HISTORICAL BOUNDARY REVIEW\n\n"),
+        (
+            "class:status-strong",
+            f"Review boundary {review.aligned_step} · "
+            f"active boundary {review.active_aligned_step}\n",
+        ),
+        ("class:section", "HISTORICAL BOUNDARY REVIEW\n"),
     ]
-    for row in page.rows:
-        fragments.extend(row)
-        fragments.append(("", "\n"))
-    fragments.append(("class:muted", _review_scroll_hint(page) + "\n"))
-    fragments.append(("", "\n"))
     if position.get("kind") == "inside-span":
         label = str(position.get("span_type") or "span").replace("-", " ").upper()
         fragments.extend(
@@ -1391,7 +881,6 @@ def _render_review(
         )
     fragments.extend(
         [
-            ("class:rule", rule + "\n"),
             ("class:help-key", "["),
             ("class:muted", " previous  "),
             ("class:help-key", "]"),
@@ -1410,7 +899,6 @@ def _render_review(
         ]
     )
     return fragments
-
 
 LIVE_STYLES = {
     "amber-cyan": Style.from_dict(
@@ -1516,17 +1004,16 @@ def _live_style(theme: str) -> Style:
 class LiveChoiceView(ViewLifecycle):
     """Reusable layout, bindings and buffer for live choices and history review."""
 
-    def __init__(self, state: ChoiceViewState, *, submit, enabled=lambda: True,
-                 terminal_size=None):
+    def __init__(self, state: ChoiceViewState, *, submit, enabled=lambda: True):
         super().__init__(submit=submit)
-        self.terminal_size = terminal_size or _terminal_size
+        self.state = state
         self.command_buffer = Buffer(multiline=True, read_only=Condition(lambda: not enabled()))
         self.bindings = KeyBindings()
-        self.context_offset = 0
         self.expanded_editor = False
-        self._context_key = None
-        self._context_layout: _IncrementalContextLayout | None = None
-        self._review_viewport: _ReviewContextViewport | None = None
+        self._context_follow_tail = True
+        self._preview_cache_key = None
+        self._preview_cache: ActionPreview | None = None
+        self._choice_cursor = Point(0, 0)
         self.update(state)
 
         def _replace_buffer(text: str, *, owned: bool) -> None:
@@ -1542,6 +1029,8 @@ class LiveChoiceView(ViewLifecycle):
         def _reset_editor_on_command_change(buffer: Buffer) -> None:
             if not _is_writing(buffer.text):
                 self.expanded_editor = False
+            self._context_follow_tail = True
+            self._preview_cache_key = None
 
         self.command_buffer.on_text_changed += _reset_editor_on_command_change
 
@@ -1658,52 +1147,26 @@ class LiveChoiceView(ViewLifecycle):
         def _insert_newline(event: object) -> None:
             self.command_buffer.insert_text("\n")
 
-        def _scroll_budget(height: int, preview: ActionPreview) -> int:
-            if _editor_expanded():
-                return _writing_sizes(height)[1]
-            if self.state.review is not None:
-                return max(1, height - 15)
-            outside_table = (preview.candidate_rank is not None and
-                any(row.rank == preview.candidate_rank for row in self.state.candidates) and
-                not any(row.rank == preview.candidate_rank for row in self.active_table_candidates))
-            return _choice_context_budget(height, len(self.active_table_candidates), self.state.feedback,
-                                          int(self.state.search_lens_active) + int(outside_table))
+        def _scroll_context(direction: int, event: object) -> None:
+            info = self.context_window.render_info
+            if info is None:
+                return
+            self._context_follow_tail = False
+            last_scroll = max(0, info.content_height - info.window_height)
+            page = max(1, info.window_height - 1)
+            self.context_window.vertical_scroll = min(
+                last_scroll,
+                max(0, self.context_window.vertical_scroll + direction * page),
+            )
+            event.app.invalidate()  # type: ignore[attr-defined]
 
         @self.bindings.add("pageup")
         def _context_up(event: object) -> None:
-            width, height = self.terminal_size()
-            if self.state.review is not None:
-                if self._review_viewport is not None:
-                    self._review_viewport.page_up(
-                        max(1, max(36, width) - 1), max(1, height - 15)
-                    )
-                return
-            preview = action_preview(self.state.choice, self.command_buffer.text, self.state.candidates, self.state.resolve_insertion,
-                                     resolve_candidate=self.state.resolve_candidate,
-                                     default_hold_tokens=self.state.default_hold_tokens,
-                                     default_search_radius=self.state.default_search_radius)
-            budget = _scroll_budget(height, preview)
-            self._sync_context_layout(self.state, max(1, max(36, width) - 1))
-            if self._context_layout is not None:
-                rows = self._context_layout.rows_with_proposal(preview.appended_text or "")
-            else:
-                rows = _context_rows(_safe_context_text(self.state.choice.context_text_tail),
-                                     _safe_rendered_text(preview.appended_text or ""), max(1, max(36, width) - 1))
-            self.context_offset = min(max(0, len(rows) - budget), self.context_offset + max(1, budget - 1))
+            _scroll_context(-1, event)
 
         @self.bindings.add("pagedown")
         def _context_down(event: object) -> None:
-            _, height = self.terminal_size()
-            if self.state.review is not None:
-                if self._review_viewport is not None:
-                    self._review_viewport.page_down()
-                return
-            preview = action_preview(self.state.choice, self.command_buffer.text, self.state.candidates, self.state.resolve_insertion,
-                                     resolve_candidate=self.state.resolve_candidate,
-                                     default_hold_tokens=self.state.default_hold_tokens,
-                                     default_search_radius=self.state.default_search_radius)
-            budget = _scroll_budget(height, preview)
-            self.context_offset = max(0, self.context_offset - max(1, budget - 1))
+            _scroll_context(1, event)
 
         @self.bindings.add("enter")
         def _submit(event: object) -> None:
@@ -1794,7 +1257,23 @@ class LiveChoiceView(ViewLifecycle):
         def _replace_completion_with_typing(event: object) -> None:
             _replace_buffer(event.data, owned=False)  # type: ignore[attr-defined]
 
-        choice_control = FormattedTextControl(self._render)
+        self._context_control = _ContextControl(self._context_view)
+        self.context_window = Window(
+            self._context_control,
+            wrap_lines=True,
+            dont_extend_height=True,
+            always_hide_cursor=True,
+        )
+        choice_control = FormattedTextControl(
+            self._render,
+            get_cursor_position=self._choice_cursor_position,
+        )
+        choice_window = Window(
+            choice_control,
+            wrap_lines=True,
+            dont_extend_height=True,
+            always_hide_cursor=True,
+        )
         input_control = BufferControl(buffer=self.command_buffer, focusable=True)
         prompt_row = VSplit(
             [
@@ -1803,18 +1282,22 @@ class LiveChoiceView(ViewLifecycle):
                     width=Dimension.exact(2),
                     height=1,
                 ),
-                Window(input_control, height=lambda: Dimension.exact(
-                           _writing_sizes(self.terminal_size()[1])[0] if _editor_expanded() else 1),
-                       wrap_lines=True, style="class:input"),
+                Window(
+                    input_control,
+                    height=lambda: (
+                        Dimension(min=3, preferred=8)
+                        if _editor_expanded()
+                        else Dimension.exact(1)
+                    ),
+                    wrap_lines=True,
+                    style="class:input",
+                ),
             ]
         )
         root = HSplit(
             [
-                Window(
-                    choice_control,
-                    wrap_lines=True,
-                    always_hide_cursor=True,
-                ),
+                self.context_window,
+                choice_window,
                 prompt_row,
                 Window(
                     FormattedTextControl(
@@ -1839,28 +1322,18 @@ class LiveChoiceView(ViewLifecycle):
                     dont_extend_height=True,
                     always_hide_cursor=True,
                 ),
-            ]
+            ],
+            align=VerticalAlign.TOP,
         )
         self.layout = Layout(root, focused_element=input_control)
 
     def update(self, state: ChoiceViewState) -> None:
-        context_key = (
-            state.choice.context_token_sha256,
-            state.review.aligned_step if state.review else None,
-        )
-        if context_key != self._context_key:
-            self.context_offset = 0
-        self._context_key = context_key
         self.state = state
-        if state.review is None:
-            self._review_viewport = None
-            self._sync_context_layout(
-                state, max(1, max(36, self.terminal_size()[0]) - 1)
-            )
-        elif self._review_viewport is None:
-            self._review_viewport = _ReviewContextViewport(state.review)
-        else:
-            self._review_viewport.update(state.review)
+        self._preview_cache_key = None
+        self._preview_cache = None
+        self._context_follow_tail = True
+        if hasattr(self, "context_window"):
+            self.context_window.vertical_scroll = 0
         self.expanded_editor = False
         self.completion_owned = bool(state.initial_command and state.review is None)
         self.active_table_candidates = tuple(
@@ -1875,45 +1348,82 @@ class LiveChoiceView(ViewLifecycle):
         text = state.initial_command if self.completion_owned else ""
         self.command_buffer.reset(document=Document(text, cursor_position=len(text)))
 
-    def _sync_context_layout(self, state: ChoiceViewState, width: int) -> None:
-        if state.review is not None:
-            return
-        context = state.choice.context_text_tail
-        if not isinstance(context, ContextText):
-            self._context_layout = None
-            return
-        if self._context_layout is None:
-            self._context_layout = _IncrementalContextLayout(context, width)
-        else:
-            self._context_layout.sync(context, width)
+    def _current_preview(self) -> ActionPreview:
+        command_text = self.command_buffer.text
+        key = (id(self.state), command_text)
+        # Insertion previews finish asynchronously; recheck them after the
+        # owner-thread completion invalidates the application.
+        if (
+            self._preview_cache_key != key
+            or self._preview_cache is None
+            or _is_writing(command_text)
+            or self._preview_cache.state == "pending"
+        ):
+            self._preview_cache = action_preview(
+                self.state.choice,
+                command_text,
+                self.state.candidates,
+                self.state.resolve_insertion,
+                resolve_candidate=self.state.resolve_candidate,
+                default_hold_tokens=self.state.default_hold_tokens,
+                default_search_radius=self.state.default_search_radius,
+            )
+            self._preview_cache_key = key
+        return self._preview_cache
+
+    def _context_view(self) -> tuple[str, str | ContextText, str, bool]:
+        if self.state.review is not None:
+            return (
+                "HISTORICAL CONTEXT",
+                self.state.review.context_text_tail,
+                "",
+                self._context_follow_tail,
+            )
+        return (
+            "DECISION BOUNDARY",
+            self.state.choice.context_text_tail,
+            self._current_preview().appended_text or "",
+            self._context_follow_tail,
+        )
+
+    def _choice_cursor_position(self) -> Point:
+        if self.state.review is not None:
+            fragments = _render_review(
+                self.state.review,
+                seamless=self.state.seamless,
+            )
+            text = "".join(value for _style, value in fragments)
+            row = text.count("\n") - int(text.endswith("\n"))
+            return Point(0, max(0, row))
+        return self._choice_cursor
 
     def _render(self):
         state = self.state
-        terminal_size = self.terminal_size()
         if state.review is not None:
             return _render_review(
                 state.review,
                 seamless=state.seamless,
-                terminal_size=terminal_size,
-                context_viewport=self._review_viewport,
             )
-        self._sync_context_layout(
-            state, max(1, max(36, terminal_size[0]) - 1)
-        )
-        return _render_choice(
-            state.choice, state.candidates, self.command_buffer.text,
-            state.resolve_insertion, state.target_token_id,
-            state.feedback, state.policy_active, state.show_policy_rank,
-            state.sort_by_policy, state.sort_by_gumbel,
-            state.logit_view, state.show_model_probabilities,
+        fragments, self._choice_cursor = _choice_render_data(
+            state.choice,
+            state.candidates,
+            self.command_buffer.text,
+            state.resolve_insertion,
+            state.target_token_id,
+            state.feedback,
+            state.policy_active,
+            state.show_policy_rank,
+            state.sort_by_policy,
+            state.sort_by_gumbel,
+            state.logit_view,
+            state.show_model_probabilities,
             state.column_focus,
             state.overlays,
             state.display_candidates,
             state.search_lens_active,
-            state.resolve_candidate, self.context_offset,
-            self.expanded_editor and _is_writing(self.command_buffer.text),
-            terminal_size=terminal_size,
-            default_hold_tokens=state.default_hold_tokens,
-            default_search_radius=state.default_search_radius,
-            context_layout=self._context_layout,
+            state.resolve_candidate,
+            state.default_hold_tokens,
+            state.default_search_radius,
+            preview=self._current_preview(),
         )
+        return fragments

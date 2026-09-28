@@ -93,6 +93,8 @@ class BeamViewRow:
     score: str
     state: str
     recent_steps: tuple[str, ...]
+    model_rank: int | None = None
+    step_log_probability: float | None = None
 
 
 @dataclass(frozen=True)
@@ -126,8 +128,6 @@ class PromptRequest:
 @dataclass(frozen=True)
 class TerminalCapabilities:
     live_views: bool
-    columns: int | None = None
-    rows: int | None = None
     single_key: bool = False
     seamless_review: bool = False
 
@@ -135,8 +135,6 @@ class TerminalCapabilities:
 class TerminalProtocol(Protocol):
     @property
     def capabilities(self) -> TerminalCapabilities: ...
-
-    def terminal_size(self) -> tuple[int, int] | None: ...
 
     def session(self) -> AbstractContextManager[object | None]: ...
 

@@ -42,7 +42,7 @@ def main():
         parser.error('rounds must be nonnegative; repeats, threads and prompt-repeats must be positive')
     root = args.package_root.resolve()
     sys.path.insert(0, str(root / 'core' / 'src'))
-    from trajectory_editor import chord as chord_module, live_tui
+    from trajectory_editor import chord as chord_module
     from trajectory_editor.chord import Chord
     from trajectory_editor.core.sampler_config import SamplerConfig
     from trajectory_editor.decoder import LlamaCppDecoder, LlamaCppSettings
@@ -61,9 +61,6 @@ def main():
         # Support the request contract on either side of TUI consolidation.
         supports_live_choices = True
         capabilities = SimpleNamespace(live_views=True, seamless_review=True)
-
-        def terminal_size(self):
-            return 120, 40
 
         def read_choice(self, *args, **kwargs):
             raise MenuReady
@@ -94,12 +91,7 @@ def main():
             }
 
     try:
-        # Historical menu preparation queried the live module for its width.
-        # Preimport it and pin the same size so neither lazy imports nor this
-        # harness process's terminal affect the before/after comparison.
-        with patch.object(backend._model, 'eval', counted_eval), patch.object(
-            live_tui, '_terminal_size', return_value=(120, 40),
-        ):
+        with patch.object(backend._model, 'eval', counted_eval):
             # One untimed warmup. Every sample then starts from the same prompt.
             backend.reset(backend.tokenize(prompt, add_bos=True, special=True))
             for repeat in range(args.repeats):

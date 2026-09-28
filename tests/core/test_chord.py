@@ -207,18 +207,18 @@ def test_chord_parser_rejects_invalid_ranks():
 @pytest.mark.current_workflow
 def test_chord_shows_bounded_shared_context_above_stable_paths():
     assert _recent_context(
-        "first\nsecond\nthird\nfourth\nfifth", width=20, lines=3,
-    ) == "…third\nfourth\nfifth"
-    assert _recent_context("1234567890", width=4, lines=2) == "…567\n90"
+        "first\nsecond\nthird\nfourth\nfifth", lines=3,
+    ) == "third\nfourth\nfifth"
+    assert _recent_context("1234567890", lines=2) == "1234567890"
 
     original = engine()
     original.apply(SelectRawRank(1))
     chord = Chord(original, (1, 2))
-    heading = chord.display(width=20).split("\n\n", 1)[0]
+    heading = chord.display().split("\n\n", 1)[0]
     assert heading == "Shared context (last 4 lines):\nP A"
-    assert "Paths:\na  rank 1  LIVE\n    B\nb  rank 2  LIVE" in chord.display(width=20)
+    assert "Paths:\na  rank 1  LIVE\n    B\nb  rank 2  LIVE" in chord.display()
     chord.advance()
-    assert chord.display(width=20).split("\n\n", 1)[0] == heading
+    assert chord.display().split("\n\n", 1)[0] == heading
     chord.discard()
 
 
@@ -227,36 +227,28 @@ def test_chord_display_tracks_live_and_eog_paths_through_rewind():
     chord = Chord(engine(), (1, 2))
     assert chord.advance()
     ended = "b  rank 2  EOG\n    B"
-    assert ended in chord.display(width=40)
+    assert ended in chord.display()
     assert chord.advance()
-    assert ended in chord.display(width=40)
-    assert "a  rank 1  EOG\n    A B" in chord.display(width=40)
+    assert ended in chord.display()
+    assert "a  rank 1  EOG\n    A B" in chord.display()
     assert chord.rewind()
-    assert ended in chord.display(width=40)
-    assert "a  rank 1  LIVE\n    A B" in chord.display(width=40)
+    assert ended in chord.display()
+    assert "a  rank 1  LIVE\n    A B" in chord.display()
     assert chord.rewind()
-    assert "a  rank 1  LIVE\n    A" in chord.display(width=40)
-    assert "b  rank 2  LIVE\n    B" in chord.display(width=40)
+    assert "a  rank 1  LIVE\n    A" in chord.display()
+    assert "b  rank 2  LIVE\n    B" in chord.display()
     chord.discard()
 
 
 @pytest.mark.current_workflow
-def test_chord_display_wraps_full_continuation_at_narrow_width():
+def test_chord_display_preserves_full_continuation_for_terminal_wrapping():
     class LongBackend(ConformingFakeBackend):
         pieces = {**ConformingFakeBackend.pieces,
                   1: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"}
 
     chord = Chord(engine(backend=LongBackend()), (1, 2, 4))
-    body = chord.display(width=24).split("Paths:\n", 1)[1]
-    first = body.split("\nb  rank", 1)[0].splitlines()
-    assert first[0] == "a  rank 1  LIVE"
-    assert "".join(line[3:] for line in first[1:]) == LongBackend.pieces[1]
-    assert all(len(line) <= 24 for line in body.splitlines())
-
-    narrow = chord.display(width=8).split("Paths:\n", 1)[1]
-    assert all(len(line) <= 8 for line in narrow.splitlines())
-    assert "LIVE" in narrow and "EOG" in narrow
-    assert narrow.startswith("a ") and "\nb " in narrow and "\nc " in narrow
+    body = chord.display().split("Paths:\n", 1)[1]
+    assert body.startswith("a  rank 1  LIVE\n   " + LongBackend.pieces[1] + "\nb  rank")
     chord.discard()
 
 
@@ -407,20 +399,6 @@ def test_chord_keeps_active_survivor_cache_and_repositions_after_rewind(branchin
     assert original.observe().proposal_token_id == manual.observe().proposal_token_id
     if cfg:
         assert guidance.tokens == manual.guidance_backend.tokens
-
-
-@pytest.mark.current_workflow
-def test_chord_shared_context_wrap_is_reused_until_width_changes():
-    chord = Chord(engine(), (1, 2))
-    with patch("trajectory_editor.chord._recent_context", wraps=_recent_context) as wrap:
-        first = chord.display(width=40)
-        assert chord.display(width=40) == first
-        chord.advance()
-        assert chord.display(width=40) != first
-        assert wrap.call_count == 1
-        chord.display(width=20)
-        assert wrap.call_count == 2
-    chord.discard()
 
 
 class DurableFakeBackend(ConformingFakeBackend):

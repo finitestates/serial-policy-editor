@@ -4,25 +4,29 @@
 per interactive run and enter `with io.session():` around that run. A live
 terminal keeps one `PersistentTerminalSession` and one prompt-toolkit
 application until the context exits. A plain or piped terminal uses the same
-context with no live application. Live choice, EDGE, and prompt reads require the
-context to be active; plain requests use that same context.
+context with no live application. Live choice, EDGE, beam, and prompt reads
+require the context to be active; plain requests use that same context.
 
-The episode-owning thread prepares `ChoiceViewState` and `EdgeViewState` from
-`terminal_contracts.py`, then calls `io.read_choice(state)` or
-`io.read_edge(state)`. Both return raw command text or `None` on EOF. The
-caller alone parses that text and applies engine, navigation, replay, or store
-changes. `PromptRequest` covers ordinary input, confirmations and single keys,
+The episode-owning thread prepares `ChoiceViewState`, `EdgeViewState`, and
+`BeamViewState` from `terminal_contracts.py`, then calls the matching
+`io.read_choice(state)`, `io.read_edge(state)`, or `io.read_beam(state)`.
+Choice and EDGE reads return raw command text; beam reads return a `BeamInput`
+with command text and selected branch. The caller alone parses that input and
+applies engine, navigation, replay, or store changes. `PromptRequest` covers
+ordinary input, confirmations and single keys,
 multiline prompt composition, pages, and isolated chord displays through
 `io.prompt(request)`. Existing `read`, `read_key`, `read_multiline_prompt`,
 and `page` methods are small adapters to this request. The chord flow submits
 an isolated `PromptRequest` directly.
 
-The `TerminalProtocol` describes the shared API. `io.terminal_size()` supplies
-the usable width and height; a missing size calls for a normal width fallback.
-`io.capabilities.seamless_review` explicitly enables Enter to rewind from a
-review boundary. Policy and EDGE callers do not choose a renderer. Adding
-presentation fields changes the relevant request type; readers pass the
-same request object through to the selected implementation.
+The `TerminalProtocol` describes the shared API. Live prompt-toolkit layouts
+allocate space to their windows and wrap or scroll content from the actual
+render area. Views provide logical content and layout priorities; they do not
+query terminal dimensions. Plain output writes complete text for the terminal
+or pager to display. `io.capabilities.seamless_review` explicitly enables
+Enter to rewind from a review boundary. Policy and EDGE callers do not choose
+a renderer. Adding presentation fields changes the relevant request type;
+readers pass the same request object through to the selected implementation.
 
 ## Where changes belong
 
@@ -32,11 +36,12 @@ same request object through to the selected implementation.
   `edge_commands.py`, dispatch it
   in `episode_cli.py` and/or `session_runtime.py` as appropriate, and update
   `edge_help.py`. Keep episode, store, and backend effects in those callers.
-- Add a decision field to `ChoiceViewState`, an EDGE field to `EdgeViewState`, or
-  an input option to `PromptRequest` in `terminal_contracts.py`. Prepare its
-  value on the episode-owning thread. Render the same request in `plain_tui.py`
-  and the corresponding live view (`live_tui.py`, `edge_tui.py`, or the prompt
-  surface in `persistent_tui.py`).
+- Add a decision field to `ChoiceViewState`, an EDGE field to `EdgeViewState`, a
+  beam field to `BeamViewState`, or an input option to `PromptRequest` in
+  `terminal_contracts.py`. Prepare its value on the episode-owning thread.
+  Render the same request in `plain_tui.py` and the corresponding live view
+  (`live_tui.py`, `edge_tui.py`, `beam_tui.py`, or the prompt surface in
+  `persistent_tui.py`).
 - Add an interactive surface to `PersistentTerminalSession` and route its
   request through `TerminalIO` in `tui.py`. Keep one application and session
   across surfaces. Its plain counterpart handles only text display and input.
@@ -58,6 +63,7 @@ EDGE command grammar. Presentation may differ in these ways:
 | Choice | Fullscreen layout, editable command buffer, non-mutating previews and optional initial command | Text table followed by ordinary input; no prefill or previews |
 | Review and feedback | Dedicated review and status areas | Text lines prepared in the same choice request |
 | EDGE | Fullscreen menu | Text menu with the same command meanings |
+| Beam | Wrapped leaderboard with keyboard branch selection | Text leaderboard with typed branch selection |
 | Page | Scrollable in-application page | System text pager |
 | Single key or confirmation | In-application key binding | Unbuffered key on a TTY; first character of an input line when piped |
 | Multiline composition | In-application editor; Escape then Enter submits, Ctrl-D cancels, empty prompts remain editable | Line-oriented prompt; Enter submits one nonempty line, Ctrl-D cancels |
@@ -65,7 +71,7 @@ EDGE command grammar. Presentation may differ in these ways:
 
 The choice request carries search results, errors, bias feedback, review
 position, and column preferences. Both EDGE renderers use the same command
-labels. Session actions can load saved episodes or explicitly save the current
+labels. Beam actions use the same request boundary in both renderers. Session actions can load saved episodes or explicitly save the current
 branch or branch family. Plain
 input preserves command meanings but has no cursor navigation or previews.
 Initial prompts and bare `new` use the same composition request. For exact

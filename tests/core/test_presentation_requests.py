@@ -128,28 +128,15 @@ def test_choice_requests_preserve_actions_feedback_and_lazy_statistics():
     assert requests[0][3].logit_view == "raw"
 
 
-def test_candidate_columns_do_not_depend_on_terminal_width():
-    class SizedIO(ScriptedIO):
-        def __init__(self, width):
-            super().__init__([])
-            self.width = width
-
-        def terminal_size(self):
-            return self.width, 24
-
+def test_candidate_column_plan_includes_requested_probability_diagnostics():
     engine = EpisodeEngine(
         CountingBackend(), initial_text="P", initial_token_ids=[7],
         sampling=SamplerConfig(temperature=0.0),
     )
-    narrow = InteractivePolicy(
-        io=SizedIO(36), menu_size=1, show_model_probabilities=True,
+    plan = InteractivePolicy(
+        io=ScriptedIO([]), menu_size=1, show_model_probabilities=True,
     )._view_plan(engine)
-    wide = InteractivePolicy(
-        io=SizedIO(160), menu_size=1, show_model_probabilities=True,
-    )._view_plan(engine)
-
-    assert narrow == wide
-    assert {label for label, _ in narrow.columns} == {
+    assert {label for label, _ in plan.columns} == {
         "raw-p", "decode-p", "token-id",
     }
 

@@ -658,7 +658,6 @@ class PersistentTerminalSession(AbstractContextManager):
                     state,
                     submit=self._submit,
                     enabled=lambda: self.accepting_input,
-                    terminal_size=self._surface_size,
                 )
             else:
                 self.choice_view.update(state)
@@ -678,7 +677,6 @@ class PersistentTerminalSession(AbstractContextManager):
                     state,
                     submit=self._submit,
                     enabled=lambda: self.accepting_input,
-                    terminal_size=self._surface_size,
                 )
             else:
                 self.beam_view.update(state)
@@ -694,13 +692,6 @@ class PersistentTerminalSession(AbstractContextManager):
             self._surface = self._prompt_view
         self.application.layout.focus(self._surface.layout.current_control)
         self.application.invalidate()
-
-    def _surface_size(self):
-        size = self.output_device.get_size()
-        return size.columns, max(1, size.rows - bool(self._notice))
-
-    def terminal_size(self) -> tuple[int, int]:
-        return self._surface_size()
 
     def _submit(self, *, result=None, exception=None):
         if isinstance(exception, KeyboardInterrupt):

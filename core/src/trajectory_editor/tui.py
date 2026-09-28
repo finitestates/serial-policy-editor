@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import shutil
 import sys
 from contextlib import contextmanager, redirect_stdout, redirect_stderr
 from io import StringIO
@@ -68,22 +67,11 @@ class TerminalIO:
 
     @property
     def capabilities(self) -> TerminalCapabilities:
-        size = self.terminal_size()
         return TerminalCapabilities(
             live_views=self._live_choices,
-            columns=size[0] if size else None,
-            rows=size[1] if size else None,
             single_key=sys.stdin.isatty(),
             seamless_review=self._live_choices,
         )
-
-    def terminal_size(self) -> tuple[int, int] | None:
-        if self._live_session is not None:
-            return self._live_session.terminal_size()
-        if not sys.stdout.isatty():
-            return None
-        size = shutil.get_terminal_size(fallback=(100, 30))
-        return size.columns, size.lines
 
     @contextmanager
     def session(self) -> Iterator[object | None]:
@@ -133,7 +121,8 @@ class TerminalIO:
 
     def read_beam(self, state: BeamViewState) -> BeamInput | None:
         if not self._live_choices:
-            raise RuntimeError("beam dashboard requires the live terminal surface")
+            from .plain_tui import read_beam
+            return read_beam(self, state)
         if self._live_session is None:
             raise RuntimeError("enter TerminalIO.session() before live requests")
         return self._live_session.read_beam(state)

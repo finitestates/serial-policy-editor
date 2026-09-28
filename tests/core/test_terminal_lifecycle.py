@@ -21,7 +21,8 @@ from trajectory_editor.core.ui import ChoiceSet
 from trajectory_editor.live_tui import PreviewPending, action_preview
 from trajectory_editor.persistent_tui import PersistentTerminalSession, _Request
 from trajectory_editor.terminal_contracts import (
-    BoundaryReview, ChoiceViewState, EdgeViewState, PromptRequest,
+    BeamInput, BeamViewRow, BeamViewState, BoundaryReview, ChoiceViewState,
+    EdgeViewState, PromptRequest,
 )
 from trajectory_editor.tui import TerminalIO
 from trajectory_editor.ui_themes import LIVE_THEME_NAMES
@@ -63,6 +64,12 @@ def test_one_application_transitions_across_choice_review_edge_page_prompt_choic
     prompt = PromptRequest("Name> ")
     page = PromptRequest("", body="Long page\nsecond line", page=True)
     edge = EdgeViewState("episode", 0, "temperature 1")
+    beam = BeamViewState(
+        "BEAM · width 1 · depth 1",
+        "Shared prefix",
+        (BeamViewRow("b1", " continuation", "-0.45", "LIVE", ("step",)),),
+        "b1",
+    )
     choice = _choice_state()
     review = replace(choice, review=BoundaryReview(
         0, 0, "P", {"kind": "token-boundary"},
@@ -81,6 +88,23 @@ def test_one_application_transitions_across_choice_review_edge_page_prompt_choic
             application = session.application
             assert complete(session.read_choice, choice, "1\r") == "1"
             choice_view = session.choice_view
+            context_info = choice_view.context_window.render_info
+            assert context_info is not None
+            assert context_info.window_height == 2
+            context_line = "".join(
+                text for _style, text in context_info.ui_content.get_line(1)
+            )
+            assert context_line == "P x"
+            assert any(
+                source_row == 1
+                for source_row, _column in context_info.visible_line_to_row_col.values()
+            )
+            assert complete(
+                session.read_beam, beam, "select b1\r"
+            ) == BeamInput("select b1", "b1")
+            assert complete(
+                session.read_beam, beam, "\x1b[C"
+            ) == BeamInput("advance 1", "b1")
             assert complete(session.read_choice, review, "\r") == "\x1b"
             assert complete(session.read_edge, edge, "c\r") == "c"
             assert complete(session.prompt, page, "\r") == ""
@@ -91,6 +115,7 @@ def test_one_application_transitions_across_choice_review_edge_page_prompt_choic
             assert session.choice_view is choice_view
             assert session.choice_view is not None and session.edge_view is not None
     rendered = stream.getvalue()
+    assert "DECISION BOUNDARY" in rendered
     assert rendered.count("\x1b[?1049h") == 1
     assert rendered.count("\x1b[?1049l") == 1
 
@@ -114,6 +139,18 @@ def test_live_terminal_redraws_after_resize_and_handles_narrow_multiline_surface
     choice = replace(_choice_state(), choice=replace(
         _choice_state().choice, context_text_tail="A very long context line " * 12,
     ))
+    beam = BeamViewState(
+        "BEAM · width 4 · depth 8",
+        "A very long shared context " * 12,
+        tuple(
+            BeamViewRow(
+                f"b{index}", "long continuation " * 8, "-0.45", "LIVE",
+                ("long recent step " * 4,),
+            )
+            for index in range(1, 5)
+        ),
+        "b1",
+    )
     edge = EdgeViewState("episode", 0, "temperature 1")
     prompt = PromptRequest("New prompt > ", multiline=True, isolated=True)
     with create_pipe_input() as pipe:
@@ -122,7 +159,6 @@ def test_live_terminal_redraws_after_resize_and_handles_narrow_multiline_surface
 
             def feed_choice():
                 _wait_until_ready(session, pipe, choice)
-                assert session.terminal_size()[0] == 28
                 previous = session.renders
                 dimensions[:] = [26, 88]
                 session._call(session.application.invalidate)
@@ -137,7 +173,13 @@ def test_live_terminal_redraws_after_resize_and_handles_narrow_multiline_surface
             assert session.read_choice(choice) == "1"
             feeder.join(timeout=3)
             assert not feeder.is_alive()
-            assert session.terminal_size()[0] == 88
+
+            dimensions[:] = [10, 28]
+            feeder = Thread(target=_send_when_ready, args=(session, pipe, beam, "\x1b[C"))
+            feeder.start()
+            assert session.read_beam(beam) == BeamInput("advance 1", "b1")
+            feeder.join(timeout=3)
+            assert not feeder.is_alive()
 
             for read, state, sent, expected in (
                 (session.read_edge, edge, "q\r", "q"),
@@ -150,6 +192,7 @@ def test_live_terminal_redraws_after_resize_and_handles_narrow_multiline_surface
                 assert not feeder.is_alive()
             assert session.application is application
     rendered = stream.getvalue()
+    assert "A very long context line" in rendered
     assert rendered.count("\x1b[?1049h") == 1
     assert rendered.count("\x1b[?1049l") == 1
 
@@ -238,9 +281,11 @@ def test_captured_output_replays_once_after_live_terminal_restoration(monkeypatc
 
 
 @pytest.mark.invariant
-def test_preview_callback_runs_on_episode_owner_thread():
+@pytest.mark.parametrize("command", ["t test", "x test"])
+def test_text_insertion_preview_updates_while_typing_on_episode_owner_thread(command):
     stream, output = _terminal()
     resolved = Event()
+    preview_visible = Event()
     callback_threads = []
 
     def resolve(text, mode):
@@ -252,19 +297,35 @@ def test_preview_callback_runs_on_episode_owner_thread():
     with create_pipe_input() as pipe:
         with PersistentTerminalSession(input_device=pipe, output_device=output) as session:
             def feed():
-                _send_when_ready(session, pipe, state, "x test")
-                if not resolved.wait(3):
-                    pipe.close()
-                    return
-                pipe.send_text("\r")
+                _wait_until_ready(session, pipe, state)
+                pipe.send_text(command)
+                try:
+                    if resolved.wait(3):
+                        deadline = monotonic() + 3
+                        while monotonic() < deadline:
+                            view = session.choice_view
+                            info = view.context_window.render_info if view else None
+                            if info is not None:
+                                text = "".join(
+                                    fragment
+                                    for line_number in range(info.ui_content.line_count)
+                                    for _style, fragment in info.ui_content.get_line(line_number)
+                                )
+                                if "test" in text:
+                                    preview_visible.set()
+                                    break
+                            sleep(.005)
+                finally:
+                    pipe.send_text("\r")
 
             feeder = Thread(target=feed)
             feeder.start()
             owner = get_ident()
-            assert session.read_choice(state) == "x test"
+            assert session.read_choice(state) == command
             feeder.join(timeout=3)
             assert not feeder.is_alive()
     assert callback_threads == [owner]
+    assert preview_visible.is_set()
 
 
 @pytest.mark.invariant

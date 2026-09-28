@@ -1,18 +1,14 @@
-"""Stable, two-pane terminal presentation for interactive beam search."""
+"""Width-independent terminal presentation for interactive beam search."""
 
 from __future__ import annotations
 
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.data_structures import Point
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout
-from prompt_toolkit.layout.containers import (
-    ConditionalContainer,
-    HSplit,
-    VSplit,
-    Window,
-)
+from prompt_toolkit.layout.containers import HSplit, VSplit, VerticalAlign, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 
@@ -23,11 +19,10 @@ from .tui_views import ViewLifecycle
 class LiveBeamView(ViewLifecycle):
     """Render the frontier and route input without reading model state."""
 
-    def __init__(self, state: BeamViewState, *, submit, enabled, terminal_size):
+    def __init__(self, state: BeamViewState, *, submit, enabled):
         super().__init__(submit=submit)
         self.state = state
         self.enabled = enabled
-        self.terminal_size = terminal_size
         self.selected_label = state.selected_label
         self.command_buffer = Buffer(
             multiline=False,
@@ -35,69 +30,14 @@ class LiveBeamView(ViewLifecycle):
         )
         self.bindings = KeyBindings()
 
-        wide = Condition(lambda: self._columns() >= 92)
-        panes = HSplit(
-            [
-                ConditionalContainer(
-                    VSplit(
-                        [
-                            Window(
-                                FormattedTextControl(self._survivors),
-                                wrap_lines=True,
-                                style="class:beam-pane",
-                            ),
-                            Window(
-                                FormattedTextControl(
-                                    [("class:rule", "│")]
-                                ),
-                                width=Dimension.exact(1),
-                                always_hide_cursor=True,
-                            ),
-                            Window(
-                                FormattedTextControl(self._details),
-                                wrap_lines=True,
-                                style="class:beam-pane",
-                            ),
-                        ],
-                        padding=1,
-                    ),
-                    wide,
-                ),
-                ConditionalContainer(
-                    HSplit(
-                        [
-                            Window(
-                                FormattedTextControl(self._survivors),
-                                wrap_lines=True,
-                                style="class:beam-pane",
-                            ),
-                            Window(
-                                FormattedTextControl(
-                                    [("class:rule", "─" * 72)]
-                                ),
-                                height=1,
-                                always_hide_cursor=True,
-                            ),
-                            Window(
-                                FormattedTextControl(self._details),
-                                wrap_lines=True,
-                                style="class:beam-pane",
-                            ),
-                        ]
-                    ),
-                    Condition(lambda: self._columns() < 92),
-                ),
-            ]
-        )
         input_control = BufferControl(buffer=self.command_buffer)
         command_row = VSplit(
             [
                 Window(
-                    FormattedTextControl(
-                        [("class:prompt-label", "Beam › ")]
-                    ),
+                    FormattedTextControl([("class:prompt-label", "Beam › ")]),
                     width=Dimension.exact(8),
                     height=1,
+                    wrap_lines=True,
                 ),
                 Window(input_control, height=1, style="class:input"),
             ]
@@ -108,22 +48,44 @@ class LiveBeamView(ViewLifecycle):
                     FormattedTextControl(self._header),
                     dont_extend_height=True,
                     always_hide_cursor=True,
+                    wrap_lines=True,
                 ),
                 Window(
-                    FormattedTextControl(self._context),
+                    FormattedTextControl(
+                        self._context,
+                        get_cursor_position=self._context_cursor_position,
+                    ),
                     wrap_lines=True,
                     dont_extend_height=True,
                     always_hide_cursor=True,
                     style="class:muted",
                 ),
                 Window(
-                    FormattedTextControl(
-                        [("class:rule", "─" * max(1, self._columns()))]
-                    ),
                     height=1,
+                    char="─",
+                    style="class:rule",
                     always_hide_cursor=True,
                 ),
-                panes,
+                Window(
+                    FormattedTextControl(
+                        self._survivors,
+                        get_cursor_position=self._survivor_cursor_position,
+                    ),
+                    wrap_lines=True,
+                    dont_extend_height=True,
+                    always_hide_cursor=True,
+                    style="class:beam-pane",
+                ),
+                Window(
+                    FormattedTextControl(
+                        self._details,
+                        get_cursor_position=self._details_cursor_position,
+                    ),
+                    wrap_lines=True,
+                    dont_extend_height=True,
+                    always_hide_cursor=True,
+                    style="class:beam-pane",
+                ),
                 Window(
                     FormattedTextControl(self._notice),
                     height=1,
@@ -138,8 +100,10 @@ class LiveBeamView(ViewLifecycle):
                     dont_extend_height=True,
                     always_hide_cursor=True,
                     style="class:hint",
+                    wrap_lines=True,
                 ),
-            ]
+            ],
+            align=VerticalAlign.TOP,
         )
         self.layout = Layout(root, focused_element=input_control)
 
@@ -193,10 +157,6 @@ class LiveBeamView(ViewLifecycle):
         self.selected_label = state.selected_label
         self.command_buffer.reset()
 
-    def _columns(self) -> int:
-        size = self.terminal_size()
-        return size[0] if size else 100
-
     def _header(self) -> StyleAndTextTuples:
         title = self.state.title
         if self.state.at_edge:
@@ -209,6 +169,11 @@ class LiveBeamView(ViewLifecycle):
             ("", self.state.shared_context),
         ]
 
+    def _context_cursor_position(self) -> Point:
+        text = "".join(value for _style, value in self._context())
+        row = text.count("\n") - int(text.endswith("\n"))
+        return Point(0, max(0, row))
+
     def _survivors(self) -> StyleAndTextTuples:
         selected = self.selected_label or "—"
         fragments: StyleAndTextTuples = [
@@ -218,9 +183,6 @@ class LiveBeamView(ViewLifecycle):
         if not self.state.rows:
             fragments.append(("class:muted", "  No retained branches.\n"))
             return fragments
-        columns = self._columns()
-        pane_width = (columns - 5) // 2 if columns >= 92 else columns
-        continuation_width = max(4, pane_width - 26)
         for rank, row in enumerate(self.state.rows, 1):
             selected_row = row.label == self.selected_label
             style = "class:beam-selected" if selected_row else "class:table-row"
@@ -228,16 +190,26 @@ class LiveBeamView(ViewLifecycle):
             status = f" · {row.state}"
             score = row.score.replace("-", "−")
             continuation = row.continuation.replace("\n", " ↵ ")
-            if len(continuation) > continuation_width:
-                continuation = continuation[:continuation_width - 1] + "…"
             fragments.extend(
                 [
                     (style, f"{marker} {rank:>2} {row.label:<4} "),
-                    (style, f"{continuation:<{continuation_width}}"),
+                    (style, continuation),
                     ("class:beam-score", f"  {score:>8}{status}\n"),
                 ]
             )
         return fragments
+
+    def _survivor_cursor_position(self) -> Point:
+        selected_index = next(
+            (
+                index
+                for index, row in enumerate(self.state.rows)
+                if row.label == self.selected_label
+            ),
+            None,
+        )
+        # The heading and selection summary occupy the first logical line.
+        return Point(0, 1 if selected_index is None else selected_index + 1)
 
     def _details(self) -> StyleAndTextTuples:
         label = self.selected_label or "—"
@@ -271,6 +243,14 @@ class LiveBeamView(ViewLifecycle):
                 )
             )
         return fragments
+
+    def _details_cursor_position(self) -> Point:
+        text = "".join(value for _style, value in self._details())
+        row = text.count("\n") - int(text.endswith("\n"))
+        return Point(
+            0,
+            max(0, row),
+        )
 
     def _notice(self) -> StyleAndTextTuples:
         if not self.state.notice:

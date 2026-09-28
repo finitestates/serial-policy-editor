@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import textwrap
 from dataclasses import dataclass, field
 
 from .core.actions import Accept, PolicyAction, SelectRawRank
@@ -41,30 +40,15 @@ def _position(backend, base: list[int], suffix: list[int]) -> None:
         backend.reset([*base, *suffix])
 
 
-def _recent_context(text: str, *, width: int, lines: int = 4) -> str:
-    """Keep the last visible screen rows of the chord's shared prefix."""
+def _recent_context(text: str, *, lines: int = 4) -> str:
+    """Keep a small logical-line tail without assuming a terminal width."""
     safe = "".join(
         char if char == "\n" or char.isprintable()
         else "    " if char == "\t"
         else f"\\x{ord(char):02x}"
         for char in text
     )
-    rows = [
-        row
-        for logical_line in safe.split("\n")
-        for row in (
-            textwrap.wrap(
-                logical_line, width=max(1, width),
-                break_long_words=True, break_on_hyphens=False,
-                replace_whitespace=False, drop_whitespace=False,
-            ) or [""]
-        )
-    ]
-    clipped = len(rows) > lines
-    tail = rows[-lines:]
-    if clipped:
-        tail[0] = "…" + tail[0][:max(0, width - 1)]
-    return "\n".join(tail)
+    return "\n".join(safe.split("\n")[-lines:])
 
 
 @dataclass
@@ -102,7 +86,7 @@ class Chord:
         self._active_path: ChordPath | None = None
         self._primary_batch: BatchedInferenceSession | None = None
         self._guidance_batch: BatchedInferenceSession | None = None
-        self._context_cache: tuple[int, str] | None = None
+        self._context_tail = _recent_context(self.shared_context)
         self.rounds: list[tuple[int, ...]] = []
         # Prepare sampler-driven model controls and one current base
         # observation before adapters create their independent lane caches.
@@ -388,9 +372,7 @@ class Chord:
             )
         self._close_batches()
 
-    def display(self, *, width: int = 100) -> str:
-        width = max(1, width)
-        indent = " " * min(3, width - 1)
+    def display(self) -> str:
         rows = []
         for path in self.paths:
             visible = path.engine.visible_token_ids[len(self.base_visible):]
@@ -402,19 +384,10 @@ class Chord:
                 for char in latest
             )
             heading = f"{path.label}  rank {path.starting_rank}  {path.state.upper()}"
-            rows.extend(textwrap.wrap(heading, width=width, subsequent_indent=indent,
-                                      break_long_words=True, break_on_hyphens=False))
+            rows.append(heading)
             for line in (safe.split("\n") if safe else ["(no visible continuation)"]):
-                wrapped = textwrap.wrap(
-                    line, width=width - len(indent), break_long_words=True,
-                    break_on_hyphens=False, replace_whitespace=False,
-                    drop_whitespace=False,
-                ) or [""]
-                rows.extend(indent + part for part in wrapped)
-        if self._context_cache is None or self._context_cache[0] != width:
-            self._context_cache = (width, _recent_context(self.shared_context, width=width))
-        context = self._context_cache[1]
-        return f"Shared context (last 4 lines):\n{context}\n\nPaths:\n" + "\n".join(rows)
+                rows.append("   " + line)
+        return f"Shared context (last 4 lines):\n{self._context_tail}\n\nPaths:\n" + "\n".join(rows)
 
 
 def chord_menu(
@@ -422,10 +395,7 @@ def chord_menu(
 ) -> tuple[str, tuple[PolicyAction, ...] | None]:
     notice = ""
     while True:
-        size = io.terminal_size()
-        columns = size[0] if size is not None else 100
-        width = max(1, columns - 2)
-        body = chord.display(width=width)
+        body = chord.display()
         if notice:
             body += "\n\n" + notice
             notice = ""

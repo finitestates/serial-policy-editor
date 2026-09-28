@@ -10,7 +10,9 @@ from .candidate_columns import CandidateColumns
 from .core.candidates import Candidate
 from .core.ui import ChoiceSet
 from .edge_help import edge_help
-from .terminal_contracts import ChoiceViewState, EdgeViewState, IO, PromptRequest
+from .terminal_contracts import (
+    BeamInput, BeamViewState, ChoiceViewState, EdgeViewState, IO, PromptRequest,
+)
 
 
 ACTION_TEXT = (
@@ -204,6 +206,54 @@ def read_edge(io: IO, state: EdgeViewState) -> str | None:
     for item in edge_help(state.mode):
         io.write(f"[{item.command}] {item.description}")
     return io.read("EDGE> ")
+
+
+def read_beam(io: IO, state: BeamViewState) -> BeamInput | None:
+    rows = [
+        state.title,
+        "Scores use full-vocabulary log-softmax after policy logit adjustments.",
+        "Temperature, truncation filters, and draw noise do not affect beam ordering.",
+        "Model-rank remains the left-column candidate address.",
+        "",
+        "Shared context (last 4 lines):",
+        state.shared_context,
+        "",
+        "Survivors:",
+    ]
+    if not state.rows:
+        rows.append("  No retained branches.")
+    for rank, row in enumerate(state.rows, 1):
+        marker = ">" if row.label == state.selected_label else " "
+        model_rank = "—" if row.model_rank is None else str(row.model_rank)
+        step_logp = (
+            "—" if row.step_log_probability is None
+            else f"{row.step_log_probability:.6f}"
+        )
+        rows.append(
+            f"{marker}{rank:>2} {row.label:<3} {row.state:<4} "
+            f"model-rank {model_rank:<7} step-logp {step_logp:<10} "
+            f"beam-logp {row.score}"
+        )
+        rows.extend(f"   {line}" for line in row.continuation.split("\n"))
+    selected = next(
+        (row for row in state.rows if row.label == state.selected_label),
+        None,
+    )
+    if selected is not None:
+        rows.extend(["", f"Selected: {selected.label}", selected.continuation, "Recent steps:"])
+        rows.extend(f"  {step}" for step in selected.recent_steps)
+    if state.notice:
+        rows.extend(["", state.notice])
+    prompt = (
+        "Beam EDGE: c resume | discard restore episode | q quit editor > "
+        if state.at_edge else
+        "Beam: Enter expand | advance N | rewind | kill ID | "
+        "ID/select ID commit | q options | ? help > "
+    )
+    raw = io.prompt(PromptRequest(prompt, body="\n".join(rows), isolated=True))
+    if raw is None:
+        return None
+    return BeamInput(raw, state.selected_label)
 
 
 def prompt(io: IO, request: PromptRequest) -> str | None:

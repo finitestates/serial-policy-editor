@@ -114,7 +114,7 @@ def test_invalid_and_incomplete_cues_are_static_and_textual():
     ):
         fragments = _render_choice(
             choice, candidates, raw, None, lambda text, mode: text, None,
-            terminal_size=(80, 30), default_hold_tokens=24,
+            default_hold_tokens=24,
         )
         assert any(marker in text and fragment_style == style
                    for fragment_style, text in fragments)

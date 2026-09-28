@@ -223,15 +223,13 @@ class ScriptedIO(ScriptedTextIO):
         super().__init__(responses)
         self.choice_requests = []
         self.edge_requests = []
+        self.beam_requests = []
         self.prompt_requests = []
 
     @property
     def capabilities(self):
         from trajectory_editor.terminal_contracts import TerminalCapabilities
         return TerminalCapabilities(live_views=False)
-
-    def terminal_size(self) -> tuple[int, int] | None:
-        return None
 
     @contextmanager
     def session(self):
@@ -246,6 +244,11 @@ class ScriptedIO(ScriptedTextIO):
         from trajectory_editor.plain_tui import read_edge
         self.edge_requests.append(state)
         return read_edge(self, state)
+
+    def read_beam(self, state):
+        from trajectory_editor.plain_tui import read_beam
+        self.beam_requests.append(state)
+        return read_beam(self, state)
 
     def prompt(self, request):
         self.prompt_requests.append(request)

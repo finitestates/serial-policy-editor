@@ -75,7 +75,6 @@ def test_scripted_terminal_is_an_explicit_request_adapter():
     assert not hasattr(text_only, "read_choice")
     terminal: TerminalProtocol = ScriptedIO([])
     assert terminal.capabilities.live_views is False
-    assert terminal.terminal_size() is None
     with terminal.session():
         terminal.write("ready")
     assert terminal.output == ["ready\n"]

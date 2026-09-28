@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import math
-import textwrap
 from dataclasses import dataclass
 
 import numpy as np
@@ -16,7 +15,7 @@ from .core.episode_observation import EpisodeObservation
 from .core.errors import EditorError
 from .core.results import ActionOutcome
 from .episode_engine import EpisodeEngine
-from .terminal_contracts import BeamViewRow, BeamViewState, PromptRequest
+from .terminal_contracts import BeamViewRow, BeamViewState
 
 
 class BeamRequested(Exception):
@@ -98,7 +97,7 @@ class BeamSearch:
         self._next_label = 0
         self._primary_batch: BatchedInferenceSession | None = None
         self._guidance_batch: BatchedInferenceSession | None = None
-        self._context_cache: tuple[int, str] | None = None
+        self._context_tail = _recent_context(self.shared_context)
         self.selected_label: str | None = None
         self.closed = False
 
@@ -536,14 +535,16 @@ class BeamSearch:
             generated = path.engine.visible_token_ids[len(self.base_visible):]
             continuation = self._safe_text(path.engine.backend.render(generated))
             if path.engine.ended:
-                continuation = f"{continuation} [finished at EOG]".strip()
+                continuation = (
+                    f"{continuation} [EOG {path.engine.terminal_token_id}]"
+                ).strip()
             nodes: list[BeamNode] = []
             node = path.node
             while node is not None:
                 nodes.append(node)
                 node = node.parent
             recent: list[str] = []
-            for node in reversed(nodes[-5:]):
+            for node in reversed(nodes[:5]):
                 token = (
                     "EOG" if node.is_eog else
                     self._safe_text(path.engine.backend.render([node.token_id]))
@@ -556,18 +557,16 @@ class BeamSearch:
             rows.append(BeamViewRow(
                 label=path.label,
                 continuation=continuation or "(no visible continuation)",
-                score=f"{path.score:.2f}",
+                score=f"{path.score:.6f}",
                 state="EOS" if path.state == "finished" else "LIVE",
                 recent_steps=tuple(recent),
+                model_rank=path.model_rank,
+                step_log_probability=path.step_log_probability,
             ))
 
-        if self._context_cache is None or self._context_cache[0] != 88:
-            self._context_cache = (
-                88, _recent_context(self.shared_context, width=88)
-            )
         return BeamViewState(
             title=f"BEAM   width {self.width} · depth {depth} · score: cumulative model log-p",
-            shared_context=self._context_cache[1],
+            shared_context=self._context_tail,
             rows=tuple(rows),
             selected_label=self.selected_label,
             notice=notice,
@@ -694,57 +693,6 @@ class BeamSearch:
             self._guidance_batch.close()
             self._guidance_batch = None
 
-    def display(self, *, width: int = 100) -> str:
-        width = max(1, width)
-        rows = [
-            "Beam leaderboard — cumulative log probability (no length normalization)",
-            "Scores use full-vocabulary log-softmax after policy logit adjustments.",
-            "Temperature, truncation filters, and random draw noise do not affect beam ordering.",
-            "Model-rank remains the left-column candidate address.",
-            "",
-        ]
-        ordered = self.ordered_paths()
-        if not ordered:
-            rows.append("No retained branches.")
-        for index, path in enumerate(ordered, 1):
-            rank = "—" if path.model_rank is None else str(path.model_rank)
-            step_logp = (
-                "—" if path.step_log_probability is None
-                else f"{path.step_log_probability:.6f}"
-            )
-            status = "EOS" if path.state == "finished" else "LIVE"
-            selected = ">" if path.label == self.selected_label else " "
-            heading = (
-                f"{selected}{index:>2} {path.label:<3} {status:<4} "
-                f"model-rank {rank:<7} step-logp {step_logp:<10} "
-                f"beam-logp {path.score:.6f}"
-            )
-            rows.extend(textwrap.wrap(
-                heading, width=width, subsequent_indent="   ",
-                break_long_words=True, break_on_hyphens=False,
-            ))
-            generated = path.engine.visible_token_ids[len(self.base_visible):]
-            text = path.engine.backend.render(generated)
-            safe = "".join(
-                char if char == "\n" or char.isprintable()
-                else "    " if char == "\t"
-                else f"\\x{ord(char):02x}"
-                for char in text
-            )
-            if path.engine.ended:
-                safe += f" [EOG {path.engine.terminal_token_id}]"
-            for line in (safe.split("\n") if safe else ["(no visible continuation)"]):
-                wrapped = textwrap.wrap(
-                    line, width=max(1, width - 3), break_long_words=True,
-                    break_on_hyphens=False, replace_whitespace=False,
-                    drop_whitespace=False,
-                ) or [""]
-                rows.extend("   " + part for part in wrapped)
-        if self._context_cache is None or self._context_cache[0] != width:
-            self._context_cache = (width, _recent_context(self.shared_context, width=width))
-        return f"Shared context (last 4 lines):\n{self._context_cache[1]}\n\n" + "\n".join(rows)
-
-
 def beam_menu(
     io,
     beam: BeamSearch,
@@ -753,38 +701,28 @@ def beam_menu(
     promote_on_select: bool = False,
 ) -> tuple[str, tuple[PolicyAction, ...] | None]:
     notice = ""
-    while True:
-        capabilities = getattr(io, "capabilities", None)
-        read_beam = getattr(io, "read_beam", None)
-        live_view = bool(
-            callable(read_beam)
-            and capabilities is not None
-            and capabilities.live_views
+
+    def advance_at_cursor(expand) -> bool:
+        """Keep the highlighted leaderboard row stable as the frontier changes."""
+        paths = beam.ordered_paths()
+        cursor_row = next(
+            (index for index, path in enumerate(paths)
+             if path.label == beam.selected_label),
+            0,
         )
-        if live_view:
-            response = read_beam(beam.view_state(notice=notice, at_edge=at_edge))
-            notice = ""
-            if response is None:
-                return "edge", None
-            command = response.command.strip().lower()
-            beam.set_selection(response.selected_label)
-        else:
-            size = io.terminal_size()
-            columns = size[0] if size is not None else 100
-            body = beam.display(width=max(1, columns - 2))
-            if notice:
-                body += "\n\n" + notice
-                notice = ""
-            prompt = (
-                "Beam EDGE: c resume | discard restore episode | q quit editor > "
-                if at_edge else
-                "Beam: Enter expand | advance N | rewind | kill ID | "
-                "ID/select ID commit | q options | ? help > "
-            )
-            raw = io.prompt(PromptRequest(prompt, body=body, isolated=True))
-            if raw is None:
-                return "edge", None
-            command = raw.strip().lower()
+        has_live_paths = expand()
+        paths = beam.ordered_paths()
+        if paths:
+            beam.set_selection(paths[min(cursor_row, len(paths) - 1)].label)
+        return has_live_paths
+
+    while True:
+        response = io.read_beam(beam.view_state(notice=notice, at_edge=at_edge))
+        notice = ""
+        if response is None:
+            return "edge", None
+        command = response.command.strip().lower()
+        beam.set_selection(response.selected_label)
         if at_edge:
             if command in {"return", "esc"}:
                 beam.discard()
@@ -803,7 +741,7 @@ def beam_menu(
                 beam.discard()
                 return "discard", None
             if command in {"", "]"}:
-                if not beam.expand():
+                if not advance_at_cursor(beam.expand):
                     notice = "No live branches remain; choose an EOS branch or open Beam EDGE."
                 continue
             if command.startswith(("advance ", "hold ", "a ")):
@@ -811,7 +749,9 @@ def beam_menu(
                 try:
                     if not count.strip().isdigit():
                         raise EditorError("use `advance N` with a step count from 1 to 256")
-                    if not beam.advance(int(count.strip())):
+                    if not advance_at_cursor(
+                        lambda: beam.advance(int(count.strip()))
+                    ):
                         notice = "No live branches remain; choose an EOS branch or open Beam EDGE."
                 except EditorError as exc:
                     notice = str(exc)
