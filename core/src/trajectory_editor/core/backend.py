@@ -67,15 +67,21 @@ class BatchedInferenceSession(Protocol):
     Lane IDs are stable for the lifetime of the session. ``flush`` advances
     selected lanes that have queued tokens in adapter batches; ``rebuild``
     starts selected lanes from their current prefixes, which is used after a
-    rewind or another non-append edit. Adapters may group lanes internally
-    when prefix lengths or cache layouts differ.
+    rewind or another non-append edit. ``fork`` copies ready source lanes into
+    destination lanes, and ``retire`` releases lanes removed from a temporary
+    frontier. Adapters may group lanes internally when prefix lengths or
+    cache layouts differ.
     """
 
     def lane(self, lane_id: int) -> InferenceBackend: ...
 
+    def fork(self, source_lane_by_destination: Mapping[int, int]) -> None: ...
+
     def flush(self, active_lane_ids: Sequence[int]) -> None: ...
 
     def rebuild(self, active_lane_ids: Sequence[int]) -> None: ...
+
+    def retire(self, lane_ids: Sequence[int]) -> None: ...
 
     def close(self) -> None: ...
 

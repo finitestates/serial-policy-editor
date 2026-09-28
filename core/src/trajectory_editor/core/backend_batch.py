@@ -15,6 +15,7 @@ from .backend_position import BackendPosition
 PrefixMap = Mapping[int, tuple[int, ...]]
 AdvanceMap = Mapping[int, tuple[tuple[int, ...], tuple[int, ...]]]
 LogitMap = Mapping[int, np.ndarray]
+ForkMap = Mapping[int, int]
 
 
 @dataclass
@@ -40,6 +41,8 @@ class InferenceBatch:
         *,
         prefill: Callable[[PrefixMap], LogitMap],
         advance: Callable[[AdvanceMap], LogitMap],
+        fork: Callable[[ForkMap], LogitMap] | None = None,
+        retire: Callable[[Sequence[int]], None] | None = None,
         close: Callable[[], None] | None = None,
     ) -> None:
         if not prefixes:
@@ -47,6 +50,8 @@ class InferenceBatch:
         self._backend = backend
         self._prefill = prefill
         self._advance = advance
+        self._fork = fork
+        self._retire = retire
         self._close_callback = close
         self._closed = False
         self._lanes = [
@@ -60,6 +65,56 @@ class InferenceBatch:
     def lane(self, lane_id: int) -> InferenceBackend:
         self._check_lane_id(lane_id)
         return _InferenceBatchLane(self, lane_id)
+
+    def fork(self, source_lane_by_destination: ForkMap) -> None:
+        """Copy current lane state into destination lanes without replaying prefixes.
+
+        Destination IDs can overlap source IDs and a source may feed multiple
+        destinations. Adapters that cannot clone their cache rows may rebuild
+        the requested prefixes through the ordinary prefill callback.
+        """
+        self._ensure_open()
+        mapping = dict(source_lane_by_destination)
+        if any(type(dst) is not int or type(src) is not int for dst, src in mapping.items()):
+            raise ValueError("batch fork lane IDs must be integers")
+        for dst, src in mapping.items():
+            self._check_lane_id(dst)
+            self._check_lane_id(src)
+            if self._lanes[src].logits is None or self._lanes[src].pending or self._lanes[src].needs_rebuild:
+                raise RuntimeError("batch fork source lane is not at a ready decision boundary")
+        if not mapping:
+            return
+
+        prefixes = {
+            dst: tuple(self._lanes[src].token_ids)
+            for dst, src in mapping.items()
+        }
+        outputs = (
+            self._fork(mapping)
+            if self._fork is not None
+            else self._prefill(prefixes)
+        )
+        self._mark_inactive(tuple(mapping))
+        for dst, prefix in prefixes.items():
+            lane = self._lanes[dst]
+            lane.token_ids = list(prefix)
+            lane.pending.clear()
+            lane.needs_rebuild = False
+        self._install_logits(outputs, expected_ids=tuple(mapping))
+
+    def retire(self, lane_ids: Sequence[int]) -> None:
+        """Drop lanes that are no longer live, releasing adapter cache rows."""
+        self._ensure_open()
+        ids = self._validate_lane_ids(lane_ids)
+        if not ids:
+            return
+        if self._retire is not None:
+            self._retire(ids)
+        for lane_id in ids:
+            lane = self._lanes[lane_id]
+            lane.logits = None
+            lane.pending.clear()
+            lane.needs_rebuild = True
 
     def flush(self, active_lane_ids: Sequence[int]) -> None:
         self._ensure_open()
@@ -193,10 +248,48 @@ class _InferenceBatchLane:
         lane.logits = None
 
     def last_logits(self) -> np.ndarray:
-        logits = self._state.logits
+        lane = self._state
+        if lane.logits is None:
+            if lane.pending and not lane.needs_rebuild:
+                self._batch.flush((self._lane_id,))
+            else:
+                self._batch.rebuild((self._lane_id,))
+            lane = self._state
+        logits = lane.logits
         if logits is None:
             raise RuntimeError("batch lane logits are stale; flush or rebuild its session")
         return logits.copy()
+
+    def position(self) -> BackendPosition:
+        lane = self._state
+        evaluated_length = len(lane.token_ids) - len(lane.pending)
+        evaluated = tuple(lane.token_ids[:evaluated_length])
+        cache_reusable = not lane.needs_rebuild and bool(evaluated)
+        return BackendPosition(
+            token_ids=evaluated,
+            cursor=evaluated_length,
+            cache_start=0 if cache_reusable else None,
+            cache_end=evaluated_length - 1 if cache_reusable else None,
+            cache_reusable=cache_reusable,
+            logits_valid=lane.logits is not None and not lane.pending,
+        )
+
+    def branch_to_prefix(self, prefix_token_ids: list[int]) -> None:
+        values = [int(token_id) for token_id in prefix_token_ids]
+        if not values:
+            raise RuntimeError("decoder prefix cannot be empty")
+        lane = self._state
+        current = tuple(lane.token_ids)
+        target = tuple(values)
+        if lane.needs_rebuild or (lane.logits is None and not lane.pending):
+            self.reset(values)
+            return
+        if current == target:
+            return
+        if target[:len(current)] == current:
+            self.eval(list(target[len(current):]))
+            return
+        self.reset(values)
 
     def tokenize(
         self, text: str, *, add_bos: bool = False, special: bool = False

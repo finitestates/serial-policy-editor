@@ -14,6 +14,7 @@ from .core.ui import EditAction, InsertMode
 
 class CommandKind(str, Enum):
     CHORD = "chord"
+    BEAM = "beam"
     BIAS = "bias"
     SAMPLER = "sampler"
     REROLL = "reroll"
@@ -88,6 +89,7 @@ class TeacherCommand:
     bias_inspect_token: int | None = None
     bias_token_id: int | None = None
     chord_ranks: tuple[int, ...] | None = None
+    beam_width: int | None = None
     sampler_text: str | None = None
     reroll_seed: int | None = None
     draw_raw_rank: int | None = None
@@ -142,6 +144,8 @@ HELP_TEXT = """Commands:
   1..N              commit a candidate; the proposal rank records acceptance
   chord RANK RANK... preview temporary continuations; choose a letter or starting rank
                     to commit its actions and drop the other previews
+  beam [WIDTH]      open an interactive beam leaderboard (default width: 5)
+                    Enter expands one token; kill ID prunes a branch; select ID commits it
   t TEXT            insert continuation text (adds a joining space if needed)
   x TEXT            insert exact text
                     after `t ` or `x `, Tab inserts a literal tab character
@@ -521,6 +525,23 @@ def parse_chord(raw: str, vocabulary_size: int) -> tuple[int, ...] | None:
     return ranks
 
 
+def parse_beam(raw: str) -> int | None:
+    """Recognize ``beam [WIDTH]`` before generic command parsing."""
+    parts = raw.strip().split()
+    if not parts or parts[0].lower() != "beam":
+        return None
+    if len(parts) > 2:
+        raise EditorError("use beam [WIDTH]")
+    if len(parts) == 1:
+        return 5
+    if not parts[1].isdecimal():
+        raise EditorError("beam width must be a positive integer")
+    width = int(parts[1])
+    if not 1 <= width <= 26:
+        raise EditorError("beam width must be between 1 and 26")
+    return width
+
+
 def parse_command(
     raw: str,
     *,
@@ -529,6 +550,9 @@ def parse_command(
     vocabulary_size: int | None = None,
     default_search_radius: int = 3,
 ) -> TeacherCommand:
+    beam_width = parse_beam(raw)
+    if beam_width is not None:
+        return TeacherCommand(CommandKind.BEAM, beam_width=beam_width)
     chord_ranks = parse_chord(raw, vocabulary_size or menu_size)
     if chord_ranks is not None:
         return TeacherCommand(CommandKind.CHORD, chord_ranks=chord_ranks)

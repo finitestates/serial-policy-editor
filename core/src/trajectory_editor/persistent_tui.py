@@ -41,6 +41,7 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.widgets import TextArea
 
 from .edge_tui import LiveEdgeView
+from .beam_tui import LiveBeamView
 from .core.errors import EditorError
 from .live_tui import (
     LiveChoiceView,
@@ -49,13 +50,19 @@ from .live_tui import (
     _live_style,
     _safe_context_text,
 )
-from .terminal_contracts import ChoiceViewState, EdgeViewState, PromptRequest
+from .terminal_contracts import (
+    BeamInput,
+    BeamViewState,
+    ChoiceViewState,
+    EdgeViewState,
+    PromptRequest,
+)
 from .ui_themes import DEFAULT_LIVE_THEME
 
 
 @dataclass(eq=False)
 class _Request:
-    state: ChoiceViewState | EdgeViewState | PromptRequest
+    state: ChoiceViewState | EdgeViewState | BeamViewState | PromptRequest
     response: Future = field(default_factory=Future)
     previews: OrderedDict = field(default_factory=OrderedDict)
     latest: dict[str, tuple] = field(default_factory=dict)
@@ -237,6 +244,7 @@ class PersistentTerminalSession(AbstractContextManager):
         self.application: Application | None = None
         self.choice_view: LiveChoiceView | None = None
         self.edge_view: LiveEdgeView | None = None
+        self.beam_view: LiveBeamView | None = None
         self._prompt_view = None
         self._surface = None
         self._current: _Request | None = None
@@ -593,6 +601,9 @@ class PersistentTerminalSession(AbstractContextManager):
     def read_edge(self, state: EdgeViewState):
         return self._read(state)
 
+    def read_beam(self, state: BeamViewState) -> BeamInput | None:
+        return self._read(state)
+
     def prompt(self, request: PromptRequest):
         return self._read(request)
 
@@ -660,6 +671,18 @@ class PersistentTerminalSession(AbstractContextManager):
             else:
                 self.edge_view.update(state)
             self._surface = self.edge_view
+        elif isinstance(state, BeamViewState):
+            self._notice = ""
+            if self.beam_view is None:
+                self.beam_view = LiveBeamView(
+                    state,
+                    submit=self._submit,
+                    enabled=lambda: self.accepting_input,
+                    terminal_size=self._surface_size,
+                )
+            else:
+                self.beam_view.update(state)
+            self._surface = self.beam_view
         else:
             if state.isolated:
                 self._notice = ""

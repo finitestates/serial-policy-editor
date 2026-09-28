@@ -20,7 +20,7 @@ import numpy as np
 
 from .core.errors import EditorError
 from .core.backend import CacheMode, validate_cache_mode
-from .core.backend_batch import AdvanceMap, InferenceBatch, LogitMap, PrefixMap
+from .core.backend_batch import AdvanceMap, ForkMap, InferenceBatch, LogitMap, PrefixMap
 from .core.backend_position import BackendPosition, compare_backend_position
 from .model_hash import sha256_path
 
@@ -816,6 +816,91 @@ class TransformersBackend:
             state["logits"] = dict(next_logits)
             return next_logits
 
+        def fork(requested: ForkMap) -> LogitMap:
+            prefixes = {
+                destination: tuple(values[source])
+                for destination, source in requested.items()
+            }
+            if not requested:
+                return {}
+            if not state["cache_enabled"]:
+                return prefill(prefixes)
+
+            sources_by_group: dict[int, tuple[dict[str, Any], list[tuple[int, int]]]] = {}
+            for destination, source in requested.items():
+                group = next(
+                    (item for item in state["groups"] if source in item["lane_ids"]),
+                    None,
+                )
+                if group is None or source not in state["logits"]:
+                    return prefill(prefixes)
+                key = id(group)
+                if key not in sources_by_group:
+                    sources_by_group[key] = (group, [])
+                sources_by_group[key][1].append((destination, source))
+
+            groups: list[dict[str, Any]] = []
+            logits: dict[int, np.ndarray] = {}
+            try:
+                for group, pairs in sources_by_group.values():
+                    destinations = [destination for destination, _ in pairs]
+                    source_rows = [group["lane_ids"].index(source) for _, source in pairs]
+                    cache = _select_cache_rows(group["cache"], source_rows, self._torch)
+                    groups.append({
+                        "lane_ids": tuple(destinations),
+                        "length": group["length"],
+                        "prefixes": {destination: prefixes[destination] for destination in destinations},
+                        "cache": cache,
+                    })
+                    logits.update({
+                        destination: state["logits"][source].copy()
+                        for destination, source in pairs
+                    })
+            except (AttributeError, RuntimeError, TypeError, ValueError, _CacheUnavailable):
+                probe = getattr(self, "_real_model_probe", None)
+                if probe is not None:
+                    probe.cache_fallback("batch-fork-cache-unavailable")
+                state["cache_enabled"] = False
+                return prefill(prefixes)
+
+            state["groups"] = groups
+            state["logits"] = dict(logits)
+            return logits
+
+        def retire(lane_ids: Sequence[int]) -> None:
+            retired = set(lane_ids)
+            if not retired:
+                return
+            kept_groups: list[dict[str, Any]] = []
+            try:
+                if state["cache_enabled"]:
+                    for group in state["groups"]:
+                        kept = [
+                            lane_id for lane_id in group["lane_ids"]
+                            if lane_id not in retired
+                        ]
+                        if not kept:
+                            continue
+                        rows = [group["lane_ids"].index(lane_id) for lane_id in kept]
+                        cache = _select_cache_rows(group["cache"], rows, self._torch)
+                        kept_groups.append({
+                            **group,
+                            "lane_ids": tuple(kept),
+                            "prefixes": {lane_id: group["prefixes"][lane_id] for lane_id in kept},
+                            "cache": cache,
+                        })
+            except (AttributeError, RuntimeError, TypeError, ValueError, _CacheUnavailable):
+                probe = getattr(self, "_real_model_probe", None)
+                if probe is not None:
+                    probe.cache_fallback("batch-retire-cache-unavailable")
+                state["cache_enabled"] = False
+                kept_groups = []
+            state["groups"] = kept_groups
+            state["logits"] = {
+                lane_id: logits for lane_id, logits in state["logits"].items()
+                if lane_id not in retired
+            }
+
         def close() -> None:
             state["groups"] = []
             state["logits"] = {}
@@ -825,6 +910,8 @@ class TransformersBackend:
             prefixes,
             prefill=prefill,
             advance=advance,
+            fork=fork,
+            retire=retire,
             close=close,
         )
 

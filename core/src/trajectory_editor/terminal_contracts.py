@@ -87,6 +87,31 @@ class EdgeViewState:
 
 
 @dataclass(frozen=True)
+class BeamViewRow:
+    label: str
+    continuation: str
+    score: str
+    state: str
+    recent_steps: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class BeamViewState:
+    title: str
+    shared_context: str
+    rows: tuple[BeamViewRow, ...]
+    selected_label: str | None
+    notice: str = ""
+    at_edge: bool = False
+
+
+@dataclass(frozen=True)
+class BeamInput:
+    command: str
+    selected_label: str | None
+
+
+@dataclass(frozen=True)
 class PromptRequest:
     """Ordinary input, a confirmation/key, composition, page, or isolated chord."""
 
@@ -118,6 +143,8 @@ class TerminalProtocol(Protocol):
     def read_choice(self, state: ChoiceViewState) -> str | None: ...
 
     def read_edge(self, state: EdgeViewState) -> str | None: ...
+
+    def read_beam(self, state: BeamViewState) -> BeamInput | None: ...
 
     def prompt(self, request: PromptRequest) -> str | None: ...
 

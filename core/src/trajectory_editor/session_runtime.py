@@ -17,6 +17,7 @@ from .core.cli_config import (
 from .core.errors import EditorError
 from .core.sampler_config import SamplerConfig
 from .chord import Chord, ChordRequested, chord_menu
+from .beam import BeamRequested, BeamSearch, beam_menu
 from .edge_status import sampler_summary
 from .episode_engine import EpisodeEngine
 from .episode_prompts import read_new_prompt, read_prompt_file
@@ -373,6 +374,36 @@ def run_session_roster(
                 )
                 if result.handed_off:
                     io.write(result.handoff_reason or "Chord selection handed off.")
+            else:
+                result = None
+            if session.engine.ended:
+                _print_final_text(session, args.output)
+                action, value = session_edge_menu(io, roster, store=store)
+            elif result is None:
+                continue
+            else:
+                continue
+        except BeamRequested as request:
+            pending_tape = None
+            beam = BeamSearch(session.engine, request.width)
+            try:
+                beam_action, actions = beam_menu(
+                    io, beam, promote_on_select=True
+                )
+            finally:
+                beam.discard()
+            if beam_action == "quit":
+                roster.discard()
+                return 0
+            if beam_action == "select":
+                assert actions is not None
+                session.adopt_promoted_outcomes(beam.selected_outcomes)
+                result = run_plan(
+                    session,
+                    divergence_policy=args.divergence_policy,
+                )
+                if result.handed_off:
+                    io.write(result.handoff_reason or "Beam selection handed off.")
             else:
                 result = None
             if session.engine.ended:

@@ -10,7 +10,8 @@ from io import StringIO
 from typing import Iterator
 
 from .terminal_contracts import (
-    ChoiceViewState, EdgeViewState, PromptRequest, TerminalCapabilities,
+    BeamInput, BeamViewState, ChoiceViewState, EdgeViewState, PromptRequest,
+    TerminalCapabilities,
 )
 from .ui_themes import resolve_live_theme
 
@@ -129,6 +130,13 @@ class TerminalIO:
         if self._live_session is None:
             raise RuntimeError("enter TerminalIO.session() before live requests")
         return self._live_session.read_edge(state)
+
+    def read_beam(self, state: BeamViewState) -> BeamInput | None:
+        if not self._live_choices:
+            raise RuntimeError("beam dashboard requires the live terminal surface")
+        if self._live_session is None:
+            raise RuntimeError("enter TerminalIO.session() before live requests")
+        return self._live_session.read_beam(state)
 
     def prompt(self, request: PromptRequest) -> str | None:
         if self._live_session is not None:

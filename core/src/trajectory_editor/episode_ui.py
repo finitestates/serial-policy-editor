@@ -17,6 +17,7 @@ from typing import Any
 
 from .candidate_columns import CandidateColumns, CandidateViewPlan, next_column_focus
 from .chord import ChordRequested
+from .beam import BeamRequested
 from .core.candidates import Candidate
 from .core.cli_config import sampler_override
 from .core.errors import EditorError
@@ -863,6 +864,15 @@ class InteractivePolicy:
                     continue
                 assert command.chord_ranks is not None
                 raise ChordRequested(command.chord_ranks)
+            if command.kind == CommandKind.BEAM:
+                if review_boundary is not None:
+                    feedback = ChoiceFeedback(
+                        "error", "INVALID COMMAND",
+                        ("return to the current menu before starting beam search",),
+                    )
+                    continue
+                assert command.beam_width is not None
+                raise BeamRequested(command.beam_width)
             if review_boundary is not None:
                 if command.kind == CommandKind.REVIEW_BACK:
                     review_boundary = max(0, review_boundary - 1)

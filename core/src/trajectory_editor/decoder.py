@@ -18,7 +18,7 @@ import numpy as np
 
 from .core.errors import EditorError
 from .core.backend import CacheMode, InferenceBackend, validate_cache_mode
-from .core.backend_batch import AdvanceMap, InferenceBatch, LogitMap, PrefixMap
+from .core.backend_batch import AdvanceMap, ForkMap, InferenceBatch, LogitMap, PrefixMap
 from .core.backend_position import BackendPosition, compare_backend_position
 from .model_hash import sha256_path
 
@@ -460,6 +460,92 @@ class LlamaCppDecoder:
             workspace["logits"] = dict(result)
             return result
 
+        def fork(requested: ForkMap) -> LogitMap:
+            if not requested:
+                return {}
+            old_prefixes = workspace["prefixes"]
+            old_logits = workspace["logits"]
+            prefixes: dict[int, tuple[int, ...]] = {}
+            for destination, source in requested.items():
+                if source not in old_prefixes or source not in old_logits:
+                    raise RuntimeError("llama.cpp batch fork source lane is not cached")
+                prefixes[destination] = tuple(old_prefixes[source])
+            context = workspace["context"]
+            copy_sequence = getattr(context, "kv_cache_seq_cp", None)
+            remove_sequence = getattr(context, "kv_cache_seq_rm", None)
+            if not self._cache_enabled or not callable(copy_sequence) or not callable(remove_sequence):
+                return prefill(prefixes)
+
+            # Stage source sequences under temporary IDs before replacing any
+            # destination. This handles permutations and repeated parents
+            # without depending on destination iteration order.
+            sources = tuple(dict.fromkeys(requested.values()))
+            temporary_ids = {
+                source: lane_count + index
+                for index, source in enumerate(sources)
+            }
+            try:
+                for source, temporary in temporary_ids.items():
+                    remove_sequence(temporary, 0, -1)
+                    copy_sequence(source, temporary, 0, -1)
+                for destination in requested:
+                    removed = remove_sequence(destination, 0, -1)
+                    if destination in old_prefixes and removed is False:
+                        raise RuntimeError("llama.cpp could not replace a cached destination sequence")
+                for destination, source in requested.items():
+                    copy_sequence(temporary_ids[source], destination, 0, -1)
+                active_destinations = set(requested)
+                for old_lane in old_prefixes:
+                    if old_lane not in active_destinations:
+                        removed = remove_sequence(old_lane, 0, -1)
+                        if removed is False:
+                            raise RuntimeError("llama.cpp could not release an inactive sequence")
+                for temporary in temporary_ids.values():
+                    if remove_sequence(temporary, 0, -1) is False:
+                        raise RuntimeError("llama.cpp could not clear a temporary fork sequence")
+            except Exception:
+                # A partially copied cache is never reused. Full prefill clears
+                # it and restores every destination from its token ledger.
+                return prefill(prefixes)
+
+            logits = {
+                destination: old_logits[source].copy()
+                for destination, source in requested.items()
+            }
+            workspace["prefixes"] = dict(prefixes)
+            workspace["logits"] = dict(logits)
+            return logits
+
+        def retire(lane_ids: Sequence[int]) -> None:
+            context = workspace["context"]
+            remove_sequence = getattr(context, "kv_cache_seq_rm", None)
+            if callable(remove_sequence):
+                try:
+                    for lane_id in lane_ids:
+                        removed = remove_sequence(lane_id, 0, -1)
+                        if lane_id in workspace["prefixes"] and removed is False:
+                            raise RuntimeError("llama.cpp could not retire a cached sequence")
+                except Exception:
+                    context.kv_cache_clear()
+                    workspace["prefixes"] = {}
+                    workspace["logits"] = {}
+                    return
+                retired = set(lane_ids)
+                workspace["prefixes"] = {
+                    lane_id: prefix
+                    for lane_id, prefix in workspace["prefixes"].items()
+                    if lane_id not in retired
+                }
+                workspace["logits"] = {
+                    lane_id: logits
+                    for lane_id, logits in workspace["logits"].items()
+                    if lane_id not in retired
+                }
+            else:
+                context.kv_cache_clear()
+                workspace["prefixes"] = {}
+                workspace["logits"] = {}
+
         def close() -> None:
             batch_wrapper.close()
             context_wrapper.close()
@@ -470,6 +556,8 @@ class LlamaCppDecoder:
                 prefixes,
                 prefill=prefill,
                 advance=advance,
+                fork=fork,
+                retire=retire,
                 close=close,
             )
         except BaseException:

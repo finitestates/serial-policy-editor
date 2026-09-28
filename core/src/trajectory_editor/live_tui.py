@@ -106,6 +106,8 @@ def action_preview(
             kind=interpretation.state.value,
             label=("invalid chord" if [part.lower() for part in raw.strip().split()[:1]] == ["chord"]
                    and interpretation.state == CommandState.INVALID
+                   else "invalid beam" if [part.lower() for part in raw.strip().split()[:1]] == ["beam"]
+                   and interpretation.state == CommandState.INVALID
                    else interpretation.state.value + " command"),
             detail=interpretation.message,
             valid=False,
@@ -129,6 +131,18 @@ def action_preview(
                 f"Press Enter to preview {len(ranks)} paths from raw ranks "
                 + ", ".join(str(rank) for rank in ranks)
                 + ". No episode action is recorded yet."
+            ),
+            command=command,
+        )
+
+    if command.kind == CommandKind.BEAM:
+        width = command.beam_width
+        assert width is not None
+        return ActionPreview(
+            kind="effect", label="beam search preview",
+            detail=(
+                f"Press Enter to open a temporary beam leaderboard with width {width}. "
+                "Beam expansions remain outside episode history until a branch is selected."
             ),
             command=command,
         )
@@ -228,6 +242,7 @@ def action_preview(
 
     effects = {
         CommandKind.BIAS: ("token bias", "Update a group or token bias; stay at this step."),
+        CommandKind.BEAM: ("beam search", "Open the temporary branch leaderboard on Enter."),
         CommandKind.SAMPLER: (
             "sampler settings",
             (
@@ -1422,6 +1437,10 @@ LIVE_STYLES = {
             "feedback-info": "ansicyan bold",
             "feedback-search": "ansimagenta bold",
             "feedback-detail": "",
+            "beam-selected": "ansicyan bold",
+            "beam-score": "ansibrightblack",
+            "beam-continuation": "",
+            "beam-pane": "",
         }
     ),
     "monochrome": Style.from_dict(
@@ -1448,6 +1467,10 @@ LIVE_STYLES = {
             "feedback-info": "bold",
             "feedback-search": "bold underline",
             "feedback-detail": "",
+            "beam-selected": "bold underline",
+            "beam-score": "",
+            "beam-continuation": "",
+            "beam-pane": "",
         }
     ),
     "high-contrast": Style.from_dict(
@@ -1474,6 +1497,10 @@ LIVE_STYLES = {
             "feedback-info": "ansibrightcyan bold",
             "feedback-search": "ansibrightmagenta bold underline",
             "feedback-detail": "bold",
+            "beam-selected": "ansicyan bold",
+            "beam-score": "ansibrightblack",
+            "beam-continuation": "",
+            "beam-pane": "",
         }
     ),
 }
