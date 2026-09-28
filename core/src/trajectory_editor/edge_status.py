@@ -17,6 +17,10 @@ def sampler_summary(config: SamplerConfig) -> str:
         f"presence={config.presence_penalty:g} "
         f"frequency={config.frequency_penalty:g} seed={config.seed}"
     )
+    if config.gumbel_top_k is not None:
+        summary += f" gumbel_top_k={config.gumbel_top_k}"
+    if config.draw_kernel == "gaussian-max":
+        summary += f" gaussian_noise_std={config.gaussian_noise_std:g}"
     if config.bias_groups:
         summary += " groups=" + ",".join(
             f"{group.name}:{group.bias:g}" for group in config.bias_groups

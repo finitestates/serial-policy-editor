@@ -35,6 +35,8 @@ class SamplerConfig:
     typical_p: float = 1.0
     tail_free_z: float = 1.0
     draw_kernel: str = "categorical"
+    gaussian_noise_std: float = 1.0
+    gumbel_top_k: int | None = None
     cfg_unconditional_prompt: str | None = None
     cfg_scale: float = 1.0
     cfg_prefix_tokens: int = 0
@@ -145,8 +147,22 @@ class SamplerConfig:
                 raise EditorError(f"{name} must be a finite number")
             if not 0.0 < float(value) <= 1.0:
                 raise EditorError(f"{name} must be in (0, 1]")
-        if self.draw_kernel not in {"categorical", "gumbel-max"}:
-            raise EditorError("draw_kernel must be categorical or gumbel-max")
+        if self.draw_kernel not in {"categorical", "gumbel-max", "gaussian-max"}:
+            raise EditorError(
+                "draw_kernel must be categorical, gumbel-max, or gaussian-max"
+            )
+        if (
+            type(self.gaussian_noise_std) not in {int, float}
+            or not math.isfinite(float(self.gaussian_noise_std))
+            or float(self.gaussian_noise_std) < 0.0
+        ):
+            raise EditorError("gaussian_noise_std must be finite and nonnegative")
+        object.__setattr__(self, "gaussian_noise_std", float(self.gaussian_noise_std))
+        if self.gumbel_top_k is not None:
+            if type(self.gumbel_top_k) is not int or self.gumbel_top_k < 1:
+                raise EditorError("gumbel_top_k must be a positive integer or null")
+            if self.draw_kernel != "gumbel-max":
+                raise EditorError("gumbel_top_k requires the gumbel-max draw kernel")
         if self.cfg_unconditional_prompt is not None and not isinstance(self.cfg_unconditional_prompt, str):
             raise EditorError("cfg_unconditional_prompt must be text or null")
         if (
@@ -223,7 +239,9 @@ class SamplerConfig:
             "presence_penalty", "frequency_penalty", "history_scope",
             "policy_scheme", "seed", "rng_scheme",
         }
-        optional = {"token_biases", "bias_groups"}
+        optional = {
+            "token_biases", "bias_groups", "gaussian_noise_std", "gumbel_top_k"
+        }
         steering = {
             "steering_vector", "steering_strength", "steering_kind",
             "steering_position", "steering_layer_start", "steering_layer_end",
@@ -267,6 +285,8 @@ class SamplerConfig:
             typical_p=value["typical_p"],
             tail_free_z=value["tail_free_z"],
             draw_kernel=value["draw_kernel"],
+            gaussian_noise_std=value.get("gaussian_noise_std", 1.0),
+            gumbel_top_k=value.get("gumbel_top_k"),
             cfg_unconditional_prompt=value["cfg_unconditional_prompt"],
             cfg_scale=value["cfg_scale"],
             cfg_prefix_tokens=value["cfg_prefix_tokens"],
@@ -295,6 +315,8 @@ class SamplerConfig:
             "typical_p": self.typical_p,
             "tail_free_z": self.tail_free_z,
             "draw_kernel": self.draw_kernel,
+            "gaussian_noise_std": self.gaussian_noise_std,
+            "gumbel_top_k": self.gumbel_top_k,
             "cfg_unconditional_prompt": self.cfg_unconditional_prompt,
             "cfg_scale": self.cfg_scale,
             "cfg_prefix_tokens": self.cfg_prefix_tokens,

@@ -657,6 +657,7 @@ class EpisodeEngine:
                 stream_fingerprint=self.stream_fingerprint,
                 aligned_step=sampling_boundary,
                 kernel=self.sampling.draw_kernel,
+                gaussian_noise_std=self.sampling.gaussian_noise_std,
             )
         observation = EpisodeObservation(
             boundary=self.boundary,

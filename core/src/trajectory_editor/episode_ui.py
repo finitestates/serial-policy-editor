@@ -282,7 +282,8 @@ class PolicyViewPreferences:
 
     show: bool | None = None
     sort_by_policy: bool = False
-    sort_by_gumbel: bool = False
+    # None follows the Gumbel Top-K default; bool records an explicit v choice.
+    sort_by_gumbel: bool | None = None
     logit_view: str = "none"
     show_model_probabilities: bool = False
     # Single middle-column overlay focus; None = identity (or fall back to l/%).
@@ -619,16 +620,27 @@ class InteractivePolicy:
         self._prepare_seamless_action_index(engine, observation.boundary)
         self.choice_serial += 1
         policy_sort = self.view_preferences.sort_by_policy
+        requested_gumbel_sort = self.view_preferences.sort_by_gumbel
+        if requested_gumbel_sort is None:
+            requested_gumbel_sort = engine.sampling.gumbel_top_k is not None
         gumbel_sort = (
-            self.view_preferences.sort_by_gumbel
+            requested_gumbel_sort
             and not policy_sort
             and engine.sampling.draw_kernel == "gumbel-max"
         )
-        if policy_sort or (self.view_preferences.sort_by_gumbel and not gumbel_sort):
+        if self.view_preferences.sort_by_gumbel is True and not gumbel_sort:
             self.view_preferences.sort_by_gumbel = False
         view = self._view_plan(engine)
 
         def candidate_page(count: int, metrics: frozenset[str]) -> tuple[Candidate, ...]:
+            if engine.sampling.gumbel_top_k is not None:
+                # Select membership by Gumbel rank. The terminal applies the
+                # current display-order preference without changing rank IDs.
+                return engine.gumbel_candidates(
+                    observation,
+                    count=min(count, engine.sampling.gumbel_top_k),
+                    metrics=metrics | frozenset({"gumbel_rank"}),
+                )
             if gumbel_sort:
                 return engine.gumbel_candidates(
                     observation, count=count, metrics=metrics
@@ -659,6 +671,27 @@ class InteractivePolicy:
                     rank, self._view_plan(engine).metrics
                 )
             return preview_candidates[rank]
+
+        def refresh_candidate_page(
+            metrics: frozenset[str],
+        ) -> tuple[tuple[Candidate, ...], dict[int, Candidate]]:
+            candidates = candidate_page(len(choice.candidates), metrics)
+            if engine.sampling.gumbel_top_k is not None:
+                return candidates, {candidate.rank: candidate for candidate in candidates}
+            rank_metrics = metrics | (
+                frozenset({"gumbel_rank"}) if gumbel_sort else frozenset()
+            )
+            ranks = tuple(exposed)
+            refreshed = {
+                rank: engine.candidates(
+                    observation,
+                    start_rank=rank,
+                    count=1,
+                    metrics=rank_metrics,
+                )[0]
+                for rank in ranks
+            }
+            return candidates, refreshed
 
         search: SearchLens | None = None
         search_lens_active = False
@@ -695,31 +728,37 @@ class InteractivePolicy:
                 exposed.update((candidate.rank, candidate) for candidate in refreshed)
                 preview_candidates = dict(exposed)
                 choice_view = view
-            displayed = (
-                self._lens_candidates(engine, observation, search)
-                if search_lens_active and search is not None
-                else (
-                    engine.policy_candidates(
-                        observation,
-                        count=len(choice.candidates),
-                        metrics=view.metrics,
-                    )
-                    if policy_sort
-                    else (
-                        engine.gumbel_candidates(
-                            observation,
-                            count=len(choice.candidates),
-                            metrics=view.metrics,
-                        )
-                        if gumbel_sort
-                        else engine.candidates(
-                            observation,
-                            count=len(choice.candidates),
-                            metrics=view.metrics,
-                        )
-                    )
+            if search_lens_active and search is not None:
+                displayed = self._lens_candidates(engine, observation, search)
+            elif engine.sampling.gumbel_top_k is not None:
+                rank_metrics = view.metrics | frozenset({"gumbel_rank"})
+                if policy_sort:
+                    rank_metrics |= frozenset({"policy_rank"})
+                # Keep the Gumbel Top-K set fixed; terminal sorting can reorder
+                # these rows while Candidate.rank remains the model address.
+                displayed = engine.gumbel_candidates(
+                    observation,
+                    count=len(choice.candidates),
+                    metrics=rank_metrics,
                 )
-            )
+            elif policy_sort:
+                displayed = engine.policy_candidates(
+                    observation,
+                    count=len(choice.candidates),
+                    metrics=view.metrics,
+                )
+            elif gumbel_sort:
+                displayed = engine.gumbel_candidates(
+                    observation,
+                    count=len(choice.candidates),
+                    metrics=view.metrics,
+                )
+            else:
+                displayed = engine.candidates(
+                    observation,
+                    count=len(choice.candidates),
+                    metrics=view.metrics,
+                )
             if (policy_sort or gumbel_sort) and not search_lens_active:
                 exposed.update((candidate.rank, candidate) for candidate in displayed)
             review = None
@@ -887,25 +926,19 @@ class InteractivePolicy:
                 else:
                     engine.sampling = updated
                 observation = engine.observe()
-                if gumbel_sort and engine.sampling.draw_kernel != "gumbel-max":
-                    gumbel_sort = False
+                requested_gumbel_sort = self.view_preferences.sort_by_gumbel
+                if requested_gumbel_sort is None:
+                    requested_gumbel_sort = engine.sampling.gumbel_top_k is not None
+                gumbel_sort = (
+                    requested_gumbel_sort
+                    and not policy_sort
+                    and engine.sampling.draw_kernel == "gumbel-max"
+                )
+                if self.view_preferences.sort_by_gumbel is True and not gumbel_sort:
                     self.view_preferences.sort_by_gumbel = False
                 view = self._view_plan(engine)
-                rank_metrics = view.metrics | (
-                    frozenset({"gumbel_rank"}) if gumbel_sort else frozenset()
-                )
-                ranks = tuple(exposed)
-                exposed = {
-                    rank: engine.candidates(
-                        observation,
-                        start_rank=rank,
-                        count=1,
-                        metrics=rank_metrics,
-                    )[0]
-                    for rank in ranks
-                }
+                candidates, exposed = refresh_candidate_page(view.metrics)
                 preview_candidates = dict(exposed)
-                candidates = candidate_page(len(choice.candidates), view.metrics)
                 choice = self._choice_for_observation(
                     engine, observation, candidates, view=view
                 )
@@ -917,7 +950,7 @@ class InteractivePolicy:
                 payload = command.sampler_text
                 if payload is None:
                     payload = self.io.read(
-                        "sampler key=value changes (blank cancels; e.g. top_k=none temperature=1)> "
+                        "sampler key=value changes (blank cancels; e.g. top_k=none, gumbel_top_k=5)> "
                     ) or ""
                 if not payload.strip():
                     continue
@@ -931,25 +964,19 @@ class InteractivePolicy:
                     feedback = ChoiceFeedback("error", "INVALID SAMPLER", (str(exc),))
                     continue
                 observation = engine.observe()
-                if gumbel_sort and engine.sampling.draw_kernel != "gumbel-max":
-                    gumbel_sort = False
+                requested_gumbel_sort = self.view_preferences.sort_by_gumbel
+                if requested_gumbel_sort is None:
+                    requested_gumbel_sort = engine.sampling.gumbel_top_k is not None
+                gumbel_sort = (
+                    requested_gumbel_sort
+                    and not policy_sort
+                    and engine.sampling.draw_kernel == "gumbel-max"
+                )
+                if self.view_preferences.sort_by_gumbel is True and not gumbel_sort:
                     self.view_preferences.sort_by_gumbel = False
                 view = self._view_plan(engine)
-                rank_metrics = view.metrics | (
-                    frozenset({"gumbel_rank"}) if gumbel_sort else frozenset()
-                )
-                ranks = tuple(exposed)
-                exposed = {
-                    rank: engine.candidates(
-                        observation,
-                        start_rank=rank,
-                        count=1,
-                        metrics=rank_metrics,
-                    )[0]
-                    for rank in ranks
-                }
+                candidates, exposed = refresh_candidate_page(view.metrics)
                 preview_candidates = dict(exposed)
-                candidates = candidate_page(len(choice.candidates), view.metrics)
                 choice = self._choice_for_observation(
                     engine, observation, candidates, view=view
                 )
@@ -984,6 +1011,7 @@ class InteractivePolicy:
                         stream_fingerprint=engine.stream_fingerprint,
                         aligned_step=observation.sampling_boundary,
                         kernel=engine.sampling.draw_kernel,
+                        gaussian_noise_std=engine.sampling.gaussian_noise_std,
                         next_seed=random_seed,
                     )
                 except KeyboardInterrupt:

@@ -126,6 +126,17 @@ Use `top-k: null` or `--top-k none` to disable only top-k. The
 `--unfiltered` flag sets temperature to 1 and disables top-k, top-p, min-p,
 typical-p, and tail-free filtering.
 
+`--gumbel-top-k N` enables Gumbel-Max and limits the candidate menu to the top
+N Gumbel-ranked choices from the active filtered candidate set. The menu starts
+in Gumbel order; the first row remains the proposal, and displayed model ranks
+stay as the candidates' selection addresses. `--gumbel-top-k none` removes this
+menu limit.
+
+For Gaussian-noise argmax, use `--draw-kernel gaussian-max` with the optional
+`--gaussian-noise-std` (default `1.0`). The standard deviation is applied to
+temperature-scaled policy scores; random noise is keyed for deterministic
+replay. This kernel defines a different draw distribution from softmax sampling.
+
 ```bash
 policy-editor --profile profile.yaml --new-prompt 'Once upon a time'
 ```
