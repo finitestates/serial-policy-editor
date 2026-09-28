@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from .errors import EditorError
-from .sampling import MAX_SEED, MIN_SEED, RNG_SCHEME
+from .sampling import GUMBEL_NOISE_ADDRESSES, MAX_SEED, MIN_SEED, RNG_SCHEME
 
 
 SAMPLING_POLICY_SCHEME = "spe-history-aware-decoder-policy-v1"
@@ -54,6 +54,8 @@ class SamplerConfig:
     activation_vector_layer_start: int | None = None
     activation_vector_layer_end: int | None = None
     activation_vector_digest: str = ""
+    gumbel_noise_address: str = "token-id"
+    gumbel_noise_scale: float = 1.0
 
     def __post_init__(self) -> None:
         from ..bias_groups import BiasGroup, BiasToken
@@ -163,6 +165,17 @@ class SamplerConfig:
                 raise EditorError("gumbel_top_k must be a positive integer or null")
             if self.draw_kernel != "gumbel-max":
                 raise EditorError("gumbel_top_k requires the gumbel-max draw kernel")
+        if self.gumbel_noise_address not in GUMBEL_NOISE_ADDRESSES:
+            raise EditorError(
+                "gumbel_noise_address must be token-id or model-rank"
+            )
+        if (
+            type(self.gumbel_noise_scale) not in {int, float}
+            or not math.isfinite(float(self.gumbel_noise_scale))
+            or float(self.gumbel_noise_scale) < 0.0
+        ):
+            raise EditorError("gumbel_noise_scale must be finite and nonnegative")
+        object.__setattr__(self, "gumbel_noise_scale", float(self.gumbel_noise_scale))
         if self.cfg_unconditional_prompt is not None and not isinstance(self.cfg_unconditional_prompt, str):
             raise EditorError("cfg_unconditional_prompt must be text or null")
         if (
@@ -240,7 +253,8 @@ class SamplerConfig:
             "policy_scheme", "seed", "rng_scheme",
         }
         optional = {
-            "token_biases", "bias_groups", "gaussian_noise_std", "gumbel_top_k"
+            "token_biases", "bias_groups", "gaussian_noise_std", "gumbel_top_k",
+            "gumbel_noise_address", "gumbel_noise_scale",
         }
         steering = {
             "steering_vector", "steering_strength", "steering_kind",
@@ -287,6 +301,8 @@ class SamplerConfig:
             draw_kernel=value["draw_kernel"],
             gaussian_noise_std=value.get("gaussian_noise_std", 1.0),
             gumbel_top_k=value.get("gumbel_top_k"),
+            gumbel_noise_address=value.get("gumbel_noise_address", "token-id"),
+            gumbel_noise_scale=value.get("gumbel_noise_scale", 1.0),
             cfg_unconditional_prompt=value["cfg_unconditional_prompt"],
             cfg_scale=value["cfg_scale"],
             cfg_prefix_tokens=value["cfg_prefix_tokens"],
@@ -317,6 +333,8 @@ class SamplerConfig:
             "draw_kernel": self.draw_kernel,
             "gaussian_noise_std": self.gaussian_noise_std,
             "gumbel_top_k": self.gumbel_top_k,
+            "gumbel_noise_address": self.gumbel_noise_address,
+            "gumbel_noise_scale": self.gumbel_noise_scale,
             "cfg_unconditional_prompt": self.cfg_unconditional_prompt,
             "cfg_scale": self.cfg_scale,
             "cfg_prefix_tokens": self.cfg_prefix_tokens,

@@ -17,7 +17,7 @@ from typing import Any
 
 from .errors import EditorError
 from .sampler_config import SamplerConfig
-from .sampling import MAX_SEED, MIN_SEED
+from .sampling import GUMBEL_NOISE_ADDRESSES, MAX_SEED, MIN_SEED
 
 
 CORE_SAMPLER_FIELDS = (
@@ -30,6 +30,8 @@ CORE_SAMPLER_FIELDS = (
     "draw_kernel",
     "gaussian_noise_std",
     "gumbel_top_k",
+    "gumbel_noise_address",
+    "gumbel_noise_scale",
     "cfg_unconditional_prompt",
     "cfg_scale",
     "cfg_prefix_tokens",
@@ -58,6 +60,8 @@ SAMPLER_ALIASES = {
     "repeat": "repeat_penalty",
     "presence": "presence_penalty",
     "frequency": "frequency_penalty",
+    "gumbel-noise-address": "gumbel_noise_address",
+    "gumbel-noise-scale": "gumbel_noise_scale",
 }
 
 
@@ -130,6 +134,22 @@ def add_core_sampler_arguments(
     )
     parser.set_defaults(_gumbel_top_k_specified=False)
     sampling.add_argument(
+        "--gumbel-noise-address",
+        choices=GUMBEL_NOISE_ADDRESSES,
+        help=(
+            "address Gumbel noise by token ID or one-based full-vocabulary "
+            "model rank (default: token-id)"
+        ),
+    )
+    sampling.add_argument(
+        "--gumbel-noise-scale",
+        type=float,
+        help=(
+            "select Gumbel-Max and scale perturbations after filtering "
+            "(default: 1; 0 disables perturbations)"
+        ),
+    )
+    sampling.add_argument(
         "--gaussian-noise-std",
         type=float,
         help="standard deviation for gaussian-max noise in scaled-logit units",
@@ -200,6 +220,22 @@ def _gumbel_top_k_was_specified(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "_gumbel_top_k_specified", False))
 
 
+def _gumbel_noise_address_was_specified(args: argparse.Namespace) -> bool:
+    return getattr(args, "gumbel_noise_address", None) is not None
+
+
+def _gumbel_noise_scale_was_specified(args: argparse.Namespace) -> bool:
+    return getattr(args, "gumbel_noise_scale", None) is not None
+
+
+def _gumbel_requested(args: argparse.Namespace) -> bool:
+    return (
+        _gumbel_noise_address_was_specified(args)
+        or _gumbel_noise_scale_was_specified(args)
+        or (_gumbel_top_k_was_specified(args) and args.gumbel_top_k is not None)
+    )
+
+
 def _unfiltered_values(args: argparse.Namespace) -> dict[str, Any]:
     values = dict(_UNFILTERED_VALUES)
     cli_explicit = getattr(args, "_cli_explicit_options", set())
@@ -248,11 +284,7 @@ def sampler_from_args(
         else:
             value = getattr(args, name, None)
             values[name] = getattr(base, name) if value is None else value
-    if (
-        _gumbel_top_k_was_specified(args)
-        and args.gumbel_top_k is not None
-        and getattr(args, "draw_kernel", None) is None
-    ):
+    if _gumbel_requested(args) and getattr(args, "draw_kernel", None) is None:
         values["draw_kernel"] = "gumbel-max"
     elif (
         getattr(args, "draw_kernel", None) is not None
@@ -299,11 +331,7 @@ def sampler_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
         value = getattr(args, name, None)
         if value is not None:
             values[name] = value
-    if (
-        _gumbel_top_k_was_specified(args)
-        and args.gumbel_top_k is not None
-        and getattr(args, "draw_kernel", None) is None
-    ):
+    if _gumbel_requested(args) and getattr(args, "draw_kernel", None) is None:
         values["draw_kernel"] = "gumbel-max"
     elif (
         getattr(args, "draw_kernel", None) is not None
@@ -358,6 +386,10 @@ def sampler_override(current: SamplerConfig, raw: str) -> SamplerConfig:
                 if value not in {"categorical", "gumbel-max", "gaussian-max"}:
                     raise ValueError
                 values[key] = value
+            elif key == "gumbel_noise_address":
+                if value not in GUMBEL_NOISE_ADDRESSES:
+                    raise ValueError
+                values[key] = value
             else:
                 values[key] = float(value)
         except ValueError as exc:
@@ -365,6 +397,11 @@ def sampler_override(current: SamplerConfig, raw: str) -> SamplerConfig:
     if "gumbel_top_k" in explicit_keys and values["gumbel_top_k"] is not None:
         if "draw_kernel" not in explicit_keys:
             values["draw_kernel"] = "gumbel-max"
+    elif (
+        {"gumbel_noise_address", "gumbel_noise_scale"} & explicit_keys
+        and "draw_kernel" not in explicit_keys
+    ):
+        values["draw_kernel"] = "gumbel-max"
     elif (
         "draw_kernel" in explicit_keys
         and values["draw_kernel"] != "gumbel-max"

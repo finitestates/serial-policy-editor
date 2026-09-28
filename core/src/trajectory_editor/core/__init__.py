@@ -38,6 +38,7 @@ from .errors import EditorError
 from .results import ActionOutcome, Divergence, ReplayExpectation, TokenEvidence
 from .sampling import (
     CandidateFilterResult,
+    GUMBEL_NOISE_ADDRESSES,
     SparseDistribution,
     StandardCandidateFilter,
     apply_candidate_filter,
@@ -49,6 +50,7 @@ from .sampling import (
     gumbel_ranked_ids,
     gumbel_winner,
     position_uniform,
+    position_uniform_model_rank,
     position_uniform_token,
     raw_rank,
     top_raw_ids,
@@ -64,6 +66,7 @@ __all__ = [
     "ActionOutcome",
     "CandidateFilterResult",
     "Candidate",
+    "GUMBEL_NOISE_ADDRESSES",
     "EpisodeObservation",
     "BackendStateSnapshot",
     "BackendPosition",
@@ -108,6 +111,7 @@ __all__ = [
     "compare_backend_position",
     "position_report",
     "position_uniform",
+    "position_uniform_model_rank",
     "position_uniform_token",
     "raw_rank",
     "require_inference_backend",

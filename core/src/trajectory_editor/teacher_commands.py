@@ -133,6 +133,8 @@ HELP_TEXT = """Commands:
   multi-token terms bias only the final token after an exact prefix match
   s top_k=20|none change sampler settings; changes are part of the action tape
   s gumbel_top_k=5 shows five Gumbel-ranked candidates (proposal stays first)
+  s gumbel_noise_address=model-rank selects Gumbel-Max and addresses noise by model rank
+  s gumbel_noise_scale=0.5 selects Gumbel-Max and scales post-filter noise
   s draw_kernel=gaussian-max gaussian_noise_std=1 uses Gaussian-noise argmax
   s {JSON}        replace all sampler settings from a complete SamplerConfig record
   reroll [SEED]   change the draw seed as a replayable action

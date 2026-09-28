@@ -329,6 +329,34 @@ class PolicyCalculations:
             self._raw_ranks[token_id] = _rank(self.logits, token_id)
         return self._raw_ranks[token_id]
 
+    def raw_ranks_for(self, token_ids) -> np.ndarray:
+        """Return one-based full-model ranks for a vector of token IDs."""
+
+        ids = np.asarray(token_ids)
+        if ids.ndim != 1:
+            raise ValueError("token ids must address the decoder vocabulary")
+        if not len(ids):
+            return np.asarray([], dtype=np.int64)
+        if (
+            not np.issubdtype(ids.dtype, np.integer)
+            or np.any(ids < 0)
+            or np.any(ids >= len(self.logits))
+        ):
+            raise ValueError("token ids must address the decoder vocabulary")
+        missing = {
+            int(token_id) for token_id in ids if int(token_id) not in self._raw_ranks
+        }
+        if missing:
+            ordered_ids = _top_ids(self.logits, len(self.logits))
+            ranks = np.empty(len(self.logits), dtype=np.int64)
+            ranks[ordered_ids] = np.arange(1, len(self.logits) + 1, dtype=np.int64)
+            self._raw_ranks.update(
+                (token_id, int(ranks[token_id])) for token_id in missing
+            )
+        return np.asarray(
+            [self._raw_ranks[int(token_id)] for token_id in ids], dtype=np.int64
+        )
+
     def policy_rank(self, token_id: int) -> int:
         if token_id not in self._policy_ranks:
             self._policy_ranks[token_id] = _rank(self.adjusted, token_id)

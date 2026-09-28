@@ -641,11 +641,22 @@ class EpisodeEngine:
         sampling_boundary = self.boundary
         gumbel_scores: np.ndarray | None = None
         if self.sampling.draw_kernel == "gumbel-max":
+            candidate_model_ranks = (
+                policy_calculations.raw_ranks_for(distribution.ids)
+                if (
+                    self.sampling.gumbel_noise_address == "model-rank"
+                    and self.sampling.gumbel_noise_scale > 0.0
+                )
+                else None
+            )
             ranking = gumbel_ranking_scores(
                 distribution,
                 seed=self.sampling.seed,
                 stream_fingerprint=self.stream_fingerprint,
                 aligned_step=sampling_boundary,
+                noise_address=self.sampling.gumbel_noise_address,
+                candidate_model_ranks=candidate_model_ranks,
+                gumbel_noise_scale=self.sampling.gumbel_noise_scale,
             )
             ranking.setflags(write=False)
             gumbel_scores = ranking
