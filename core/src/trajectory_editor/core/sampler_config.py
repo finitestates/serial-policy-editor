@@ -14,7 +14,13 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from .errors import EditorError
-from .sampling import GUMBEL_NOISE_ADDRESSES, MAX_SEED, MIN_SEED, RNG_SCHEME
+from .sampling import (
+    DRAW_KERNELS,
+    GUMBEL_NOISE_ADDRESSES,
+    MAX_SEED,
+    MIN_SEED,
+    RNG_SCHEME,
+)
 
 
 SAMPLING_POLICY_SCHEME = "spe-history-aware-decoder-policy-v1"
@@ -36,6 +42,8 @@ class SamplerConfig:
     tail_free_z: float = 1.0
     draw_kernel: str = "categorical"
     gaussian_noise_std: float = 1.0
+    perturb_noise_std: float = 1.0
+    student_t_df: float = 3.0
     gumbel_top_k: int | None = None
     cfg_unconditional_prompt: str | None = None
     cfg_scale: float = 1.0
@@ -149,10 +157,9 @@ class SamplerConfig:
                 raise EditorError(f"{name} must be a finite number")
             if not 0.0 < float(value) <= 1.0:
                 raise EditorError(f"{name} must be in (0, 1]")
-        if self.draw_kernel not in {"categorical", "gumbel-max", "gaussian-max"}:
-            raise EditorError(
-                "draw_kernel must be categorical, gumbel-max, or gaussian-max"
-            )
+        if self.draw_kernel not in DRAW_KERNELS:
+            choices = ", ".join(DRAW_KERNELS)
+            raise EditorError(f"draw_kernel must be one of: {choices}")
         if (
             type(self.gaussian_noise_std) not in {int, float}
             or not math.isfinite(float(self.gaussian_noise_std))
@@ -160,6 +167,24 @@ class SamplerConfig:
         ):
             raise EditorError("gaussian_noise_std must be finite and nonnegative")
         object.__setattr__(self, "gaussian_noise_std", float(self.gaussian_noise_std))
+        if (
+            type(self.perturb_noise_std) not in {int, float}
+            or not math.isfinite(float(self.perturb_noise_std))
+            or float(self.perturb_noise_std) < 0.0
+        ):
+            raise EditorError("perturb_noise_std must be finite and nonnegative")
+        object.__setattr__(self, "perturb_noise_std", float(self.perturb_noise_std))
+        if type(self.student_t_df) not in {int, float}:
+            raise EditorError("student_t_df must be finite and greater than 0")
+        try:
+            student_t_df = float(self.student_t_df)
+        except OverflowError as exc:
+            raise EditorError(
+                "student_t_df must be finite and greater than 0"
+            ) from exc
+        if not math.isfinite(student_t_df) or student_t_df <= 0.0:
+            raise EditorError("student_t_df must be finite and greater than 0")
+        object.__setattr__(self, "student_t_df", student_t_df)
         if self.gumbel_top_k is not None:
             if type(self.gumbel_top_k) is not int or self.gumbel_top_k < 1:
                 raise EditorError("gumbel_top_k must be a positive integer or null")
@@ -253,7 +278,9 @@ class SamplerConfig:
             "policy_scheme", "seed", "rng_scheme",
         }
         optional = {
-            "token_biases", "bias_groups", "gaussian_noise_std", "gumbel_top_k",
+            "token_biases", "bias_groups", "gaussian_noise_std", "perturb_noise_std",
+            "student_t_df",
+            "gumbel_top_k",
             "gumbel_noise_address", "gumbel_noise_scale",
         }
         steering = {
@@ -300,6 +327,8 @@ class SamplerConfig:
             tail_free_z=value["tail_free_z"],
             draw_kernel=value["draw_kernel"],
             gaussian_noise_std=value.get("gaussian_noise_std", 1.0),
+            perturb_noise_std=value.get("perturb_noise_std", 1.0),
+            student_t_df=value.get("student_t_df", 3.0),
             gumbel_top_k=value.get("gumbel_top_k"),
             gumbel_noise_address=value.get("gumbel_noise_address", "token-id"),
             gumbel_noise_scale=value.get("gumbel_noise_scale", 1.0),
@@ -332,6 +361,8 @@ class SamplerConfig:
             "tail_free_z": self.tail_free_z,
             "draw_kernel": self.draw_kernel,
             "gaussian_noise_std": self.gaussian_noise_std,
+            "perturb_noise_std": self.perturb_noise_std,
+            "student_t_df": self.student_t_df,
             "gumbel_top_k": self.gumbel_top_k,
             "gumbel_noise_address": self.gumbel_noise_address,
             "gumbel_noise_scale": self.gumbel_noise_scale,

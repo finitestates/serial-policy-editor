@@ -1048,6 +1048,8 @@ class InteractivePolicy:
                         aligned_step=observation.sampling_boundary,
                         kernel=engine.sampling.draw_kernel,
                         gaussian_noise_std=engine.sampling.gaussian_noise_std,
+                        perturb_noise_std=engine.sampling.perturb_noise_std,
+                        student_t_df=engine.sampling.student_t_df,
                         gumbel_noise_address=engine.sampling.gumbel_noise_address,
                         gumbel_noise_scale=engine.sampling.gumbel_noise_scale,
                         candidate_model_ranks=(

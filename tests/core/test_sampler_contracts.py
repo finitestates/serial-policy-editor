@@ -33,6 +33,7 @@ from trajectory_editor.core.sampling import (
     SparseDistribution,
     draw_token,
     find_seed_for_token,
+    perturbation_ranking_scores,
     position_uniform_token,
     raw_rank,
     top_raw_ids,
@@ -65,6 +66,17 @@ def test_s01_sampler_config_accepts_rejects_and_round_trips_core_state():
             SamplerConfig(temperature=invalid)
     with pytest.raises(ValueError, match="decoder logits"):
         PolicyCalculations(np.asarray([0.0, math.nan]), SamplerConfig(), [])
+
+
+def test_student_t_df_is_positive_finite_serialized_and_legacy_defaults_to_three():
+    config = SamplerConfig(draw_kernel="student-t-max", student_t_df=1.0)
+    assert SamplerConfig.from_record(config.to_dict()) == config
+    legacy_record = config.to_dict()
+    legacy_record.pop("student_t_df")
+    assert SamplerConfig.from_record(legacy_record).student_t_df == 3.0
+    for invalid in (0.0, -1.0, math.nan, math.inf, -math.inf, 10**10000):
+        with pytest.raises(EditorError, match="student_t_df"):
+            SamplerConfig(student_t_df=invalid)
 
 
 @pytest.mark.invariant
@@ -146,6 +158,81 @@ def test_targeted_seed_search_finds_only_active_candidates():
             kernel="categorical",
             next_seed=lambda: pytest.fail("ineligible targets must not search seeds"),
         )
+
+
+def test_student_t_sampler_preserves_df3_draws_and_supports_cauchy_df1():
+    distribution = SparseDistribution(
+        np.asarray([5, 2, 9], dtype=np.int64),
+        np.asarray([0.2, 0.5, 0.3], dtype=np.float64),
+        np.asarray([1.0, 0.0, -2.0], dtype=np.float64),
+    )
+    kwargs = dict(
+        seed=19,
+        stream_fingerprint="a" * 64,
+        aligned_step=4,
+        kernel="student-t-max",
+    )
+    legacy_df3 = perturbation_ranking_scores(distribution, **kwargs)
+    np.testing.assert_allclose(
+        legacy_df3,
+        [1.3532073552692647, 1.9757514253850954, -2.3560151756666734],
+        rtol=0.0,
+        atol=1e-15,
+    )
+
+    cauchy_scores = perturbation_ranking_scores(
+        distribution, **kwargs, student_t_df=1.0
+    )
+    np.testing.assert_array_equal(
+        cauchy_scores,
+        perturbation_ranking_scores(distribution, **kwargs, student_t_df=1.0),
+    )
+    assert np.all(np.isfinite(cauchy_scores))
+    assert not np.array_equal(cauchy_scores, legacy_df3)
+    fractional_scores = perturbation_ranking_scores(
+        distribution, **kwargs, student_t_df=0.5
+    )
+    assert np.all(np.isfinite(fractional_scores))
+    selected = draw_token(distribution, **kwargs, student_t_df=1.0)
+    assert selected in distribution.ids
+
+    target = draw_token(distribution, **kwargs, student_t_df=1.0)
+    found, checked = find_seed_for_token(
+        distribution,
+        target,
+        current_seed=12345,
+        stream_fingerprint="a" * 64,
+        aligned_step=4,
+        kernel="student-t-max",
+        student_t_df=1.0,
+        next_seed=lambda: 19,
+    )
+    assert found == 19
+    assert checked == 1
+
+
+def test_episode_engine_uses_configured_student_t_df_for_proposals():
+    sampling = SamplerConfig(
+        draw_kernel="student-t-max",
+        student_t_df=0.5,
+        top_k=5,
+        top_p=1.0,
+        min_p=0.0,
+    )
+    runtime = EpisodeEngine(
+        ConformingFakeBackend(), sampling=sampling, initial_token_ids=[7]
+    )
+    observation = runtime.observe()
+    expected = draw_token(
+        observation.distribution,
+        seed=sampling.seed,
+        stream_fingerprint=runtime.stream_fingerprint,
+        aligned_step=observation.sampling_boundary,
+        kernel="student-t-max",
+        perturb_noise_std=sampling.perturb_noise_std,
+        student_t_df=0.5,
+    )
+    assert observation.proposal_token_id == expected
 
 
 @pytest.mark.invariant

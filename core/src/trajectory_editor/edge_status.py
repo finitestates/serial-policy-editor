@@ -28,6 +28,12 @@ def sampler_summary(config: SamplerConfig) -> str:
         summary += f" gumbel_noise_scale={config.gumbel_noise_scale:g}"
     if config.draw_kernel == "gaussian-max":
         summary += f" gaussian_noise_std={config.gaussian_noise_std:g}"
+    if config.draw_kernel in {
+        "logistic-max", "student-t-max", "laplace-max", "uniform-max"
+    }:
+        summary += f" perturb_noise_std={config.perturb_noise_std:g}"
+    if config.draw_kernel == "student-t-max":
+        summary += f" student_t_df={config.student_t_df:g}"
     if config.bias_groups:
         summary += " groups=" + ",".join(
             f"{group.name}:{group.bias:g}" for group in config.bias_groups

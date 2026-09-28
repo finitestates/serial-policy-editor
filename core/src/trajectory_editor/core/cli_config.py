@@ -17,7 +17,7 @@ from typing import Any
 
 from .errors import EditorError
 from .sampler_config import SamplerConfig
-from .sampling import GUMBEL_NOISE_ADDRESSES, MAX_SEED, MIN_SEED
+from .sampling import DRAW_KERNELS, GUMBEL_NOISE_ADDRESSES, MAX_SEED, MIN_SEED
 
 
 CORE_SAMPLER_FIELDS = (
@@ -29,6 +29,8 @@ CORE_SAMPLER_FIELDS = (
     "tail_free_z",
     "draw_kernel",
     "gaussian_noise_std",
+    "perturb_noise_std",
+    "student_t_df",
     "gumbel_top_k",
     "gumbel_noise_address",
     "gumbel_noise_scale",
@@ -115,9 +117,10 @@ def add_core_sampler_arguments(
     )
     sampling.add_argument(
         "--draw-kernel",
-        choices=("categorical", "gumbel-max", "gaussian-max"),
+        choices=DRAW_KERNELS,
         help=(
-            "candidate draw kernel (categorical, gumbel-max, or gaussian-max; "
+            "candidate draw kernel (categorical, gumbel-max, gaussian-max, "
+            "logistic-max, student-t-max, laplace-max, or uniform-max; "
             "default: categorical)"
         ),
     )
@@ -153,6 +156,22 @@ def add_core_sampler_arguments(
         "--gaussian-noise-std",
         type=float,
         help="standard deviation for gaussian-max noise in scaled-logit units",
+    )
+    sampling.add_argument(
+        "--perturb-noise-std",
+        type=float,
+        help=(
+            "scale for logistic-max, student-t-max, laplace-max, or uniform-max "
+            "noise in scaled-logit units (Student-t df=3 has unit variance)"
+        ),
+    )
+    sampling.add_argument(
+        "--student-t-df",
+        type=float,
+        help=(
+            "degrees of freedom for student-t-max (finite and > 0; default: 3; "
+            "t draws retain the df=3 scale)"
+        ),
     )
     sampling.add_argument(
         "--cfg-unconditional-prompt",
@@ -383,7 +402,7 @@ def sampler_override(current: SamplerConfig, raw: str) -> SamplerConfig:
             }:
                 values[key] = int(value)
             elif key == "draw_kernel":
-                if value not in {"categorical", "gumbel-max", "gaussian-max"}:
+                if value not in DRAW_KERNELS:
                     raise ValueError
                 values[key] = value
             elif key == "gumbel_noise_address":

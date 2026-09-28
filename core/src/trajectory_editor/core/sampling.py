@@ -21,6 +21,13 @@ from .errors import EditorError
 
 RNG_SCHEME = "blake2b64-token-prefix-quantile-v2"
 GUMBEL_NOISE_ADDRESSES = ("token-id", "model-rank")
+PERTURB_MAX_KERNELS = (
+    "logistic-max",
+    "student-t-max",
+    "laplace-max",
+    "uniform-max",
+)
+DRAW_KERNELS = ("categorical", "gumbel-max", "gaussian-max", *PERTURB_MAX_KERNELS)
 MIN_SEED = -(1 << 63)
 MAX_SEED = (1 << 63) - 1
 
@@ -491,6 +498,219 @@ def gaussian_ranking_scores(
     return ranking
 
 
+def _perturbation_uniform(
+    *,
+    seed: int,
+    stream_fingerprint: str,
+    aligned_step: int,
+    token_id: int,
+    lane: int,
+) -> float:
+    payload = (
+        f"{RNG_SCHEME}:perturb-max:{seed}:{stream_fingerprint}:"
+        f"{aligned_step}:{token_id}:{lane}"
+    ).encode()
+    value = int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big")
+    # 52-bit midpoints stay strictly inside (0, 1) in binary64.
+    return ((value >> 12) + 0.5) / float(1 << 52)
+
+
+def _normal_from_uniforms(first: float, second: float) -> float:
+    radius = math.sqrt(-2.0 * math.log(first))
+    return radius * math.cos(2.0 * math.pi * second)
+
+
+def _log_gamma_ge_one(
+    shape: float,
+    uniform: Callable[[], float],
+    normal: Callable[[], float],
+) -> float:
+    """Sample log Gamma(shape, 1) with Marsaglia-Tsang rejection sampling."""
+
+    d = shape - 1.0 / 3.0
+    c = 1.0 / math.sqrt(9.0 * d)
+    for _ in range(128):
+        value = normal()
+        base = 1.0 + c * value
+        if base <= 0.0:
+            continue
+        cube = base * base * base
+        draw = uniform()
+        if draw < 1.0 - 0.0331 * value**4 or math.log(draw) < (
+            0.5 * value * value + d * (1.0 - cube + math.log(cube))
+        ):
+            return math.log(d) + math.log(cube)
+    raise ValueError("Student-t gamma draw did not converge")
+
+
+def _log_gamma(
+    shape: float,
+    uniform: Callable[[], float],
+    normal: Callable[[], float],
+) -> float:
+    """Sample log Gamma(shape, 1), including shapes in (0, 1)."""
+
+    if shape >= 1.0:
+        return _log_gamma_ge_one(shape, uniform, normal)
+    if shape <= 0.0:
+        # A positive df can underflow when halved only at the smallest
+        # representable inputs; its gamma variate is then below float range.
+        return -math.inf
+    boosted = _log_gamma_ge_one(shape + 1.0, uniform, normal)
+    try:
+        return boosted + math.log(uniform()) / shape
+    except OverflowError:
+        return -math.inf
+
+
+def _student_t_unit_noise(
+    *,
+    seed: int,
+    stream_fingerprint: str,
+    aligned_step: int,
+    token_id: int,
+    degrees_of_freedom: float,
+) -> float:
+    """Draw t_df / sqrt(3), retaining the historical t3 stream exactly."""
+
+    def uniform_at(lane: int) -> float:
+        return _perturbation_uniform(
+            seed=seed,
+            stream_fingerprint=stream_fingerprint,
+            aligned_step=aligned_step,
+            token_id=token_id,
+            lane=lane,
+        )
+
+    if degrees_of_freedom == 3.0:
+        # Keep the original four-lane Box-Muller construction byte-for-byte:
+        # existing df=3 episodes therefore replay the same perturbations.
+        normals = []
+        for offset in (0, 2):
+            radius = math.sqrt(-2.0 * math.log(uniform_at(offset)))
+            angle = 2.0 * math.pi * uniform_at(offset + 1)
+            normals.extend((radius * math.cos(angle), radius * math.sin(angle)))
+        return normals[0] / math.sqrt(
+            normals[1] ** 2 + normals[2] ** 2 + normals[3] ** 2
+        )
+
+    lane = 0
+
+    def next_uniform() -> float:
+        nonlocal lane
+        result = uniform_at(lane)
+        lane += 1
+        return result
+
+    def next_normal() -> float:
+        return _normal_from_uniforms(next_uniform(), next_uniform())
+
+    normal = next_normal()
+    log_gamma = _log_gamma(degrees_of_freedom / 2.0, next_uniform, next_normal)
+    if normal == 0.0:
+        return 0.0
+    log_magnitude = (
+        math.log(abs(normal))
+        - 0.5 * (math.log(2.0) + log_gamma - math.log(degrees_of_freedom))
+        - 0.5 * math.log(3.0)
+    )
+    if log_magnitude > math.log(float.fromhex("0x1.fffffffffffffp+1023")):
+        return math.copysign(math.inf, normal)
+    if log_magnitude < math.log(float.fromhex("0x0.0000000000001p-1022")):
+        return math.copysign(0.0, normal)
+    return math.copysign(math.exp(log_magnitude), normal)
+
+
+def _validated_student_t_df(value: float) -> float:
+    if type(value) not in {int, float}:
+        raise EditorError("student_t_df must be finite and greater than 0")
+    try:
+        degrees_of_freedom = float(value)
+    except OverflowError as exc:
+        raise EditorError("student_t_df must be finite and greater than 0") from exc
+    if not math.isfinite(degrees_of_freedom) or degrees_of_freedom <= 0.0:
+        raise EditorError("student_t_df must be finite and greater than 0")
+    return degrees_of_freedom
+
+
+def perturbation_ranking_scores(
+    distribution: SparseDistribution,
+    *,
+    seed: int,
+    stream_fingerprint: str,
+    aligned_step: int,
+    kernel: str,
+    noise_std: float = 1.0,
+    student_t_df: float = 3.0,
+) -> np.ndarray:
+    """Add replay-stable perturbations to the active candidate scores."""
+
+    if kernel not in PERTURB_MAX_KERNELS:
+        raise EditorError("unsupported perturb-and-argmax kernel")
+    if kernel == "student-t-max":
+        student_t_df = _validated_student_t_df(student_t_df)
+    if distribution.scores is None:
+        raise ValueError(f"{kernel} requires candidate scores")
+    scores = np.asarray(distribution.scores, dtype=np.float64)
+    ids = np.asarray(distribution.ids, dtype=np.int64)
+    if scores.shape != ids.shape:
+        raise ValueError("candidate scores do not match candidate IDs")
+    if not len(ids):
+        raise ValueError(f"{kernel} requires at least one candidate")
+    if type(noise_std) not in {int, float} or not math.isfinite(float(noise_std)):
+        raise EditorError("perturb_noise_std must be finite and nonnegative")
+    if noise_std < 0.0:
+        raise EditorError("perturb_noise_std must be finite and nonnegative")
+    if type(seed) is not int or not MIN_SEED <= seed <= MAX_SEED:
+        raise EditorError("seed must be a signed-64-bit integer")
+    _validate_fingerprint(stream_fingerprint)
+    _validate_boundary(aligned_step, "sampling boundary")
+    if noise_std == 0.0:
+        return scores.copy()
+
+    perturbations = np.empty(len(ids), dtype=np.float64)
+    for index, token_id in enumerate(ids):
+        if kernel == "student-t-max":
+            unit_noise = _student_t_unit_noise(
+                seed=seed,
+                stream_fingerprint=stream_fingerprint,
+                aligned_step=aligned_step,
+                token_id=int(token_id),
+                degrees_of_freedom=float(student_t_df),
+            )
+        else:
+            uniform = _perturbation_uniform(
+                seed=seed,
+                stream_fingerprint=stream_fingerprint,
+                aligned_step=aligned_step,
+                token_id=int(token_id),
+                lane=0,
+            )
+            if kernel == "logistic-max":
+                unit_noise = (math.sqrt(3.0) / math.pi) * (
+                    math.log(uniform) - math.log1p(-uniform)
+                )
+            elif kernel == "laplace-max":
+                unit_noise = (
+                    math.log(2.0 * uniform)
+                    if uniform < 0.5
+                    else -math.log(2.0 * (1.0 - uniform))
+                ) / math.sqrt(2.0)
+            else:
+                unit_noise = math.sqrt(3.0) * (2.0 * uniform - 1.0)
+        perturbations[index] = float(noise_std) * unit_noise
+
+    ranking = scores + perturbations
+    if not np.all(np.isfinite(ranking)):
+        if kernel == "student-t-max":
+            raise ValueError(
+                f"student-t-max at df={float(student_t_df):g} produced "
+                "non-finite ranking scores"
+            )
+        raise ValueError(f"{kernel} noise produced non-finite ranking scores")
+    return ranking
+
+
 def draw_token(
     distribution: SparseDistribution,
     *,
@@ -499,13 +719,15 @@ def draw_token(
     aligned_step: int,
     kernel: str = "categorical",
     gaussian_noise_std: float = 1.0,
+    perturb_noise_std: float = 1.0,
+    student_t_df: float = 3.0,
     gumbel_noise_address: str = "token-id",
     candidate_model_ranks: np.ndarray | None = None,
     gumbel_noise_scale: float = 1.0,
 ) -> int:
-    """Draw one token using a replay-stable categorical, Gumbel, or Gaussian kernel."""
+    """Draw one token with a replay-stable categorical or perturb-and-argmax kernel."""
 
-    if kernel not in {"categorical", "gumbel-max", "gaussian-max"}:
+    if kernel not in DRAW_KERNELS:
         raise EditorError("unsupported draw kernel")
     if kernel == "gumbel-max":
         scores = gumbel_ranking_scores(
@@ -527,6 +749,17 @@ def draw_token(
             noise_std=gaussian_noise_std,
         )
         return gaussian_winner(distribution, scores)
+    if kernel in PERTURB_MAX_KERNELS:
+        scores = perturbation_ranking_scores(
+            distribution,
+            seed=seed,
+            stream_fingerprint=stream_fingerprint,
+            aligned_step=aligned_step,
+            kernel=kernel,
+            noise_std=perturb_noise_std,
+            student_t_df=student_t_df,
+        )
+        return perturbation_winner(distribution, scores)
     draw = position_uniform(seed, stream_fingerprint, aligned_step)
     index = int(np.searchsorted(np.cumsum(distribution.probabilities), draw, side="right"))
     return int(distribution.ids[min(index, len(distribution.ids) - 1)])
@@ -629,6 +862,21 @@ def gaussian_winner(
     return int(ids[best[np.argmin(ids[best])]])
 
 
+def perturbation_winner(
+    distribution: SparseDistribution, ranking_scores: np.ndarray
+) -> int:
+    """Return the highest perturbation score, breaking exact ties by token ID."""
+
+    ids = np.asarray(distribution.ids, dtype=np.int64)
+    scores = np.asarray(ranking_scores, dtype=np.float64)
+    if scores.shape != ids.shape:
+        raise ValueError("perturbation scores do not match candidate IDs")
+    if not len(ids):
+        raise ValueError("perturb-and-argmax requires at least one candidate")
+    best = np.flatnonzero(scores == np.max(scores))
+    return int(ids[best[np.argmin(ids[best])]])
+
+
 def gumbel_ranked_ids(
     distribution: SparseDistribution,
     *,
@@ -664,12 +912,14 @@ def find_seed_for_token(
     aligned_step: int,
     kernel: str,
     gaussian_noise_std: float = 1.0,
+    perturb_noise_std: float = 1.0,
+    student_t_df: float = 3.0,
     gumbel_noise_address: str = "token-id",
     candidate_model_ranks: np.ndarray | None = None,
     gumbel_noise_scale: float = 1.0,
     next_seed: Callable[[], int],
 ) -> tuple[int, int]:
-    """Find a fresh seed whose normal draw selects an eligible token.
+    """Find a fresh seed whose configured draw selects an eligible token.
 
     Returns the seed and the number of candidate seeds checked.  The caller
     supplies seed generation so this numeric kernel stays independent of
@@ -684,6 +934,14 @@ def find_seed_for_token(
         )
     if kernel == "categorical" and distribution.probability(token_id) <= 0.0:
         raise EditorError(f"token {token_id} has no selectable categorical mass")
+    if kernel in PERTURB_MAX_KERNELS and (
+        type(perturb_noise_std) not in {int, float}
+        or not math.isfinite(float(perturb_noise_std))
+        or perturb_noise_std < 0.0
+    ):
+        raise EditorError("perturb_noise_std must be finite and nonnegative")
+    if kernel == "student-t-max":
+        student_t_df = _validated_student_t_df(student_t_df)
     if kernel == "gaussian-max" and gaussian_noise_std == 0.0:
         proposal = draw_token(
             distribution,
@@ -699,6 +957,36 @@ def find_seed_for_token(
             raise EditorError(
                 "gaussian_noise_std=0 makes this token impossible to select"
             )
+    if kernel in PERTURB_MAX_KERNELS and perturb_noise_std == 0.0:
+        proposal = draw_token(
+            distribution,
+            seed=current_seed,
+            stream_fingerprint=stream_fingerprint,
+            aligned_step=aligned_step,
+            kernel=kernel,
+            perturb_noise_std=0.0,
+            student_t_df=student_t_df,
+        )
+        if proposal != token_id:
+            raise EditorError(
+                f"perturb_noise_std=0 makes this token impossible to select"
+            )
+    if kernel == "uniform-max" and perturb_noise_std > 0.0:
+        if distribution.scores is None:
+            raise ValueError("uniform-max requires candidate scores")
+        scores = np.asarray(distribution.scores, dtype=np.float64)
+        ids = np.asarray(distribution.ids, dtype=np.int64)
+        if scores.shape != ids.shape:
+            raise ValueError("candidate scores do not match candidate IDs")
+        other_scores = scores[ids != token_id]
+        if len(other_scores):
+            half_width = math.sqrt(3.0) * float(perturb_noise_std)
+            if scores[ids == token_id][0] + half_width <= float(
+                np.max(other_scores - half_width)
+            ):
+                raise EditorError(
+                    "uniform-max bounded noise makes this token impossible to select"
+                )
     if kernel == "gumbel-max" and gumbel_noise_scale == 0.0:
         proposal = draw_token(
             distribution,
@@ -729,6 +1017,8 @@ def find_seed_for_token(
             aligned_step=aligned_step,
             kernel=kernel,
             gaussian_noise_std=gaussian_noise_std,
+            perturb_noise_std=perturb_noise_std,
+            student_t_df=student_t_df,
             gumbel_noise_address=gumbel_noise_address,
             candidate_model_ranks=candidate_model_ranks,
             gumbel_noise_scale=gumbel_noise_scale,
@@ -738,9 +1028,11 @@ def find_seed_for_token(
 
 __all__ = [
     "CandidateFilterResult",
+    "DRAW_KERNELS",
     "GUMBEL_NOISE_ADDRESSES",
     "MAX_SEED",
     "MIN_SEED",
+    "PERTURB_MAX_KERNELS",
     "RNG_SCHEME",
     "SparseDistribution",
     "StandardCandidateFilter",
@@ -759,6 +1051,8 @@ __all__ = [
     "position_uniform",
     "position_uniform_model_rank",
     "position_uniform_token",
+    "perturbation_ranking_scores",
+    "perturbation_winner",
     "raw_rank",
     "top_raw_ids",
 ]

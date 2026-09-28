@@ -152,13 +152,28 @@ For Gaussian-noise argmax, use `--draw-kernel gaussian-max` with the optional
 temperature-scaled policy scores; random noise is keyed for deterministic
 replay. This kernel defines a different draw distribution from softmax sampling.
 
+Four additional perturb-and-argmax kernels share the `--perturb-noise-std`
+control (default `1.0`): `logistic-max`, `student-t-max`, `laplace-max`, and
+`uniform-max`. The Student-t kernel defaults to 3 degrees of freedom and
+accepts any finite positive value via `--student-t-df` (also available as the
+live `s student_t_df=...` setting). Student-t variates are divided by
+`sqrt(3)` so the df=3 setting preserves the existing unit-variance behavior;
+at other df values `perturb_noise_std` is a scale multiplier, not generally a
+standard deviation. In particular, Student-t variance is infinite at df <= 2.
+Logistic, Laplace, and Uniform noise are unit variance before applying the
+standard-deviation control. Uniform noise is bounded, with half-width
+`sqrt(3) * perturb_noise_std`; a score gap greater than or equal to twice that
+half-width cannot be overcome. Like Gaussian-Max, perturbations are keyed for
+deterministic replay and only rank candidates left by temperature scaling and
+filtering.
+
 ```bash
 policy-editor --profile profile.yaml --new-prompt 'Once upon a time'
 ```
 
 The editor supports sequential token selection, full-vocabulary search, text
 writes, check/force actions, chord previews, reusable profiles, bias and history
-controls, CFG and Gumbel draws, rerolls, raw/model/gap logit views, teacher
+controls, CFG and perturb-and-argmax draws, rerolls, raw/model/gap logit views, teacher
 replay, rewind, fork, and live-edge continuation.
 
 ## Vectors
