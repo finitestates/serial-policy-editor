@@ -7,7 +7,7 @@ this contract.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -28,7 +28,12 @@ def validate_cache_mode(value: str) -> CacheMode:
 
 @runtime_checkable
 class InferenceBackend(Protocol):
-    """Minimal model interface required by stepped episode editing."""
+    """One sequence view over model inference.
+
+    ``eval`` appends tokens to this sequence. It does not require an adapter to
+    execute each call separately: adapters may queue work and execute several
+    independent sequences together through :class:`BatchedInferenceBackend`.
+    """
 
     def vocabulary_size(self) -> int: ...
 
@@ -53,6 +58,35 @@ class InferenceBackend(Protocol):
     def tokenizer_id(self) -> str: ...
 
     def provenance(self, *, include_model_sha256: bool = True) -> Mapping[str, Any]: ...
+
+
+@runtime_checkable
+class BatchedInferenceSession(Protocol):
+    """Independent sequence lanes evaluated by one model adapter.
+
+    Lane IDs are stable for the lifetime of the session. ``flush`` advances
+    selected lanes that have queued tokens in adapter batches; ``rebuild``
+    starts selected lanes from their current prefixes, which is used after a
+    rewind or another non-append edit. Adapters may group lanes internally
+    when prefix lengths or cache layouts differ.
+    """
+
+    def lane(self, lane_id: int) -> InferenceBackend: ...
+
+    def flush(self, active_lane_ids: Sequence[int]) -> None: ...
+
+    def rebuild(self, active_lane_ids: Sequence[int]) -> None: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class BatchedInferenceBackend(InferenceBackend, Protocol):
+    """Inference adapter with first-class independent, batched sequence lanes."""
+
+    def create_batch(
+        self, prefixes: Sequence[Sequence[int]]
+    ) -> BatchedInferenceSession: ...
 
 
 @dataclass(frozen=True)

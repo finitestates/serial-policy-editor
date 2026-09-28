@@ -6,6 +6,7 @@ import textwrap
 from dataclasses import dataclass, field
 
 from .core.actions import Accept, PolicyAction, SelectRawRank
+from .core.backend import BatchedInferenceSession
 from .core.errors import EditorError
 from .core.results import ActionOutcome
 from .episode_engine import EpisodeEngine, TokenPrefixSnapshot
@@ -99,47 +100,76 @@ class Chord:
         shared_prefix_snapshot = engine._observation_prefix_snapshot()
         self.paths: list[ChordPath] = []
         self._active_path: ChordPath | None = None
+        self._primary_batch: BatchedInferenceSession | None = None
+        self._guidance_batch: BatchedInferenceSession | None = None
         self._context_cache: tuple[int, str] | None = None
         self.rounds: list[tuple[int, ...]] = []
-        # All paths start at one decision; keep its logits stable while cache
-        # activation truncates and switches the shared backend prefix.
-        shared_observation = (
-            engine._observation
-            if engine._observation is not None
-            and engine._observation_key == engine._decision_key()
-            else None
-        )
+        # Prepare sampler-driven model controls and one current base
+        # observation before adapters create their independent lane caches.
+        shared_observation = engine.observe()
         self.selected_outcomes: tuple[ActionOutcome, ...] = ()
         self.closed = False
         try:
+            primary_factory = getattr(engine.backend, "create_batch", None)
+            guidance_active = engine._cfg_active()
+            guidance_factory = (
+                getattr(engine.guidance_backend, "create_batch", None)
+                if guidance_active and engine.guidance_backend is not None
+                else None
+            )
+            if callable(primary_factory) and (
+                not guidance_active or callable(guidance_factory)
+            ):
+                self._primary_batch = primary_factory(
+                    [self.base_prefix for _ in ranks]
+                )
+                if guidance_active:
+                    guidance_prefix = [
+                        *engine._guidance_prompt_tokens(), *self.base_visible
+                    ]
+                    try:
+                        self._guidance_batch = guidance_factory(
+                            [guidance_prefix for _ in ranks]
+                        )
+                    except BaseException:
+                        self._primary_batch.close()
+                        self._primary_batch = None
+                        raise
             for index, rank in enumerate(ranks):
                 preview = EpisodeEngine(
-                    engine.backend,
+                    (
+                        self._primary_batch.lane(index)
+                        if self._primary_batch is not None
+                        else engine.backend
+                    ),
                     sampling=engine.sampling,
                     initial_text=engine.initial_text,
                     initial_token_ids=engine.initial_token_ids,
                     stream_fingerprint=engine.stream_fingerprint,
-                    guidance_backend=engine.guidance_backend,
+                    guidance_backend=(
+                        self._guidance_batch.lane(index)
+                        if self._guidance_batch is not None
+                        else engine.guidance_backend
+                    ),
                 )
                 preview.visible_token_ids = self.base_visible
                 preview._prefix_snapshot = shared_prefix_snapshot
                 preview._prefix_snapshot_boundary = engine.boundary
                 preview._prefix_snapshot_dirty = False
                 preview._activation_runtime_key = engine._activation_runtime_key
-                if shared_observation is not None:
-                    preview._observation = shared_observation
-                    preview._observation_key = preview._decision_key()
+                preview._observation = shared_observation
+                preview._observation_key = preview._decision_key()
                 path = ChordPath(chr(ord("a") + index), rank, preview)
                 path.prefix_snapshots.append(shared_prefix_snapshot)
                 self.paths.append(path)
                 self._activate(path)
-                if shared_observation is None:
-                    shared_observation = preview.observe()
                 outcome = preview.apply(SelectRawRank(rank))
                 path.actions.append(SelectRawRank(rank))
                 path.outcomes.append(outcome)
                 path.token_ids.extend(outcome.resolved_token_ids)
                 path.prefix_snapshots.append(preview._observation_prefix_snapshot())
+            if self._primary_batch is not None:
+                self._flush_batches()
         except BaseException:
             self.discard()
             raise
@@ -149,6 +179,9 @@ class Chord:
             # Leave the current decision lazy until the next display or action.
             return
         self._active_path = None
+        if self._primary_batch is not None:
+            self._active_path = path
+            return
         suffix = list(path.engine.visible_token_ids[len(self.base_visible):])
         _position(self.original.backend, self.base_prefix, suffix)
         if path.engine._cfg_active() and path.engine.guidance_backend is not None:
@@ -159,12 +192,68 @@ class Chord:
             )
         self._active_path = path
 
+    @staticmethod
+    def _primary_prefix(path: ChordPath) -> list[int]:
+        return [*path.engine.initial_token_ids, *path.engine.visible_token_ids]
+
+    def _flush_batches(self) -> None:
+        """Advance all live chord lanes, then make their next observations ready."""
+        if self._primary_batch is None:
+            return
+        live = [index for index, path in enumerate(self.paths) if path.state == "live"]
+        for index, path in enumerate(self.paths):
+            self._primary_batch.lane(index).branch_to_prefix(
+                self._primary_prefix(path)
+            )
+            if self._guidance_batch is not None:
+                guidance_prefix = [
+                    *path.engine._guidance_prompt_tokens(),
+                    *path.engine.visible_token_ids,
+                ]
+                self._guidance_batch.lane(index).branch_to_prefix(guidance_prefix)
+        self._primary_batch.flush(live)
+        if self._guidance_batch is not None:
+            guided = [
+                index for index, path in enumerate(self.paths)
+                if path.state == "live" and path.engine._cfg_active()
+            ]
+            self._guidance_batch.flush(guided)
+
+    def _rebuild_batches(self) -> None:
+        """Re-prefill live lanes after a non-append edit such as rewind."""
+        if self._primary_batch is None:
+            return
+        live = [index for index, path in enumerate(self.paths) if path.state == "live"]
+        for index, path in enumerate(self.paths):
+            self._primary_batch.lane(index).reset(self._primary_prefix(path))
+            if self._guidance_batch is not None:
+                self._guidance_batch.lane(index).reset([
+                    *path.engine._guidance_prompt_tokens(),
+                    *path.engine.visible_token_ids,
+                ])
+        self._primary_batch.rebuild(live)
+        if self._guidance_batch is not None:
+            guided = [
+                index for index, path in enumerate(self.paths)
+                if path.state == "live" and path.engine._cfg_active()
+            ]
+            self._guidance_batch.rebuild(guided)
+
+    def _close_batches(self) -> None:
+        if self._primary_batch is not None:
+            self._primary_batch.close()
+            self._primary_batch = None
+        if self._guidance_batch is not None:
+            self._guidance_batch.close()
+            self._guidance_batch = None
+
     def advance(self) -> bool:
         advanced: list[int] = []
         for index, path in enumerate(self.paths):
             if path.state != "live":
                 continue
-            self._activate(path)
+            if self._primary_batch is None:
+                self._activate(path)
             outcome = path.engine.apply(Accept())
             path.actions.append(Accept())
             path.outcomes.append(outcome)
@@ -173,6 +262,8 @@ class Chord:
             advanced.append(index)
         if advanced:
             self.rounds.append(tuple(advanced))
+            if self._primary_batch is not None:
+                self._flush_batches()
         return bool(advanced)
 
     def rewind(self) -> bool:
@@ -199,6 +290,8 @@ class Chord:
             path.engine._prefix_snapshot_boundary = path.engine.boundary
             path.engine._prefix_snapshot_dirty = False
             active = path
+        if self._primary_batch is not None:
+            self._rebuild_batches()
         self._active_path = active
         return True
 
@@ -214,17 +307,28 @@ class Chord:
         if self.closed:
             raise EditorError("chord is already closed")
         path = self._find_path(label)
-        observation_is_current = (
-            path.engine._observation is not None
-            and path.engine._observation_key == path.engine._decision_key()
-        )
-        if self._active_path is path:
+        if self._primary_batch is not None:
             if path.state == "live":
+                activation_changed = (
+                    path.engine._activation_backend_key_for(path.engine.sampling)
+                    != path.engine._activation_runtime_key
+                )
+                if activation_changed:
+                    path.engine._prepare_activation_runtime()
+                if activation_changed or not path.engine._cached_observation_is_current():
+                    self._rebuild_batches()
                 path.engine.observe()
-        elif path.state == "live" and not observation_is_current:
-            # Rebuild only if a control edit or rewind invalidated the cached
-            # boundary. The ordinary path selection case stays display-only.
-            self._activate(path)
+        else:
+            observation_is_current = (
+                path.engine._observation is not None
+                and path.engine._observation_key == path.engine._decision_key()
+            )
+            if self._active_path is path:
+                if path.state == "live":
+                    path.engine.observe()
+            elif path.state == "live" and not observation_is_current:
+                # A control edit or rewind invalidated this shared boundary.
+                self._activate(path)
         boundary = len(self.base_visible)
         for outcome in path.outcomes:
             if outcome.boundary_before != boundary:
@@ -236,6 +340,19 @@ class Chord:
             != tuple(self.base_visible)
         ):
             raise EditorError("chord outcomes do not match the selected preview boundary")
+        if self._primary_batch is not None:
+            suffix = list(path.engine.visible_token_ids[len(self.base_visible):])
+            _position(self.original.backend, self.base_prefix, suffix)
+            if self.original._cfg_active() and self.original.guidance_backend is not None:
+                prompt = list(self.original._guidance_prompt_tokens())
+                _position(
+                    self.original.guidance_backend,
+                    [*prompt, *self.base_visible],
+                    suffix,
+                )
+            path.engine.backend = self.original.backend
+            path.engine.guidance_backend = self.original.guidance_backend
+            self._close_batches()
         self.original.adopt_preview_state(path.engine)
         self.selected_outcomes = tuple(path.outcomes)
         self.closed = True
@@ -255,15 +372,21 @@ class Chord:
         if self.closed:
             return
         self.closed = True
-        _position(self.original.backend, self.base_prefix, [])
+        if self._primary_batch is None:
+            _position(self.original.backend, self.base_prefix, [])
         self.original._invalidate_observation()
         self.original._invalidate_guidance()
-        if self.original._cfg_active() and self.original.guidance_backend is not None:
+        if (
+            self._primary_batch is None
+            and self.original._cfg_active()
+            and self.original.guidance_backend is not None
+        ):
             prompt = list(self.original._guidance_prompt_tokens())
             _position(
                 self.original.guidance_backend,
                 [*prompt, *self.base_visible], [],
             )
+        self._close_batches()
 
     def display(self, *, width: int = 100) -> str:
         width = max(1, width)

@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
-
 import codecs
 import ctypes
 import hashlib
 import json
 import platform
 import sys
+from collections.abc import Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -18,6 +18,7 @@ import numpy as np
 
 from .core.errors import EditorError
 from .core.backend import CacheMode, InferenceBackend, validate_cache_mode
+from .core.backend_batch import AdvanceMap, InferenceBatch, LogitMap, PrefixMap
 from .core.backend_position import BackendPosition, compare_backend_position
 from .model_hash import sha256_path
 
@@ -241,6 +242,7 @@ class LlamaCppDecoder:
         self._speculation_logits: np.ndarray | None = None
         self._token_embedding_matrix_cache: np.ndarray | None = None
         self._activation_logit_cache: dict[tuple[str, str, str], np.ndarray] = {}
+        self._activation_control_vector_state: tuple[Any, ...] | None = None
         self._model_sha256_cache: str | None = None
         self._tokenizer_id_cache = _llama_tokenizer_id(
             self._model, self._vocabulary_size, tuple(sorted(self._fallback_eog_ids))
@@ -262,6 +264,254 @@ class LlamaCppDecoder:
 
     def vocabulary_size(self) -> int:
         return self._vocabulary_size
+
+    def create_batch(self, prefixes: Sequence[Sequence[int]]) -> InferenceBatch:
+        """Create native multi-sequence KV state over the already loaded model."""
+        values = {
+            lane_id: tuple(int(token_id) for token_id in prefix)
+            for lane_id, prefix in enumerate(prefixes)
+        }
+        if not values or any(not prefix for prefix in values.values()):
+            raise RuntimeError("batch lane prefixes cannot be empty")
+        lane_count = len(values)
+        context_wrapper = batch_wrapper = None
+        try:
+            from llama_cpp import _internals
+
+            owner_model = self._model
+            source_params = owner_model.context_params
+            params = type(source_params)()
+            ctypes.memmove(
+                ctypes.byref(params),
+                ctypes.byref(source_params),
+                ctypes.sizeof(type(source_params)),
+            )
+            if not hasattr(params, "n_seq_max"):
+                raise RuntimeError("installed llama.cpp binding has no multi-sequence context support")
+            total_context = self.settings.n_ctx * lane_count
+            batch_capacity = max(self.settings.n_batch, lane_count)
+            params.n_seq_max = lane_count
+            params.n_ctx = total_context
+            params.n_batch = max(int(params.n_batch), batch_capacity)
+            params.n_ubatch = min(int(params.n_ubatch), int(params.n_batch))
+            if hasattr(params, "kv_unified"):
+                params.kv_unified = True
+            context_wrapper = _internals.LlamaContext(
+                model=owner_model._model,
+                params=params,
+                verbose=False,
+            )
+            batch_wrapper = _internals.LlamaBatch(
+                n_tokens=batch_capacity,
+                embd=0,
+                n_seq_max=lane_count,
+                verbose=False,
+            )
+        except BaseException:
+            if batch_wrapper is not None:
+                batch_wrapper.close()
+            if context_wrapper is not None:
+                context_wrapper.close()
+            raise
+
+        workspace: dict[str, Any] = {
+            "context": context_wrapper,
+            "batch": batch_wrapper,
+            "prefixes": {},
+            "logits": {},
+            "control_key": None,
+        }
+
+        def decode_runs(
+            runs: Mapping[int, Sequence[int]],
+            starts: Mapping[int, int],
+            *,
+            kind: str,
+            context_length: int,
+        ) -> LogitMap:
+            batch = workspace["batch"]
+            context = workspace["context"]
+            max_tokens = max((len(tokens) for tokens in runs.values()), default=0)
+            flat = [
+                (lane_id, offset, int(tokens[offset]))
+                for offset in range(max_tokens)
+                for lane_id, tokens in runs.items()
+                if offset < len(tokens)
+            ]
+            if not flat:
+                return {}
+            self._sync_batch_control_vector(workspace)
+            outputs: dict[int, np.ndarray] = {}
+            interval = self._batch_model_interval(
+                kind, len(flat), context_length
+            )
+            with interval:
+                for start in range(0, len(flat), batch_capacity):
+                    chunk = flat[start : start + batch_capacity]
+                    batch.reset()
+                    native_batch = batch.batch
+                    for index, (lane_id, offset, token_id) in enumerate(chunk):
+                        native_batch.token[index] = token_id
+                        native_batch.pos[index] = starts[lane_id] + offset
+                        native_batch.seq_id[index][0] = lane_id
+                        native_batch.n_seq_id[index] = 1
+                        is_final = offset == len(runs[lane_id]) - 1
+                        native_batch.logits[index] = is_final
+                    native_batch.n_tokens = len(chunk)
+                    context.decode(batch)
+                    for index, (lane_id, offset, _) in enumerate(chunk):
+                        if offset == len(runs[lane_id]) - 1:
+                            outputs[lane_id] = self._batch_context_logits(
+                                context, index
+                            )
+            return outputs
+
+        def prefill(requested: PrefixMap) -> LogitMap:
+            for prefix in requested.values():
+                if len(prefix) > self.settings.n_ctx:
+                    raise RuntimeError(
+                        f"llama.cpp batch prefix exceeds context limit: {len(prefix)} > {self.settings.n_ctx}"
+                    )
+                if any(token_id < 0 or token_id >= self._vocabulary_size for token_id in prefix):
+                    raise RuntimeError("batch prefix contains a token id outside the model vocabulary")
+            context = workspace["context"]
+            context.kv_cache_clear()
+            representatives: dict[tuple[int, ...], int] = {}
+            aliases: dict[int, int] = {}
+            for lane_id, prefix in requested.items():
+                representative = representatives.setdefault(prefix, lane_id)
+                if representative != lane_id:
+                    aliases[lane_id] = representative
+            can_copy_sequences = callable(
+                getattr(context, "kv_cache_seq_cp", None)
+            )
+            prefill_prefixes = (
+                {
+                    lane_id: requested[lane_id]
+                    for lane_id in representatives.values()
+                }
+                if can_copy_sequences
+                else requested
+            )
+            result = decode_runs(
+                prefill_prefixes,
+                {lane_id: 0 for lane_id in prefill_prefixes},
+                kind="batch-prefill",
+                context_length=max((len(prefix) for prefix in requested.values()), default=0),
+            )
+            if can_copy_sequences:
+                copy_sequence = context.kv_cache_seq_cp
+                for alias_id, representative_id in aliases.items():
+                    copy_sequence(representative_id, alias_id, 0, -1)
+                    result[alias_id] = result[representative_id].copy()
+            workspace["prefixes"] = dict(requested)
+            workspace["logits"] = dict(result)
+            return result
+
+        def advance(requested: AdvanceMap) -> LogitMap:
+            if not requested:
+                workspace["prefixes"] = {}
+                workspace["logits"] = {}
+                workspace["context"].kv_cache_clear()
+                return {}
+            if not self._cache_enabled:
+                return prefill({
+                    lane_id: prefix for lane_id, (prefix, _) in requested.items()
+                })
+            old_prefixes = workspace["prefixes"]
+            for lane_id, (prefix, pending) in requested.items():
+                if len(prefix) > self.settings.n_ctx:
+                    raise RuntimeError(
+                        f"llama.cpp batch prefix exceeds context limit: {len(prefix)} > {self.settings.n_ctx}"
+                    )
+                if any(token_id < 0 or token_id >= self._vocabulary_size for token_id in prefix):
+                    raise RuntimeError("batch prefix contains a token id outside the model vocabulary")
+                old_prefix = old_prefixes.get(lane_id)
+                if (
+                    old_prefix is None
+                    or prefix[:len(old_prefix)] != old_prefix
+                    or tuple(prefix[len(old_prefix):]) != tuple(pending)
+                ):
+                    return prefill({
+                        requested_lane: lane_prefix
+                        for requested_lane, (lane_prefix, _) in requested.items()
+                    })
+            runs: dict[int, Sequence[int]] = {}
+            starts: dict[int, int] = {}
+            for lane_id, (prefix, pending) in requested.items():
+                old_length = len(old_prefixes[lane_id])
+                if pending:
+                    runs[lane_id] = pending
+                    starts[lane_id] = old_length
+            result = {
+                lane_id: workspace["logits"][lane_id].copy()
+                for lane_id, (_, pending) in requested.items()
+                if not pending
+            }
+            result.update(decode_runs(
+                runs,
+                starts,
+                kind="batch-incremental",
+                context_length=max((len(prefix) for prefix, _ in requested.values()), default=0),
+            ))
+            workspace["prefixes"] = {
+                lane_id: prefix for lane_id, (prefix, _) in requested.items()
+            }
+            workspace["logits"] = dict(result)
+            return result
+
+        def close() -> None:
+            batch_wrapper.close()
+            context_wrapper.close()
+
+        try:
+            return InferenceBatch(
+                self,
+                prefixes,
+                prefill=prefill,
+                advance=advance,
+                close=close,
+            )
+        except BaseException:
+            close()
+            raise
+
+    def _batch_model_interval(self, kind: str, positions: int, context_length: int):
+        probe = getattr(self, "_real_model_probe", None)
+        return probe.model_call(kind, positions, context_length) if probe is not None else nullcontext()
+
+    def _batch_context_logits(self, context: Any, output_index: int) -> np.ndarray:
+        pointer = context.get_logits_ith(output_index)
+        if not pointer:
+            raise RuntimeError("llama.cpp returned no batch sequence logits")
+        logits = np.ctypeslib.as_array(
+            pointer, shape=(self._vocabulary_size,)
+        ).astype(np.float32, copy=True)
+        if not np.all(np.isfinite(logits)):
+            raise RuntimeError("llama.cpp returned non-finite batch logits")
+        return logits
+
+    def _sync_batch_control_vector(self, workspace: dict[str, Any]) -> None:
+        state = self._activation_control_vector_state
+        key = None if state is None else (
+            state[1], state[2], state[3],
+            hashlib.sha256(np.ascontiguousarray(state[0]).tobytes()).hexdigest(),
+        )
+        if key == workspace["control_key"]:
+            return
+        context = workspace["context"].ctx
+        if state is None:
+            self._clear_control_vector_from_context(context)
+        else:
+            vector, layer_start, layer_end, strength = state
+            self._set_control_vector_on_context(
+                context,
+                vector,
+                layer_start=layer_start,
+                layer_end=layer_end,
+                strength=strength,
+            )
+        workspace["control_key"] = key
 
     def reset(self, prefix_token_ids: list[int]) -> None:
         if self._speculation_prefix is not None:
@@ -551,9 +801,6 @@ class LlamaCppDecoder:
         upstream native adapter reserves no slot 0; canonical layer N is
         fully steerable before final output normalization.
         """
-        setter = getattr(self._llama_cpp, "llama_set_adapter_cvec", None)
-        if not callable(setter):
-            raise RuntimeError("installed llama.cpp binding does not expose control vectors")
         width = self.activation_control_vector_width()
         layer_count = self.activation_control_vector_layer_count()
         if layer_count < 2:
@@ -583,8 +830,40 @@ class LlamaCppDecoder:
         # directly to native slots 1..N-1.  This preserves the final block's
         # pre-normalization injection point.
         native_values = np.ascontiguousarray(values[width:], dtype=np.float32)
-        scaled = np.ascontiguousarray(native_values * float(strength), dtype=np.float32)
         context = self._model._ctx.ctx if hasattr(self._model, "_ctx") else self._model.ctx
+        self._set_control_vector_on_context(
+            context,
+            native_values,
+            layer_start=layer_start,
+            layer_end=layer_end,
+            strength=float(strength),
+            canonical=False,
+        )
+        self._activation_control_vector_state = (
+            values.copy(), layer_start, layer_end, float(strength)
+        )
+
+    def _set_control_vector_on_context(
+        self,
+        context: Any,
+        values: np.ndarray,
+        *,
+        layer_start: int,
+        layer_end: int,
+        strength: float,
+        canonical: bool = True,
+    ) -> None:
+        setter = getattr(self._llama_cpp, "llama_set_adapter_cvec", None)
+        if not callable(setter):
+            raise RuntimeError("installed llama.cpp binding does not expose control vectors")
+        width = self.activation_control_vector_width()
+        layer_count = self.activation_control_vector_layer_count()
+        vector = np.asarray(values, dtype=np.float32)
+        if canonical:
+            if vector.ndim != 1 or vector.size != width * layer_count:
+                raise RuntimeError("control-vector data does not match the loaded model")
+            vector = np.ascontiguousarray(vector[width:], dtype=np.float32)
+        scaled = np.ascontiguousarray(vector * float(strength), dtype=np.float32)
         result = setter(
             context,
             scaled.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
@@ -598,12 +877,16 @@ class LlamaCppDecoder:
 
     def clear_activation_control_vector(self) -> None:
         """Remove any cvector from the live llama.cpp context."""
+        context = self._model._ctx.ctx if hasattr(self._model, "_ctx") else self._model.ctx
+        self._clear_control_vector_from_context(context)
+        self._activation_control_vector_state = None
+
+    def _clear_control_vector_from_context(self, context: Any) -> None:
         setter = getattr(self._llama_cpp, "llama_set_adapter_cvec", None)
         if not callable(setter):
             return
         width = self.activation_control_vector_width()
         layer_count = self.activation_control_vector_layer_count()
-        context = self._model._ctx.ctx if hasattr(self._model, "_ctx") else self._model.ctx
         result = setter(context, None, 0, width, 1, max(1, layer_count - 1))
         if int(result) != 0:
             raise RuntimeError(f"llama.cpp rejected clearing the control vector (error {result})")

@@ -17,6 +17,8 @@ from .actions import (
 )
 from .backend import (
     BackendStateSnapshot,
+    BatchedInferenceBackend,
+    BatchedInferenceSession,
     CacheMode,
     IncrementalTextBackend,
     IncrementalTextStream,
@@ -26,6 +28,7 @@ from .backend import (
     require_inference_backend,
     validate_cache_mode,
 )
+from .backend_batch import InferenceBatch
 from .backend_position import (
     BackendPosition,
     PositionComparison,
@@ -69,6 +72,8 @@ __all__ = [
     "GUMBEL_NOISE_ADDRESSES",
     "EpisodeObservation",
     "BackendStateSnapshot",
+    "BatchedInferenceBackend",
+    "BatchedInferenceSession",
     "BackendPosition",
     "CacheMode",
     "ActionKind",
@@ -83,6 +88,7 @@ __all__ = [
     "IncrementalTextBackend",
     "IncrementalTextStream",
     "InferenceBackend",
+    "InferenceBatch",
     "PositionAwareInferenceBackend",
     "PositionComparison",
     "SnapshotableInferenceBackend",

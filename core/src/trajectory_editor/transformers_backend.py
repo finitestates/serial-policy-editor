@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
+from collections.abc import Sequence
 from contextlib import nullcontext
+import copy
 import importlib.util
 import hashlib
 import inspect
@@ -17,6 +20,7 @@ import numpy as np
 
 from .core.errors import EditorError
 from .core.backend import CacheMode, validate_cache_mode
+from .core.backend_batch import AdvanceMap, InferenceBatch, LogitMap, PrefixMap
 from .core.backend_position import BackendPosition, compare_backend_position
 from .model_hash import sha256_path
 
@@ -405,6 +409,72 @@ def _crop_cache(cache: Any, target_length: int) -> Any:
     raise _CacheUnavailable("installed Transformers cache cannot be cropped")
 
 
+def _first_cache_tensor(cache: Any) -> Any | None:
+    if isinstance(cache, (tuple, list)):
+        for item in cache:
+            found = _first_cache_tensor(item)
+            if found is not None:
+                return found
+        return None
+    layers = getattr(cache, "layers", None)
+    if layers is not None:
+        found = _first_cache_tensor(layers)
+        if found is not None:
+            return found
+    for name in ("keys", "values", "key_cache", "value_cache"):
+        value = getattr(cache, name, None)
+        if value is not None and value is not cache:
+            found = _first_cache_tensor(value)
+            if found is not None:
+                return found
+    return cache if hasattr(cache, "device") and hasattr(cache, "index_select") else None
+
+
+def _select_cache_rows(cache: Any, rows: Sequence[int], torch: Any) -> Any:
+    """Select batch rows without changing the independent sequence caches."""
+    if not rows:
+        raise _CacheUnavailable("cannot select an empty Transformers cache batch")
+    selector_tensor = _first_cache_tensor(cache)
+    if selector_tensor is None:
+        raise _CacheUnavailable("Transformers cache has no selectable batch tensor")
+    indices = torch.tensor(rows, dtype=torch.long, device=selector_tensor.device)
+    select = getattr(cache, "batch_select_indices", None)
+    if callable(select):
+        result = select(indices)
+        return cache if result is None else result
+    if isinstance(cache, tuple):
+        return tuple(
+            tuple(value.index_select(0, indices.to(value.device)) for value in layer)
+            for layer in cache
+        )
+    if isinstance(cache, list):
+        return [
+            tuple(value.index_select(0, indices.to(value.device)) for value in layer)
+            for layer in cache
+        ]
+    raise _CacheUnavailable("Transformers cache does not support selecting batch rows")
+
+
+def _repeat_cache_rows(cache: Any, repeats: int) -> Any:
+    """Duplicate one prompt's KV row while leaving the live backend untouched."""
+    cloned = copy.deepcopy(cache)
+    repeat = getattr(cloned, "batch_repeat_interleave", None)
+    if callable(repeat):
+        result = repeat(repeats)
+        return cloned if result is None else result
+    if isinstance(cloned, tuple):
+        return tuple(
+            tuple(value.repeat_interleave(repeats, dim=0) for value in layer)
+            for layer in cloned
+        )
+    if isinstance(cloned, list):
+        return [
+            tuple(value.repeat_interleave(repeats, dim=0) for value in layer)
+            for layer in cloned
+        ]
+    raise _CacheUnavailable("Transformers cache cannot duplicate a sequence row")
+
+
 class TransformersBackend:
     """Local Hugging Face causal-LM adapter with optional KV reuse."""
 
@@ -588,6 +658,278 @@ class TransformersBackend:
 
     def vocabulary_size(self) -> int:
         return self._vocabulary_size
+
+    def create_batch(self, prefixes: Sequence[Sequence[int]]) -> InferenceBatch:
+        """Create independent lanes sharing one batched Transformers cache.
+
+        Full rebuilds group lanes by prefix length. While lanes only append,
+        their cache rows are compacted and advanced together without repeating
+        the shared prompt.
+        """
+        values = {
+            lane_id: tuple(int(token_id) for token_id in prefix)
+            for lane_id, prefix in enumerate(prefixes)
+        }
+        if not values or any(not prefix for prefix in values.values()):
+            raise RuntimeError("batch lane prefixes cannot be empty")
+        for prefix in values.values():
+            self._validate_tokens(list(prefix))
+
+        state: dict[str, Any] = {
+            "cache_enabled": self._cache_enabled,
+            "seed_available": True,
+            "groups": [],
+            "logits": {},
+        }
+
+        def prefill(requested: PrefixMap) -> LogitMap:
+            if state["seed_available"]:
+                state["seed_available"] = False
+                base_prefix = tuple(self._tokens)
+                if (
+                    state["cache_enabled"]
+                    and self._cache_active
+                    and self._past_key_values is not None
+                    and self._last_logits is not None
+                    and requested
+                    and all(prefix == base_prefix for prefix in requested.values())
+                ):
+                    try:
+                        cache = _repeat_cache_rows(
+                            self._past_key_values, len(requested)
+                        )
+                    except (AttributeError, RuntimeError, TypeError, ValueError, _CacheUnavailable):
+                        pass
+                    else:
+                        lane_ids = tuple(requested)
+                        logits = {
+                            lane_id: self._last_logits.copy()
+                            for lane_id in lane_ids
+                        }
+                        state["groups"] = [{
+                            "lane_ids": lane_ids,
+                            "length": len(base_prefix),
+                            "prefixes": {
+                                lane_id: base_prefix for lane_id in lane_ids
+                            },
+                            "cache": cache,
+                        }]
+                        state["logits"] = dict(logits)
+                        return logits
+            groups_by_length: dict[int, list[int]] = defaultdict(list)
+            for lane_id, prefix in requested.items():
+                self._validate_tokens(list(prefix))
+                groups_by_length[len(prefix)].append(lane_id)
+            ordered_groups = [
+                (length, tuple(lane_ids))
+                for length, lane_ids in sorted(groups_by_length.items())
+            ]
+            use_cache = bool(state["cache_enabled"])
+            try:
+                groups, logits = self._prefill_batch_groups(
+                    requested, ordered_groups, use_cache=use_cache
+                )
+            except (AttributeError, TypeError, ValueError, _CacheUnavailable):
+                if not use_cache:
+                    raise
+                probe = getattr(self, "_real_model_probe", None)
+                if probe is not None:
+                    probe.cache_fallback("batch-prefill-cache-unavailable")
+                state["cache_enabled"] = False
+                groups, logits = self._prefill_batch_groups(
+                    requested, ordered_groups, use_cache=False
+                )
+            state["groups"] = groups
+            state["logits"] = dict(logits)
+            return logits
+
+        def advance(requested: AdvanceMap) -> LogitMap:
+            if not requested:
+                state["groups"] = []
+                state["logits"] = {}
+                return {}
+            for prefix, _ in requested.values():
+                self._validate_tokens(list(prefix))
+            if not state["cache_enabled"]:
+                return prefill({lane_id: prefix for lane_id, (prefix, _) in requested.items()})
+
+            next_groups: list[dict[str, Any]] = []
+            next_logits: dict[int, np.ndarray] = {}
+            found: set[int] = set()
+            try:
+                for old_group in state["groups"]:
+                    selected = [
+                        lane_id for lane_id in requested
+                        if lane_id in old_group["lane_ids"]
+                    ]
+                    if not selected:
+                        continue
+                    old_rows = [old_group["lane_ids"].index(lane_id) for lane_id in selected]
+                    old_length = old_group["length"]
+                    appends = [requested[lane_id][1] for lane_id in selected]
+                    append_lengths = {len(tokens) for tokens in appends}
+                    if len(append_lengths) != 1:
+                        raise _CacheUnavailable("batch lanes appended different token counts")
+                    append_count = next(iter(append_lengths))
+                    prefixes: dict[int, tuple[int, ...]] = {}
+                    for lane_id, tokens in zip(selected, appends):
+                        prefix, pending = requested[lane_id]
+                        old_prefix = old_group["prefixes"][lane_id]
+                        if (
+                            prefix[:len(old_prefix)] != old_prefix
+                            or len(prefix) != old_length + len(pending)
+                            or tuple(prefix[old_length:]) != tuple(pending)
+                        ):
+                            raise _CacheUnavailable("batch lane no longer extends its cached prefix")
+                        prefixes[lane_id] = prefix
+
+                    cache = _select_cache_rows(
+                        old_group["cache"], old_rows, self._torch
+                    )
+                    if append_count:
+                        token_rows = [list(tokens) for tokens in appends]
+                        cache, logit_rows = self._evaluate_batch_incremental(
+                            token_rows, cache, old_length
+                        )
+                        new_length = old_length + append_count
+                    else:
+                        logit_rows = [state["logits"][lane_id].copy() for lane_id in selected]
+                        new_length = old_length
+                    next_groups.append({
+                        "lane_ids": tuple(selected),
+                        "length": new_length,
+                        "prefixes": prefixes,
+                        "cache": cache,
+                    })
+                    next_logits.update(zip(selected, logit_rows))
+                    found.update(selected)
+                if found != set(requested):
+                    raise _CacheUnavailable("batch lane has no reusable cache row")
+            except (AttributeError, TypeError, ValueError, _CacheUnavailable):
+                probe = getattr(self, "_real_model_probe", None)
+                if probe is not None:
+                    probe.cache_fallback("batch-incremental-cache-unavailable")
+                state["cache_enabled"] = False
+                return prefill({lane_id: prefix for lane_id, (prefix, _) in requested.items()})
+
+            state["groups"] = next_groups
+            state["logits"] = dict(next_logits)
+            return next_logits
+
+        def close() -> None:
+            state["groups"] = []
+            state["logits"] = {}
+
+        return InferenceBatch(
+            self,
+            prefixes,
+            prefill=prefill,
+            advance=advance,
+            close=close,
+        )
+
+    def _prefill_batch_groups(
+        self,
+        prefixes: PrefixMap,
+        groups: Sequence[tuple[int, Sequence[int]]],
+        *,
+        use_cache: bool,
+    ) -> tuple[list[dict[str, Any]], dict[int, np.ndarray]]:
+        result_groups: list[dict[str, Any]] = []
+        result_logits: dict[int, np.ndarray] = {}
+        for length, lane_ids in groups:
+            rows = [list(prefixes[lane_id]) for lane_id in lane_ids]
+            logits, cache = self._evaluate_batch_prefix(rows, use_cache=use_cache)
+            result_groups.append({
+                "lane_ids": tuple(lane_ids),
+                "length": length,
+                "prefixes": {lane_id: prefixes[lane_id] for lane_id in lane_ids},
+                "cache": cache,
+            })
+            result_logits.update(zip(lane_ids, logits))
+        return result_groups, result_logits
+
+    def _evaluate_batch_prefix(
+        self, rows: Sequence[Sequence[int]], *, use_cache: bool
+    ) -> tuple[list[np.ndarray], Any | None]:
+        if not rows or len({len(row) for row in rows}) != 1:
+            raise RuntimeError("Transformers prefill groups must have one shared prefix length")
+        torch = self._torch
+        input_ids = torch.tensor(rows, dtype=torch.long, device=self._input_device)
+        kwargs: dict[str, Any] = {
+            "input_ids": input_ids,
+            "attention_mask": torch.ones_like(input_ids),
+            "use_cache": use_cache,
+            "return_dict": True,
+        }
+        if self._supports_logits_to_keep:
+            kwargs["logits_to_keep"] = 1
+        with self._model_interval("batch-prefill", int(input_ids.numel()), int(input_ids.shape[1])):
+            with torch.inference_mode():
+                outputs = self._model(**kwargs)
+        logits = self._batch_logits_rows(getattr(outputs, "logits", None), len(rows))
+        cache = None
+        if use_cache:
+            cache = getattr(outputs, "past_key_values", None)
+            if cache is None:
+                raise _CacheUnavailable("Transformers batch prefill returned no KV cache")
+        return logits, cache
+
+    def _evaluate_batch_incremental(
+        self, token_rows: Sequence[Sequence[int]], cache: Any, old_length: int
+    ) -> tuple[Any, list[np.ndarray]]:
+        if not token_rows or len({len(row) for row in token_rows}) != 1:
+            raise _CacheUnavailable("Transformers incremental batch rows must have equal lengths")
+        torch = self._torch
+        input_ids = torch.tensor(token_rows, dtype=torch.long, device=self._input_device)
+        new_length = old_length + int(input_ids.shape[1])
+        attention_mask = torch.ones(
+            (len(token_rows), new_length), dtype=torch.long, device=self._input_device
+        )
+        kwargs: dict[str, Any] = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "past_key_values": cache,
+            "use_cache": True,
+            "return_dict": True,
+        }
+        if self._supports_logits_to_keep:
+            kwargs["logits_to_keep"] = 1
+        cache_position = torch.arange(
+            old_length, new_length, dtype=torch.long, device=self._input_device
+        )
+        try:
+            with self._model_interval("batch-incremental", int(input_ids.numel()), new_length):
+                with torch.inference_mode():
+                    outputs = self._model(**kwargs, cache_position=cache_position)
+        except TypeError:
+            with self._model_interval("batch-incremental-retry", int(input_ids.numel()), new_length):
+                with torch.inference_mode():
+                    outputs = self._model(**kwargs)
+        next_cache = getattr(outputs, "past_key_values", None)
+        if next_cache is None:
+            raise _CacheUnavailable("Transformers incremental batch returned no KV cache")
+        logits = self._batch_logits_rows(getattr(outputs, "logits", None), len(token_rows))
+        return next_cache, logits
+
+    def _batch_logits_rows(self, logits: Any, batch_size: int) -> list[np.ndarray]:
+        if (
+            logits is None
+            or getattr(logits, "ndim", None) != 3
+            or int(logits.shape[0]) != batch_size
+            or int(logits.shape[2]) < self._vocabulary_size
+        ):
+            raise RuntimeError("Transformers batch logits do not cover every sequence vocabulary")
+        rows = (
+            logits[:, -1, : self._vocabulary_size]
+            .detach()
+            .to(dtype=self._torch.float32, device="cpu")
+            .numpy()
+        )
+        result = [np.asarray(row, dtype=np.float32).copy() for row in rows]
+        if any(not np.all(np.isfinite(row)) for row in result):
+            raise RuntimeError("Transformers returned non-finite batch logits")
+        return result
 
     def _validate_tokens(self, values: list[int]) -> None:
         if any(v < 0 or v >= self._vocabulary_size for v in values):

@@ -10,7 +10,12 @@ from .core.actions import (
     SetSampler,
     Write,
 )
-from .core.backend import InferenceBackend
+from .core.backend import (
+    BatchedInferenceBackend,
+    BatchedInferenceSession,
+    InferenceBackend,
+)
+from .core.backend_batch import InferenceBatch
 from .core.candidates import Candidate
 from .core.errors import EditorError
 from .core.results import ActionOutcome, Divergence, ReplayExpectation, TokenEvidence
@@ -40,7 +45,10 @@ __all__ = [
     "EpisodeProjection",
     "EpisodeStore",
     "Hold",
+    "BatchedInferenceBackend",
+    "BatchedInferenceSession",
     "InferenceBackend",
+    "InferenceBatch",
     "BranchIdentity",
     "BranchState",
     "LiveBranch",
