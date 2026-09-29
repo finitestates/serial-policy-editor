@@ -13,6 +13,11 @@ The live TTY interface uses Textual in a dedicated UI thread. Its request
 screens are exercised headlessly with Textual Pilot; the synchronous engine
 continues to own backend and storage work. See `TERMINAL_API.md` for the thread
 bridge, screen map, theme behavior, and prepared-screen transition benchmark.
+`tests/core/test_textual_driver_pty.py` also drives `run_session_roster()`
+through a real POSIX PTY, replays output into resize-delimited checkpoints, and
+checks runtime state across Choice, EDGE, prompt, and Beam transitions. Those
+checkpoints record the screen after bytes between resize events; they do not
+capture each driver write or establish physical display stability.
 
 Version metadata in `core/pyproject.toml`, `vector/pyproject.toml`, and
 `core/src/trajectory_editor/version.py` must agree. The vector package's core

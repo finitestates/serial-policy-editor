@@ -27,6 +27,7 @@ from trajectory_editor.textual_tui import (
     BeamScreen,
     ChoiceScreen,
     EdgeScreen,
+    OutputScreen,
     PolicyEditorApp,
     PromptScreen,
     _RequestLifecycle,
@@ -228,6 +229,56 @@ def test_choice_layout_reflows_between_regular_terminal_sizes():
             await pilot.resize_terminal(120, 40)
             assert table.size.height == regular_height
             assert table.virtual_size.height <= 40 * 0.3 + 3
+
+    run_pilot(scenario)
+
+
+def test_output_modal_matches_the_bounded_history_while_open_and_after_reopen():
+    async def scenario():
+        app = PolicyEditorApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await install_request(app, pilot, prompt_state())
+            limit = app.OUTPUT_HISTORY_LIMIT
+            app.write_output("discarded" + "x" * (limit + 7))
+            assert app._output_history_chars == limit
+            assert "".join(app._output_chunks) == "x" * limit
+            assert app.stats["output_history_high_water_chars"] == limit
+
+            app.start_output()
+            await pilot.pause()
+            assert isinstance(app.screen, OutputScreen)
+            log = app.screen.query_one("#output-body")
+            assert "".join(segment.text for line in log.lines for segment in line) == "x" * limit
+
+            app.write_output("ab")
+            await pilot.pause()
+            expected = "x" * (limit - 2) + "ab"
+            assert "".join(app._output_chunks) == expected
+            assert app._output_history_chars == limit
+            assert app.stats["output_history_high_water_chars"] == limit
+            assert "".join(segment.text for line in log.lines for segment in line) == expected
+
+            log.scroll_to(y=0, animate=False, immediate=True)
+            await pilot.pause()
+            assert log.scroll_y < log.max_scroll_y
+            for character in "cdefghijklmnop":
+                app.write_output(character)
+            await pilot.pause()
+            expected = "x" * (limit - 16) + "abcdefghijklmnop"
+            assert "".join(app._output_chunks) == expected
+            assert app._output_history_chars == limit
+            assert "".join(segment.text for line in log.lines for segment in line) == expected
+            assert log.scroll_y < log.max_scroll_y
+
+            await pilot.press("q")
+            await pilot.pause()
+            app.start_output()
+            await pilot.pause()
+            reopened_log = app.screen.query_one("#output-body")
+            assert "".join(
+                segment.text for line in reopened_log.lines for segment in line
+            ) == expected
+            assert len(reopened_log.lines) <= limit + 1
 
     run_pilot(scenario)
 
@@ -613,6 +664,73 @@ def test_choice_context_paging_temporarily_disables_tail_follow():
     run_pilot(scenario)
 
 
+def test_choice_context_growth_keeps_all_prepared_history_and_respects_paging():
+    async def scenario():
+        initial_tail = "\n".join(f"earlier boundary {index}" for index in range(80))
+        state = choice_state()
+        state = replace(
+            state,
+            choice=replace(state.choice, context_text_tail=initial_tail),
+        )
+        app = PolicyEditorApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await install_request(app, pilot, state)
+            screen = app._active_screen
+            scroll = screen.query_one("#context-scroll", VerticalScroll)
+            rendered_chars = 0
+            render_work = len(f"DECISION BOUNDARY\n{initial_tail}")
+            full_tail = initial_tail
+
+            for index in range(40):
+                addition = f"\nlive boundary {index}"
+                full_tail += addition
+                screen.state = replace(
+                    screen.state,
+                    choice=replace(screen.state.choice, context_text_tail=full_tail),
+                )
+                screen._render_boundary_context()
+                rendered_chars += len(addition)
+                render_work += len(f"DECISION BOUNDARY\n{full_tail}")
+
+            assert screen._rendered_context.plain == f"DECISION BOUNDARY\n{full_tail}"
+            assert app.stats["context_append_characters"] == rendered_chars
+            assert app.stats["context_high_water_characters"] == len(full_tail)
+            assert app.stats["context_rendered_characters"] == render_work
+            assert len(screen._rendered_context.plain) > 1_000
+
+            await pilot.press("pageup")
+            await pilot.pause()
+            assert screen._follow_tail is False
+            previous_scroll_y = scroll.scroll_y
+            full_tail += "\nwhile paging"
+            screen.state = replace(
+                screen.state,
+                choice=replace(screen.state.choice, context_text_tail=full_tail),
+            )
+            screen._render_boundary_context()
+            render_work += len(f"DECISION BOUNDARY\n{full_tail}")
+            await pilot.pause()
+            assert app.stats["context_rendered_characters"] == render_work
+            assert scroll.scroll_y == previous_scroll_y
+            assert screen._rendered_context.plain.endswith(full_tail)
+
+            await pilot.press("pagedown")
+            await pilot.pause()
+            assert screen._follow_tail is True
+            full_tail += "\nfollow the newest boundary"
+            screen.state = replace(
+                screen.state,
+                choice=replace(screen.state.choice, context_text_tail=full_tail),
+            )
+            screen._render_boundary_context()
+            render_work += len(f"DECISION BOUNDARY\n{full_tail}")
+            await pilot.pause()
+            assert app.stats["context_rendered_characters"] == render_work
+            assert scroll.scroll_y == scroll.max_scroll_y
+
+    run_pilot(scenario)
+
+
 def test_choice_preview_cache_tracks_command_and_request_generation(monkeypatch):
     from trajectory_editor import textual_tui
 
@@ -804,19 +922,22 @@ def test_beam_empty_enter_resumes_at_the_edge():
 
 def test_beam_renders_survivors_and_details_on_a_regular_terminal():
     async def scenario():
-        state = beam_state(row_count=12)
+        state = beam_state(row_count=40)
         long_continuation = (
             "The wind howls outside, and the shutters rattle against the old stone "
             "walls while rain streams down."
         )
-        rows = (
-            replace(state.rows[0], continuation=long_continuation),
-            *state.rows[1:-1],
+        rows = tuple(
             replace(
-                state.rows[-1],
-                label="branch-12",
+                row,
+                label="branch-40" if index == 39 else row.label,
                 continuation=long_continuation,
-            ),
+                recent_steps=(
+                    tuple(f"detail step {step}" for step in range(80))
+                    if index == 0 else row.recent_steps
+                ),
+            )
+            for index, row in enumerate(state.rows)
         )
         state = replace(
             state,
@@ -834,18 +955,18 @@ def test_beam_renders_survivors_and_details_on_a_regular_terminal():
             details = _text(screen.query_one("#beam-detail", Static))
 
             assert body.region.width == 120
-            assert 3 <= body.region.height <= 40 * 0.3 + 1
+            assert body.region.height > 40 * 0.3
             assert table.region.width >= 75
             assert detail_pane.region.width >= 35
             assert 3 <= detail_pane.region.height <= body.region.height
             assert screen.query_one("#hint", Static).region.bottom == 40
-            assert table.row_count == 12
+            assert table.row_count == 40
             assert table.max_scroll_y > 0
             assert detail_pane.max_scroll_y > 0
             assert table.virtual_size.width <= table.scrollable_content_region.width
-            assert _cell_text(table, "branch-12", "label") == "branch-12"
-            assert _cell_text(table, "branch-12", "continuation") == long_continuation
-            assert table.get_row_height("branch-12") >= 2
+            assert _cell_text(table, "branch-40", "label") == "branch-40"
+            assert _cell_text(table, "branch-40", "continuation") == long_continuation
+            assert table.get_row_height("branch-40") >= 2
             assert screen.selected_label == "b1"
             assert long_continuation in details
             assert "family A" in details

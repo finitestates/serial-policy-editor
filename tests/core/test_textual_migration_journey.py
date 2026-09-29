@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -10,11 +11,11 @@ import pytest
 from textual.command import CommandList
 from textual.events import MouseScrollDown
 from textual.widgets import DataTable, Static, TextArea
-
 from trajectory_editor.edge_commands import NewCommand, SaveCommand, parse_edge_command
 from trajectory_editor.edge_help import edge_help
-from trajectory_editor.terminal_contracts import BeamInput, BeamViewRow, PromptRequest
+from trajectory_editor.terminal_contracts import BeamInput
 from trajectory_editor.textual_tui import BeamScreen, PolicyEditorApp
+
 from tests.core.textual_support import (
     beam_state,
     choice_state,
@@ -32,13 +33,50 @@ _SNAPSHOT_SIZES = ((40, 12), (80, 24), (160, 50))
 
 
 def _save_or_compare_svg(app: PolicyEditorApp, name: str) -> None:
-    actual = app.export_screenshot(simplify=True)
+    actual = re.sub(r"terminal-\d+", "terminal-ID", app.export_screenshot(simplify=True))
     path = _SNAPSHOT_DIR / name
     if os.environ.get("UPDATE_TEXTUAL_SNAPSHOTS") == "1":
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(actual, encoding="utf-8")
     assert path.exists(), f"missing Textual SVG snapshot: {path}"
-    assert actual == path.read_text(encoding="utf-8")
+    expected = re.sub(r"terminal-\d+", "terminal-ID", path.read_text(encoding="utf-8"))
+    assert actual == expected
+
+
+@pytest.mark.parametrize(
+    ("theme", "environment", "name"),
+    [
+        ("amber-cyan", {"COLORTERM": "truecolor"}, "amber-cyan"),
+        ("monochrome", {"COLORTERM": "truecolor"}, "monochrome"),
+        ("high-contrast", {"COLORTERM": "truecolor"}, "high-contrast"),
+    ],
+)
+def test_request_screens_have_visual_checkpoints_and_visible_editor_focus(
+    theme, environment, name,
+):
+    async def scenario():
+        screens = (
+            ("choice", choice_state()),
+            ("edge", edge_state(mode="session")),
+            ("beam", beam_state(row_count=8)),
+        )
+        for screen_name, state in screens:
+            app = PolicyEditorApp(theme=theme, environment=environment)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await install_request(app, pilot, state)
+                await pilot.pause()
+                screen = app._active_screen
+                editor_id = {
+                    "choice": "#choice-input",
+                    "edge": "#edge-input",
+                    "beam": "#beam-input",
+                }[screen_name]
+                editor = screen.query_one(editor_id)
+                assert app.focused is editor
+                assert editor.has_focus
+                _save_or_compare_svg(app, f"{screen_name}-120x40-{name}.svg")
+
+    run_pilot(scenario)
 
 
 @pytest.mark.parametrize("size", _SNAPSHOT_SIZES, ids=("short", "ordinary", "wide"))
@@ -168,6 +206,11 @@ def test_one_app_carries_a_multi_request_pilot_journey():
             await pilot.pause()
             first_result = submitted(first)
             assert first_result == "x alpha"
+            assert app.screen is first_screen
+            assert app.focused is first_editor
+            assert first_editor.has_focus
+            assert not first_editor.disabled
+            assert first_editor.read_only
             engine.choice(first_result, first_state)
             assert engine.text == "alpha"
 
@@ -177,9 +220,15 @@ def test_one_app_carries_a_multi_request_pilot_journey():
             second_table = second_screen.query_one("#choice-table", DataTable)
             second_editor = second_screen.query_one("#choice-input", TextArea)
 
+            candidate_offset = (5, second_table.header_height + 1)
+            await pilot.mouse_down(second_table, offset=candidate_offset)
+            await pilot.pause()
+            assert app.focused is second_editor
+            await pilot.mouse_up(second_table, offset=candidate_offset)
+            await pilot.pause()
             await pilot.click(
                 second_table,
-                offset=(5, second_table.header_height + 1),
+                offset=candidate_offset,
             )
             await pilot.pause()
             assert second_editor.text == "2", (
@@ -188,6 +237,16 @@ def test_one_app_carries_a_multi_request_pilot_journey():
                 f"cutoff={app._input_event_cutoff}; focus={app.focused!r}"
             )
             assert app.focused is second_editor
+            # Clicking the already-selected row posts RowSelected rather than
+            # RowHighlighted. The editor must keep focus without relying on a
+            # highlight callback to restore it.
+            await pilot.click(
+                second_table,
+                offset=(5, second_table.header_height + 1),
+            )
+            await pilot.pause()
+            assert app.focused is second_editor
+            assert second_editor.text == "2"
             await pilot.press("backspace", "2")
             await pilot.pause()
             assert second_editor.text == "2"
@@ -248,15 +307,25 @@ def test_one_app_carries_a_multi_request_pilot_journey():
             assert edge_table.scroll_y > 0
             edge_table.scroll_to(y=0, animate=False, immediate=True)
             await pilot.pause()
-            await pilot.click(edge_table, offset=(4, edge_table.header_height + edge_row))
-            await pilot.pause()
             edge_editor = edge_screen.query_one("#edge-input", TextArea)
+            candidate_offset = (4, edge_table.header_height + edge_row)
+            edge_editor.focus()
+            await pilot.mouse_down(edge_table, offset=candidate_offset)
+            await pilot.pause()
+            assert app.focused is edge_editor
+            await pilot.mouse_up(edge_table, offset=candidate_offset)
+            await pilot.pause()
+            await pilot.click(edge_table, offset=candidate_offset)
+            await pilot.pause()
             assert app.focused is edge_editor
             assert edge_editor.text == "new "
             await pilot.press(*tuple("branch"), "backspace", "h")
             assert edge_editor.text == "new branch"
             await pilot.press("enter")
             await pilot.pause()
+            assert edge_editor.has_focus
+            assert edge_editor.read_only
+            assert not edge_editor.disabled
             new_root = engine.edge(submitted(edge))
             assert new_root == NewCommand("branch")
 
@@ -314,6 +383,20 @@ def test_one_app_carries_a_multi_request_pilot_journey():
             await pilot.pause()
             assert detail_pane.scroll_y > 0
 
+            # Re-selecting the current row has no highlight change to restore
+            # editor focus, so mouse-down must preserve it by policy.
+            candidate_offset = (5, beam_table.header_height + 1)
+            await pilot.mouse_down(beam_table, offset=candidate_offset)
+            await pilot.pause()
+            assert app.focused is beam_editor
+            await pilot.mouse_up(beam_table, offset=candidate_offset)
+            await pilot.pause()
+            await pilot.click(beam_table, offset=candidate_offset)
+            await pilot.press(*tuple("advance 2"))
+            await pilot.pause()
+            assert beam_editor.text == "advance 2"
+            assert app.focused is beam_editor
+
             # Resizing preserves the editor focus, then a table-focused pass
             # crosses immediately below/at/above the CSS breakpoint.
             await pilot.resize_terminal(40, 12)
@@ -337,10 +420,13 @@ def test_one_app_carries_a_multi_request_pilot_journey():
                 assert beam_screen.has_class(breakpoint_class)
                 assert beam_screen.selected_label == "b2"
             beam_editor.focus()
-            await pilot.press(*tuple("advance 2"), "enter")
+            await pilot.press("enter")
             await pilot.pause()
             beam_value = submitted(beam_request)
             assert beam_value == BeamInput("advance 2", "b2")
+            assert beam_editor.has_focus
+            assert beam_editor.read_only
+            assert not beam_editor.disabled
             engine.beam(beam_value)
 
             multiline = await install_request(
@@ -385,8 +471,8 @@ def test_stale_mouse_input_is_filtered_at_request_turnover():
             await pilot.press("enter")
             await pilot.pause()
             assert submitted(first) == ""
-            cutoff = app._input_event_cutoff
-            assert cutoff is not None
+            submit_cutoff = app._input_event_cutoff
+            assert submit_cutoff is not None
 
             rows = list(beam_state(row_count=1).rows)
             rows[0] = replace(
@@ -398,6 +484,8 @@ def test_stale_mouse_input_is_filtered_at_request_turnover():
             )
             pane = app._active_screen.query_one("#beam-detail-pane")
             assert pane.max_scroll_y > 0
+            cutoff = app._input_event_cutoff
+            assert cutoff is not None and cutoff >= submit_cutoff
 
             def scroll_event():
                 x = max(0, pane.size.width // 2)

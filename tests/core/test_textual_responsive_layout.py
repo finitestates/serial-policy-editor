@@ -7,10 +7,10 @@ from dataclasses import replace
 import pytest
 from rich.text import Text
 from textual.widgets import DataTable, Input, Static, TextArea
-
 from trajectory_editor.terminal_contracts import BeamInput
 from trajectory_editor.textual_tui import PolicyEditorApp
 from trajectory_editor.ui_themes import resolve_live_theme
+
 from tests.core.textual_support import (
     beam_state,
     choice_state,
@@ -181,7 +181,10 @@ def test_beam_panes_stack_at_narrow_width_and_reflow_without_stealing_focus():
     run_pilot(scenario)
 
 
-@pytest.mark.parametrize("size", [(40, 12), (44, 14), (60, 18), (80, 24)])
+@pytest.mark.parametrize(
+    "size",
+    [(40, 12), (60, 18), (80, 24), (119, 30), (120, 40), (121, 40), (160, 50), (240, 80)],
+)
 def test_beam_compact_layout_keeps_the_table_input_and_help_inside_the_viewport(size):
     async def scenario():
         width, height = size
@@ -195,7 +198,10 @@ def test_beam_compact_layout_keeps_the_table_input_and_help_inside_the_viewport(
             hint = screen.query_one("#hint", Static)
             hint_text = _static_text(hint)
 
-            assert screen.has_class("-stacked")
+            if width < 120:
+                assert screen.has_class("-stacked")
+            else:
+                assert screen.has_class("-side-by-side")
             assert table.region.width <= width
             assert table.virtual_size.width <= table.scrollable_content_region.width
             assert beam_input.region.y + beam_input.region.height <= height
@@ -204,6 +210,8 @@ def test_beam_compact_layout_keeps_the_table_input_and_help_inside_the_viewport(
             assert "Ctrl+K commands" in hint_text
             assert "F1 help" in hint_text
             assert app.focused is beam_input
+            if height >= 40:
+                assert body.region.height > height * 0.30
 
     run_pilot(scenario)
 

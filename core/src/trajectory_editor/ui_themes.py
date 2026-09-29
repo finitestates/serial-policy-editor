@@ -293,7 +293,7 @@ def theme_stylesheet(
     #choice-heading, #review-header, #edge-header {{ width: 1fr; max-width: 160; }}
     #choice-preview, #choice-feedback, #beam-detail, #beam-notice {{ height: auto; width: 1fr; max-width: 160; padding: 0 1; }}
     #choice-table, #edge-commands {{ width: 1fr; max-width: 160; height: auto; max-height: 30%; min-height: 3; }}
-    #beam-body {{ height: 1fr; width: 1fr; max-width: 200; max-height: 30%; min-height: 3; layout: horizontal; }}
+    #beam-body {{ height: 1fr; width: 1fr; max-width: 200; min-height: 3; layout: horizontal; }}
     BeamScreen.-stacked #beam-body {{ layout: vertical; max-width: 160; }}
     #beam-table {{ width: 2fr; height: 1fr; min-width: 48; min-height: 3; }}
     #beam-detail-pane {{ width: 1fr; height: 1fr; min-width: 36; border-left: solid $secondary; padding: 0 1; }}
@@ -318,6 +318,7 @@ def theme_stylesheet(
     #prompt-status {{ height: auto; width: 1fr; padding: 0 1; }}
     #page-scroll {{ height: 1fr; width: 1fr; }}
     #page-body {{ height: auto; width: 1fr; }}
+    #single-key-hint:focus {{ color: $background; background: $secondary; text-style: bold; }}
     #hint {{ height: auto; max-height: 30%; width: 1fr; max-width: 160; padding: 0 1; dock: bottom; text-wrap: wrap; text-align: center; }}
     #edge-header {{ height: auto; padding: 0 1; }}
     #edge-commands {{ margin: 0 1; }}

@@ -244,6 +244,9 @@ async def _measure(args: argparse.Namespace, modules) -> dict[str, object]:
             "context_high_water_characters": app.stats[
                 "context_high_water_characters"
             ],
+            "context_rendered_characters": app.stats.get(
+                "context_rendered_characters", 0
+            ),
             "driver_write_calls": None,
             "driver_write_characters": None,
         },

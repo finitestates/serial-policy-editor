@@ -1,0 +1,88 @@
+{
+  "date": "2026-09-29",
+  "harness": "benchmarks/tui_transitions.py",
+  "scope": "Textual Pilot headless prepared-screen transitions; driver writes and terminal painting are excluded",
+  "terminal": {
+    "rows": 40,
+    "columns": 120
+  },
+  "iterations_argument": 60,
+  "input_ready_events_per_run": 117,
+  "baseline": {
+    "revision": "e6b3736",
+    "runs": [
+      {"median_ms": 82.497, "p95_ms": 132.771},
+      {"median_ms": 81.481, "p95_ms": 137.787},
+      {"median_ms": 83.238, "p95_ms": 134.196}
+    ],
+    "median_of_run_medians_ms": 82.497,
+    "median_of_run_p95_ms": 134.196,
+    "work_counts_per_run": {
+      "screen_layout_refreshes": 131,
+      "table_fit_attempts": 50,
+      "table_column_resizes": 44,
+      "table_layout_refresh_requests": 44,
+      "beam_detail_renders": 6,
+      "output_history_high_water_chars": 8568,
+      "context_append_characters": 625,
+      "context_high_water_characters": 9744
+    }
+  },
+  "working_tree": {
+    "runs": [
+      {"median_ms": 83.522, "p95_ms": 149.437},
+      {"median_ms": 83.067, "p95_ms": 155.096},
+      {"median_ms": 82.502, "p95_ms": 152.520}
+    ],
+    "median_of_run_medians_ms": 83.067,
+    "median_of_run_p95_ms": 152.520,
+    "work_counts_per_run": {
+      "screen_layout_refreshes": 131,
+      "table_fit_attempts": 50,
+      "table_column_resizes": 44,
+      "table_layout_refresh_requests": 44,
+      "beam_detail_renders": 6,
+      "output_history_high_water_chars": 8568,
+      "context_append_characters": 625,
+      "context_high_water_characters": 9744,
+      "context_rendered_characters": 243090
+    }
+  },
+  "interpretation": {
+    "median_delta_ms": 0.570,
+    "median_delta_percent": 0.691,
+    "p95_delta_ms": 18.324,
+    "p95_delta_percent": 13.651,
+    "note": "Three run summaries are descriptive, not a regression threshold. Median latency and operation counts are close; the p95 estimate shifted upward and needs further investigation. Other focused PTY and lifecycle validation ran concurrently, so repeat this comparison in isolation before using the p95 shift as evidence of a change."
+  },
+  "isolated_repeat": {
+    "runs": 2,
+    "baseline": {
+      "all_transition_medians_ms": [86.968, 87.989],
+      "median_of_run_medians_ms": 87.479,
+      "all_transition_p95_ms": [135.917, 142.332],
+      "median_of_run_p95_ms": 139.125
+    },
+    "working_tree": {
+      "all_transition_medians_ms": [81.296, 80.899],
+      "median_of_run_medians_ms": 81.098,
+      "all_transition_p95_ms": [156.432, 135.612],
+      "median_of_run_p95_ms": 146.022
+    },
+    "work_counts_match": true,
+    "work_counts_per_run": {
+      "screen_layout_refreshes": 131,
+      "table_fit_attempts": 50,
+      "table_column_resizes": 44,
+      "table_layout_refresh_requests": 44,
+      "beam_detail_renders": 6
+    },
+    "interpretation": {
+      "median_delta_ms": -6.381,
+      "median_delta_percent": -7.295,
+      "p95_delta_ms": 6.897,
+      "p95_delta_percent": 4.958,
+      "note": "Two isolated runs per revision still do not establish a regression gate. Median latency favored the working tree in both runs, while p95 varied between runs; operation counts matched. This headless comparison excludes driver writes and terminal painting."
+    }
+  }
+}

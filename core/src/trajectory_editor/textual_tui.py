@@ -291,6 +291,13 @@ class _FluidDataTable(DataTable):
                     self.app.stats["table_column_resizes"] += 1
 
 
+class _CommandTemplateDataTable(_FluidDataTable):
+    """Stage row commands without taking focus away from their editor."""
+
+    def focus_on_click(self) -> bool:
+        return False
+
+
 @dataclass(frozen=True)
 class _OwnerPreview:
     generation: int
@@ -561,6 +568,7 @@ class PolicyEditorApp(App[None]):
             "output_history_high_water_chars": 0,
             "context_append_characters": 0,
             "context_high_water_characters": 0,
+            "context_rendered_characters": 0,
             "beam_detail_renders": 0,
         }
 
@@ -574,6 +582,9 @@ class PolicyEditorApp(App[None]):
 
     def _screen_ready(self, screen: _RequestScreen) -> None:
         if screen is self._active_screen:
+            # Input that reached the driver before readiness belongs to the
+            # previous handoff, even if Textual dispatches it later.
+            self._input_event_cutoff = time.monotonic()
             if not screen._layout_metrics_subscribed:
                 screen.screen_layout_refresh_signal.subscribe(
                     self, self._note_screen_layout_refresh,
@@ -608,18 +619,21 @@ class PolicyEditorApp(App[None]):
                 event.prevent_default()
                 return
             screen = self._active_screen
-            if (
-                screen is not None
-                and not screen.accepting_input
-            ):
+            if screen is None or not screen.accepting_input:
                 event.stop()
                 event.prevent_default()
+                self.stats["stale_input_events"] += 1
+                if isinstance(event, events.Key):
+                    self.stats["stale_key_events"] += 1
+                elif isinstance(event, events.MouseEvent):
+                    self.stats["stale_mouse_events"] += 1
                 return
             self._input_event_cutoff = None
         await super().on_event(event)
 
     def on_key(self, event: events.Key) -> None:
-        if self._active_screen is None:
+        screen = self._active_screen
+        if screen is None:
             event.stop()
             event.prevent_default()
 
@@ -842,7 +856,9 @@ class PolicyEditorApp(App[None]):
             safe_text = safe_text[-self.OUTPUT_HISTORY_LIMIT:]
         self._output_chunks.append(safe_text)
         self._output_history_chars += len(safe_text)
+        history_trimmed = False
         while self._output_history_chars > self.OUTPUT_HISTORY_LIMIT:
+            history_trimmed = True
             oldest = self._output_chunks.popleft()
             excess = self._output_history_chars - self.OUTPUT_HISTORY_LIMIT
             if len(oldest) > excess:
@@ -855,7 +871,10 @@ class PolicyEditorApp(App[None]):
             self.stats["output_history_high_water_chars"], self._output_history_chars,
         )
         if isinstance(self.screen, OutputScreen):
-            self.screen.append_output(safe_text)
+            if history_trimmed:
+                self.screen.refresh_output()
+            else:
+                self.screen.append_output(safe_text)
 
     def start_output(self) -> None:
         if self._active_screen is not None and self._active_screen.accepting_input:
@@ -1049,7 +1068,7 @@ class ChoiceScreen(_RequestScreen):
             yield VerticalScroll(Static(id="context"), id="context-scroll")
             yield Static(id="choice-preview")
             yield Static("Candidates", classes="section")
-            yield _FluidDataTable(
+            yield _CommandTemplateDataTable(
                 id="choice-table", cursor_type="row", zebra_stripes=False,
                 stretch_column="text",
             )
@@ -1070,8 +1089,10 @@ class ChoiceScreen(_RequestScreen):
         super().on_mount()
         self.query_one("#choice-feedback", Static).display = False
         input_widget = self.query_one("#choice-input", TextArea)
-        if self.state.review is None:
-            input_widget.focus()
+        # Historical review still receives screen-level keyboard commands.
+        # Keep its editor read-only while giving the active screen a focused
+        # target so terminal-driver key events reach ChoiceScreen.on_key.
+        input_widget.focus()
         if self.state.review is None and self._completion_owned:
             input_widget.read_only = True
         if self.state.review is not None:
@@ -1121,14 +1142,14 @@ class ChoiceScreen(_RequestScreen):
         self._navigation = self._navigation_commands()
 
         input_widget = self.query_one("#choice-input", TextArea)
-        input_widget.disabled = True
+        input_widget.disabled = False
+        input_widget.read_only = True
         input_widget.remove_class("expanded")
         self._suppress_changed = True
         input_widget.text = self._command_text
         lines = self._command_text.splitlines() or [""]
         input_widget.move_cursor((len(lines) - 1, len(lines[-1])))
         self._suppress_changed = False
-        input_widget.read_only = self._completion_owned
         input_widget.focus()
 
         self.query_one("#choice-table", DataTable).clear(columns=True)
@@ -1139,7 +1160,10 @@ class ChoiceScreen(_RequestScreen):
 
     def set_input_enabled(self, enabled: bool) -> None:
         widget = self.query_one("#choice-input", TextArea)
-        widget.disabled = not enabled
+        # The app and screen reject input while a request is submitted. Keep
+        # the field focused/read-only through the owner-thread handoff so its
+        # focused command bar does not blink out between consecutive choices.
+        widget.disabled = False
         if self.state.review is None:
             widget.read_only = not enabled or self._completion_owned
             if enabled:
@@ -1264,6 +1288,11 @@ class ChoiceScreen(_RequestScreen):
         # A mouse selection stages the command in the editor and returns the
         # caret there so the next typed character has an obvious destination.
         self._set_command(str(rank), owned=False, focus=True)
+
+    @on(DataTable.RowSelected, "#choice-table")
+    def _on_candidate_selected(self, _event: DataTable.RowSelected) -> None:
+        if self.accepting_input and self.state.review is None:
+            self.query_one("#choice-input", TextArea).focus()
 
     def _refresh_candidate_focus(self) -> None:
         if not self._candidate_table_ready or not self.is_mounted:
@@ -1419,6 +1448,7 @@ class ChoiceScreen(_RequestScreen):
             return
         context_tail = _safe_context_text(self.state.choice.context_text_tail)
         context_widget = self.query_one("#context", Static)
+        rendered = False
         if (
             self._rendered_context is not None
             and self._rendered_context_tail is not None
@@ -1429,6 +1459,7 @@ class ChoiceScreen(_RequestScreen):
                 self._rendered_context.append(addition)
                 self.terminal_app.stats["context_append_characters"] += len(addition)
                 context_widget.update(self._rendered_context)
+                rendered = True
         else:
             context = Text(
                 "DECISION BOUNDARY\n",
@@ -1440,6 +1471,11 @@ class ChoiceScreen(_RequestScreen):
             context.append(context_tail)
             self._rendered_context = context
             context_widget.update(context)
+            rendered = True
+        if rendered:
+            self.terminal_app.stats["context_rendered_characters"] += len(
+                self._rendered_context
+            )
         self._rendered_context_tail = context_tail
         self.terminal_app.stats["context_high_water_characters"] = max(
             self.terminal_app.stats["context_high_water_characters"],
@@ -1782,7 +1818,7 @@ class EdgeScreen(_RequestScreen):
             id="edge-header",
             classes="status-strong",
         )
-        table = _FluidDataTable(
+        table = _CommandTemplateDataTable(
             id="edge-commands", cursor_type="row", stretch_column="description"
         )
         yield table
@@ -1807,7 +1843,13 @@ class EdgeScreen(_RequestScreen):
         )
 
     def set_input_enabled(self, enabled: bool) -> None:
-        self.query_one("#edge-input", TextArea).disabled = not enabled
+        widget = self.query_one("#edge-input", TextArea)
+        # Keep the command bar visibly focused across request handoff while
+        # making it read-only until the next request is ready.
+        widget.disabled = False
+        widget.read_only = not enabled
+        if not enabled:
+            widget.focus()
 
     @on(DataTable.RowHighlighted, "#edge-commands")
     def _on_command_highlighted(self, event: DataTable.RowHighlighted) -> None:
@@ -1818,6 +1860,11 @@ class EdgeScreen(_RequestScreen):
         widget.text = command
         widget.move_cursor((0, len(command)))
         widget.focus()
+
+    @on(DataTable.RowSelected, "#edge-commands")
+    def _on_command_selected(self, _event: DataTable.RowSelected) -> None:
+        if self.accepting_input:
+            self.query_one("#edge-input", TextArea).focus()
 
     def action_submit_command(self) -> None:
         if self.accepting_input:
@@ -1885,7 +1932,7 @@ class BeamScreen(_RequestScreen):
         yield Static(title, id="beam-heading", classes="status-strong")
         yield Static(id="beam-context", classes="muted")
         with Horizontal(id="beam-body"):
-            yield _FluidDataTable(
+            yield _CommandTemplateDataTable(
                 id="beam-table", cursor_type="row", stretch_column="continuation"
             )
             with VerticalScroll(id="beam-detail-pane"):
@@ -1907,7 +1954,7 @@ class BeamScreen(_RequestScreen):
                 ),
             )
         )
-        table = self.query_one("#beam-table", _FluidDataTable)
+        table = self.query_one("#beam-table", _CommandTemplateDataTable)
         for label, width in (
             ("", 2), ("#", 3), ("label", None), ("state", None),
             ("score", None), ("continuation", 1),
@@ -1962,7 +2009,11 @@ class BeamScreen(_RequestScreen):
         self.query_one("#hint", Static).update(hint)
 
     def set_input_enabled(self, enabled: bool) -> None:
-        self.query_one("#beam-input", TextArea).disabled = not enabled
+        widget = self.query_one("#beam-input", TextArea)
+        widget.disabled = False
+        widget.read_only = not enabled
+        if not enabled:
+            widget.focus()
 
     def handle_empty_key(self, key: str) -> None:
         if key == "p":
@@ -2024,7 +2075,13 @@ class BeamScreen(_RequestScreen):
 
     @on(DataTable.RowHighlighted, "#beam-table")
     def _on_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        label = str(event.row_key.value)
+        self._select_row(str(event.row_key.value))
+
+    @on(DataTable.RowSelected, "#beam-table")
+    def _on_row_selected(self, event: DataTable.RowSelected) -> None:
+        self._select_row(str(event.row_key.value))
+
+    def _select_row(self, label: str) -> None:
         if label in self._labels and label != self.selected_label:
             self.selected_label = label
             self._render_details()
@@ -2046,9 +2103,7 @@ class BeamScreen(_RequestScreen):
             current = 0 if direction >= 0 else len(self._labels) - 1
         selected = max(0, min(len(self._labels) - 1, current + direction))
         selected_label = self._labels[selected]
-        if selected_label != self.selected_label:
-            self.selected_label = selected_label
-            self._render_details()
+        self._select_row(selected_label)
         self.query_one("#beam-table", DataTable).move_cursor(row=selected, column=0, animate=False)
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
@@ -2123,6 +2178,12 @@ class BeamScreen(_RequestScreen):
         widget.focus()
 
 
+class _SingleKeyHint(Static):
+    """Focusable target for single-key requests, which have no editor widget."""
+
+    can_focus = True
+
+
 class PromptScreen(_RequestScreen):
     """One parameterized screen for ordinary, key, multiline, page, and chord input."""
 
@@ -2173,7 +2234,7 @@ class PromptScreen(_RequestScreen):
                     else:
                         yield Input("", id="prompt-input", placeholder="Response")
                 else:
-                    yield Static("Press a key", id="single-key-hint")
+                    yield _SingleKeyHint("Press a key", id="single-key-hint")
             yield Static(id="prompt-status", classes="feedback-info")
         yield Static(id="hint", classes="hint")
 
@@ -2189,9 +2250,16 @@ class PromptScreen(_RequestScreen):
         else:
             hint = "Enter submits · Ctrl+D cancels · PgUp/PgDn scroll · Ctrl+L output · F1 help"
         self.query_one("#hint", Static).update(hint)
+        self.call_after_refresh(self._focus_prompt_target)
+
+    def _focus_prompt_target(self) -> None:
         if self.state.multiline:
             self.query_one("#multiline-input", TextArea).focus()
-        elif not self.state.page and not self.state.single_key:
+        elif self.state.page:
+            self.query_one("#page-scroll", VerticalScroll).focus()
+        elif self.state.single_key:
+            self.query_one("#single-key-hint", _SingleKeyHint).focus()
+        else:
             self.query_one("#prompt-input", Input).focus()
 
     def set_input_enabled(self, enabled: bool) -> None:
@@ -2361,17 +2429,41 @@ class OutputScreen(ModalScreen[None]):
         with Vertical(id="output-dialog"):
             yield Static("Captured output", classes="section")
             yield RichLog(
-                id="output-body", max_lines=500, wrap=True,
+                id="output-body", max_lines=self.terminal_app.OUTPUT_HISTORY_LIMIT + 1,
+                wrap=True,
                 markup=False, highlight=False,
             )
             yield Static("PgUp/PgDn scroll · Esc/q/Ctrl+L closes", id="hint", classes="hint")
 
     def on_mount(self) -> None:
-        for chunk in self.terminal_app._output_chunks:
-            self.append_output(chunk)
+        self.refresh_output()
+
+    def refresh_output(self) -> None:
+        log = self.query_one("#output-body", RichLog)
+        previous_scroll_y = log.scroll_y
+        following_tail = previous_scroll_y >= log.max_scroll_y
+        log.clear()
+        history = "".join(self.terminal_app._output_chunks)
+        if history:
+            log.write(Text(history), scroll_end=False)
+            self.terminal_app.stats["rich_log_writes"] += 1
+
+        def restore_scroll() -> None:
+            if following_tail:
+                log.scroll_end(animate=False, immediate=True)
+            else:
+                log.scroll_to(
+                    y=min(previous_scroll_y, log.max_scroll_y),
+                    animate=False,
+                    immediate=True,
+                )
+
+        self.call_after_refresh(restore_scroll)
 
     def append_output(self, text: str) -> None:
-        self.query_one("#output-body", RichLog).write(Text(text))
+        log = self.query_one("#output-body", RichLog)
+        was_at_tail = log.scroll_y >= log.max_scroll_y
+        log.write(Text(text), scroll_end=was_at_tail)
         self.terminal_app.stats["rich_log_writes"] += 1
 
     def action_scroll_up(self) -> None:

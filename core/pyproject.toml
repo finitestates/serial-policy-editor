@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=9,<10"]
+test = ["pytest>=9,<10", "pyte>=0.8.2,<1"]
 llama = ["llama-cpp-python>=0.3"]
 transformers = ["torch>=2.1", "transformers>=4.45,<6"]
 transformers-accelerate = [

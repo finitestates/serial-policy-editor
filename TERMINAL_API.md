@@ -32,16 +32,22 @@ During a live session, incidental stdout and stderr are held in memory and do
 not enter the live screen. The captured text is flushed to the original streams
 only after the session exits, once Textual has restored the terminal. Explicit
 `TerminalIO.write(...)` messages remain available in the app's docked `RichLog`.
+The viewer retains the same trailing 16,000 characters whether it stays open or
+is reopened; large writes and history rollover keep that limit.
 
 ## Screens and controls
 
-Each request type has one Textual screen:
+Each request type has one Textual screen. Clicking a Choice, EDGE, or Beam row
+keeps command focus in the editor through mouse-down and row selection. The
+focused command bar remains read-only during owner-thread handoff, then becomes
+editable when the next request is ready; the app rejects queued keys, mouse
+events, and paste during that interval.
 
 | Screen | Contents and behavior |
 | --- | --- |
-| `ChoiceScreen` | Scrollable context, candidate `DataTable`, preview and feedback, editable command area, and read-only historical review. PgUp/PgDn control context scrolling; Ctrl+E expands authored-text input; Alt+Enter inserts a newline in `t` and `x` commands. |
+| `ChoiceScreen` | Scrollable prepared context, candidate `DataTable`, preview and feedback, editable command area, and read-only historical review. Context follows the prepared tail, which is unlimited by default. PgUp/PgDn control context scrolling; Ctrl+E expands authored-text input; Alt+Enter inserts a newline in `t` and `x` commands. |
 | `EdgeScreen` | Episode or session status, sampler summary, mode-specific commands from `edge_help()`, and a command input. Blank Enter submits an empty command so the engine can continue. |
-| `BeamScreen` | Survivor table, shared context, selected-branch details, notice, and command input. Arrow keys change the selected row. |
+| `BeamScreen` | Survivor table, shared context, selected-branch details, notice, and command input. Arrow keys change the selected row. The table and details use the remaining terminal height; below 120 columns they stack. |
 | `PromptScreen` | One parameterized screen for ordinary input, single keys, multiline composition, scrollable pages, and isolated chord composition. |
 | `HelpScreen` | Scrollable modal help shown over the active request screen. |
 
@@ -89,7 +95,11 @@ WCAG AA contrast against their light or dark background.
 
 `tests/core/test_terminal_architecture.py` checks that runtime imports stay at
 the terminal boundary, Textual remains lazy, and the plain fallback stays
-isolated. Pilot tests exercise the live screens and future results.
+isolated. Pilot tests exercise screen state and layout; POSIX PTY tests exercise
+the custom driver, multi-turn runtime bridge, handoff input rejection, terminal
+cleanup, and resize-delimited output checkpoints replayed through pyte. The
+checkpoints show the screen after each recorded resize interval. They do not
+capture every driver write or establish physical display stability.
 `benchmarks/tui_transitions.py --package-root CHECKOUT` loads that checkout's
 `core/src` directly and measures prepared-screen submission-to-next-render
 latency at the requested console size. It excludes model, database, and
