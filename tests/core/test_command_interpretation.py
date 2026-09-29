@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from textual.theme import Theme
 
 from tests.fakes import ConformingFakeBackend, ScriptedIO
 from trajectory_editor.core.actions import Reroll
@@ -17,7 +18,7 @@ from trajectory_editor.teacher_commands import (
 )
 from trajectory_editor.ui_themes import (
     LIVE_THEME_NAMES, is_dark_terminal, resolve_live_theme, semantic_style,
-    theme_palette, theme_stylesheet,
+    textual_theme_values, theme_palette, theme_stylesheet,
 )
 
 pytestmark = pytest.mark.current_workflow
@@ -159,6 +160,20 @@ def test_theme_selection_respects_color_environment_and_ansi_fallback():
     assert theme_palette(
         "amber-cyan", environment={"COLORTERM": "truecolor", "COLORFGBG": "0;15"}
     ).background == "#FFFDF7"
+
+
+def test_functional_scrollbars_use_quiet_theme_colors_including_no_color():
+    environments = [({"COLORTERM": "truecolor"}, name) for name in LIVE_THEME_NAMES]
+    no_color = {"NO_COLOR": ""}
+    environments.append((no_color, resolve_live_theme(None, environment=no_color)))
+
+    for environment, name in environments:
+        palette = theme_palette(name, environment=environment)
+        colors = Theme(**textual_theme_values(palette)).to_color_system().generate()
+
+        assert colors["scrollbar"] == palette.muted
+        assert colors["scrollbar-hover"] == palette.secondary
+        assert colors["scrollbar-background"] == palette.background
 
 
 def test_submit_reinterprets_the_actual_buffer_and_blank_accepts_proposal():

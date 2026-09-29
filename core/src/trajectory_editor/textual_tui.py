@@ -17,6 +17,7 @@ from dataclasses import dataclass, field, replace
 from queue import Empty, Queue
 from typing import Any, ClassVar
 
+from rich.markup import escape as escape_markup
 from rich.text import Text
 from textual import constants, events, on
 from textual.app import App, ComposeResult
@@ -206,10 +207,16 @@ class _TerminalResponse:
     exception: BaseException | None = None
 
 
-def _stretch_data_table_column(table: DataTable, key: str) -> None:
+def _stretch_data_table_column(
+    table: DataTable, key: str, *, available_width: int | None = None
+) -> None:
     """Give a table's descriptive column the width left by its fixed columns."""
     column = table.columns[key]
-    available = table.scrollable_content_region.width
+    available = (
+        table.scrollable_content_region.width
+        if available_width is None
+        else available_width
+    )
     fixed = sum(
         item.get_render_width(table)
         for item in table.columns.values()
@@ -239,20 +246,33 @@ class _FluidDataTable(DataTable):
     def __init__(self, *args: Any, stretch_column: str, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._stretch_column = stretch_column
-
-    def on_mount(self) -> None:
-        self.call_after_refresh(self.fit_column)
+        self._fit_scheduled = False
 
     def on_resize(self, _event: events.Resize) -> None:
-        self.call_after_refresh(self.fit_column)
+        # A resize event already has the final viewport geometry. Fit before
+        # Textual paints that geometry so an initial scrollbar cannot flash.
+        self.fit_column()
 
     def fit_column(self) -> None:
-        if self.is_mounted and self._stretch_column in self.columns:
+        if (
+            self._stretch_column in self.columns
+            and self.scrollable_content_region.width > 0
+        ):
             column = self.columns[self._stretch_column]
             previous_width = column.width
             _stretch_data_table_column(self, self._stretch_column)
             if column.width != previous_width:
-                self.call_after_refresh(self.fit_column)
+                self._schedule_fit_after_layout()
+
+    def _schedule_fit_after_layout(self) -> None:
+        if self._fit_scheduled or not self.is_mounted:
+            return
+        self._fit_scheduled = True
+        self.call_after_refresh(self._fit_after_layout)
+
+    def _fit_after_layout(self) -> None:
+        self._fit_scheduled = False
+        self.fit_column()
 
 
 @dataclass(frozen=True)
@@ -354,7 +374,7 @@ def _teacher_palette_entries() -> tuple[_PaletteEntry, ...]:
         ("sampler settings", "s ", "Change one or more sampler settings."),
         ("token bias", "b ", "Change a group or token bias."),
         ("fork boundary", "f", "Fork at the current boundary."),
-        ("help", "?", "Show the full command list."),
+        ("help", "", "Show the full command list."),
     ):
         if title not in known:
             result.append(_PaletteEntry(title, insert, detail))
@@ -372,6 +392,7 @@ _BEAM_PALETTE_ENTRIES = (
     _PaletteEntry("families", "families", "Toggle branch family details."),
     _PaletteEntry("return", "return", "Return to the teacher decision."),
 )
+_HELP_PALETTE_ENTRY = _PaletteEntry("help", "", "Show the full command list.")
 
 
 def _edge_insert_command(command: str) -> str:
@@ -404,12 +425,13 @@ def _edge_insert_command(command: str) -> str:
 
 def _palette_entries(state: Any) -> tuple[_PaletteEntry, ...]:
     if isinstance(state, EdgeViewState):
-        return tuple(
+        commands = tuple(
             _PaletteEntry(item.command, _edge_insert_command(item.command), item.description)
             for item in edge_help(state.mode)
         )
+        return (*commands, _HELP_PALETTE_ENTRY)
     if isinstance(state, BeamViewState):
-        return _BEAM_PALETTE_ENTRIES
+        return (*_BEAM_PALETTE_ENTRIES, _HELP_PALETTE_ENTRY)
     if isinstance(state, ChoiceViewState):
         return _TEACHER_PALETTE_ENTRIES
     return ()
@@ -432,16 +454,25 @@ def _help_document(state: Any) -> Text:
 class _CommandProvider(Provider):
     """Fuzzy-search teacher, edge, and beam commands for the active surface."""
 
+    @staticmethod
+    def _activate(screen: _RequestScreen, entry: _PaletteEntry) -> None:
+        if screen.terminal_app._active_screen is not screen or not screen.accepting_input:
+            return
+        if entry.title == "help":
+            screen.action_show_help()
+        else:
+            screen.insert_command(entry.insert)
+
     async def discover(self):
         screen = self.screen
         if not isinstance(screen, _RequestScreen):
             return
         for entry in _palette_entries(screen.lifecycle.state):
             yield DiscoveryHit(
-                self.matcher("").highlight(entry.title),
-                lambda item=entry: screen.insert_command(item.insert),
+                Text(entry.title),
+                lambda item=entry: self._activate(screen, item),
                 text=entry.title,
-                help=entry.help,
+                help=escape_markup(entry.help),
             )
 
     async def search(self, query: str):
@@ -455,10 +486,10 @@ class _CommandProvider(Provider):
                 continue
             yield Hit(
                 score,
-                matcher.highlight(entry.title),
-                lambda item=entry: screen.insert_command(item.insert),
+                matcher.highlight(escape_markup(entry.title)),
+                lambda item=entry: self._activate(screen, item),
                 text=entry.title,
-                help=entry.help,
+                help=escape_markup(entry.help),
             )
 
 
@@ -509,7 +540,11 @@ class PolicyEditorApp(App[None]):
 
     def _screen_ready(self, screen: _RequestScreen) -> None:
         if screen is self._active_screen:
-            self.use_command_palette = True
+            self._set_command_palette_for(screen)
+
+    def _set_command_palette_for(self, screen: _RequestScreen) -> None:
+        state = getattr(screen, "state", None)
+        self.use_command_palette = not bool(getattr(state, "single_key", False))
 
     def on_unmount(self) -> None:
         # The UI loop must finish unmounting before owner threads wait for
@@ -562,7 +597,7 @@ class PolicyEditorApp(App[None]):
             assert isinstance(current, ChoiceScreen)
             screen = current
             self._active_screen = screen
-            self.use_command_palette = True
+            self._set_command_palette_for(screen)
             screen.update_request(lifecycle)
             mount = None
         elif isinstance(state, ChoiceViewState):
@@ -575,7 +610,7 @@ class PolicyEditorApp(App[None]):
             screen = PromptScreen(self, lifecycle)
         if not reuse_choice:
             self._active_screen = screen
-            self.use_command_palette = True
+            self._set_command_palette_for(screen)
             if isinstance(current, _RequestScreen) and not current.accepting_input:
                 mount = self.switch_screen(screen)
             else:
@@ -773,43 +808,11 @@ class PolicyEditorApp(App[None]):
         self._preview_executor.shutdown(wait=wait, cancel_futures=True)
 
 
-class _HelpAwareTextArea(TextArea):
-    """Open help on a typed question mark before a command buffer consumes it."""
-
-    async def _on_key(self, event: events.Key) -> None:
-        if event.character == "?":
-            screen = self.screen
-            if isinstance(screen, PromptScreen) and screen.state.single_key:
-                screen.submit("?")
-            else:
-                screen.action_show_help()
-            event.stop()
-            event.prevent_default()
-            return
-        await super()._on_key(event)
-
-
-class _HelpAwareInput(Input):
-    """Open help on a typed question mark before a prompt consumes it."""
-
-    async def _on_key(self, event: events.Key) -> None:
-        if event.character == "?":
-            screen = self.screen
-            if isinstance(screen, PromptScreen) and screen.state.single_key:
-                screen.submit("?")
-            else:
-                screen.action_show_help()
-            event.stop()
-            event.prevent_default()
-            return
-        await super()._on_key(event)
-
-
 class _RequestScreen(Screen[_TerminalResponse]):
     """A request screen whose result is the only input returned to the engine."""
 
     BINDINGS: ClassVar[list[Binding]] = [
-        Binding("question_mark", "show_help", "Help", show=False, priority=True),
+        Binding("f1", "show_help", "Help", show=False, priority=True),
         Binding("ctrl+c", "interrupt", "Interrupt", show=False, priority=True),
     ]
 
@@ -854,18 +857,9 @@ class _RequestScreen(Screen[_TerminalResponse]):
         if not self.accepting_input:
             event.stop()
             event.prevent_default()
-            return
-        if event.character == "?" and not (
-            isinstance(self, PromptScreen) and self.state.single_key
-        ):
-            self.action_show_help()
-            event.stop()
-            event.prevent_default()
 
     def action_show_help(self) -> None:
-        if self.accepting_input and isinstance(self, PromptScreen) and self.state.single_key:
-            self.submit("?")
-        elif self.accepting_input:
+        if self.accepting_input:
             self.terminal_app.start_help(self)
 
     def action_interrupt(self) -> None:
@@ -983,7 +977,7 @@ class ChoiceScreen(_RequestScreen):
             )
             yield VerticalScroll(Static(id="review-context"), id="context-scroll")
             yield Static(id="choice-feedback")
-            yield _HelpAwareTextArea(
+            yield TextArea(
                 self._command_text,
                 id="choice-input",
                 compact=True,
@@ -1001,15 +995,16 @@ class ChoiceScreen(_RequestScreen):
                 stretch_column="text",
             )
             yield Static(id="choice-feedback")
-            yield _HelpAwareTextArea(
-                self._command_text,
-                id="choice-input",
-                compact=True,
-                read_only=self._completion_owned,
-                soft_wrap=True,
-                tab_behavior="focus",
-                placeholder="Command",
-            )
+            with Horizontal(id="choice-command-row"):
+                yield Static("Command >", classes="prompt-label")
+                yield TextArea(
+                    self._command_text,
+                    id="choice-input",
+                    compact=True,
+                    read_only=self._completion_owned,
+                    soft_wrap=True,
+                    tab_behavior="focus",
+                )
         yield Static(id="hint", classes="hint")
 
     def on_mount(self) -> None:
@@ -1034,8 +1029,7 @@ class ChoiceScreen(_RequestScreen):
             self._render_feedback()
             return
         self._build_candidate_table()
-        self._refresh_preview()
-        self.call_after_refresh(self._render_preview)
+        self._render_boundary_context()
         self._render_warm_status()
 
     def update_request(self, lifecycle: _RequestLifecycle) -> None:
@@ -1080,6 +1074,7 @@ class ChoiceScreen(_RequestScreen):
 
         self.query_one("#choice-table", DataTable).clear(columns=True)
         self._build_candidate_table()
+        self._render_boundary_context()
         self._render_warm_status()
         self.call_after_refresh(self._enable_input)
 
@@ -1156,11 +1151,11 @@ class ChoiceScreen(_RequestScreen):
         self._candidate_focus_rank = plan.focus_rank
         self._candidate_table_ready = True
         self._move_candidate_cursor(table, plan.candidates, plan.focus_rank)
+        table.fit_column()
+        self._render_preview()
         self.query_one("#choice-heading", Static).update(
             f"Step {self.state.choice.aligned_step} · teacher track"
         )
-        self.call_after_refresh(table.fit_column)
-        self.call_after_refresh(self._render_boundary_context)
 
     @staticmethod
     def _move_candidate_cursor(table: DataTable, candidates, focus_rank: int | None) -> None:
@@ -1173,6 +1168,18 @@ class ChoiceScreen(_RequestScreen):
             return
         table.cursor_type = "row"
         table.move_cursor(row=focus_row, column=0, animate=False)
+
+    @on(DataTable.RowHighlighted, "#choice-table")
+    def _on_candidate_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if not self.accepting_input or self.state.review is not None:
+            return
+        try:
+            rank = int(event.row_key.value)
+        except (TypeError, ValueError):
+            return
+        if rank not in self._candidate_by_rank:
+            return
+        self._set_command(str(rank), owned=False, focus=False)
 
     def _refresh_candidate_focus(self) -> None:
         if not self._candidate_table_ready or not self.is_mounted:
@@ -1198,6 +1205,7 @@ class ChoiceScreen(_RequestScreen):
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if event.text_area.id != "choice-input" or self._suppress_changed:
             return
+        input_had_focus = event.text_area.has_focus
         self._command_text = event.text_area.text
         self._local_feedback = None
         self._preview_error = None
@@ -1208,7 +1216,7 @@ class ChoiceScreen(_RequestScreen):
             event.text_area.remove_class("expanded")
         self._follow_tail = True
         self._refresh_preview()
-        if self.accepting_input and self.state.review is None:
+        if input_had_focus and self.accepting_input and self.state.review is None:
             event.text_area.focus()
 
     def on_key(self, event: events.Key) -> None:
@@ -1232,7 +1240,7 @@ class ChoiceScreen(_RequestScreen):
             event.stop()
             event.prevent_default()
 
-    def _set_command(self, value: str, *, owned: bool) -> None:
+    def _set_command(self, value: str, *, owned: bool, focus: bool = True) -> None:
         command_changed = value != self._command_text
         self._suppress_changed = True
         self._command_text = value
@@ -1247,7 +1255,7 @@ class ChoiceScreen(_RequestScreen):
         self._suppress_changed = False
         self._local_feedback = None
         self._refresh_preview()
-        if self.accepting_input and self.state.review is None:
+        if self.accepting_input and self.state.review is None and focus:
             widget.focus()
 
     def _preview_request_key(self, command_text: str, kind: str, value: Any) -> tuple[Any, ...]:
@@ -1306,7 +1314,7 @@ class ChoiceScreen(_RequestScreen):
             default_search_radius=self.state.default_search_radius,
         )
         self._preview_key = key
-        if self.is_mounted:
+        if self.is_mounted and self._candidate_table_ready:
             self._render_preview()
 
     def _render_preview(self) -> None:
@@ -1323,7 +1331,7 @@ class ChoiceScreen(_RequestScreen):
         self._render_feedback()
 
     def _render_boundary_context(self) -> None:
-        if self.state.review is not None or not self.is_mounted:
+        if self.state.review is not None:
             return
         context_tail = _safe_context_text(self.state.choice.context_text_tail)
         context_widget = self.query_one("#context", Static)
@@ -1355,8 +1363,6 @@ class ChoiceScreen(_RequestScreen):
             scroll.scroll_end(animate=False)
 
     def _render_feedback(self) -> None:
-        if not self.is_mounted:
-            return
         target = self.query_one("#choice-feedback", Static)
         feedback = self._local_feedback or self.state.feedback
         rendered = Text()
@@ -1385,8 +1391,19 @@ class ChoiceScreen(_RequestScreen):
                     environment=self.terminal_app.environment,
                 ),
             )
-        target.update(rendered)
-        target.display = bool(rendered.plain)
+        visible = bool(rendered.plain)
+        if target.content == rendered and target.display == visible:
+            return
+        if not visible:
+            if target.display:
+                target.display = False
+            if target.content != rendered:
+                target.update(rendered, layout=False)
+            return
+        if target.content != rendered:
+            target.update(rendered)
+        if not target.display:
+            target.display = True
 
     def _render_warm_status(self) -> None:
         try:
@@ -1409,10 +1426,10 @@ class ChoiceScreen(_RequestScreen):
 
     def _choice_hint(self) -> str:
         if self.state.review is not None:
-            return "Historical review · Enter resumes · f forks · Esc returns"
+            return "Enter resumes · f forks · Esc returns\nPgUp/PgDn scroll · F1 help"
         if self._expanded:
-            return "Alt+Enter newline · Enter commits · Tab inserts tab · Ctrl+K commands"
-        return "Tab cycles · Enter commits · Ctrl+G rank · Ctrl+K commands · ? help"
+            return "Alt+Enter newline · Enter commits\nTab inserts · Ctrl+K menu · F1 help"
+        return "Tab cycles · Enter commits · Ctrl+G rank\nPgUp/PgDn context · Ctrl+K · F1 help"
 
     def warm_started(self, target: tuple[int, int]) -> None:
         self._warm_pending_target = target
@@ -1683,21 +1700,23 @@ class EdgeScreen(_RequestScreen):
         )
         yield table
         with Horizontal(id="command-row"):
-            yield Static("Command ›", classes="prompt-label")
-            yield _HelpAwareTextArea("", id="edge-input", compact=True, soft_wrap=False, tab_behavior="focus")
+            yield Static("Command >", classes="prompt-label")
+            yield TextArea("", id="edge-input", compact=True, soft_wrap=False, tab_behavior="focus")
         yield Static(id="hint", classes="hint")
 
     def on_mount(self) -> None:
         super().on_mount()
         table = self.query_one("#edge-commands", _FluidDataTable)
-        table.add_column("command", width=26, key="command")
+        table.add_column("command", key="command")
         table.add_column("description", key="description")
         for item in edge_help(self.state.mode):
-            table.add_row(item.command, item.description, key=item.command)
+            table.add_row(item.command, item.description, key=item.command, height=None)
         self.call_after_refresh(table.fit_column)
         self.query_one("#edge-input", TextArea).focus()
         self.query_one("#hint", Static).update(
-            "Ctrl+K commands · ? help · Enter submits (blank continues) · Ctrl+C interrupts · Ctrl+D quits"
+            "↑↓ browse · Enter insert · type command\n"
+            "Enter submits · blank continues\n"
+            "Ctrl+C interrupt · Ctrl+D quit · F1 help"
         )
 
     def set_input_enabled(self, enabled: bool) -> None:
@@ -1711,7 +1730,6 @@ class EdgeScreen(_RequestScreen):
         command = _edge_insert_command(str(event.row_key.value))
         widget.text = command
         widget.move_cursor((0, len(command)))
-        widget.focus()
 
     def action_submit_command(self) -> None:
         if self.accepting_input:
@@ -1727,7 +1745,7 @@ class EdgeScreen(_RequestScreen):
         widget.focus()
 
 
-class BeamInputArea(_HelpAwareTextArea):
+class BeamInputArea(TextArea):
     """Preserve branch shortcuts before a blank TextArea consumes a letter."""
 
     async def _on_key(self, event: events.Key) -> None:
@@ -1744,11 +1762,15 @@ class BeamInputArea(_HelpAwareTextArea):
 class BeamScreen(_RequestScreen):
     """Beam survivor table and branch controls."""
 
+    SIDE_BY_SIDE_MIN_WIDTH = 120
+
     BINDINGS: ClassVar[list[Binding]] = [
         *_RequestScreen.BINDINGS,
         Binding("enter", "submit_command", "Submit", show=False, priority=True),
         Binding("up", "selection_up", "Previous branch", show=False, priority=True),
         Binding("down", "selection_down", "Next branch", show=False, priority=True),
+        Binding("pageup", "detail_page_up", "Scroll details up", show=False, priority=True),
+        Binding("pagedown", "detail_page_down", "Scroll details down", show=False, priority=True),
         Binding("backspace", "kill_selected", "Kill selected", show=False, priority=True),
         Binding("p", "protect_selected", "Protect selected", show=False, priority=True),
         Binding("f", "toggle_families", "Toggle families", show=False, priority=True),
@@ -1771,7 +1793,9 @@ class BeamScreen(_RequestScreen):
             title = f"BEAM OPTIONS   ·   {title.removeprefix('BEAM   ')}"
         yield Static(title, id="beam-heading", classes="status-strong")
         yield Static(id="beam-context", classes="muted")
-        with Horizontal(id="beam-body"):
+        initial_size = self.terminal_app.size
+        layout_classes = self._responsive_layout_classes(initial_size.width)
+        with Horizontal(id="beam-body", classes=layout_classes):
             yield _FluidDataTable(
                 id="beam-table", cursor_type="row", stretch_column="continuation"
             )
@@ -1779,9 +1803,18 @@ class BeamScreen(_RequestScreen):
                 yield Static(id="beam-detail")
         yield Static(id="beam-notice")
         with Horizontal(id="command-row"):
-            yield Static("Beam ›", classes="prompt-label")
+            yield Static("Beam >", classes="prompt-label")
             yield BeamInputArea("", id="beam-input", compact=True, soft_wrap=False, tab_behavior="focus")
         yield Static(id="hint", classes="hint")
+
+    def _initial_table_content_width(self) -> int:
+        """Estimate the first table viewport before Textual lays out the screen."""
+        terminal_width = self.terminal_app.size.width
+        stacked = terminal_width < self.SIDE_BY_SIDE_MIN_WIDTH
+        body_width = min(terminal_width, 160 if stacked else 200)
+        table_width = body_width if stacked else body_width * 2 // 3
+        # DataTable's row and column gutters occupy two cells in this layout.
+        return max(1, table_width - 2)
 
     def on_mount(self) -> None:
         super().on_mount()
@@ -1795,9 +1828,10 @@ class BeamScreen(_RequestScreen):
             )
         )
         table = self.query_one("#beam-table", _FluidDataTable)
+        initial_content_width = self._initial_table_content_width()
         for label, width in (
             ("", 2), ("#", 3), ("label", None), ("state", None),
-            ("score", None), ("continuation", None),
+            ("score", None), ("continuation", 1),
         ):
             table.add_column(label, width=width, key=label or "marker")
         self._labels = [row.label for row in self.state.rows]
@@ -1833,18 +1867,36 @@ class BeamScreen(_RequestScreen):
         )
         if self.state.rows:
             table.move_cursor(row=selected_index, column=0, animate=False)
-        self.call_after_refresh(table.fit_column)
+        _stretch_data_table_column(
+            table, "continuation", available_width=initial_content_width
+        )
+        table.fit_column()
         self._render_details()
         self.query_one("#beam-notice", Static).update(self.state.notice)
         self.query_one("#beam-notice", Static).display = bool(self.state.notice)
         hint = (
-            "Enter/→ resume · discard restore episode · Esc return · q quit editor"
+            "Enter/→ resume · Esc/Ctrl+D return\nCtrl+K commands · F1 help"
             if self.state.at_edge else
-            "↑↓ inspect · Backspace kill · "
+            "↑↓ select · ←/→ step · Enter commit\n"
+            "PgUp/Dn details · Esc/Ctrl+D return\n"
+            "Backspace kill · "
             + ("p protect · " if not self.state.stochastic else "")
-            + "f family · → step · ← rewind · Enter commit · Esc return · advance N · kill ID · Ctrl+K commands · ? help"
+            + "f family\nCtrl+K commands · F1 help"
         )
         self.query_one("#hint", Static).update(hint)
+
+    @classmethod
+    def _responsive_layout_classes(cls, width: int) -> str:
+        return "stacked" if width < cls.SIDE_BY_SIDE_MIN_WIDTH else ""
+
+    def on_resize(self, event: events.Resize) -> None:
+        if not self.is_mounted:
+            return
+        body = self.query_one("#beam-body", Horizontal)
+        body.set_class(
+            self._responsive_layout_classes(event.size.width) == "stacked",
+            "stacked",
+        )
 
     def set_input_enabled(self, enabled: bool) -> None:
         self.query_one("#beam-input", TextArea).disabled = not enabled
@@ -1895,6 +1947,16 @@ class BeamScreen(_RequestScreen):
             else:
                 rendered.append("  No generated steps yet.\n")
         self.query_one("#beam-detail", Static).update(rendered)
+
+    def action_detail_page_up(self) -> None:
+        if self.accepting_input:
+            pane = self.query_one("#beam-detail-pane", VerticalScroll)
+            pane.scroll_relative(y=-max(1, pane.size.height - 1), animate=False, immediate=True)
+
+    def action_detail_page_down(self) -> None:
+        if self.accepting_input:
+            pane = self.query_one("#beam-detail-pane", VerticalScroll)
+            pane.scroll_relative(y=max(1, pane.size.height - 1), animate=False, immediate=True)
 
     @on(DataTable.RowHighlighted, "#beam-table")
     def _on_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
@@ -2014,52 +2076,60 @@ class PromptScreen(_RequestScreen):
         self._error = ""
 
     def compose_request(self) -> ComposeResult:
+        group_classes = []
         if self.state.page:
-            yield VerticalScroll(
-                Static(Text(self.state.body), id="page-body"),
-                id="page-scroll",
-            )
-        else:
-            if self.state.body:
-                yield VerticalScroll(Static(Text(self.state.body)), id="prompt-body")
-            if self.state.multiline:
-                yield Static(
-                    "Enter a prompt to start the new episode. Enter adds a line; press Esc, then Enter to submit. Ctrl+D cancels.",
-                    id="prompt-instructions",
-                    classes="muted",
+            group_classes.append("page")
+        if self.terminal_app.size.height < 18:
+            group_classes.append("short")
+        with Vertical(id="prompt-group", classes=" ".join(group_classes)):
+            if self.state.page:
+                yield VerticalScroll(
+                    Static(Text(self.state.body), id="page-body"),
+                    id="page-scroll",
                 )
-            yield Static(self.state.prompt, id="prompt-label", classes="prompt-label")
-            if not self.state.single_key:
-                if self.state.multiline:
-                    yield _HelpAwareTextArea(
-                        "", id="multiline-input", soft_wrap=True,
-                        tab_behavior="indent", placeholder="Write at least one character",
-                    )
-                else:
-                    yield _HelpAwareInput("", id="prompt-input", placeholder="Response")
             else:
-                yield Static("Press a key", id="single-key-hint")
-        yield Static(id="prompt-status", classes="feedback-info")
+                if self.state.body:
+                    yield VerticalScroll(Static(Text(self.state.body)), id="prompt-body")
+                if self.state.multiline:
+                    yield Static(
+                        "Write the new prompt. Enter adds a line; Esc then Enter submits.",
+                        id="prompt-instructions",
+                        classes="muted",
+                    )
+                yield Static(self.state.prompt, id="prompt-label", classes="prompt-label")
+                if not self.state.single_key:
+                    if self.state.multiline:
+                        yield TextArea(
+                            "", id="multiline-input", soft_wrap=True,
+                            tab_behavior="indent", placeholder="Write at least one character",
+                        )
+                    else:
+                        yield Input("", id="prompt-input", placeholder="Response")
+                else:
+                    yield Static("Press a key", id="single-key-hint")
+            yield Static(id="prompt-status", classes="feedback-info")
         yield Static(id="hint", classes="hint")
 
     def on_mount(self) -> None:
         super().on_mount()
         self.query_one("#prompt-status", Static).display = False
         if self.state.page:
-            hint = "PgUp/PgDn scroll 10 lines · Enter/Esc/q returns"
+            hint = "PgUp/PgDn scroll · Enter/Esc/q return · F1 help"
         elif self.state.single_key:
-            hint = "Press a key · Backspace returns DEL · Esc returns ESC · Ctrl+D cancels"
+            hint = "Press a key · Backspace returns DEL\nEsc returns ESC · Ctrl+D cancels · F1 help"
         elif self.state.multiline:
-            hint = "Enter inserts a line · Esc then Enter submits · Ctrl+D cancels"
+            hint = "Enter adds a line · Esc then Enter submits\nCtrl+D cancels · F1 help"
         else:
-            hint = "Enter submits · Ctrl+D cancels · PgUp/PgDn scrolls the document"
+            hint = "Enter submits · Ctrl+D cancels · PgUp/PgDn scroll · F1 help"
         self.query_one("#hint", Static).update(hint)
-        if self.state.single_key:
-            self.terminal_app.use_command_palette = False
         if self.state.multiline:
             self.query_one("#multiline-input", TextArea).focus()
         elif not self.state.page and not self.state.single_key:
             self.query_one("#prompt-input", Input).focus()
+
+    def on_resize(self, event: events.Resize) -> None:
+        if self.is_mounted:
+            self.query_one("#prompt-group").set_class(event.size.height < 18, "short")
 
     def set_input_enabled(self, enabled: bool) -> None:
         if self.state.single_key or self.state.page:
@@ -2081,11 +2151,11 @@ class PromptScreen(_RequestScreen):
             event.prevent_default()
             return
         if self.state.single_key:
-            if event.key in {"escape", "ctrl+d", "ctrl+c", "backspace", "enter", "pageup", "pagedown"}:
+            if event.key in {"escape", "ctrl+d", "ctrl+c", "backspace", "enter", "pageup", "pagedown", "ctrl+k", "f1"}:
                 return
             if event.character is not None:
                 self.submit(event.character)
-            elif event.key != "ctrl+k":
+            else:
                 self.submit(event.key)
             event.stop()
             event.prevent_default()

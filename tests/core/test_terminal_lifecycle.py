@@ -195,9 +195,10 @@ def test_choice_candidate_table_uses_available_terminal_space(size):
             screen = app._active_screen
             table = screen.query_one("#choice-table", DataTable)
             assert table.row_count == 12
-            assert table.size.height >= size[1] // 2
-            assert table.virtual_size.height <= table.scrollable_content_region.height
-            assert table.virtual_size.width >= table.scrollable_content_region.width
+            assert table.size.height <= size[1] * 0.3 + 1
+            assert table.size.height >= 3
+            assert table.virtual_size.height <= size[1] * 0.3 + 3
+            assert table.virtual_size.width == table.scrollable_content_region.width
             assert not screen.query_one("#output-log").display
 
     run_pilot(scenario)
@@ -221,11 +222,12 @@ def test_choice_layout_reflows_between_regular_terminal_sizes():
             table = app._active_screen.query_one("#choice-table", DataTable)
             regular_height = table.size.height
             await pilot.resize_terminal(140, 50)
-            assert table.size.height > regular_height
+            assert regular_height <= 40 * 0.3 + 1
+            assert table.size.height <= 50 * 0.3 + 1
             assert table.virtual_size.width == table.scrollable_content_region.width
             await pilot.resize_terminal(120, 40)
             assert table.size.height == regular_height
-            assert table.virtual_size.height <= table.scrollable_content_region.height
+            assert table.virtual_size.height <= 40 * 0.3 + 3
 
     run_pilot(scenario)
 
@@ -245,7 +247,7 @@ def test_edge_mouse_selection_inserts_command_template():
             await pilot.pause()
             command_input = screen.query_one("#edge-input", TextArea)
             assert command_input.text == "new "
-            assert command_input.has_focus
+            assert table.has_focus
             await pilot.press("enter")
             await pilot.pause()
             assert submitted(lifecycle) == "new "
@@ -254,30 +256,30 @@ def test_edge_mouse_selection_inserts_command_template():
 
 
 @pytest.mark.parametrize("size", [(120, 40), (140, 45)])
-def test_edge_beam_and_prompt_inputs_expand_to_terminal_width(size):
+def test_edge_beam_and_prompt_inputs_keep_a_useful_capped_width(size):
     async def scenario():
         app = PolicyEditorApp()
         async with app.run_test(size=size) as pilot:
             edge = await install_request(app, pilot, edge_state())
             edge_screen = app._active_screen
             edge_input = edge_screen.query_one("#edge-input", TextArea)
-            assert edge_input.size.width >= size[0] - 20
+            assert 8 <= edge_input.size.width <= 120
             edge_table = edge_screen.query_one("#edge-commands", DataTable)
-            assert edge_table.virtual_size.width >= edge_table.scrollable_content_region.width
+            assert edge_table.virtual_size.width == edge_table.scrollable_content_region.width
             await pilot.press("ctrl+d")
             await pilot.pause()
             assert submitted(edge) is None
 
             beam = await install_request(app, pilot, beam_state(), generation=2)
             beam_screen = app._active_screen
-            assert beam_screen.query_one("#beam-input", TextArea).size.width >= size[0] - 20
+            assert 8 <= beam_screen.query_one("#beam-input", TextArea).size.width <= 120
             await pilot.press("ctrl+d")
             await pilot.pause()
             assert submitted(beam) == BeamInput("return", "b1")
 
             await install_request(app, pilot, prompt_state(), generation=3)
             prompt_input = app._active_screen.query_one("#prompt-input", Input)
-            assert prompt_input.size.width >= size[0] - 10
+            assert 8 <= prompt_input.size.width <= 96
 
     run_pilot(scenario)
 
@@ -823,13 +825,14 @@ def test_beam_renders_survivors_and_details_on_a_regular_terminal():
             details = _text(screen.query_one("#beam-detail", Static))
 
             assert body.region.width == 120
-            assert body.region.height >= 30
+            assert 3 <= body.region.height <= 40 * 0.3 + 1
             assert table.region.width >= 75
             assert detail_pane.region.width >= 35
-            assert detail_pane.region.height == body.region.height
+            assert 3 <= detail_pane.region.height <= body.region.height
             assert screen.query_one("#hint", Static).region.bottom == 40
             assert table.row_count == 12
-            assert table.virtual_size.height <= table.scrollable_content_region.height
+            assert table.max_scroll_y > 0
+            assert detail_pane.max_scroll_y > 0
             assert table.virtual_size.width == table.scrollable_content_region.width
             assert _cell_text(table, "branch-12", "label") == "branch-12"
             assert _cell_text(table, "branch-12", "continuation") == long_continuation
@@ -984,8 +987,8 @@ def test_page_prompt_scrolls_by_ten_and_multiline_requires_escape_then_enter():
             )
             screen = app._active_screen
             instructions = _text(screen.query_one("#prompt-instructions", Static))
-            assert "Enter a prompt to start the new episode" in instructions
-            assert "press Esc, then Enter to submit" in instructions
+            assert "Write the new prompt" in instructions
+            assert "Esc then Enter submits" in instructions
             await pilot.press("enter")
             await pilot.pause()
             assert not request.response.done()
@@ -1036,7 +1039,7 @@ def test_help_modal_is_available_over_each_request_screen(state, expected):
         app = PolicyEditorApp()
         async with app.run_test(size=(120, 40)) as pilot:
             request = await install_request(app, pilot, state)
-            await pilot.press("?")
+            await pilot.press("f1")
             await pilot.pause()
             assert "commands" in _text(app.screen.query_one("#help-body", Static)).lower()
             assert not request.response.done()
@@ -1054,7 +1057,7 @@ def test_help_command_list_scrolls_inside_its_modal():
         app = PolicyEditorApp()
         async with app.run_test(size=(120, 40)) as pilot:
             await install_request(app, pilot, choice_state())
-            await pilot.press("?")
+            await pilot.press("f1")
             await pilot.pause()
             scroll = app.screen.query_one("#help-scroll", VerticalScroll)
             assert scroll.max_scroll_y > 0

@@ -159,7 +159,9 @@ def theme_palette(
     )
 
 
-def textual_theme_values(palette: ThemePalette) -> dict[str, str | bool]:
+def textual_theme_values(
+    palette: ThemePalette,
+) -> dict[str, str | bool | dict[str, str]]:
     """Return constructor values for Textual's ``Theme`` registry."""
     return {
         "name": palette.name,
@@ -173,6 +175,15 @@ def textual_theme_values(palette: ThemePalette) -> dict[str, str | bool]:
         "surface": palette.background,
         "panel": palette.background,
         "boost": palette.secondary,
+        "variables": {
+            "scrollbar": palette.muted,
+            "scrollbar-hover": palette.secondary,
+            "scrollbar-active": palette.secondary,
+            "scrollbar-background": palette.background,
+            "scrollbar-background-hover": palette.background,
+            "scrollbar-background-active": palette.background,
+            "scrollbar-corner-color": palette.background,
+        },
     }
 
 
@@ -276,30 +287,41 @@ def theme_stylesheet(
     del palette
     return f"""
     Screen {{ background: $background; color: $foreground; }}
-    #root {{ height: 1fr; }}
-    #context-scroll {{ height: auto; min-height: 2; max-height: 30%; width: 1fr; border-bottom: solid $secondary; }}
+    #root {{ height: 1fr; width: 1fr; align-horizontal: center; }}
+    #context-scroll {{ height: 8; min-height: 2; max-height: 30%; width: 1fr; max-width: 160; border-bottom: solid $secondary; }}
     #context, #review-context {{ height: auto; width: 1fr; padding: 0 1; }}
-    #choice-preview, #choice-feedback, #beam-detail, #beam-notice {{ height: auto; width: 1fr; padding: 0 1; }}
-    #choice-table, #beam-table, #edge-commands {{ width: 1fr; height: 1fr; min-height: 3; }}
-    #beam-body {{ height: 1fr; width: 1fr; min-height: 6; }}
-    #beam-table {{ width: 2fr; height: 1fr; min-width: 0; }}
-    #beam-detail-pane {{ width: 1fr; height: 1fr; min-width: 0; border-left: solid $secondary; padding: 0 1; }}
-    #command-row {{ width: 1fr; height: 1; }}
+    #choice-heading, #review-header, #edge-header {{ width: 1fr; max-width: 160; }}
+    #choice-preview, #choice-feedback, #beam-detail, #beam-notice {{ height: auto; width: 1fr; max-width: 160; padding: 0 1; }}
+    #choice-table, #edge-commands {{ width: 1fr; max-width: 160; height: auto; max-height: 30%; min-height: 3; }}
+    #beam-body {{ height: 1fr; width: 1fr; max-width: 200; min-height: 3; layout: horizontal; }}
+    #beam-body.stacked {{ layout: vertical; max-width: 160; }}
+    #beam-table {{ width: 2fr; height: 1fr; min-width: 48; min-height: 3; }}
+    #beam-detail-pane {{ width: 1fr; height: 1fr; min-width: 36; border-left: solid $secondary; padding: 0 1; }}
+    #beam-body.stacked #beam-table {{ width: 1fr; min-width: 0; }}
+    #beam-body.stacked #beam-detail-pane {{ width: 1fr; min-width: 0; border-left: none; border-top: solid $secondary; }}
+    #choice-command-row {{ width: 1fr; max-width: 160; height: 1; }}
+    #command-row {{ width: 1fr; max-width: 120; height: 1; }}
     .prompt-label {{ width: auto; }}
     #choice-input, #beam-input, #edge-input {{ width: 1fr; min-width: 8; height: 1; min-height: 1; border: none; padding: 0 1; background: $surface; }}
     #choice-input.expanded {{ height: 8; min-height: 3; border: solid $secondary; }}
-    #prompt-input {{ width: 1fr; min-width: 8; height: 1; min-height: 1; }}
-    #multiline-input {{ height: 1fr; min-height: 3; }}
-    #prompt-body {{ height: auto; max-height: 30%; width: 1fr; border: solid $secondary; padding: 0 1; }}
-    #prompt-instructions {{ height: auto; width: 1fr; padding: 0 1; }}
+    #prompt-group {{ height: auto; width: 1fr; max-width: 96; margin-top: 2; padding: 0 1; }}
+    #prompt-group.page {{ height: 1fr; max-width: 160; margin-top: 0; }}
+    #prompt-group.short {{ margin-top: 0; }}
+    #prompt-group.short #prompt-body {{ max-height: 12%; }}
+    #prompt-group.short #multiline-input {{ height: 5; max-height: 25%; }}
+    #prompt-input {{ width: 1fr; min-width: 8; height: 3; min-height: 3; border: solid $secondary; padding: 0 1; }}
+    #prompt-input:focus {{ border: heavy $secondary; }}
+    #multiline-input {{ height: 8; max-height: 30%; min-height: 3; width: 1fr; }}
+    #prompt-body {{ height: auto; max-height: 30%; width: 1fr; max-width: 84; border: solid $secondary; padding: 0 1; }}
+    #prompt-instructions, #prompt-label, #single-key-hint {{ height: auto; width: 1fr; padding: 0 1; }}
     #prompt-status {{ height: auto; width: 1fr; padding: 0 1; }}
-    #page-scroll {{ height: 1fr; }}
+    #page-scroll {{ height: 1fr; width: 1fr; }}
     #page-body {{ height: auto; width: 1fr; }}
-    #hint {{ height: 1; padding: 0 1; dock: bottom; }}
-    #edge-header {{ height: auto; width: 1fr; padding: 0 1; }}
+    #hint {{ height: auto; max-height: 30%; width: 1fr; max-width: 160; padding: 0 1; dock: bottom; text-wrap: wrap; text-align: center; }}
+    #edge-header {{ height: auto; padding: 0 1; }}
     #edge-commands {{ margin: 0 1; }}
-    #beam-context {{ height: auto; min-height: 2; max-height: 20%; width: 1fr; padding: 0 1; }}
-    #output-log {{ height: auto; min-height: 1; max-height: 20%; dock: bottom; border-top: solid $secondary; }}
+    #beam-context {{ height: auto; min-height: 2; max-height: 20%; width: 1fr; max-width: 160; padding: 0 1; }}
+    #output-log {{ height: auto; min-height: 1; max-height: 20%; width: 1fr; max-width: 160; dock: bottom; border-top: solid $secondary; }}
     #help-dialog {{ width: 90%; height: 85%; border: tall $secondary; background: $background; padding: 1 2; }}
     #help-scroll {{ height: 1fr; }}
     #help-body {{ height: auto; }}
