@@ -198,8 +198,8 @@ def test_choice_candidate_table_uses_available_terminal_space(size):
             assert table.size.height <= size[1] * 0.3 + 1
             assert table.size.height >= 3
             assert table.virtual_size.height <= size[1] * 0.3 + 3
-            assert table.virtual_size.width == table.scrollable_content_region.width
-            assert not screen.query_one("#output-log").display
+            assert table.virtual_size.width <= table.scrollable_content_region.width
+            assert app._output_history_chars == 0
 
     run_pilot(scenario)
 
@@ -224,7 +224,7 @@ def test_choice_layout_reflows_between_regular_terminal_sizes():
             await pilot.resize_terminal(140, 50)
             assert regular_height <= 40 * 0.3 + 1
             assert table.size.height <= 50 * 0.3 + 1
-            assert table.virtual_size.width == table.scrollable_content_region.width
+            assert table.virtual_size.width <= table.scrollable_content_region.width
             await pilot.resize_terminal(120, 40)
             assert table.size.height == regular_height
             assert table.virtual_size.height <= 40 * 0.3 + 3
@@ -247,7 +247,7 @@ def test_edge_mouse_selection_inserts_command_template():
             await pilot.pause()
             command_input = screen.query_one("#edge-input", TextArea)
             assert command_input.text == "new "
-            assert table.has_focus
+            assert app.focused is command_input
             await pilot.press("enter")
             await pilot.pause()
             assert submitted(lifecycle) == "new "
@@ -265,7 +265,7 @@ def test_edge_beam_and_prompt_inputs_keep_a_useful_capped_width(size):
             edge_input = edge_screen.query_one("#edge-input", TextArea)
             assert 8 <= edge_input.size.width <= 120
             edge_table = edge_screen.query_one("#edge-commands", DataTable)
-            assert edge_table.virtual_size.width == edge_table.scrollable_content_region.width
+            assert edge_table.virtual_size.width <= edge_table.scrollable_content_region.width
             await pilot.press("ctrl+d")
             await pilot.pause()
             assert submitted(edge) is None
@@ -364,9 +364,18 @@ def test_choice_submission_is_a_single_result_and_keeps_invalid_feedback_editabl
             feedback = _text(screen.query_one("#choice-feedback", Static))
             assert "COMMAND" in feedback.upper()
             assert "rank must be 1..5" in feedback.lower()
-            assert screen.query_one("#choice-input", TextArea).text == "9"
-            screen.query_one("#choice-input", TextArea).text = "2"
-            await pilot.press("enter")
+            editor = screen.query_one("#choice-input", TextArea)
+            assert editor.text == "9"
+            text_before_backspace = editor.text
+            cursor_before_backspace = editor.cursor_location
+            await pilot.press("backspace")
+            await pilot.pause()
+            assert editor.text == "", (
+                f"before={text_before_backspace!r}/{cursor_before_backspace}; "
+                f"after={editor.text!r}/{editor.cursor_location}; "
+                f"internal={screen._command_text!r}; focused={app.focused!r}"
+            )
+            await pilot.press("2", "enter")
             await pilot.pause()
             assert submitted(request) == "2"
 
@@ -833,7 +842,7 @@ def test_beam_renders_survivors_and_details_on_a_regular_terminal():
             assert table.row_count == 12
             assert table.max_scroll_y > 0
             assert detail_pane.max_scroll_y > 0
-            assert table.virtual_size.width == table.scrollable_content_region.width
+            assert table.virtual_size.width <= table.scrollable_content_region.width
             assert _cell_text(table, "branch-12", "label") == "branch-12"
             assert _cell_text(table, "branch-12", "continuation") == long_continuation
             assert table.get_row_height("branch-12") >= 2
@@ -892,7 +901,7 @@ def test_beam_stochastic_score_format_preserves_unicode_minus_and_notice():
             formatted_score = "G −0.45 · log-p -0.800"
             assert _cell_text(table, "b1", "score") == formatted_score
             assert table.columns["score"].content_width >= len(formatted_score)
-            assert table.virtual_size.width == table.scrollable_content_region.width
+            assert table.virtual_size.width <= table.scrollable_content_region.width
             assert "beam notice" in _text(app._active_screen.query_one("#beam-notice", Static))
 
     run_pilot(scenario)

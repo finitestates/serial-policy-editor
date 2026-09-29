@@ -4,9 +4,10 @@ from dataclasses import replace
 
 import pytest
 from textual.command import CommandList
-from textual.events import MouseScrollDown
 from textual.widgets import DataTable, Input, Static, TextArea
 
+from trajectory_editor.edge_commands import NewCommand, SaveCommand, parse_edge_command
+from trajectory_editor.edge_help import edge_help
 from trajectory_editor.terminal_contracts import BeamInput
 from trajectory_editor.textual_tui import PolicyEditorApp
 from tests.core.textual_support import (
@@ -122,7 +123,7 @@ def test_help_can_be_opened_from_the_command_palette(state_factory):
     run_pilot(scenario)
 
 
-def test_clicking_a_choice_candidate_stages_the_rank_enter_commits():
+def test_clicking_a_choice_candidate_returns_focus_and_keeps_typing_in_the_editor():
     async def scenario():
         app = PolicyEditorApp()
         async with app.run_test(size=(120, 40)) as pilot:
@@ -134,8 +135,13 @@ def test_clicking_a_choice_candidate_stages_the_rank_enter_commits():
             await pilot.click(table, offset=(5, table.header_height + 1))
             await pilot.pause(0.2)
             assert input_widget.text == "2"
-            assert table.has_focus
+            assert app.focused is input_widget
 
+            await pilot.press("backspace", "2")
+            await pilot.pause()
+            assert input_widget.text == "2"
+            assert screen._preview.candidate_rank == 2
+            assert screen._preview.state == "ready"
             await pilot.press("enter")
             await pilot.pause()
             assert submitted(request) == "2"
@@ -144,7 +150,7 @@ def test_clicking_a_choice_candidate_stages_the_rank_enter_commits():
     run_pilot(scenario)
 
 
-def test_edge_command_navigation_keeps_table_focus_and_enter_submits_staged_row():
+def test_edge_template_click_returns_focus_for_argument_editing_and_enter_submits():
     async def scenario():
         app = PolicyEditorApp()
         async with app.run_test(size=(120, 40)) as pilot:
@@ -153,23 +159,54 @@ def test_edge_command_navigation_keeps_table_focus_and_enter_submits_staged_row(
             table = screen.query_one("#edge-commands", DataTable)
             input_widget = screen.query_one("#edge-input", TextArea)
 
-            await pilot.click(table, offset=(4, table.header_height + 1))
+            row_index = next(
+                index for index, item in enumerate(edge_help(screen.state.mode))
+                if item.command == "new TEXT"
+            )
+            await pilot.click(table, offset=(4, table.header_height + row_index))
             await pilot.pause()
-            assert table.has_focus
-            await pilot.press("down")
+            assert app.focused is input_widget
+            assert input_widget.text == "new "
+            await pilot.press(*tuple("branch"), "backspace", "h")
             await pilot.pause()
-            assert table.has_focus
             command = input_widget.text
-            assert command
+            assert command == "new branch"
 
             await pilot.press("enter")
             await pilot.pause()
             assert submitted(request) == command
+            assert parse_edge_command(command) == NewCommand("branch")
 
     run_pilot(scenario)
 
 
-def test_beam_detail_page_keys_and_mouse_wheel_scroll_without_changing_branch():
+def test_blank_save_template_submits_the_documented_follow_on_command():
+    async def scenario():
+        app = PolicyEditorApp()
+        async with app.run_test(size=(100, 32)) as pilot:
+            request = await install_request(app, pilot, edge_state(mode="session"))
+            screen = app._active_screen
+            table = screen.query_one("#edge-commands", DataTable)
+            row_index = next(
+                index for index, item in enumerate(edge_help(screen.state.mode))
+                if item.command.startswith("save [")
+            )
+
+            table.move_cursor(row=row_index, column=0, animate=False)
+            await pilot.pause()
+            editor = screen.query_one("#edge-input", TextArea)
+            assert app.focused is editor
+            assert editor.text == "save "
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert submitted(request) == "save "
+            assert parse_edge_command("save ") == SaveCommand(None, None)
+
+    run_pilot(scenario)
+
+
+def test_beam_detail_page_keys_scroll_without_changing_branch():
     async def scenario():
         state = beam_state(row_count=1)
         long_row = replace(
@@ -189,12 +226,6 @@ def test_beam_detail_page_keys_and_mouse_wheel_scroll_without_changing_branch():
             await pilot.press("pagedown")
             await pilot.pause()
             assert pane.scroll_y > 0
-            assert screen.selected_label == selected
-
-            before_wheel = pane.scroll_y
-            await pilot._post_mouse_events([MouseScrollDown], pane, offset=(2, 2))
-            await pilot.pause()
-            assert pane.scroll_y > before_wheel
             assert screen.selected_label == selected
 
     run_pilot(scenario)

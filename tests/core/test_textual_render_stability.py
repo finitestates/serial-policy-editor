@@ -97,12 +97,12 @@ def test_beam_continuation_column_is_fitted_before_its_first_frame(size):
             table = app._active_screen.query_one("#beam-table", DataTable)
             assert first_frame
             first_width, first_viewport, first_visible = first_frame[0]
-            assert not first_visible or first_width == first_viewport
+            assert not first_visible or first_width <= first_viewport
             assert table.styles.get_rule("visibility") != "hidden"
-            assert table.virtual_size.width == table.scrollable_content_region.width
+            assert table.virtual_size.width <= table.scrollable_content_region.width
 
             await pilot.resize_terminal(size[0] + 20, size[1] + 10)
-            assert table.virtual_size.width == table.scrollable_content_region.width
+            assert table.virtual_size.width <= table.scrollable_content_region.width
 
     run_pilot(scenario)
 

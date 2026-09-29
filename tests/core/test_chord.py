@@ -19,7 +19,7 @@ from trajectory_editor.episode_ui import _choice_from_observation
 from trajectory_editor.episode_hash import token_prefix_sha256
 from trajectory_editor.tui_render import action_preview
 from trajectory_editor.terminal_contracts import PromptRequest
-from trajectory_editor.textual_tui import PolicyEditorApp
+from trajectory_editor.textual_tui import OutputScreen, PolicyEditorApp
 from tests.core.textual_support import install_request, run_pilot
 from trajectory_editor.teacher_plan import load_teacher_tape_jsonl
 
@@ -300,6 +300,15 @@ def test_live_chord_prompt_uses_only_current_preview_body():
             assert "a (1) | b (2)" in screen.query_one("#prompt-body Static").content.plain
             app.write_output("Model loaded.")
             assert "Model loaded" not in screen.query_one("#prompt-body Static").content.plain
+            assert app.stats["rich_log_writes"] == 0
+            await pilot.press("ctrl+l")
+            await pilot.pause()
+            assert isinstance(app.screen, OutputScreen)
+            assert app.stats["rich_log_writes"] == 1
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app.screen is screen
+            assert app.focused is screen.query_one("#prompt-input")
             await pilot.press("a", "enter")
             await pilot.pause()
             await install_request(app, pilot, PromptRequest("Next > "), generation=2)

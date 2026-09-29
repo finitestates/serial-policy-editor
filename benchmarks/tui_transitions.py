@@ -118,7 +118,7 @@ async def _measure(args: argparse.Namespace, modules) -> dict[str, object]:
                 target_token_id=max(1, row_count // 2),
                 feedback=ChoiceFeedback("search", "SEARCH · rank neighborhood"),
             ),
-            ("1", "enter"),
+            (str(max(0, row_count // 2 - 3) + 1), "enter"),
         ),
         (
             "history review",
@@ -162,6 +162,7 @@ async def _measure(args: argparse.Namespace, modules) -> dict[str, object]:
     )
 
     app = PolicyEditorApp()
+    accumulated_choice_context = context
     ready_times: list[float] = []
     original_screen_ready = app._screen_ready
 
@@ -177,7 +178,21 @@ async def _measure(args: argparse.Namespace, modules) -> dict[str, object]:
 
     async with app.run_test(size=(args.columns, args.rows)) as pilot:
         for iteration in range(total_requests):
+            app.write_output(
+                f"benchmark output chunk {iteration:04d}: " + "x" * 96 + "\n"
+            )
             label, state, keys = variants[iteration % len(variants)]
+            if isinstance(state, ChoiceViewState) and state.review is None:
+                accumulated_choice_context += (
+                    f"\nTurn {iteration + 1}: benchmark continuation."
+                )
+                state = replace(
+                    state,
+                    choice=replace(
+                        state.choice,
+                        context_text_tail=accumulated_choice_context,
+                    ),
+                )
             ready_count = len(ready_times)
             lifecycle = RequestLifecycle(
                 generation=iteration + 1,
@@ -185,7 +200,9 @@ async def _measure(args: argparse.Namespace, modules) -> dict[str, object]:
                 response=Future(),
                 owner_queue=None,
             )
-            await app.show_request(lifecycle)
+            mount = app.show_request(lifecycle)
+            if mount is not None:
+                await mount
             await pilot.pause()
             while len(ready_times) == ready_count:
                 await pilot.pause(.01)
@@ -210,8 +227,31 @@ async def _measure(args: argparse.Namespace, modules) -> dict[str, object]:
         "samples": len(values),
         "transitions": {label: _summary(samples) for label, samples in measurements.items()},
         "all_transitions": _summary(values),
-        "renders": len(ready_times),
-        "scope": "Prepared Textual screens; excludes inference, database work, and terminal painting.",
+        "input_ready_events": len(ready_times),
+        "measurements": {
+            "screen_layout_refreshes": app.stats["screen_layout_refreshes"],
+            "table_fit_attempts": app.stats["table_fit_attempts"],
+            "table_column_resizes": app.stats["table_column_resizes"],
+            "table_layout_refresh_requests": app.stats[
+                "table_layout_refresh_requests"
+            ],
+            "beam_detail_renders": app.stats["beam_detail_renders"],
+            "rich_log_writes": app.stats["rich_log_writes"],
+            "output_history_high_water_chars": app.stats[
+                "output_history_high_water_chars"
+            ],
+            "context_append_characters": app.stats["context_append_characters"],
+            "context_high_water_characters": app.stats[
+                "context_high_water_characters"
+            ],
+            "driver_write_calls": None,
+            "driver_write_characters": None,
+        },
+        "scope": (
+            "Prepared Textual screens in a headless Pilot. Transition latency ends "
+            "when the next screen becomes input-ready. Driver writes and terminal "
+            "painting require the separate POSIX PTY run."
+        ),
     }
 
 

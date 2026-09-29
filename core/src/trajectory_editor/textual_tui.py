@@ -9,6 +9,7 @@ import signal
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
@@ -96,6 +97,7 @@ if os.name == "posix":
         ) -> None:
             Driver.__init__(self, app, debug=debug, mouse=mouse, size=size)
             self._file = getattr(app, "terminal_output", None) or sys.__stderr__
+            self._metrics_app = app
             self.fileno = sys.__stdin__.fileno()
             self.input_tty = sys.__stdin__.isatty()
             self.attrs_before: list[Any] | None = None
@@ -105,15 +107,21 @@ if os.name == "posix":
             self._must_signal_resume = False
             self._in_band_window_resize = False
             self._mouse_pixels = False
+            self._count_driver_writes = False
+
+        def write(self, data: str) -> None:
+            """Count driver writes after terminal startup is complete."""
+            if self._count_driver_writes:
+                self._metrics_app.stats["driver_write_calls"] += 1
+                self._metrics_app.stats["driver_write_characters"] += len(data)
+            super().write(data)
 
         def _get_terminal_size(self) -> tuple[int, int]:
             """Read the TTY geometry, ignoring potentially stale LINES/COLUMNS."""
-            if self._size is not None:
-                return self._size
             try:
                 size = os.get_terminal_size(self.fileno)
             except OSError:
-                return super()._get_terminal_size()
+                return self._size or super()._get_terminal_size()
             return size.columns, size.lines
 
         def _send_terminal_resize(self) -> None:
@@ -183,6 +191,11 @@ if os.name == "posix":
                 asyncio.run_coroutine_threadsafe(
                     self._app._post_message(self.SignalResume()), loop=loop
                 )
+            self._count_driver_writes = True
+
+        def stop_application_mode(self) -> None:
+            self._count_driver_writes = False
+            super().stop_application_mode()
 
         def disable_input(self) -> None:
             """Stop the input reader without changing process signal handlers."""
@@ -208,15 +221,16 @@ class _TerminalResponse:
 
 
 def _stretch_data_table_column(
-    table: DataTable, key: str, *, available_width: int | None = None
+    table: DataTable, key: str
 ) -> None:
-    """Give a table's descriptive column the width left by its fixed columns."""
+    """Fit one flexible DataTable column using the pinned Textual 8.2.8 internals.
+
+    DataTable 8.2.8 has no public API for a column that consumes the remaining
+    viewport width. Keep this version-sensitive operation in this adapter and
+    pin the supported Textual version in core/pyproject.toml.
+    """
     column = table.columns[key]
-    available = (
-        table.scrollable_content_region.width
-        if available_width is None
-        else available_width
-    )
+    available = table.scrollable_content_region.width
     fixed = sum(
         item.get_render_width(table)
         for item in table.columns.values()
@@ -238,19 +252,29 @@ def _stretch_data_table_column(
     table._new_rows.update(table.rows)
     table._require_update_dimensions = True
     table.refresh(layout=True)
+    app = table.app
+    if isinstance(app, PolicyEditorApp):
+        app.stats["table_layout_refresh_requests"] += 1
 
 
 class _FluidDataTable(DataTable):
-    """A DataTable that fills its final descriptive column after every resize."""
+    """DataTable adapter for one flexible column on Textual 8.2.8."""
 
     def __init__(self, *args: Any, stretch_column: str, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._stretch_column = stretch_column
-        self._fit_scheduled = False
+        self._fit_after_resize_scheduled = False
 
     def on_resize(self, _event: events.Resize) -> None:
-        # A resize event already has the final viewport geometry. Fit before
-        # Textual paints that geometry so an initial scrollbar cannot flash.
+        # Resize handlers run before all child regions settle. Coalesce resize
+        # bursts and fit once against the final viewport reported after refresh.
+        if self._fit_after_resize_scheduled:
+            return
+        self._fit_after_resize_scheduled = True
+        self.call_after_refresh(self._fit_after_resize)
+
+    def _fit_after_resize(self) -> None:
+        self._fit_after_resize_scheduled = False
         self.fit_column()
 
     def fit_column(self) -> None:
@@ -261,18 +285,10 @@ class _FluidDataTable(DataTable):
             column = self.columns[self._stretch_column]
             previous_width = column.width
             _stretch_data_table_column(self, self._stretch_column)
-            if column.width != previous_width:
-                self._schedule_fit_after_layout()
-
-    def _schedule_fit_after_layout(self) -> None:
-        if self._fit_scheduled or not self.is_mounted:
-            return
-        self._fit_scheduled = True
-        self.call_after_refresh(self._fit_after_layout)
-
-    def _fit_after_layout(self) -> None:
-        self._fit_scheduled = False
-        self.fit_column()
+            if isinstance(self.app, PolicyEditorApp):
+                self.app.stats["table_fit_attempts"] += 1
+                if column.width != previous_width:
+                    self.app.stats["table_column_resizes"] += 1
 
 
 @dataclass(frozen=True)
@@ -439,6 +455,8 @@ def _palette_entries(state: Any) -> tuple[_PaletteEntry, ...]:
 
 def _help_document(state: Any) -> Text:
     document = Text(HELP_TEXT)
+    document.append("\nTerminal output\n", style="bold underline")
+    document.append("  Ctrl+L                   Open captured output\n")
     if isinstance(state, EdgeViewState):
         heading = f"\n{state.mode.title()} edge commands\n"
         document.append(heading, style="bold underline")
@@ -500,6 +518,7 @@ class PolicyEditorApp(App[None]):
     COMMAND_PALETTE_BINDING = "ctrl+k"
     COMMANDS = App.COMMANDS | {_CommandProvider}
     CSS = ""
+    OUTPUT_HISTORY_LIMIT = 16_000
 
     def __init__(
         self,
@@ -522,17 +541,32 @@ class PolicyEditorApp(App[None]):
         self._active_request: _RequestLifecycle | None = None
         self._active_screen: _RequestScreen | None = None
         self._input_event_cutoff: float | None = None
-        self._output_chunks: list[str] = []
+        self._output_chunks: deque[str] = deque()
+        self._output_history_chars = 0
         self._warm_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="spe-search-warm")
         self._preview_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="spe-preview")
-        self.stats = {"warm_dispatches": 0, "promotions": 0}
+        self.stats = {
+            "warm_dispatches": 0,
+            "promotions": 0,
+            "stale_input_events": 0,
+            "stale_key_events": 0,
+            "stale_mouse_events": 0,
+            "driver_write_calls": 0,
+            "driver_write_characters": 0,
+            "screen_layout_refreshes": 0,
+            "table_fit_attempts": 0,
+            "table_column_resizes": 0,
+            "table_layout_refresh_requests": 0,
+            "rich_log_writes": 0,
+            "output_history_high_water_chars": 0,
+            "context_append_characters": 0,
+            "context_high_water_characters": 0,
+            "beam_detail_renders": 0,
+        }
 
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
             yield Static("Waiting for an editor request…", id="idle-status")
-            output_log = RichLog(id="output-log", wrap=True, markup=False, highlight=False)
-            output_log.display = False
-            yield output_log
 
     def on_mount(self) -> None:
         if self._ready_future is not None and not self._ready_future.done():
@@ -540,7 +574,15 @@ class PolicyEditorApp(App[None]):
 
     def _screen_ready(self, screen: _RequestScreen) -> None:
         if screen is self._active_screen:
+            if not screen._layout_metrics_subscribed:
+                screen.screen_layout_refresh_signal.subscribe(
+                    self, self._note_screen_layout_refresh,
+                )
+                screen._layout_metrics_subscribed = True
             self._set_command_palette_for(screen)
+
+    def _note_screen_layout_refresh(self, _screen: Screen[Any]) -> None:
+        self.stats["screen_layout_refreshes"] += 1
 
     def _set_command_palette_for(self, screen: _RequestScreen) -> None:
         state = getattr(screen, "state", None)
@@ -552,19 +594,23 @@ class PolicyEditorApp(App[None]):
         self.close_executors(wait=False)
 
     async def on_event(self, event: events.Event) -> None:
-        if isinstance(event, events.Key):
+        if isinstance(event, (events.InputEvent, events.Paste)):
             if (
                 self._input_event_cutoff is not None
                 and event.time <= self._input_event_cutoff
             ):
+                self.stats["stale_input_events"] += 1
+                if isinstance(event, events.Key):
+                    self.stats["stale_key_events"] += 1
+                elif isinstance(event, events.MouseEvent):
+                    self.stats["stale_mouse_events"] += 1
                 event.stop()
                 event.prevent_default()
                 return
             screen = self._active_screen
             if (
                 screen is not None
-                and screen._input_ready_at is not None
-                and event.time <= screen._input_ready_at
+                and not screen.accepting_input
             ):
                 event.stop()
                 event.prevent_default()
@@ -789,16 +835,31 @@ class PolicyEditorApp(App[None]):
             screen.owner_preview_ready(key, result, error)
 
     def write_output(self, text: str) -> None:
-        self._output_chunks.append(text)
-        screen = self._active_screen
-        if screen is not None and screen.is_mounted:
-            screen.write_output(text)
+        safe_text = _safe_context_text(text)
+        if not safe_text:
             return
-        try:
-            self.query_one("#output-log", RichLog).write(Text(_safe_context_text(text)))
-        except NoMatches:
-            # Output before the first request remains buffered for its screen.
-            return
+        if len(safe_text) > self.OUTPUT_HISTORY_LIMIT:
+            safe_text = safe_text[-self.OUTPUT_HISTORY_LIMIT:]
+        self._output_chunks.append(safe_text)
+        self._output_history_chars += len(safe_text)
+        while self._output_history_chars > self.OUTPUT_HISTORY_LIMIT:
+            oldest = self._output_chunks.popleft()
+            excess = self._output_history_chars - self.OUTPUT_HISTORY_LIMIT
+            if len(oldest) > excess:
+                oldest = oldest[excess:]
+                self._output_chunks.appendleft(oldest)
+                self._output_history_chars -= excess
+            else:
+                self._output_history_chars -= len(oldest)
+        self.stats["output_history_high_water_chars"] = max(
+            self.stats["output_history_high_water_chars"], self._output_history_chars,
+        )
+        if isinstance(self.screen, OutputScreen):
+            self.screen.append_output(safe_text)
+
+    def start_output(self) -> None:
+        if self._active_screen is not None and self._active_screen.accepting_input:
+            self.push_screen(OutputScreen(self))
 
     def start_help(self, screen: _RequestScreen) -> None:
         self.push_screen(HelpScreen(_help_document(screen.lifecycle.state)))
@@ -813,6 +874,7 @@ class _RequestScreen(Screen[_TerminalResponse]):
 
     BINDINGS: ClassVar[list[Binding]] = [
         Binding("f1", "show_help", "Help", show=False, priority=True),
+        Binding("ctrl+l", "show_output", "Captured output", show=False, priority=True),
         Binding("ctrl+c", "interrupt", "Interrupt", show=False, priority=True),
     ]
 
@@ -820,8 +882,8 @@ class _RequestScreen(Screen[_TerminalResponse]):
         super().__init__()
         self.terminal_app = terminal_app
         self.lifecycle = lifecycle
+        self._layout_metrics_subscribed = False
         self.accepting_input = False
-        self._input_ready_at: float | None = None
         self._submitted = False
         self._owner_preview_values: dict[tuple[Any, ...], Any] = {}
         self._owner_preview_errors: dict[tuple[Any, ...], BaseException] = {}
@@ -830,28 +892,29 @@ class _RequestScreen(Screen[_TerminalResponse]):
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
             yield from self.compose_request()
-            output_log = RichLog(id="output-log", wrap=True, markup=False, highlight=False)
-            output_log.display = bool(self.terminal_app._output_chunks)
-            yield output_log
 
     def compose_request(self) -> ComposeResult:
         raise NotImplementedError
 
     def on_mount(self) -> None:
-        for chunk in self.terminal_app._output_chunks:
-            self.write_output(chunk)
         self.call_after_refresh(self._enable_input)
 
     def _enable_input(self) -> None:
         if self._submitted:
             return
-        self._input_ready_at = time.monotonic()
         self.accepting_input = True
         self.set_input_enabled(True)
         self.terminal_app._screen_ready(self)
 
     def set_input_enabled(self, enabled: bool) -> None:
         del enabled
+
+    async def on_event(self, event: events.Event) -> None:
+        if isinstance(event, (events.InputEvent, events.Paste)) and not self.accepting_input:
+            event.stop()
+            event.prevent_default()
+            return
+        await super().on_event(event)
 
     def on_key(self, event: events.Key) -> None:
         if not self.accepting_input:
@@ -861,6 +924,10 @@ class _RequestScreen(Screen[_TerminalResponse]):
     def action_show_help(self) -> None:
         if self.accepting_input:
             self.terminal_app.start_help(self)
+
+    def action_show_output(self) -> None:
+        if self.accepting_input:
+            self.terminal_app.start_output()
 
     def action_interrupt(self) -> None:
         self.submit_exception(KeyboardInterrupt())
@@ -888,15 +955,6 @@ class _RequestScreen(Screen[_TerminalResponse]):
             self.lifecycle,
             _TerminalResponse(exception=error),
         )
-
-    def write_output(self, text: str) -> None:
-        try:
-            output_log = self.query_one("#output-log", RichLog)
-            output_log.display = True
-            output_log.write(Text(_safe_context_text(text)))
-        except NoMatches:
-            # The screen may be between dismissal and unmount during output capture.
-            return
 
     def insert_command(self, command: str) -> None:
         if self.accepting_input:
@@ -959,6 +1017,7 @@ class ChoiceScreen(_RequestScreen):
         self._candidate_table_columns: CandidateColumns | None = None
         self._candidate_column_keys: tuple[str, ...] = ()
         self._candidate_focus_rank: int | None = None
+        self._programmatic_candidate_highlights: set[str] = set()
         self._candidate_table_ready = False
         self._rendered_context_tail: str | None = None
         self._rendered_context: Text | None = None
@@ -1040,7 +1099,6 @@ class ChoiceScreen(_RequestScreen):
         self.state = lifecycle.state
         self.generation = lifecycle.generation
         self.accepting_input = False
-        self._input_ready_at = None
         self._submitted = False
         self._owner_preview_values.clear()
         self._owner_preview_errors.clear()
@@ -1057,6 +1115,7 @@ class ChoiceScreen(_RequestScreen):
         self._candidate_table_columns = None
         self._candidate_column_keys = ()
         self._candidate_focus_rank = None
+        self._programmatic_candidate_highlights.clear()
         self._candidate_table_ready = False
         self._command_text = self.state.initial_command if self._completion_owned else ""
         self._navigation = self._navigation_commands()
@@ -1083,6 +1142,8 @@ class ChoiceScreen(_RequestScreen):
         widget.disabled = not enabled
         if self.state.review is None:
             widget.read_only = not enabled or self._completion_owned
+            if enabled:
+                widget.focus()
         else:
             widget.read_only = True
 
@@ -1157,8 +1218,9 @@ class ChoiceScreen(_RequestScreen):
             f"Step {self.state.choice.aligned_step} · teacher track"
         )
 
-    @staticmethod
-    def _move_candidate_cursor(table: DataTable, candidates, focus_rank: int | None) -> None:
+    def _move_candidate_cursor(
+        self, table: DataTable, candidates, focus_rank: int | None
+    ) -> None:
         focus_row = next(
             (index for index, candidate in enumerate(candidates) if candidate.rank == focus_rank),
             None,
@@ -1167,6 +1229,13 @@ class ChoiceScreen(_RequestScreen):
             table.cursor_type = "none"
             return
         table.cursor_type = "row"
+        if (
+            self.accepting_input
+            and table.cursor_coordinate.row != focus_row
+        ):
+            self._programmatic_candidate_highlights.add(
+                str(candidates[focus_row].rank)
+            )
         table.move_cursor(row=focus_row, column=0, animate=False)
 
     @on(DataTable.RowHighlighted, "#choice-table")
@@ -1177,9 +1246,24 @@ class ChoiceScreen(_RequestScreen):
             rank = int(event.row_key.value)
         except (TypeError, ValueError):
             return
+        table = self.query_one("#choice-table", DataTable)
+        if not table.is_valid_row_index(table.cursor_coordinate.row):
+            return
+        cursor_row_key = table.coordinate_to_cell_key(
+            table.cursor_coordinate
+        ).row_key.value
+        if str(cursor_row_key) != str(rank):
+            return
+        if str(rank) in self._programmatic_candidate_highlights:
+            self._programmatic_candidate_highlights.discard(str(rank))
+            return
         if rank not in self._candidate_by_rank:
             return
-        self._set_command(str(rank), owned=False, focus=False)
+        if self._preview is not None and self._preview.candidate_rank == rank:
+            return
+        # A mouse selection stages the command in the editor and returns the
+        # caret there so the next typed character has an obvious destination.
+        self._set_command(str(rank), owned=False, focus=True)
 
     def _refresh_candidate_focus(self) -> None:
         if not self._candidate_table_ready or not self.is_mounted:
@@ -1342,10 +1426,9 @@ class ChoiceScreen(_RequestScreen):
         ):
             addition = context_tail[len(self._rendered_context_tail):]
             if addition:
-                context = self._rendered_context.copy()
-                context.append(addition)
-                self._rendered_context = context
-                context_widget.update(context)
+                self._rendered_context.append(addition)
+                self.terminal_app.stats["context_append_characters"] += len(addition)
+                context_widget.update(self._rendered_context)
         else:
             context = Text(
                 "DECISION BOUNDARY\n",
@@ -1358,6 +1441,10 @@ class ChoiceScreen(_RequestScreen):
             self._rendered_context = context
             context_widget.update(context)
         self._rendered_context_tail = context_tail
+        self.terminal_app.stats["context_high_water_characters"] = max(
+            self.terminal_app.stats["context_high_water_characters"],
+            len(context_tail),
+        )
         scroll = self.query_one("#context-scroll", VerticalScroll)
         if self._follow_tail:
             scroll.scroll_end(animate=False)
@@ -1426,10 +1513,10 @@ class ChoiceScreen(_RequestScreen):
 
     def _choice_hint(self) -> str:
         if self.state.review is not None:
-            return "Enter resumes · f forks · Esc returns\nPgUp/PgDn scroll · F1 help"
+            return "Enter resumes · f forks · Esc returns\nPgUp/PgDn scroll · Ctrl+L output · F1 help"
         if self._expanded:
-            return "Alt+Enter newline · Enter commits\nTab inserts · Ctrl+K menu · F1 help"
-        return "Tab cycles · Enter commits · Ctrl+G rank\nPgUp/PgDn context · Ctrl+K · F1 help"
+            return "Alt+Enter newline · Enter commits\nTab inserts · Ctrl+K menu · Ctrl+L output · F1 help"
+        return "Tab cycles · Enter commits · Ctrl+G rank\nPgUp/PgDn context · Ctrl+K menu · Ctrl+L output · F1 help"
 
     def warm_started(self, target: tuple[int, int]) -> None:
         self._warm_pending_target = target
@@ -1714,9 +1801,9 @@ class EdgeScreen(_RequestScreen):
         self.call_after_refresh(table.fit_column)
         self.query_one("#edge-input", TextArea).focus()
         self.query_one("#hint", Static).update(
-            "↑↓ browse · Enter insert · type command\n"
-            "Enter submits · blank continues\n"
-            "Ctrl+C interrupt · Ctrl+D quit · F1 help"
+            "Click a template · type to edit · Enter submits\n"
+            "Blank continues · Ctrl+C interrupt · Ctrl+D quit\n"
+            "Ctrl+L output · F1 help"
         )
 
     def set_input_enabled(self, enabled: bool) -> None:
@@ -1730,6 +1817,7 @@ class EdgeScreen(_RequestScreen):
         command = _edge_insert_command(str(event.row_key.value))
         widget.text = command
         widget.move_cursor((0, len(command)))
+        widget.focus()
 
     def action_submit_command(self) -> None:
         if self.accepting_input:
@@ -1763,6 +1851,9 @@ class BeamScreen(_RequestScreen):
     """Beam survivor table and branch controls."""
 
     SIDE_BY_SIDE_MIN_WIDTH = 120
+    HORIZONTAL_BREAKPOINTS: ClassVar[list[tuple[int, str]]] = [
+        (0, "-stacked"), (SIDE_BY_SIDE_MIN_WIDTH, "-side-by-side"),
+    ]
 
     BINDINGS: ClassVar[list[Binding]] = [
         *_RequestScreen.BINDINGS,
@@ -1793,9 +1884,7 @@ class BeamScreen(_RequestScreen):
             title = f"BEAM OPTIONS   ·   {title.removeprefix('BEAM   ')}"
         yield Static(title, id="beam-heading", classes="status-strong")
         yield Static(id="beam-context", classes="muted")
-        initial_size = self.terminal_app.size
-        layout_classes = self._responsive_layout_classes(initial_size.width)
-        with Horizontal(id="beam-body", classes=layout_classes):
+        with Horizontal(id="beam-body"):
             yield _FluidDataTable(
                 id="beam-table", cursor_type="row", stretch_column="continuation"
             )
@@ -1806,15 +1895,6 @@ class BeamScreen(_RequestScreen):
             yield Static("Beam >", classes="prompt-label")
             yield BeamInputArea("", id="beam-input", compact=True, soft_wrap=False, tab_behavior="focus")
         yield Static(id="hint", classes="hint")
-
-    def _initial_table_content_width(self) -> int:
-        """Estimate the first table viewport before Textual lays out the screen."""
-        terminal_width = self.terminal_app.size.width
-        stacked = terminal_width < self.SIDE_BY_SIDE_MIN_WIDTH
-        body_width = min(terminal_width, 160 if stacked else 200)
-        table_width = body_width if stacked else body_width * 2 // 3
-        # DataTable's row and column gutters occupy two cells in this layout.
-        return max(1, table_width - 2)
 
     def on_mount(self) -> None:
         super().on_mount()
@@ -1828,7 +1908,6 @@ class BeamScreen(_RequestScreen):
             )
         )
         table = self.query_one("#beam-table", _FluidDataTable)
-        initial_content_width = self._initial_table_content_width()
         for label, width in (
             ("", 2), ("#", 3), ("label", None), ("state", None),
             ("score", None), ("continuation", 1),
@@ -1867,36 +1946,20 @@ class BeamScreen(_RequestScreen):
         )
         if self.state.rows:
             table.move_cursor(row=selected_index, column=0, animate=False)
-        _stretch_data_table_column(
-            table, "continuation", available_width=initial_content_width
-        )
         table.fit_column()
         self._render_details()
         self.query_one("#beam-notice", Static).update(self.state.notice)
         self.query_one("#beam-notice", Static).display = bool(self.state.notice)
         hint = (
-            "Enter/→ resume · Esc/Ctrl+D return\nCtrl+K commands · F1 help"
+            "Enter/→ resume · Esc/Ctrl+D return\nCtrl+K commands · Ctrl+L output · F1 help"
             if self.state.at_edge else
             "↑↓ select · ←/→ step · Enter commit\n"
             "PgUp/Dn details · Esc/Ctrl+D return\n"
             "Backspace kill · "
             + ("p protect · " if not self.state.stochastic else "")
-            + "f family\nCtrl+K commands · F1 help"
+            + "f family\nCtrl+K commands · Ctrl+L output · F1 help"
         )
         self.query_one("#hint", Static).update(hint)
-
-    @classmethod
-    def _responsive_layout_classes(cls, width: int) -> str:
-        return "stacked" if width < cls.SIDE_BY_SIDE_MIN_WIDTH else ""
-
-    def on_resize(self, event: events.Resize) -> None:
-        if not self.is_mounted:
-            return
-        body = self.query_one("#beam-body", Horizontal)
-        body.set_class(
-            self._responsive_layout_classes(event.size.width) == "stacked",
-            "stacked",
-        )
 
     def set_input_enabled(self, enabled: bool) -> None:
         self.query_one("#beam-input", TextArea).disabled = not enabled
@@ -1908,6 +1971,7 @@ class BeamScreen(_RequestScreen):
             self.action_toggle_families()
 
     def _render_details(self) -> None:
+        self.terminal_app.stats["beam_detail_renders"] += 1
         row = next((item for item in self.state.rows if item.label == self.selected_label), None)
         label = self.selected_label or "—"
         protected = " · PROTECTED" if row is not None and row.protected else ""
@@ -1961,9 +2025,11 @@ class BeamScreen(_RequestScreen):
     @on(DataTable.RowHighlighted, "#beam-table")
     def _on_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         label = str(event.row_key.value)
-        if label in self._labels:
+        if label in self._labels and label != self.selected_label:
             self.selected_label = label
             self._render_details()
+        if label in self._labels:
+            self.query_one("#beam-input", TextArea).focus()
 
     def action_selection_up(self) -> None:
         self._move_selection(-1)
@@ -1979,9 +2045,11 @@ class BeamScreen(_RequestScreen):
         except ValueError:
             current = 0 if direction >= 0 else len(self._labels) - 1
         selected = max(0, min(len(self._labels) - 1, current + direction))
-        self.selected_label = self._labels[selected]
+        selected_label = self._labels[selected]
+        if selected_label != self.selected_label:
+            self.selected_label = selected_label
+            self._render_details()
         self.query_one("#beam-table", DataTable).move_cursor(row=selected, column=0, animate=False)
-        self._render_details()
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if event.text_area.id != "beam-input":
@@ -2067,6 +2135,9 @@ class PromptScreen(_RequestScreen):
         Binding("pageup", "page_up", "Scroll up", show=False, priority=True),
         Binding("pagedown", "page_down", "Scroll down", show=False, priority=True),
     ]
+    VERTICAL_BREAKPOINTS: ClassVar[list[tuple[int, str]]] = [
+        (0, "-short"), (18, "-regular"),
+    ]
 
     def __init__(self, terminal_app: PolicyEditorApp, lifecycle: _RequestLifecycle) -> None:
         super().__init__(terminal_app, lifecycle)
@@ -2076,12 +2147,8 @@ class PromptScreen(_RequestScreen):
         self._error = ""
 
     def compose_request(self) -> ComposeResult:
-        group_classes = []
-        if self.state.page:
-            group_classes.append("page")
-        if self.terminal_app.size.height < 18:
-            group_classes.append("short")
-        with Vertical(id="prompt-group", classes=" ".join(group_classes)):
+        group_classes = "page" if self.state.page else ""
+        with Vertical(id="prompt-group", classes=group_classes):
             if self.state.page:
                 yield VerticalScroll(
                     Static(Text(self.state.body), id="page-body"),
@@ -2114,22 +2181,18 @@ class PromptScreen(_RequestScreen):
         super().on_mount()
         self.query_one("#prompt-status", Static).display = False
         if self.state.page:
-            hint = "PgUp/PgDn scroll · Enter/Esc/q return · F1 help"
+            hint = "PgUp/PgDn scroll · Enter/Esc/q return · Ctrl+L output · F1 help"
         elif self.state.single_key:
-            hint = "Press a key · Backspace returns DEL\nEsc returns ESC · Ctrl+D cancels · F1 help"
+            hint = "Press a key · Backspace returns DEL\nEsc returns ESC · Ctrl+D cancels · Ctrl+L output · F1 help"
         elif self.state.multiline:
-            hint = "Enter adds a line · Esc then Enter submits\nCtrl+D cancels · F1 help"
+            hint = "Enter adds a line · Esc then Enter submits\nCtrl+D cancels · Ctrl+L output · F1 help"
         else:
-            hint = "Enter submits · Ctrl+D cancels · PgUp/PgDn scroll · F1 help"
+            hint = "Enter submits · Ctrl+D cancels · PgUp/PgDn scroll · Ctrl+L output · F1 help"
         self.query_one("#hint", Static).update(hint)
         if self.state.multiline:
             self.query_one("#multiline-input", TextArea).focus()
         elif not self.state.page and not self.state.single_key:
             self.query_one("#prompt-input", Input).focus()
-
-    def on_resize(self, event: events.Resize) -> None:
-        if self.is_mounted:
-            self.query_one("#prompt-group").set_class(event.size.height < 18, "short")
 
     def set_input_enabled(self, enabled: bool) -> None:
         if self.state.single_key or self.state.page:
@@ -2276,6 +2339,50 @@ class HelpScreen(ModalScreen[None]):
         )
 
     def action_close_help(self) -> None:
+        self.dismiss(None)
+
+
+class OutputScreen(ModalScreen[None]):
+    """Bounded captured output, opened deliberately without reflowing requests."""
+
+    BINDINGS: ClassVar[list[Binding]] = [
+        Binding("pageup", "scroll_up", "Scroll up", show=False, priority=True),
+        Binding("pagedown", "scroll_down", "Scroll down", show=False, priority=True),
+        Binding("escape", "close_output", "Close output", show=False, priority=True),
+        Binding("q", "close_output", "Close output", show=False, priority=True),
+        Binding("ctrl+l", "close_output", "Close output", show=False, priority=True),
+    ]
+
+    def __init__(self, terminal_app: PolicyEditorApp) -> None:
+        super().__init__()
+        self.terminal_app = terminal_app
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="output-dialog"):
+            yield Static("Captured output", classes="section")
+            yield RichLog(
+                id="output-body", max_lines=500, wrap=True,
+                markup=False, highlight=False,
+            )
+            yield Static("PgUp/PgDn scroll · Esc/q/Ctrl+L closes", id="hint", classes="hint")
+
+    def on_mount(self) -> None:
+        for chunk in self.terminal_app._output_chunks:
+            self.append_output(chunk)
+
+    def append_output(self, text: str) -> None:
+        self.query_one("#output-body", RichLog).write(Text(text))
+        self.terminal_app.stats["rich_log_writes"] += 1
+
+    def action_scroll_up(self) -> None:
+        log = self.query_one("#output-body", RichLog)
+        log.scroll_relative(y=-max(1, log.size.height - 1), animate=False, immediate=True)
+
+    def action_scroll_down(self) -> None:
+        log = self.query_one("#output-body", RichLog)
+        log.scroll_relative(y=max(1, log.size.height - 1), animate=False, immediate=True)
+
+    def action_close_output(self) -> None:
         self.dismiss(None)
 
 

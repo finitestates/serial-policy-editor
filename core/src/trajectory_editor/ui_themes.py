@@ -293,22 +293,23 @@ def theme_stylesheet(
     #choice-heading, #review-header, #edge-header {{ width: 1fr; max-width: 160; }}
     #choice-preview, #choice-feedback, #beam-detail, #beam-notice {{ height: auto; width: 1fr; max-width: 160; padding: 0 1; }}
     #choice-table, #edge-commands {{ width: 1fr; max-width: 160; height: auto; max-height: 30%; min-height: 3; }}
-    #beam-body {{ height: 1fr; width: 1fr; max-width: 200; min-height: 3; layout: horizontal; }}
-    #beam-body.stacked {{ layout: vertical; max-width: 160; }}
+    #beam-body {{ height: 1fr; width: 1fr; max-width: 200; max-height: 30%; min-height: 3; layout: horizontal; }}
+    BeamScreen.-stacked #beam-body {{ layout: vertical; max-width: 160; }}
     #beam-table {{ width: 2fr; height: 1fr; min-width: 48; min-height: 3; }}
     #beam-detail-pane {{ width: 1fr; height: 1fr; min-width: 36; border-left: solid $secondary; padding: 0 1; }}
-    #beam-body.stacked #beam-table {{ width: 1fr; min-width: 0; }}
-    #beam-body.stacked #beam-detail-pane {{ width: 1fr; min-width: 0; border-left: none; border-top: solid $secondary; }}
+    BeamScreen.-stacked #beam-body #beam-table {{ width: 1fr; min-width: 0; }}
+    BeamScreen.-stacked #beam-body #beam-detail-pane {{ width: 1fr; min-width: 0; border-left: none; border-top: solid $secondary; }}
     #choice-command-row {{ width: 1fr; max-width: 160; height: 1; }}
     #command-row {{ width: 1fr; max-width: 120; height: 1; }}
     .prompt-label {{ width: auto; }}
     #choice-input, #beam-input, #edge-input {{ width: 1fr; min-width: 8; height: 1; min-height: 1; border: none; padding: 0 1; background: $surface; }}
+    #choice-input:focus, #beam-input:focus, #edge-input:focus {{ color: $background; background: $secondary; text-style: bold; }}
     #choice-input.expanded {{ height: 8; min-height: 3; border: solid $secondary; }}
     #prompt-group {{ height: auto; width: 1fr; max-width: 96; margin-top: 2; padding: 0 1; }}
     #prompt-group.page {{ height: 1fr; max-width: 160; margin-top: 0; }}
-    #prompt-group.short {{ margin-top: 0; }}
-    #prompt-group.short #prompt-body {{ max-height: 12%; }}
-    #prompt-group.short #multiline-input {{ height: 5; max-height: 25%; }}
+    PromptScreen.-short #prompt-group {{ margin-top: 0; }}
+    PromptScreen.-short #prompt-body {{ max-height: 12%; }}
+    PromptScreen.-short #multiline-input {{ height: 5; max-height: 25%; }}
     #prompt-input {{ width: 1fr; min-width: 8; height: 3; min-height: 3; border: solid $secondary; padding: 0 1; }}
     #prompt-input:focus {{ border: heavy $secondary; }}
     #multiline-input {{ height: 8; max-height: 30%; min-height: 3; width: 1fr; }}
@@ -321,10 +322,15 @@ def theme_stylesheet(
     #edge-header {{ height: auto; padding: 0 1; }}
     #edge-commands {{ margin: 0 1; }}
     #beam-context {{ height: auto; min-height: 2; max-height: 20%; width: 1fr; max-width: 160; padding: 0 1; }}
-    #output-log {{ height: auto; min-height: 1; max-height: 20%; width: 1fr; max-width: 160; dock: bottom; border-top: solid $secondary; }}
-    #help-dialog {{ width: 90%; height: 85%; border: tall $secondary; background: $background; padding: 1 2; }}
-    #help-scroll {{ height: 1fr; }}
-    #help-body {{ height: auto; }}
+    #output-dialog {{ width: 92vw; height: 85vh; max-width: 100vw; max-height: 100vh; min-width: 0; min-height: 0; border: tall $secondary; background: $background; padding: 1 2; }}
+    #output-body {{ width: 1fr; height: 1fr; min-height: 0; border-top: solid $secondary; }}
+    CommandPalette CommandList {{ width: 75vw; offset-x: 12.5vw; max-height: 40vh; }}
+    ModalScreen {{ align: center middle; }}
+    #help-dialog {{ width: 90vw; height: 85vh; max-width: 100vw; max-height: 100vh; min-width: 0; min-height: 0; border: tall $secondary; background: $background; padding: 1 2; }}
+    #help-scroll {{ height: 1fr; min-height: 0; }}
+    #help-body {{ height: auto; width: 1fr; }}
+    #help-dialog #hint {{ width: 1fr; max-width: 100%; min-height: 1; max-height: 30%; dock: bottom; text-wrap: wrap; text-align: center; }}
+    #output-dialog #hint {{ width: 1fr; max-width: 100%; min-height: 1; max-height: 30%; dock: bottom; text-wrap: wrap; text-align: center; }}
     {color_rules}
     {monochrome_rules}
     DataTable > .datatable--cursor {{ text-style: bold reverse; }}

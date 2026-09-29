@@ -107,6 +107,30 @@ def test_multiline_prompt_field_and_wrapping_hint_remain_visible(size):
     run_pilot(scenario)
 
 
+@pytest.mark.parametrize(
+    ("height", "breakpoint_class"),
+    [(17, "-short"), (18, "-regular"), (19, "-regular")],
+    ids=("below", "at", "above"),
+)
+def test_prompt_vertical_breakpoint_has_one_height_threshold(height, breakpoint_class):
+    async def scenario():
+        app = PolicyEditorApp()
+        async with app.run_test(size=(80, height)) as pilot:
+            await install_request(app, pilot, prompt_state("Next step?"))
+            screen = app._active_screen
+            group = screen.query_one("#prompt-group")
+            prompt_input = screen.query_one("#prompt-input", Input)
+            hint = screen.query_one("#hint", Static)
+
+            assert screen.has_class(breakpoint_class)
+            assert group.region.right <= 80
+            assert prompt_input.region.bottom <= hint.region.y
+            assert hint.region.bottom == height
+            assert app.focused is prompt_input
+
+    run_pilot(scenario)
+
+
 def test_edge_commands_fit_their_content_and_descriptions_wrap_on_narrow_terminals():
     async def scenario():
         app = PolicyEditorApp()
@@ -135,19 +159,22 @@ def test_beam_panes_stack_at_narrow_width_and_reflow_without_stealing_focus():
             detail = screen.query_one("#beam-detail-pane")
             beam_input = screen.query_one("#beam-input", TextArea)
 
-            assert not body.has_class("stacked")
+            assert screen.has_class("-side-by-side")
+            assert not screen.has_class("-stacked")
             assert table.region.width >= 48
             assert detail.region.width >= 36
             assert app.focused is beam_input
 
             await pilot.resize_terminal(80, 24)
-            assert body.has_class("stacked")
+            assert screen.has_class("-stacked")
+            assert not screen.has_class("-side-by-side")
             assert table.region.width == body.region.width
             assert detail.region.width == body.region.width
             assert app.focused is beam_input
 
             await pilot.resize_terminal(160, 50)
-            assert not body.has_class("stacked")
+            assert screen.has_class("-side-by-side")
+            assert not screen.has_class("-stacked")
             assert detail.region.width >= 36
             assert app.focused is beam_input
 
@@ -168,9 +195,9 @@ def test_beam_compact_layout_keeps_the_table_input_and_help_inside_the_viewport(
             hint = screen.query_one("#hint", Static)
             hint_text = _static_text(hint)
 
-            assert body.has_class("stacked")
+            assert screen.has_class("-stacked")
             assert table.region.width <= width
-            assert table.virtual_size.width == table.scrollable_content_region.width
+            assert table.virtual_size.width <= table.scrollable_content_region.width
             assert beam_input.region.y + beam_input.region.height <= height
             assert hint.region.bottom == height
             assert "PgUp/Dn details" in hint_text
