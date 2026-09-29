@@ -9,6 +9,11 @@ Develop experimental work in a separate checkout. Promote individual features
 with focused changes and tests; do not merge the entire experimental branch
 into main merely to synchronize repositories.
 
+The live TTY interface uses Textual in a dedicated UI thread. Its request
+screens are exercised headlessly with Textual Pilot; the synchronous engine
+continues to own backend and storage work. See `TERMINAL_API.md` for the thread
+bridge, screen map, theme behavior, and prepared-screen transition benchmark.
+
 Version metadata in `core/pyproject.toml`, `vector/pyproject.toml`, and
 `core/src/trajectory_editor/version.py` must agree. The vector package's core
 dependency lower bound should track the core release. Use a development suffix

@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import codecs
 import importlib.util
+import os
 import sys
-from contextlib import contextmanager, redirect_stdout, redirect_stderr
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from io import StringIO
-from typing import Iterator
 
 from .terminal_contracts import (
-    BeamInput, BeamViewState, ChoiceViewState, EdgeViewState, PromptRequest,
+    BeamInput,
+    BeamViewState,
+    ChoiceViewState,
+    EdgeViewState,
+    PromptRequest,
     TerminalCapabilities,
 )
 from .ui_themes import resolve_live_theme
@@ -25,23 +32,135 @@ def _live_stream_ready(stream) -> bool:
 
 
 class _SessionOutput(StringIO):
-    """Hold incidental print output until fullscreen exits, showing live status."""
+    """Hold incidental print output until the fullscreen session exits."""
 
-    def __init__(self, session, original):
+    def __init__(self):
         super().__init__()
-        self.session = session
-        self.original = original
+        self._lock = threading.Lock()
 
     def write(self, text):
-        result = super().write(text)
-        self.session.write(text, end="")
-        return result
+        with self._lock:
+            return super().write(text)
 
     def isatty(self):
-        return self.original.isatty()
+        return False
 
     def fileno(self):
-        return self.original.fileno()
+        return -1
+
+
+class _ProcessOutputCapture:
+    """Keep native stdout/stderr writes off the TTY while Textual is active."""
+
+    def __init__(self, stdout_capture: _SessionOutput, stderr_capture: _SessionOutput):
+        self.stdout_capture = stdout_capture
+        self.stderr_capture = stderr_capture
+        self.terminal_output = None
+        self._saved_fds: dict[int, int] = {}
+        self._redirected_fds: set[int] = set()
+        self._read_fds: list[int] = []
+        self._write_fds: list[int] = []
+        self._readers: list[threading.Thread] = []
+
+    def start(self):
+        if os.name != "posix":
+            return None
+        stderr_fd = sys.__stderr__.fileno()
+        self.terminal_output = os.fdopen(
+            os.dup(stderr_fd),
+            "w",
+            buffering=1,
+            encoding=sys.__stderr__.encoding or "utf-8",
+            errors=sys.__stderr__.errors or "replace",
+        )
+        sinks = (
+            (1, self.stdout_capture),
+            (2, self.stderr_capture),
+        )
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+            sys.__stdout__.flush()
+            sys.__stderr__.flush()
+            for target_fd, sink in sinks:
+                self._saved_fds[target_fd] = os.dup(target_fd)
+                read_fd, write_fd = os.pipe()
+                self._read_fds.append(read_fd)
+                self._write_fds.append(write_fd)
+                source_stream = sys.__stdout__ if target_fd == 1 else sys.__stderr__
+                reader = threading.Thread(
+                    target=self._read_output,
+                    args=(
+                        read_fd,
+                        sink,
+                        source_stream.encoding or "utf-8",
+                        source_stream.errors or "replace",
+                    ),
+                    name=f"spe-output-capture-{target_fd}",
+                    daemon=True,
+                )
+                reader.start()
+                self._readers.append(reader)
+                os.dup2(write_fd, target_fd)
+                self._redirected_fds.add(target_fd)
+                os.close(write_fd)
+                self._write_fds.remove(write_fd)
+            return self.terminal_output
+        except BaseException:
+            self.stop()
+            raise
+
+    def stop(self) -> None:
+        for stream in (sys.stdout, sys.stderr, sys.__stdout__, sys.__stderr__):
+            try:
+                stream.flush()
+            except (OSError, ValueError):
+                pass
+        for target_fd in tuple(self._redirected_fds):
+            saved_fd = self._saved_fds.get(target_fd)
+            if saved_fd is not None:
+                os.dup2(saved_fd, target_fd)
+            self._redirected_fds.discard(target_fd)
+        for saved_fd in self._saved_fds.values():
+            os.close(saved_fd)
+        self._saved_fds.clear()
+        for write_fd in self._write_fds:
+            os.close(write_fd)
+        self._write_fds.clear()
+        for reader in self._readers:
+            reader.join()
+        self._readers.clear()
+        for read_fd in self._read_fds:
+            try:
+                os.close(read_fd)
+            except OSError:
+                pass
+        self._read_fds.clear()
+        if self.terminal_output is not None:
+            self.terminal_output.close()
+            self.terminal_output = None
+
+    @staticmethod
+    def _read_output(
+        read_fd: int,
+        sink: _SessionOutput,
+        encoding: str,
+        errors: str,
+    ) -> None:
+        decoder = codecs.getincrementaldecoder(encoding)(errors=errors)
+        while True:
+            try:
+                chunk = os.read(read_fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            text = decoder.decode(chunk)
+            if text:
+                sink.write(text)
+        remaining = decoder.decode(b"", final=True)
+        if remaining:
+            sink.write(remaining)
 
 
 class TerminalIO:
@@ -57,7 +176,7 @@ class TerminalIO:
             requested
             and _live_stream_ready(sys.stdin)
             and _live_stream_ready(sys.stdout)
-            and importlib.util.find_spec("prompt_toolkit") is not None
+            and importlib.util.find_spec("textual") is not None
         )
         self._live_session: object | None = None
 
@@ -81,23 +200,28 @@ class TerminalIO:
             return
         if self._live_session is not None:
             raise RuntimeError("live session is already active")
-        from .persistent_tui import PersistentTerminalSession
+        from .textual_tui import TextualTerminalSession
 
-        session = PersistentTerminalSession(theme=self._live_theme)
         stdout, stderr = sys.stdout, sys.stderr
-        captured_out = _SessionOutput(session, stdout)
-        captured_err = _SessionOutput(session, stderr)
+        captured_out = _SessionOutput()
+        captured_err = _SessionOutput()
+        process_output = _ProcessOutputCapture(captured_out, captured_err)
         try:
+            terminal_output = process_output.start()
+            session = TextualTerminalSession(
+                theme=self._live_theme,
+                terminal_output=terminal_output,
+            )
             with session:
                 self._live_session = session
                 try:
-                    with redirect_stdout(captured_out), redirect_stderr(captured_err):
-                        yield session
+                    yield session
                 finally:
                     self._live_session = None
         finally:
+            process_output.stop()
             # CLI summaries and errors belong to the restored normal screen.
-            # Prompt-toolkit writes through the output captured before redirection.
+            # Native and Python output are flushed after Textual restores the TTY.
             stdout.write(captured_out.getvalue())
             stderr.write(captured_err.getvalue())
             stdout.flush()

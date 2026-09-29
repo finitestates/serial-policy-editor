@@ -1,7 +1,6 @@
 """Chord previews never enter episode history; selection uses ordinary actions."""
 
 from contextlib import contextmanager
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -18,9 +17,10 @@ from trajectory_editor.episode_replay_source import replay_procedure
 from trajectory_editor.episode_store import EpisodeStore
 from trajectory_editor.episode_ui import _choice_from_observation
 from trajectory_editor.episode_hash import token_prefix_sha256
-from trajectory_editor.live_tui import action_preview
-from trajectory_editor.persistent_tui import PersistentTerminalSession, _Request
+from trajectory_editor.tui_render import action_preview
 from trajectory_editor.terminal_contracts import PromptRequest
+from trajectory_editor.textual_tui import PolicyEditorApp
+from tests.core.textual_support import install_request, run_pilot
 from trajectory_editor.teacher_plan import load_teacher_tape_jsonl
 
 
@@ -288,18 +288,22 @@ def test_live_choice_preview_recognizes_chord_and_validates_ranks():
 
 @pytest.mark.current_workflow
 def test_live_chord_prompt_uses_only_current_preview_body():
-    terminal = PersistentTerminalSession()
-    terminal._notice = "Model loaded."
-    terminal.application = SimpleNamespace(
-        layout=SimpleNamespace(focus=lambda control: None), invalidate=lambda: None,
-    )
-    terminal._show(_Request(PromptRequest(
-        "Chord > ", body="a (1) | b (2)", isolated=True,
-    )))
-    assert terminal._prompt_view.body.text == "a (1) | b (2)"
-    assert terminal._notice == ""
-    terminal._show(_Request(PromptRequest("Next > ")))
-    assert terminal._prompt_view.body.text == ""
+    async def scenario():
+        app = PolicyEditorApp()
+        async with app.run_test(size=(100, 32)) as pilot:
+            await install_request(
+                app,
+                pilot,
+                PromptRequest("Chord > ", body="a (1) | b (2)", isolated=True),
+            )
+            screen = app._active_screen
+            assert "a (1) | b (2)" in screen.query_one("#prompt-body Static").content.plain
+            app.write_output("Model loaded.")
+            assert "Model loaded" not in screen.query_one("#prompt-body Static").content.plain
+            await pilot.press("a", "enter")
+            await pilot.pause()
+            await install_request(app, pilot, PromptRequest("Next > "), generation=2)
+            assert not app._active_screen.query("#prompt-body")
 
     class ChordIO(ScriptedIO):
         def __init__(self):
@@ -316,6 +320,8 @@ def test_live_chord_prompt_uses_only_current_preview_body():
     assert result == "select" and actions == (SelectRawRank(1), Accept())
     assert len(io.bodies) == 4
     assert not any("Model loaded" in body for body in io.bodies)
+
+    run_pilot(scenario)
 
 
 class BranchBackend(ConformingFakeBackend):

@@ -212,6 +212,11 @@ writes, check/force actions, chord previews, reusable profiles, bias and history
 controls, CFG and perturb-and-argmax draws, rerolls, raw/model/gap logit views, teacher
 replay, rewind, fork, and live-edge continuation.
 
+On a usable TTY, the live editor uses Textual screens for choices, the live
+edge, beam branches, and prompts. Press Ctrl+K to search command templates or
+`?` to open the full command list. Piped and noninteractive runs keep the plain
+terminal interface.
+
 ## Vectors
 
 Install the optional vector package when you want to create or inspect

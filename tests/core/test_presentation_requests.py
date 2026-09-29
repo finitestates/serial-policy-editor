@@ -10,12 +10,13 @@ from tests.fakes import ConformingFakeBackend, ScriptedIO, SpeculativeFakeBacken
 from tests.core.runtime_helpers import LiveScriptedIO
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.edge_help import edge_help
-from trajectory_editor.edge_tui import _edge_header
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_ui import InteractivePolicy
 from trajectory_editor.plain_tui import read_edge
 from trajectory_editor.terminal_contracts import EdgeViewState
 from trajectory_editor.teacher_commands import HELP_TEXT
+from trajectory_editor.textual_tui import PolicyEditorApp
+from tests.core.textual_support import install_request, run_pilot
 
 pytestmark = pytest.mark.current_workflow
 
@@ -172,22 +173,29 @@ def test_bias_feedback_is_in_next_choice_request():
     assert terminal.states[1].choice != terminal.states[0].choice
 
 
-def test_edge_help_is_shared_by_plain_and_live_with_mode_specific_actions():
-    for mode in ("episode", "session"):
-        state = EdgeViewState("one", 2, "temp=1", mode=mode)
-        plain = ScriptedIO(["q"])
-        assert read_edge(plain, state) == "q"
-        plain_text = "".join(plain.output)
-        live_text = "".join(fragment for _, fragment in _edge_header(
-            episode_id=state.episode_id, boundary=state.boundary,
-            sampler_summary=state.sampler_summary, mode=mode,
-        ))
-        for item in edge_help(mode):
-            assert f"[{item.command}] {item.description}" in plain_text
-            assert item.command in live_text and item.description in live_text
-    assert "save WORKSPACE [ID]" not in "".join(
-        item.command for item in edge_help("episode")
-    )
+def test_edge_help_is_shared_by_plain_and_textual_command_table():
+    async def scenario():
+        app = PolicyEditorApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            for generation, mode in enumerate(("episode", "session"), 1):
+                state = EdgeViewState("one", 2, "temp=1", mode=mode)
+                plain = ScriptedIO(["q"])
+                assert read_edge(plain, state) == "q"
+                plain_text = "".join(plain.output)
+                request = await install_request(app, pilot, state, generation=generation)
+                table = app._active_screen.query_one("#edge-commands")
+                assert table.row_count == len(edge_help(mode))
+                for item in edge_help(mode):
+                    assert f"[{item.command}] {item.description}" in plain_text
+                    assert tuple(table.get_row(item.command)) == (item.command, item.description)
+                await pilot.press("q", "enter")
+                await pilot.pause()
+                assert request.response.result() == "q"
+        assert "save WORKSPACE [ID]" not in "".join(
+            item.command for item in edge_help("episode")
+        )
+
+    run_pilot(scenario)
 
 
 @pytest.mark.parametrize("submitted_rank", (1, 2))

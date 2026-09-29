@@ -1,404 +1,141 @@
-"""Search-target speculation stays warm until the user changes targets."""
+"""Search rank warming runs off the Textual thread and returns by generation."""
 
 from __future__ import annotations
 
-from io import StringIO
-from threading import Event, Thread
-from time import monotonic, sleep
+import threading
 
 import pytest
-from prompt_toolkit.data_structures import Size
-from prompt_toolkit.input import create_pipe_input
-from prompt_toolkit.output.vt100 import Vt100_Output
+from rich.text import Text
+from textual.widgets import Static
+from trajectory_editor.terminal_contracts import ChoiceFeedback
+from trajectory_editor.textual_tui import PolicyEditorApp, TextualTerminalSession
 
-from tests.fakes import SpeculativeFakeBackend
-from trajectory_editor.core.actions import Accept, SelectRawRank
-from trajectory_editor.core.sampler_config import SamplerConfig
-from trajectory_editor.episode_engine import EpisodeEngine
-from trajectory_editor.episode_ui import InteractivePolicy, _choice_from_observation
-from trajectory_editor.episode_hash import token_prefix_sha256
-from trajectory_editor.persistent_tui import PersistentTerminalSession
-from trajectory_editor.terminal_contracts import ChoiceFeedback, ChoiceViewState
+from tests.core.textual_support import (
+    choice_state,
+    install_request,
+    run_pilot,
+    submitted,
+)
 
-
-def _until(predicate, timeout: float = 3.0) -> bool:
-    deadline = monotonic() + timeout
-    while monotonic() < deadline:
-        if predicate():
-            return True
-        sleep(0.005)
-    return False
+pytestmark = pytest.mark.current_workflow
 
 
-def _terminal():
-    return Vt100_Output(
-        StringIO(), lambda: Size(rows=24, columns=80), term="xterm",
-    )
+def _plain(widget: Static) -> str:
+    value = widget.content
+    return value.plain if isinstance(value, Text) else str(value)
 
 
-class SearchBackend(SpeculativeFakeBackend):
-    def __init__(self, *, on_eval=None):
-        super().__init__(on_eval=on_eval)
-        self.pieces = {**self.pieces, 3: "TERM", 4: "SECOND"}
-
-    def tokenize(self, text: str, *, add_bos: bool = False, special: bool = False):
-        if not add_bos and text == "TERM":
-            return [3]
-        if not add_bos and text == "MULTI":
-            return [3, 4]
-        if not add_bos and text == "SECOND":
-            return [4]
-        return super().tokenize(text, add_bos=add_bos, special=special)
-
-
-def _engine(backend=None):
-    return EpisodeEngine(
-        backend or SearchBackend(),
-        initial_token_ids=[7],
-        sampling=SamplerConfig(temperature=0.0),
-    )
-
-
-def _search_state(
-    engine: EpisodeEngine,
-    observation,
-    *,
-    token_id: int,
-    search_lens_active: bool = True,
-    suggestions: tuple[str, ...] = (),
-    calls: list | None = None,
-    completed: dict[int, Event] | None = None,
-):
-    rank = observation.policy_calculations.raw_rank(token_id)
-    target = (rank, token_id)
-    menu = tuple(engine.candidates(observation, count=3))
-    start = max(1, rank - 2) if search_lens_active else 1
-    stop = min(len(observation.logits), rank + 2) if search_lens_active else len(menu)
-    rows = tuple(engine.candidates(observation, start_rank=start, count=stop - start + 1))
-    by_rank = {candidate.rank: candidate for candidate in (*menu, *rows)}
-    choice = _choice_from_observation(
-        engine, observation, menu,
-        context_text_tail=engine.backend.render(
-            list(observation.prefix_token_ids), special=True
+def _search_state(warm, cancel, *, initial_tab_command="2"):
+    base = choice_state()
+    return choice_state(
+        feedback=ChoiceFeedback(
+            "search", "SEARCH RESULTS", initial_tab_command=initial_tab_command,
         ),
-        context_token_sha256=token_prefix_sha256(list(observation.prefix_token_ids)),
-        serial=1,
-    )
-
-    def warm(raw_rank, selected_token_id, generation, cancelled):
-        if calls is not None:
-            calls.append((raw_rank, selected_token_id, monotonic()))
-        result = engine.speculate_accept(
-            observation, raw_rank=raw_rank, token_id=selected_token_id,
-            generation=generation, cancelled=cancelled,
-        )
-        if completed is not None:
-            completed.setdefault(selected_token_id, Event()).set()
-        return result
-
-    feedback = (
-        ChoiceFeedback(
-            "search", "SEARCH RESULTS",
-            completion_commands=suggestions,
-            initial_tab_command=str(rank) if search_lens_active else None,
-        )
-        if search_lens_active or suggestions else None
-    )
-    state = ChoiceViewState(
-        choice=choice,
-        candidates=tuple(by_rank[key] for key in sorted(by_rank)),
-        display_candidates=rows if search_lens_active else menu,
-        resolve_insertion=lambda text, mode: text,
-        resolve_candidate=lambda raw_rank: engine.candidates(
-            observation, start_rank=raw_rank, count=1,
-        )[0],
-        target_token_id=token_id if search_lens_active else None,
-        feedback=feedback,
-        search_lens_active=search_lens_active,
+        search_lens_active=True,
+        target_token_id=3,
+        display_candidates=(base.candidates[1],),
         warm_search_token=warm,
-        cancel_search_warm=engine.discard_speculative_accept,
-        search_warm_target=target,
-        search_warm_commands=suggestions,
-        search_warm_prepared=engine.has_prepared_accept(observation, rank, token_id),
-    )
-    return rank, state
-
-
-def _request_warm_done(session, state) -> bool:
-    request = session._current
-    return bool(
-        request is not None
-        and request.state is state
-        and request.warm_future is not None
-        and request.warm_future.done()
+        cancel_search_warm=cancel,
+        search_warm_target=(2, 3),
+        search_warm_commands=("/needle",),
     )
 
 
-@pytest.mark.invariant
-def test_exact_search_warms_before_tab_and_rank_commit_promotes_it():
-    backend = SearchBackend()
-    engine = _engine(backend)
-    observation = engine.observe()
-    rank = observation.policy_calculations.raw_rank(3)
-    errors = []
+def test_search_warm_runs_on_worker_shows_pending_rank_and_delivers_to_ui_thread():
+    async def scenario():
+        ui_thread = threading.get_ident()
+        entered = threading.Event()
+        release = threading.Event()
+        calls = []
+        completions = []
 
-    with create_pipe_input() as pipe:
-        with PersistentTerminalSession(
-            input_device=pipe, output_device=_terminal(),
-        ) as session:
-            policy = InteractivePolicy(io=session, search_radius=1)
+        def warm(raw_rank, token_id, generation, cancelled):
+            calls.append((raw_rank, token_id, generation, threading.get_ident()))
+            entered.set()
+            release.wait(2)
+            return not cancelled()
 
-            def feed():
-                try:
-                    assert _until(lambda: session._current is not None and session.accepting_input)
-                    pipe.send_text("/TERM\r")
-                    assert _until(lambda: (
-                        session._current is not None
-                        and isinstance(session._current.state, ChoiceViewState)
-                        and session._current.state.search_warm_target == (rank, 3)
-                        and _request_warm_done(session, session._current.state)
-                    ))
-                    request = session._current
-                    assert request.warm_future.result() is True
-                    assert request.state.search_lens_active
-                    assert session.choice_view.command_buffer.text == ""
-                    # The semantic episode prefix stays fixed while the backend holds the warm token.
-                    assert engine.token_ids == [7]
-                    assert backend.tokens == [7, 3]
-                    assert engine.has_prepared_accept(observation, rank, 3)
-                    pipe.send_text("\t")
-                    assert _until(lambda: session.choice_view.command_buffer.text == str(rank))
-                    pipe.send_text("\r")
-                except BaseException as exc:
-                    errors.append(exc)
-                    pipe.close()
+        app = PolicyEditorApp()
+        original = app._warm_completed
 
-            feeder = Thread(target=feed)
-            feeder.start()
-            action = policy.choose(engine, observation)
-            feeder.join(timeout=3)
-            assert not feeder.is_alive() and not errors
+        def on_ui_completion(*args):
+            completions.append(threading.get_ident())
+            return original(*args)
 
-    assert isinstance(action, SelectRawRank)
-    assert action.rank == rank
-    engine.apply(action)
-    assert backend.eval_calls == [(3,)]
-    assert backend.tokens == [7, 3]
-    assert session.stats["promotions"] == 1
+        app._warm_completed = on_ui_completion
+        async with app.run_test(size=(120, 40)) as pilot:
+            state = _search_state(warm, lambda: None)
+            lifecycle = await install_request(app, pilot, state, generation=31)
+            screen = app._active_screen
+            assert entered.wait(1)
+            pending_line = screen.query_one("#hint", Static)
+            assert "Resolving raw rank 2…" in _plain(pending_line)
+            assert pending_line.size.height == 1
+            before_resolution = tuple(
+                (selector, screen.query_one(selector).region.y, screen.query_one(selector).region.height)
+                for selector in ("#context-scroll", "#choice-table", "#choice-input", "#hint")
+            )
+            release.set()
+            for _ in range(20):
+                await pilot.pause(.02)
+                if screen._warm_pending_target is None:
+                    break
+            assert screen._warm_pending_target is None
+            assert pending_line.size.height == 1
+            assert "Resolving raw rank" not in _plain(pending_line)
+            after_resolution = tuple(
+                (selector, screen.query_one(selector).region.y, screen.query_one(selector).region.height)
+                for selector in ("#context-scroll", "#choice-table", "#choice-input", "#hint")
+            )
+            assert after_resolution == before_resolution
+            assert calls == [(2, 3, 31, calls[0][3])]
+            assert calls[0][3] != ui_thread
+            assert completions == [ui_thread]
+            assert app.stats["warm_dispatches"] == 1
+            await pilot.press("tab", "enter")
+            await pilot.pause()
+            assert submitted(lifecycle) == "2"
+            assert lifecycle.submitted_target == (2, 3)
 
+            terminal = TextualTerminalSession()
+            terminal.application = app
+            terminal._finish_warm(lifecycle)
+            assert app.stats["promotions"] == 1
 
-@pytest.mark.invariant
-def test_multi_token_search_warms_first_result_and_preserves_it_through_suggestion():
-    backend = SearchBackend()
-    engine = _engine(backend)
-    observation = engine.observe()
-    first_rank = observation.policy_calculations.raw_rank(3)
-    first_suggestion = '/"TERM"'
-    errors = []
-
-    with create_pipe_input() as pipe:
-        with PersistentTerminalSession(
-            input_device=pipe, output_device=_terminal(),
-        ) as session:
-            policy = InteractivePolicy(io=session, search_radius=1)
-
-            def feed():
-                try:
-                    assert _until(lambda: session._current is not None and session.accepting_input)
-                    pipe.send_text("/MULTI\r")
-                    assert _until(lambda: (
-                        session._current is not None
-                        and isinstance(session._current.state, ChoiceViewState)
-                        and session._current.state.feedback is not None
-                        and len(session._current.state.feedback.completion_commands) == 2
-                        and session._current.state.search_warm_target == (first_rank, 3)
-                        and _request_warm_done(session, session._current.state)
-                    ))
-                    request = session._current
-                    assert request.warm_future.result() is True
-                    assert backend.eval_calls == [(3,)]
-                    pipe.send_text("\t")
-                    assert _until(lambda: session.choice_view.command_buffer.text == first_suggestion)
-                    pipe.send_text("\r")
-                    assert _until(lambda: (
-                        session._current is not None
-                        and isinstance(session._current.state, ChoiceViewState)
-                        and session._current.state.search_lens_active
-                        and session._current.state.search_warm_target == (first_rank, 3)
-                        and _request_warm_done(session, session._current.state)
-                    ))
-                    # The next view recognizes the carried prepared state; it does not eval again.
-                    assert backend.eval_calls == [(3,)]
-                    pipe.send_text("\t")
-                    assert _until(lambda: session.choice_view.command_buffer.text == str(first_rank))
-                    pipe.send_text("\r")
-                except BaseException as exc:
-                    errors.append(exc)
-                    pipe.close()
-
-            feeder = Thread(target=feed)
-            feeder.start()
-            action = policy.choose(engine, observation)
-            feeder.join(timeout=3)
-            assert not feeder.is_alive() and not errors
-
-    assert isinstance(action, SelectRawRank)
-    assert action.rank == first_rank
-    engine.apply(action)
-    assert backend.eval_calls == [(3,)]
-    assert backend.tokens == [7, 3]
-    assert session.stats["promotions"] == 1
+    run_pilot(scenario)
 
 
-@pytest.mark.invariant
-def test_search_warm_stays_ready_while_navigating_then_rolls_back_other_commit():
-    backend = SearchBackend()
-    engine = _engine(backend)
-    observation = engine.observe()
-    calls = []
-    rank, state = _search_state(engine, observation, token_id=3, calls=calls)
-    other_rank = next(
-        candidate.rank
-        for candidate in engine.candidates(observation, count=len(observation.logits))
-        if candidate.rank != rank and not backend.is_eog(candidate.token_id)
-    )
-    other_token_id = engine.candidates(
-        observation, start_rank=other_rank, count=1,
-    )[0].token_id
-    errors = []
+def test_selecting_a_different_rank_cancels_the_search_warm():
+    async def scenario():
+        ui_thread = threading.get_ident()
+        cancelled_threads = []
+        entered = threading.Event()
 
-    with create_pipe_input() as pipe:
-        with PersistentTerminalSession(
-            input_device=pipe, output_device=_terminal(),
-        ) as session:
-            def feed():
-                try:
-                    assert _until(lambda: session._current is not None
-                                  and session._current.state is state
-                                  and session.accepting_input)
-                    assert _until(lambda: _request_warm_done(session, state))
-                    assert engine.has_prepared_accept(observation, rank, 3)
-                    pipe.send_text(str(other_rank))
-                    assert _until(lambda: session.choice_view.command_buffer.text == str(other_rank))
-                    # Editing the candidate keeps the search target ready until commit.
-                    assert engine.has_prepared_accept(observation, rank, 3)
-                    assert backend.tokens == [7, 3]
-                    assert [(call[0], call[1]) for call in calls] == [(rank, 3)]
-                    pipe.send_text("\r")
-                except BaseException as exc:
-                    errors.append(exc)
-                    pipe.close()
+        def warm(raw_rank, token_id, generation, cancelled):
+            entered.set()
+            return True
 
-            feeder = Thread(target=feed)
-            feeder.start()
-            raw = session.read_choice(state)
-            feeder.join(timeout=3)
-            assert not feeder.is_alive() and not errors
+        def cancel():
+            cancelled_threads.append(threading.get_ident())
 
-    assert raw == str(other_rank)
-    assert not engine.has_prepared_accept(observation, rank, 3)
-    assert backend.tokens == [7]
-    engine.apply(SelectRawRank(other_rank))
-    assert backend.eval_calls == [(3,), (other_token_id,)]
-    assert backend.tokens == [7, other_token_id]
+        app = PolicyEditorApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            state = _search_state(warm, cancel)
+            lifecycle = await install_request(app, pilot, state, generation=32)
+            assert entered.wait(1)
+            for _ in range(10):
+                await pilot.pause(.02)
+                if lifecycle.warm_future.done():
+                    break
+            await pilot.press("1", "enter")
+            await pilot.pause()
+            assert submitted(lifecycle) == "1"
+            assert lifecycle.submitted_target == (1, 2)
+            assert lifecycle.warm_cancelled.is_set()
+            terminal = TextualTerminalSession()
+            terminal.application = app
+            terminal._finish_warm(lifecycle)
+            assert cancelled_threads and cancelled_threads[0] != ui_thread
+            assert app.stats["promotions"] == 0
 
-
-@pytest.mark.invariant
-def test_new_search_replaces_the_previous_search_warm():
-    backend = SearchBackend()
-    engine = _engine(backend)
-    observation = engine.observe()
-    first_rank = observation.policy_calculations.raw_rank(3)
-    second_rank = observation.policy_calculations.raw_rank(4)
-    errors = []
-
-    with create_pipe_input() as pipe:
-        with PersistentTerminalSession(
-            input_device=pipe, output_device=_terminal(),
-        ) as session:
-            policy = InteractivePolicy(io=session, search_radius=1)
-
-            def feed():
-                try:
-                    assert _until(lambda: session._current is not None and session.accepting_input)
-                    pipe.send_text("/TERM\r")
-                    assert _until(lambda: (
-                        session._current is not None
-                        and isinstance(session._current.state, ChoiceViewState)
-                        and session._current.state.search_warm_target == (first_rank, 3)
-                        and _request_warm_done(session, session._current.state)
-                    ))
-                    assert backend.tokens == [7, 3]
-                    pipe.send_text("/SECOND\r")
-                    assert _until(lambda: (
-                        session._current is not None
-                        and isinstance(session._current.state, ChoiceViewState)
-                        and session._current.state.search_warm_target == (second_rank, 4)
-                        and _request_warm_done(session, session._current.state)
-                    ))
-                    assert backend.eval_calls == [(3,), (4,)]
-                    assert backend.tokens == [7, 4]
-                    pipe.send_text(str(second_rank) + "\r")
-                except BaseException as exc:
-                    errors.append(exc)
-                    pipe.close()
-
-            feeder = Thread(target=feed)
-            feeder.start()
-            action = policy.choose(engine, observation)
-            feeder.join(timeout=3)
-            assert not feeder.is_alive() and not errors
-
-    assert isinstance(action, SelectRawRank)
-    assert action.rank == second_rank
-    engine.apply(action)
-    assert backend.eval_calls == [(3,), (4,)]
-    assert backend.tokens == [7, 4]
-    assert session.stats["promotions"] == 1
-
-
-@pytest.mark.invariant
-def test_blank_enter_keeps_accept_semantics_without_false_search_promotion():
-    backend = SearchBackend()
-    engine = _engine(backend)
-    observation = engine.observe()
-    _, state = _search_state(engine, observation, token_id=3)
-    warmed = Event()
-    errors = []
-    original_warm = state.warm_search_token
-
-    def warm(rank, token_id, generation, cancelled):
-        result = original_warm(rank, token_id, generation, cancelled)
-        warmed.set()
-        return result
-
-    object.__setattr__(state, "warm_search_token", warm)
-
-    with create_pipe_input() as pipe:
-        with PersistentTerminalSession(
-            input_device=pipe, output_device=_terminal(),
-        ) as session:
-            def feed():
-                try:
-                    assert _until(lambda: session._current is not None
-                                  and session._current.state is state
-                                  and session.accepting_input)
-                    assert warmed.wait(3)
-                    assert _request_warm_done(session, state)
-                    pipe.send_text("\r")
-                except BaseException as exc:
-                    errors.append(exc)
-                    pipe.close()
-
-            feeder = Thread(target=feed)
-            feeder.start()
-            raw = session.read_choice(state)
-            feeder.join(timeout=3)
-            assert not feeder.is_alive() and not errors
-
-    assert raw == ""
-    assert session.stats["promotions"] == 0
-    assert engine._prepared_accept is None
-    engine.apply(Accept())
-    assert backend.eval_calls == [(3,), (1,)]
-    assert backend.tokens == [7, 1]
+    run_pilot(scenario)

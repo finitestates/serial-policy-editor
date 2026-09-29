@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Replace the live terminal UI with Textual screens for choices and historical
+  review, EDGE, beam branches, prompts, and isolated chord composition. The
+  synchronous engine now exchanges screen requests and results across a
+  dedicated UI thread while keeping backend and storage ownership.
+- Add Ctrl+K fuzzy command search and `?` modal help. Remove the repeated static
+  command block from the EDGE status area; EDGE commands remain visible in its
+  command table.
+- Add light and dark variants for the three live themes and preserve the plain
+  terminal fallback for piped or noninteractive use.
+
 ## v0.8.5 — 2026-09-27
 
 - Remove global token budgets and the abandoned control-track state. Episodes

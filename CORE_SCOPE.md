@@ -42,6 +42,11 @@ currently supports:
 - externally produced steering-vector artifacts and episode projection or
   portable teacher-tape export.
 
+On a usable TTY, Textual renders choice, EDGE, beam, and prompt requests in
+separate screens through one app running on a dedicated UI thread. The
+synchronous episode thread keeps engine and storage ownership. Piped and
+noninteractive runs use the plain terminal fallback.
+
 A database or other storage medium can be part of the workspace implementation, but it is not the definition
 of an episode. The runtime owns episode/action meaning; persistence adapts that
 meaning to the workspace.

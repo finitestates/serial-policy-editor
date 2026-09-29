@@ -9,10 +9,13 @@ Core tests assert observable state, persisted records, replay results, and may a
 
 | ID | Terminal contract | Active evidence |
 | --- | --- | --- |
-| T01 | one application accepts choice, review, EDGE, page, prompt, and another choice across surface transitions | `test_terminal_lifecycle.py` |
-| T02 | preview callbacks run only on the episode-owning thread; unexpected failures wake the owner while expected validation remains editable | `test_terminal_lifecycle.py` |
-| T03 | submitted and not-yet-rendered requests reject stale input; obsolete and abandoned previews are cancelled | `test_terminal_lifecycle.py` |
-| T04 | exit restores the terminal after ordinary completion, an exception, EOF, or interrupt; plain mode consumes the same request types | `test_terminal_lifecycle.py` |
+| T01 | one Textual app accepts choice, review, EDGE, beam, page, prompt, and isolated chord requests across screen transitions | `test_terminal_lifecycle.py`, `test_chord.py` |
+| T02 | engine-owned insertion previews run on the request owner; search warming runs on an executor and delivers generation-tagged results on the UI thread | `test_search_warm_terminal.py` |
+| T03 | invalid choice commands remain editable; a submitted screen stops accepting input before resolving its future | `test_terminal_lifecycle.py` |
+| T04 | EDGE blank Enter, Ctrl+C, and Ctrl+D preserve their command, interrupt, and cancellation values; the non-TTY path remains text-only | `test_terminal_lifecycle.py`, `test_terminal_scenarios.py` |
+| T05 | Choice feedback navigation, search-lens rank selection, authored-text editing, context paging, and review reactivation retain their command results | `test_terminal_lifecycle.py` |
+| T06 | beam shortcuts, selection, stochastic score formatting, and prompt modes return the requested values | `test_terminal_lifecycle.py` |
+| T07 | ordinary rank browsing does not mutate speculative backend state before engine commit | `test_selection_warm_terminal.py` |
 
 ## Sampler and action contracts — 8
 
