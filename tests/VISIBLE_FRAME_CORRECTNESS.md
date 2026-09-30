@@ -103,6 +103,60 @@ or a captured region escapes the terminal.
 This is evidence about the terminal protocol stream rather than only the
 framework's object model.
 
+## Reproducing and inspecting a terminal journey
+
+WIP 6 adds a small evidence-producing workflow around the PTY harness rather
+than requiring a contributor to read the large test module directly.
+
+From the repository root:
+
+```bash
+core/.venv/bin/python core/scripts/record_textual_journey.py --scenario beam
+core/.venv/bin/python core/scripts/record_textual_journey.py --scenario rewind
+```
+
+The recorder runs the selected production-driver journey under pytest, keeps
+the pytest temporary directory, preserves the raw PTY stream and capture JSON,
+and exports every marked display grid as a plain text frame with sequence,
+generation, terminal size, screen identity, and synchronized-update state in
+its header. The available scenarios also include `mouse`, `runtime`, and
+`all`.
+
+This matters because the first useful inspection format is often not an image.
+The exported character grids are effectively graph paper: they make a vanished
+pane, collapsed region, shifted command line, or partial repaint visible as a
+geometric fact without depending on font rendering or visual taste.
+
+For style/color inspection, selected display events can be rendered from the
+same capture:
+
+```bash
+core/.venv/bin/python core/scripts/render_textual_capture.py \
+    /path/to/run/example.capture.json \
+    --sequence 137 141 --png
+```
+
+`render_textual_capture.py` does not trust the stored image representation.
+It replays the raw PTY bytes through a fresh `pyte.Screen` up to each selected
+display boundary and checks that the newly reconstructed grid agrees with the
+grid stored in the capture before producing SVG (and optionally PNG). That
+provides a useful consistency check between retained evidence and later
+visualization.
+
+The reproducible rewind journey in
+`core/scripts/test_runtime_rewind_journey.py` uses the same production PTY
+support to exercise Beam editing and rewind behavior while retaining the raw
+stream and reconstructed ordered events. New visual regressions should prefer
+this pattern: make the reported interaction deterministic, preserve the raw
+protocol evidence before assertions, and render only after the ordered cell
+states have been reconstructed.
+
+If elapsed duration is important, add timing evidence at the layer that owns
+that question. Monotonic timestamps on input/write/display markers can measure
+software timing; a timestamped desktop recording can bound
+compositor-visible presentation. Neither is required merely to decide that a
+reconstructed ordered frame violates a structural invariant.
+
 ## Invalid frames do not require timestamps
 
 A visual defect can be hard for an automated agent to observe directly. That
