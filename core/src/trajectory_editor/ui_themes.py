@@ -288,11 +288,12 @@ def theme_stylesheet(
     return f"""
     Screen {{ background: $background; color: $foreground; }}
     #root {{ height: 1fr; width: 1fr; align-horizontal: center; }}
-    #context-scroll {{ height: 8; min-height: 2; max-height: 30%; width: 1fr; max-width: 160; border-bottom: solid $secondary; }}
+    #context-scroll {{ height: auto; min-height: 2; max-height: 5; width: 1fr; border-bottom: solid $secondary; }}
     #context, #review-context {{ height: auto; width: 1fr; padding: 0 1; }}
-    #choice-heading, #review-header, #edge-header {{ width: 1fr; max-width: 160; }}
-    #choice-preview, #choice-feedback, #beam-detail, #beam-notice {{ height: auto; width: 1fr; max-width: 160; padding: 0 1; }}
-    #choice-table, #edge-commands {{ width: 1fr; max-width: 160; height: auto; max-height: 30%; min-height: 3; }}
+    #choice-heading, #review-header, #edge-header {{ width: 1fr; }}
+    #choice-preview, #choice-feedback, #beam-detail, #beam-notice {{ height: auto; width: 1fr; padding: 0 1; }}
+    #choice-table {{ width: 1fr; height: 1fr; min-height: 4; }}
+    #edge-commands {{ width: 1fr; max-width: 160; height: auto; max-height: 30%; min-height: 3; }}
     #beam-body {{ height: 1fr; width: 1fr; max-width: 200; min-height: 3; layout: horizontal; }}
     BeamScreen.-stacked #beam-body {{ layout: vertical; max-width: 160; }}
     #beam-table {{ width: 2fr; height: 1fr; min-width: 48; min-height: 3; overflow-y: scroll; }}
@@ -302,10 +303,10 @@ def theme_stylesheet(
     BeamScreen #beam-notice {{ height: 1; min-height: 1; max-height: 1; }}
     BeamScreen #hint {{ height: 4; min-height: 4; max-height: 4; }}
     BeamScreen.-side-by-side #hint {{ height: 2; min-height: 2; max-height: 2; }}
-    #choice-command-row {{ width: 1fr; max-width: 160; height: 1; }}
+    #choice-command-row {{ width: 1fr; height: 1; }}
     #command-row {{ width: 1fr; max-width: 120; height: 1; }}
     .prompt-label {{ width: auto; }}
-    #choice-input, #beam-input, #edge-input {{ width: 1fr; min-width: 8; height: 1; min-height: 1; border: none; padding: 0 1; background: $surface; }}
+    #choice-input, #beam-input, #edge-input {{ width: 1fr; min-width: 8; height: 1; min-height: 1; border: none; padding: 0; background: $surface; }}
     #choice-input:focus, #beam-input:focus, #edge-input:focus {{ color: $background; background: $secondary; text-style: bold; }}
     #choice-input.expanded {{ height: 8; min-height: 3; border: solid $secondary; }}
     #prompt-group {{ height: auto; width: 1fr; max-width: 96; margin-top: 2; padding: 0 1; }}
@@ -323,6 +324,7 @@ def theme_stylesheet(
     #page-scroll {{ height: 1fr; width: 1fr; }}
     #page-body {{ height: auto; width: 1fr; }}
     #page-return:focus, #single-key-hint:focus {{ color: $background; background: $secondary; text-style: bold; }}
+    #choice-hint {{ height: 1; min-height: 1; max-height: 1; width: 1fr; padding: 0 1; text-wrap: nowrap; text-overflow: ellipsis; }}
     #hint {{ height: auto; max-height: 30%; width: 1fr; max-width: 160; padding: 0 1; dock: bottom; text-wrap: wrap; text-align: center; }}
     #edge-header {{ height: auto; padding: 0 1; }}
     #edge-commands {{ margin: 0 1; }}
