@@ -1250,7 +1250,7 @@ class ChoiceScreen(_RequestScreen):
                     soft_wrap=True,
                     tab_behavior="focus",
                 )
-        yield Static(id="hint", classes="hint")
+        yield Static(id="choice-hint", classes="hint")
 
     def on_mount(self) -> None:
         super().on_mount()
@@ -1697,7 +1697,7 @@ class ChoiceScreen(_RequestScreen):
 
     def _render_warm_status(self) -> None:
         try:
-            target = self.query_one("#hint", Static)
+            target = self.query_one("#choice-hint", Static)
         except NoMatches:
             return
         if self._warm_pending_target is None:
@@ -1716,10 +1716,10 @@ class ChoiceScreen(_RequestScreen):
 
     def _choice_hint(self) -> str:
         if self.state.review is not None:
-            return "Enter resumes · f forks · Esc returns\nPgUp/PgDn scroll · Ctrl+L output · F1 help"
+            return "Enter resumes · f forks · Esc returns · PgUp/PgDn context · F1 help"
         if self._expanded:
-            return "Alt+Enter newline · Enter commits\nTab inserts · Ctrl+K menu · Ctrl+L output · F1 help"
-        return "Tab cycles · Enter commits · Ctrl+G rank\nPgUp/PgDn context · Ctrl+K menu · Ctrl+L output · F1 help"
+            return "Alt+Enter newline · Enter commits · Tab inserts · Ctrl+K commands · F1 help"
+        return "Tab browse · Enter commit · Ctrl+G rank · Ctrl+K commands · F1 help"
 
     def warm_started(self, target: tuple[int, int]) -> None:
         self._warm_pending_target = target
