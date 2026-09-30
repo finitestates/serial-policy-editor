@@ -53,7 +53,7 @@ def test_ordinary_prompt_is_centered_capped_and_has_a_visible_input(size):
     run_pilot(scenario)
 
 
-def test_choice_context_uses_a_fixed_scroll_viewport_as_history_grows():
+def test_choice_context_is_bounded_and_candidates_own_remaining_height():
     async def scenario():
         state = choice_state()
         state = replace(
@@ -70,10 +70,11 @@ def test_choice_context_uses_a_fixed_scroll_viewport_as_history_grows():
             context = screen.query_one("#context-scroll")
             table = screen.query_one("#choice-table", DataTable)
 
-            assert context.region.height == 8
+            assert 2 <= context.region.height <= 5
             assert context.max_scroll_y > 0
-            assert table.region.height < 20
+            assert table.region.height >= 20
             assert table.region.bottom <= screen.query_one("#choice-input").region.y
+            assert screen.query_one("#choice-hint", Static).region.y >= screen.query_one("#choice-input").region.bottom
 
     run_pilot(scenario)
 
@@ -242,7 +243,9 @@ def test_request_screens_keep_controls_and_submission_visible_by_theme_and_size(
             screen = app._active_screen
             assert screen.query_one("#choice-table", DataTable).row_count == 2
             assert screen.query_one("#choice-input", TextArea).region.bottom <= height
-            assert screen.query_one("#hint", Static).region.bottom == height
+            choice_hint = screen.query_one("#choice-hint", Static)
+            assert choice_hint.region.bottom <= height
+            assert choice_hint.region.y >= screen.query_one("#choice-input", TextArea).region.bottom
             assert app.focused is screen.query_one("#choice-input", TextArea)
             await pilot.press("enter")
             await pilot.pause()
