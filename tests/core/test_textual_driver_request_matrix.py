@@ -23,7 +23,7 @@ import threading
 import time
 from dataclasses import replace
 from pathlib import Path
-
+from textual.containers import VerticalScroll
 from trajectory_editor.terminal_contracts import BoundaryReview, PromptRequest
 from trajectory_editor.textual_tui import ChoiceScreen, PromptScreen, TextualTerminalSession
 from tests.core.textual_support import choice_state
@@ -71,6 +71,11 @@ with TextualTerminalSession() as terminal:
                 "escape_pending": screen._escape_pending,
                 "focused": app.focused.id if app.focused is not None else None,
                 "stale_input": app.stats["stale_input_events"],
+                "top_screen": type(app.screen).__name__,
+                "page_scroll_y": (
+                    screen.query_one("#page-scroll", VerticalScroll).scroll_y
+                    if request.page else None
+                ),
             }
         return None
 
@@ -105,6 +110,13 @@ with TextualTerminalSession() as terminal:
         ))
     elif mode == "single":
         value = terminal.prompt(PromptRequest("Press one key", single_key=True))
+    elif mode == "boundaries":
+        long_page = "\n".join(f"Page line {line}" for line in range(100))
+        first_page = terminal.prompt(PromptRequest("First page", body=long_page, page=True))
+        second_page = terminal.prompt(PromptRequest("Second page", body="second", page=True))
+        first_key = terminal.prompt(PromptRequest("First key", single_key=True))
+        second_key = terminal.prompt(PromptRequest("Second key", single_key=True))
+        value = [first_page, second_page, first_key, second_key]
     else:
         value = terminal.prompt(PromptRequest(
             "New prompt > ", multiline=True, isolated=True,
@@ -272,7 +284,7 @@ def test_actual_driver_submits_review_page_chord_single_key_and_multiline_values
                 and (
                     mode not in {"page", "single"}
                     or row.get("focused") == (
-                        "page-scroll" if mode == "page" else "single-key-hint"
+                        "page-return" if mode == "page" else "single-key-hint"
                     )
                 )
                 for row in value.get("observations", ())
@@ -308,6 +320,82 @@ def test_actual_driver_submits_review_page_chord_single_key_and_multiline_values
             _send(master, b"\r")
         result = _finish(process, master, output, result_path)
         assert result["value"] == expected
+        assert result["workers"] == {"session": False, "input": False, "output": False}
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=2)
+        final_attributes = termios.tcgetattr(slave)
+        os.close(master)
+        os.close(slave)
+    assert final_attributes == initial_attributes
+
+
+def test_actual_driver_page_and_single_key_ownership_survives_boundaries_and_modals(tmp_path):
+    process, master, slave, initial_attributes, result_path = _launch(
+        tmp_path, "request-boundaries", "boundaries", child=_MATRIX_CHILD,
+    )
+    output = bytearray()
+    snapshot_path = result_path.with_suffix(".snapshot.json")
+    try:
+        def wait_for(kind, generation, **conditions):
+            return _wait_json(
+                master, process, output, snapshot_path,
+                lambda value: (
+                    (row := _latest(value)).get("kind") == kind
+                    and row.get("generation") == generation
+                    and row.get("accepting")
+                    and all(row.get(name) == expected for name, expected in conditions.items())
+                ),
+            )
+
+        wait_for("page", 1, focused="page-return")
+        _send(master, b"\x1b[6~")
+        _wait_json(
+            master, process, output, snapshot_path,
+            lambda value: any(
+                row.get("generation") == 1 and row.get("page_scroll_y", 0) > 0
+                for row in value.get("observations", ())
+            ),
+        )
+        _send(master, b"\x1b[5~")
+        _wait_json(
+            master, process, output, snapshot_path,
+            lambda value: any(
+                row.get("generation") == 1 and row.get("page_scroll_y") == 0
+                for row in value.get("observations", ())
+            ),
+        )
+        _send(master, b"\x1b[11~")
+        _wait_json(
+            master, process, output, snapshot_path,
+            lambda value: _latest(value).get("top_screen") == "HelpScreen",
+        )
+        _send(master, b"\x1b")
+        wait_for("page", 1, focused="page-return", top_screen="PromptScreen")
+        _send(master, b"q")
+        wait_for("page", 2, focused="page-return")
+        _send(master, b"\r")
+        wait_for("single", 3, focused="single-key-hint")
+        _send(master, b"\x1b[11~")
+        _wait_json(
+            master, process, output, snapshot_path,
+            lambda value: _latest(value).get("top_screen") == "HelpScreen",
+        )
+        _send(master, b"\x1b")
+        wait_for("single", 3, focused="single-key-hint", top_screen="PromptScreen")
+        _send(master, b"z")
+        wait_for("single", 4, focused="single-key-hint")
+        _send(master, b"\x0c")
+        _wait_json(
+            master, process, output, snapshot_path,
+            lambda value: _latest(value).get("top_screen") == "OutputScreen",
+        )
+        _send(master, b"q")
+        wait_for("single", 4, focused="single-key-hint", top_screen="PromptScreen")
+        _send(master, b"\x7f")
+        result = _finish(process, master, output, result_path)
+        assert result["value"] == ["", "", "z", "\x7f"]
         assert result["workers"] == {"session": False, "input": False, "output": False}
     finally:
         if process.poll() is None:

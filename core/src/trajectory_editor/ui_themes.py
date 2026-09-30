@@ -264,6 +264,7 @@ def theme_stylesheet(
 ) -> str:
     """Return the Textual CSS palette and semantic widget classes."""
     palette = theme_palette(name, environment=environment)
+    del palette
     color_rules = "" if name == "monochrome" else """
     .status-strong { color: $primary; text-style: bold; }
     .muted { color: $foreground; }
@@ -284,7 +285,6 @@ def theme_stylesheet(
     .feedback-info { text-style: bold; }
     .feedback-search { text-style: bold underline; }
     """
-    del palette
     return f"""
     Screen {{ background: $background; color: $foreground; }}
     #root {{ height: 1fr; width: 1fr; align-horizontal: center; }}
@@ -295,10 +295,13 @@ def theme_stylesheet(
     #choice-table, #edge-commands {{ width: 1fr; max-width: 160; height: auto; max-height: 30%; min-height: 3; }}
     #beam-body {{ height: 1fr; width: 1fr; max-width: 200; min-height: 3; layout: horizontal; }}
     BeamScreen.-stacked #beam-body {{ layout: vertical; max-width: 160; }}
-    #beam-table {{ width: 2fr; height: 1fr; min-width: 48; min-height: 3; }}
+    #beam-table {{ width: 2fr; height: 1fr; min-width: 48; min-height: 3; overflow-y: scroll; }}
     #beam-detail-pane {{ width: 1fr; height: 1fr; min-width: 36; border-left: solid $secondary; padding: 0 1; }}
-    BeamScreen.-stacked #beam-body #beam-table {{ width: 1fr; min-width: 0; }}
-    BeamScreen.-stacked #beam-body #beam-detail-pane {{ width: 1fr; min-width: 0; border-left: none; border-top: solid $secondary; }}
+    BeamScreen.-stacked #beam-body #beam-table {{ width: 1fr; min-width: 0; max-height: 50%; }}
+    BeamScreen.-stacked #beam-body #beam-detail-pane {{ width: 1fr; min-width: 0; max-height: 25%; border-left: none; border-top: solid $secondary; }}
+    BeamScreen #beam-notice {{ height: 1; min-height: 1; max-height: 1; }}
+    BeamScreen #hint {{ height: 4; min-height: 4; max-height: 4; }}
+    BeamScreen.-side-by-side #hint {{ height: 2; min-height: 2; max-height: 2; }}
     #choice-command-row {{ width: 1fr; max-width: 160; height: 1; }}
     #command-row {{ width: 1fr; max-width: 120; height: 1; }}
     .prompt-label {{ width: auto; }}
@@ -314,15 +317,16 @@ def theme_stylesheet(
     #prompt-input:focus {{ border: heavy $secondary; }}
     #multiline-input {{ height: 8; max-height: 30%; min-height: 3; width: 1fr; }}
     #prompt-body {{ height: auto; max-height: 30%; width: 1fr; max-width: 84; border: solid $secondary; padding: 0 1; }}
-    #prompt-instructions, #prompt-label, #single-key-hint {{ height: auto; width: 1fr; padding: 0 1; }}
+    #prompt-instructions, #prompt-label {{ height: auto; width: 1fr; padding: 0 1; }}
+    #page-return, #single-key-hint {{ height: 1; width: 1fr; min-height: 1; padding: 0 1; border: none; background: $surface; }}
     #prompt-status {{ height: auto; width: 1fr; padding: 0 1; }}
     #page-scroll {{ height: 1fr; width: 1fr; }}
     #page-body {{ height: auto; width: 1fr; }}
-    #single-key-hint:focus {{ color: $background; background: $secondary; text-style: bold; }}
+    #page-return:focus, #single-key-hint:focus {{ color: $background; background: $secondary; text-style: bold; }}
     #hint {{ height: auto; max-height: 30%; width: 1fr; max-width: 160; padding: 0 1; dock: bottom; text-wrap: wrap; text-align: center; }}
     #edge-header {{ height: auto; padding: 0 1; }}
     #edge-commands {{ margin: 0 1; }}
-    #beam-context {{ height: auto; min-height: 2; max-height: 20%; width: 1fr; max-width: 160; padding: 0 1; }}
+    #beam-context {{ height: auto; min-height: 1; max-height: 20%; width: 1fr; max-width: 160; padding: 0 1; }}
     #output-dialog {{ width: 92vw; height: 85vh; max-width: 100vw; max-height: 100vh; min-width: 0; min-height: 0; border: tall $secondary; background: $background; padding: 1 2; }}
     #output-body {{ width: 1fr; height: 1fr; min-height: 0; border-top: solid $secondary; }}
     CommandPalette CommandList {{ width: 75vw; offset-x: 12.5vw; max-height: 40vh; }}

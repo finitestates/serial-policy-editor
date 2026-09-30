@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import replace
+from html import unescape
 from pathlib import Path
 
 import pytest
@@ -74,6 +75,12 @@ def test_request_screens_have_visual_checkpoints_and_visible_editor_focus(
                 editor = screen.query_one(editor_id)
                 assert app.focused is editor
                 assert editor.has_focus
+                if screen_name == "beam":
+                    painted_text = unescape(app.export_screenshot(simplify=True))
+                    painted_text = painted_text.replace("\xa0", " ")
+                    assert "Ctrl+K commands" in painted_text
+                    assert "Ctrl+L output" in painted_text
+                    assert "F1 help" in painted_text
                 _save_or_compare_svg(app, f"{screen_name}-120x40-{name}.svg")
 
     run_pilot(scenario)

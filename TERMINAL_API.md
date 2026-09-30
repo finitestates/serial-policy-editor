@@ -40,16 +40,25 @@ is reopened; large writes and history rollover keep that limit.
 Each request type has one Textual screen. Clicking a Choice, EDGE, or Beam row
 keeps command focus in the editor through mouse-down and row selection. The
 focused command bar remains read-only during owner-thread handoff, then becomes
-editable when the next request is ready; the app rejects queued keys, mouse
-events, and paste during that interval.
+editable when the next request is ready. The POSIX request matrix verifies a
+gated stale paste is discarded and fresh multiline paste is preserved; the
+runtime journey also checks queued key and mouse rejection during its tested
+handoff. These cases do not cover every request and modal lifecycle.
 
 | Screen | Contents and behavior |
 | --- | --- |
 | `ChoiceScreen` | Scrollable prepared context, candidate `DataTable`, preview and feedback, editable command area, and read-only historical review. Context follows the prepared tail, which is unlimited by default. PgUp/PgDn control context scrolling; Ctrl+E expands authored-text input; Alt+Enter inserts a newline in `t` and `x` commands. |
 | `EdgeScreen` | Episode or session status, sampler summary, mode-specific commands from `edge_help()`, and a command input. Blank Enter submits an empty command so the engine can continue. |
-| `BeamScreen` | Survivor table, shared context, selected-branch details, notice, and command input. Arrow keys change the selected row. The table and details use the remaining terminal height; below 120 columns they stack. |
-| `PromptScreen` | One parameterized screen for ordinary input, single keys, multiline composition, scrollable pages, and isolated chord composition. |
+| `BeamScreen` | Survivor table, shared context, selected-branch details, notice, and command input. Same-kind Beam commands update the mounted screen in a batch. Wrapped table rows and the flexible continuation column are fitted before the compositor pass. The table and details use the remaining terminal height; below 120 columns they stack. |
+| `PromptScreen` | One parameterized screen for ordinary input, single keys, multiline composition, scrollable pages, and isolated chord composition. Page return and single-key capture use focused input targets so the production driver delivers keys through Textual's input-widget path. |
 | `HelpScreen` | Scrollable modal help shown over the active request screen. |
+
+The transition matrix verifies mounted-screen reuse for repeated Edge and
+compatible Prompt requests. The production Beam journey separately asserts
+screen/table/detail/editor identity through 30 advances and checks each
+captured display pass at 80×24 and 160×50. These are bounded test journeys;
+Choice reuse and every cancellation/modal combination are not all asserted by
+that matrix.
 
 Ctrl+K opens Textual's fuzzy command palette. Selecting a command inserts its
 template into the active input. `?` opens the full command list as a modal.
@@ -59,8 +68,11 @@ palette. Help is not printed into the Edge status area on every refresh.
 Choice and EDGE reads return command text; beam reads return `BeamInput`.
 `PromptRequest` covers ordinary input, confirmations and single keys,
 multiline composition, pages, and isolated chord displays through
-`io.prompt(request)`. `read`, `read_key`, and `page` are small adapters to this
-request. The chord flow submits an isolated `PromptRequest` directly.
+`io.prompt(request)`. The POSIX request matrix checks actual driver submission
+for page return (`q` returns `""`; Enter/Esc also return), single-key values
+(including Backspace as DEL), chord selection, and multiline paste. `read`,
+`read_key`, and `page` are small adapters to this request. The chord flow
+submits an isolated `PromptRequest` directly.
 
 `SEAMLESS_REACTIVATE` distinguishes Enter in a seamless historical review from
 Escape and ordinary command text. `io.capabilities.seamless_review` tells
@@ -96,10 +108,16 @@ WCAG AA contrast against their light or dark background.
 `tests/core/test_terminal_architecture.py` checks that runtime imports stay at
 the terminal boundary, Textual remains lazy, and the plain fallback stays
 isolated. Pilot tests exercise screen state and layout; POSIX PTY tests exercise
-the custom driver, multi-turn runtime bridge, handoff input rejection, terminal
-cleanup, and resize-delimited output checkpoints replayed through pyte. The
-checkpoints show the screen after each recorded resize interval. They do not
-capture every driver write or establish physical display stability.
+the custom driver, multi-turn runtime bridge, tested handoff input rejection,
+terminal cleanup, and output replayed through pyte. Resize checkpoints show the
+screen at recorded resize offsets. Ordered writer markers identify individual
+terminal writes; a test-only marker queued after Textual's `post_display_hook`
+identifies a completed display pass in that same writer queue. The Beam journey
+checks its gated wait, 30 advances, retained widget identity, complete captured
+panes, and settled repaint after synchronized resizes. The retained comparison
+shows the archived baseline failing the same remount assertion. These protocol
+captures do not establish physical-terminal behavior or prove that no
+intermediate partial display is visible.
 `benchmarks/tui_transitions.py --package-root CHECKOUT` loads that checkout's
 `core/src` directly and measures prepared-screen submission-to-next-render
 latency at the requested console size. It excludes model, database, and

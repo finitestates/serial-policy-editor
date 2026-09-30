@@ -84,5 +84,39 @@
       "p95_delta_percent": 4.958,
       "note": "Two isolated runs per revision still do not establish a regression gate. Median latency favored the working tree in both runs, while p95 varied between runs; operation counts matched. This headless comparison excludes driver writes and terminal painting."
     }
+  },
+  "post_fix_repeat": {
+    "date": "2026-09-29",
+    "scenario": "same 60-iteration prepared transition harness, repeated after Part Five input and PTY evidence fixes",
+    "runs": 2,
+    "baseline_revision": "4685000",
+    "baseline": {
+      "all_transition_medians_ms": [85.756, 81.106],
+      "median_of_run_medians_ms": 83.431,
+      "all_transition_p95_ms": [137.131, 133.742],
+      "median_of_run_p95_ms": 135.437
+    },
+    "working_tree": {
+      "all_transition_medians_ms": [81.748, 83.149],
+      "median_of_run_medians_ms": 82.449,
+      "all_transition_p95_ms": [129.367, 131.0],
+      "median_of_run_p95_ms": 130.184
+    },
+    "work_counts_match": true,
+    "work_counts_per_run": {
+      "input_ready_events": 117,
+      "screen_layout_refreshes": 131,
+      "table_fit_attempts": 50,
+      "table_column_resizes": 44,
+      "table_layout_refresh_requests": 44,
+      "beam_detail_renders": 6
+    },
+    "interpretation": {
+      "median_delta_ms": -0.983,
+      "median_delta_percent": -1.177,
+      "p95_delta_ms": -5.253,
+      "p95_delta_percent": -3.880,
+      "note": "Two paired runs are descriptive only; they do not establish a speedup or regression threshold. Counts show no added layout or table-fit work in this harness. Driver writes and terminal painting remain out of scope."
+    }
   }
 }

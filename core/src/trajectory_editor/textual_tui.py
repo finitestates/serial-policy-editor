@@ -21,7 +21,7 @@ from typing import Any, ClassVar
 from rich.markup import escape as escape_markup
 from rich.text import Text
 from textual import constants, events, on
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, ScreenError
 from textual.binding import Binding
 from textual.command import DiscoveryHit, Hit, Provider
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -247,8 +247,12 @@ def _stretch_data_table_column(
     for row in table.rows.values():
         if row.auto_height:
             row.height = 0
-    table._row_renderable_cache.clear()
-    table._cell_render_cache.clear()
+    # Textual 8.2.8's row and line caches are keyed by update count / screen
+    # coordinates, but not by column width. A width-only reflow can otherwise
+    # paint a stale wrap until some later data update. Clear all DataTable
+    # render and offset caches before measuring auto-height rows at the new
+    # width.
+    table._clear_caches()
     table._new_rows.update(table.rows)
     table._require_update_dimensions = True
     table.refresh(layout=True)
@@ -258,12 +262,93 @@ def _stretch_data_table_column(
 
 
 class _FluidDataTable(DataTable):
-    """DataTable adapter for one flexible column on Textual 8.2.8."""
+    """DataTable adapter for one flexible column on Textual 8.2.8.
 
-    def __init__(self, *args: Any, stretch_column: str, **kwargs: Any) -> None:
+    Textual's screen compositor calls ``_size_updated`` for every widget after
+    assigning its final region and before it renders that layout. Fit the
+    flexible column at that boundary so neither the seed width nor rows wrapped
+    at that width can enter a completed display pass.
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        stretch_column: str,
+        fit_before_compositor: bool = False,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self._stretch_column = stretch_column
+        self._fit_before_compositor = fit_before_compositor
         self._fit_after_resize_scheduled = False
+
+    def _size_updated(
+        self,
+        size: Size,
+        virtual_size: Size,
+        container_size: Size,
+        layout: bool = True,
+    ) -> bool:
+        """Fit and remeasure after allocation, before Textual paints the pass.
+
+        This deliberately uses Textual 8.2.8's pinned ``Widget._size_updated``
+        and DataTable dimension APIs. The resize message itself is delivered
+        after the screen's synchronous compositor refresh, which is too late
+        for a post-refresh fit to protect the first frame.
+        """
+        changed = super()._size_updated(size, virtual_size, container_size, layout)
+        if (
+            self._fit_before_compositor
+            and
+            self.is_mounted
+            and self._stretch_column in self.columns
+            and self.scrollable_content_region.width > 0
+        ):
+            self._fit_column_before_compositor()
+        return changed
+
+    def _fit_column_before_compositor(self) -> None:
+        """Settle widths and wrapped row heights in the current allocation."""
+        if self._updated_cells:
+            updated_cells = self._updated_cells.copy()
+            self._updated_cells.clear()
+            self._update_column_widths(updated_cells)
+
+        # New/changed rows establish the natural widths of the non-fill
+        # columns. Measure them once before allocating the remainder, then
+        # remeasure auto-height rows after the fill column is settled.
+        self._flush_pending_dimensions()
+        column = self.columns[self._stretch_column]
+        for _ in range(4):
+            viewport_width = self.scrollable_content_region.width
+            previous_width = column.width
+            _stretch_data_table_column(self, self._stretch_column)
+            if isinstance(self.app, PolicyEditorApp):
+                self.app.stats["table_fit_attempts"] += 1
+                if column.width != previous_width:
+                    self.app.stats["table_column_resizes"] += 1
+            self._flush_pending_dimensions()
+            if (
+                self.scrollable_content_region.width == viewport_width
+                and column.width == previous_width
+                and not self._require_update_dimensions
+            ):
+                break
+
+    def _flush_pending_dimensions(self) -> None:
+        """Run DataTable's queued measurement before the compositor pass."""
+        if self._require_update_dimensions:
+            new_rows = self._new_rows.copy()
+            self._new_rows.clear()
+            self._require_update_dimensions = False
+            previous_virtual_size = self.virtual_size
+            self._update_dimensions(new_rows)
+            if self._fit_before_compositor and self.virtual_size != previous_virtual_size:
+                # DataTable normally refreshes scrollbar gutters from
+                # ScrollView._size_updated(). Beam's synchronous row
+                # measurement can change virtual height after that hook has
+                # run, so settle the gutter now before fitting the fill column.
+                self._scroll_update(self.virtual_size)
 
     def on_resize(self, _event: events.Resize) -> None:
         # Resize handlers run before all child regions settle. Coalesce resize
@@ -278,6 +363,13 @@ class _FluidDataTable(DataTable):
         self.fit_column()
 
     def fit_column(self) -> None:
+        if self._fit_before_compositor:
+            if (
+                self._stretch_column in self.columns
+                and self.scrollable_content_region.width > 0
+            ):
+                self._fit_column_before_compositor()
+            return
         if (
             self._stretch_column in self.columns
             and self.scrollable_content_region.width > 0
@@ -547,6 +639,7 @@ class PolicyEditorApp(App[None]):
         self._ready_future = ready
         self._active_request: _RequestLifecycle | None = None
         self._active_screen: _RequestScreen | None = None
+        self._beam_resize_batch_pending = False
         self._input_event_cutoff: float | None = None
         self._output_chunks: deque[str] = deque()
         self._output_history_chars = 0
@@ -594,6 +687,42 @@ class PolicyEditorApp(App[None]):
 
     def _note_screen_layout_refresh(self, _screen: Screen[Any]) -> None:
         self.stats["screen_layout_refreshes"] += 1
+
+    async def _on_resize(self, event: events.Resize) -> None:
+        """Keep an old Beam layout from repainting at the new PTY size.
+
+        Textual 8.2.8 debounces the screen Resize event by 1/120s. Other
+        pending widget updates can otherwise repaint during that interval,
+        after the physical terminal has changed size but before Beam has
+        applied its responsive classes and reflowed.
+        """
+        try:
+            screen = self.screen
+        except ScreenError:
+            screen = None
+        if (
+            isinstance(screen, BeamScreen)
+            and self._size is not None
+            and self._size != event.size
+            and not self._beam_resize_batch_pending
+        ):
+            self._begin_batch()
+            self._beam_resize_batch_pending = True
+        await super()._on_resize(event)
+
+    def _finish_beam_resize_batch(self) -> None:
+        if self._beam_resize_batch_pending:
+            self._beam_resize_batch_pending = False
+            self._end_batch()
+
+    def _check_resize(self) -> None:
+        super()._check_resize()
+        try:
+            screen = self.screen
+        except ScreenError:
+            screen = None
+        if self._beam_resize_batch_pending and not isinstance(screen, BeamScreen):
+            self._finish_beam_resize_batch()
 
     def _set_command_palette_for(self, screen: _RequestScreen) -> None:
         state = getattr(screen, "state", None)
@@ -643,7 +772,6 @@ class PolicyEditorApp(App[None]):
 
     def show_request(self, lifecycle: _RequestLifecycle) -> Any:
         """Install or update a request screen and return its mount awaitable, if any."""
-        self._active_request = lifecycle
         state = lifecycle.state
         current = self.screen
         reuse_choice = (
@@ -653,8 +781,47 @@ class PolicyEditorApp(App[None]):
             and current.state.review is None
             and not current.accepting_input
         )
-        if reuse_choice:
+        reuse_beam = (
+            isinstance(state, BeamViewState)
+            and isinstance(current, BeamScreen)
+            and not current.accepting_input
+        )
+        reuse_edge = (
+            isinstance(state, EdgeViewState)
+            and isinstance(current, EdgeScreen)
+            and not current.accepting_input
+        )
+        reuse_prompt = (
+            isinstance(state, PromptRequest)
+            and isinstance(current, PromptScreen)
+            and not current.accepting_input
+            and PromptScreen.layout_key(current.state)
+            == PromptScreen.layout_key(state)
+        )
+        if not reuse_beam:
+            self._active_request = lifecycle
+        if reuse_beam:
+            screen = current
+            self._active_screen = screen
+            self._set_command_palette_for(screen)
+            screen.update_request(lifecycle)
+            mount = None
+        elif reuse_choice:
             assert isinstance(current, ChoiceScreen)
+            screen = current
+            self._active_screen = screen
+            self._set_command_palette_for(screen)
+            screen.update_request(lifecycle)
+            mount = None
+        elif reuse_edge:
+            assert isinstance(current, EdgeScreen)
+            screen = current
+            self._active_screen = screen
+            self._set_command_palette_for(screen)
+            screen.update_request(lifecycle)
+            mount = None
+        elif reuse_prompt:
+            assert isinstance(current, PromptScreen)
             screen = current
             self._active_screen = screen
             self._set_command_palette_for(screen)
@@ -668,7 +835,7 @@ class PolicyEditorApp(App[None]):
             screen = BeamScreen(self, lifecycle)
         else:
             screen = PromptScreen(self, lifecycle)
-        if not reuse_choice:
+        if not (reuse_choice or reuse_beam or reuse_edge or reuse_prompt):
             self._active_screen = screen
             self._set_command_palette_for(screen)
             if isinstance(current, _RequestScreen) and not current.accepting_input:
@@ -881,7 +1048,7 @@ class PolicyEditorApp(App[None]):
             self.push_screen(OutputScreen(self))
 
     def start_help(self, screen: _RequestScreen) -> None:
-        self.push_screen(HelpScreen(_help_document(screen.lifecycle.state)))
+        self.push_screen(HelpScreen(self, _help_document(screen.lifecycle.state)))
 
     def close_executors(self, *, wait: bool = True) -> None:
         self._warm_executor.shutdown(wait=wait, cancel_futures=True)
@@ -1832,8 +1999,7 @@ class EdgeScreen(_RequestScreen):
         table = self.query_one("#edge-commands", _FluidDataTable)
         table.add_column("command", key="command")
         table.add_column("description", key="description")
-        for item in edge_help(self.state.mode):
-            table.add_row(item.command, item.description, key=item.command, height=None)
+        self._populate_command_rows(table)
         self.call_after_refresh(table.fit_column)
         self.query_one("#edge-input", TextArea).focus()
         self.query_one("#hint", Static).update(
@@ -1841,6 +2007,43 @@ class EdgeScreen(_RequestScreen):
             "Blank continues · Ctrl+C interrupt · Ctrl+D quit\n"
             "Ctrl+L output · F1 help"
         )
+
+    def _populate_command_rows(self, table: _FluidDataTable) -> None:
+        for item in edge_help(self.state.mode):
+            table.add_row(item.command, item.description, key=item.command, height=None)
+
+    def update_request(self, lifecycle: _RequestLifecycle) -> None:
+        """Refresh a same-kind edge view while retaining its command widgets."""
+        assert isinstance(lifecycle.state, EdgeViewState)
+        next_state = lifecycle.state
+        mode_changed = next_state.mode != self.state.mode
+        self.accepting_input = False
+        self._submitted = False
+
+        with self.app.batch_update():
+            editor = self.query_one("#edge-input", TextArea)
+            self.set_input_enabled(False)
+            editor.text = ""
+            header = self.query_one("#edge-header", Static)
+            title = "LIVE SESSION" if next_state.mode == "session" else "LIVE EDGE"
+            entity = "Branch" if next_state.mode == "session" else "Episode"
+            header.update(Text(
+                f"{title}\n{entity} {next_state.episode_id} · boundary "
+                f"{next_state.boundary}\nSampler · {next_state.sampler_summary}"
+            ))
+            if mode_changed:
+                table = self.query_one("#edge-commands", _FluidDataTable)
+                table.clear()
+                self.state = next_state
+                self._populate_command_rows(table)
+                self.call_after_refresh(table.fit_column)
+            else:
+                self.state = next_state
+            self.lifecycle = lifecycle
+            self.generation = lifecycle.generation
+            self.terminal_app._active_request = lifecycle
+
+        self.call_after_refresh(self._enable_input)
 
     def set_input_enabled(self, enabled: bool) -> None:
         widget = self.query_one("#edge-input", TextArea)
@@ -1897,6 +2100,7 @@ class BeamInputArea(TextArea):
 class BeamScreen(_RequestScreen):
     """Beam survivor table and branch controls."""
 
+    AUTO_FOCUS = "#beam-input"
     SIDE_BY_SIDE_MIN_WIDTH = 120
     HORIZONTAL_BREAKPOINTS: ClassVar[list[tuple[int, str]]] = [
         (0, "-stacked"), (SIDE_BY_SIDE_MIN_WIDTH, "-side-by-side"),
@@ -1924,6 +2128,48 @@ class BeamScreen(_RequestScreen):
         self.state = lifecycle.state
         self.selected_label = self.state.selected_label
         self._labels: list[str] = []
+        self._set_layout_for_width(terminal_app.size.width)
+
+    def _set_layout_for_width(self, width: int) -> None:
+        """Choose the responsive class before Textual lays out this screen."""
+        self.update_classes(
+            {
+                "-stacked": width < self.SIDE_BY_SIDE_MIN_WIDTH,
+                "-side-by-side": width >= self.SIDE_BY_SIDE_MIN_WIDTH,
+            },
+            animate=False,
+        )
+
+    def _screen_resized(self, size: Size) -> None:
+        """Apply Beam's breakpoint before Textual reflows the screen.
+
+        Screen._on_resize currently lays out once before setting its breakpoint
+        classes. Updating the same class here prevents that intermediate layout
+        from over-allocating the horizontal table at narrow widths. Textual's
+        normal breakpoint update then confirms the same class later in the
+        resize handler.
+        """
+        self._set_layout_for_width(size.width)
+        if self.is_mounted:
+            self._render_hint(self.state)
+        super()._screen_resized(size)
+
+    async def _on_resize(self, event: events.Resize) -> None:
+        try:
+            await super()._on_resize(event)
+            # Screen._on_resize applies Textual's breakpoint classes after
+            # _screen_resized. Force the final class/size allocation while the
+            # app-level resize batch is still held; Screen._refresh_layout()
+            # will defer compositor output until the batch is released.
+            if self.terminal_app._beam_resize_batch_pending:
+                self._refresh_layout(event.size)
+                # The layout calls the Beam DataTable's _size_updated adapter,
+                # which may queue its fit/row-height refresh while still inside
+                # this resize. Promote those flags before releasing the batch
+                # so the compositor cannot paint the newly sized but stale row.
+                self._flush_pending_widget_refreshes()
+        finally:
+            self.terminal_app._finish_beam_resize_batch()
 
     def compose_request(self) -> ComposeResult:
         title = self.state.title
@@ -1933,21 +2179,94 @@ class BeamScreen(_RequestScreen):
         yield Static(id="beam-context", classes="muted")
         with Horizontal(id="beam-body"):
             yield _CommandTemplateDataTable(
-                id="beam-table", cursor_type="row", stretch_column="continuation"
+                id="beam-table", cursor_type="row", stretch_column="continuation",
+                fit_before_compositor=True,
             )
             with VerticalScroll(id="beam-detail-pane"):
                 yield Static(id="beam-detail")
         yield Static(id="beam-notice")
         with Horizontal(id="command-row"):
             yield Static("Beam >", classes="prompt-label")
-            yield BeamInputArea("", id="beam-input", compact=True, soft_wrap=False, tab_behavior="focus")
+            yield BeamInputArea(
+                "", id="beam-input", compact=True, soft_wrap=False,
+                tab_behavior="focus",
+            )
         yield Static(id="hint", classes="hint")
 
     def on_mount(self) -> None:
         super().on_mount()
+        table = self.query_one("#beam-table", _CommandTemplateDataTable)
+        for label, width in (
+            ("", 2), ("#", 3), ("label", None), ("state", None),
+            ("score", None), ("continuation", 1),
+        ):
+            table.add_column(label, width=width, key=label or "marker")
+        self._labels, self.selected_label = self._render_state()
+
+    def update_request(self, lifecycle: _RequestLifecycle) -> None:
+        """Advance the mounted Beam view without exposing an empty screen."""
+        assert isinstance(lifecycle.state, BeamViewState)
+        self.accepting_input = False
+        self._submitted = False
+        with self.app.batch_update():
+            editor = self.query_one("#beam-input", TextArea)
+            editor.read_only = True
+            editor.text = ""
+            labels, selected_label = self._render_state(
+                lifecycle.state, lifecycle.state.selected_label,
+            )
+            self._flush_pending_widget_refreshes()
+            # Publish generation and selection only after every widget has
+            # handed its refresh request to the screen, while the batch still
+            # prevents compositor output. Textual 8.2.8 normally promotes a
+            # widget's refresh flags from that widget's later Idle event;
+            # without this handoff, those independent messages can reach the
+            # screen after the batch and produce mixed-generation frames.
+            self.lifecycle = lifecycle
+            self.state = lifecycle.state
+            self._labels = labels
+            self.selected_label = selected_label
+            self.terminal_app._active_request = lifecycle
+        self.call_after_refresh(self._enable_input)
+
+    def _flush_pending_widget_refreshes(self) -> None:
+        """Queue staged descendant refreshes before a Beam batch is released.
+
+        Textual 8.2.8's Widget.refresh() marks each widget dirty, then promotes
+        those flags to separate Screen Update/Layout messages on that widget's
+        next Idle. A synchronous App.batch_update() would end before those
+        messages are queued. Promoting them here lets the Screen coalesce all
+        affected widgets into one compositor pass. This adapter deliberately
+        uses the pinned Textual refresh hook, and is only called inside the
+        Beam screen's update/selection transactions.
+        """
+        for widget in self.walk_children(with_self=True):
+            if (
+                widget._repaint_required
+                or widget._layout_required
+                or widget._scroll_required
+                or widget._refresh_styles_required
+            ):
+                widget._check_refresh()
+
+    def _render_state(
+        self,
+        state: BeamViewState | None = None,
+        selected_label: str | None = None,
+    ) -> tuple[list[str], str | None]:
+        using_current_state = state is None
+        state = self.state if state is None else state
+        if selected_label is None and using_current_state:
+            selected_label = self.selected_label
+        title = state.title
+        if state.at_edge:
+            title = f"BEAM OPTIONS   ·   {title.removeprefix('BEAM   ')}"
+        heading = self.query_one("#beam-heading", Static)
+        if heading.content != title:
+            heading.update(title)
         self.query_one("#beam-context", Static).update(
             Text(
-                "Shared context: " + _safe_context_text(self.state.shared_context),
+                "Shared context: " + _safe_context_text(state.shared_context),
                 style=semantic_style(
                     "section", self.terminal_app.theme_name,
                     environment=self.terminal_app.environment,
@@ -1955,19 +2274,18 @@ class BeamScreen(_RequestScreen):
             )
         )
         table = self.query_one("#beam-table", _CommandTemplateDataTable)
-        for label, width in (
-            ("", 2), ("#", 3), ("label", None), ("state", None),
-            ("score", None), ("continuation", 1),
-        ):
-            table.add_column(label, width=width, key=label or "marker")
-        self._labels = [row.label for row in self.state.rows]
-        if self.selected_label not in self._labels:
-            self.selected_label = self._labels[0] if self._labels else None
+        next_labels = [row.label for row in state.rows]
+        if next_labels != self._labels:
+            # Changing membership/order is one atomic update on the mounted
+            # table; never paint its cleared intermediate state.
+            table.clear()
+        if selected_label not in next_labels:
+            selected_label = next_labels[0] if next_labels else None
         self.query_one("#beam-input", TextArea).focus()
-        for rank, row in enumerate(self.state.rows, 1):
-            marker = ">" if row.label == self.selected_label else " "
+        for rank, row in enumerate(state.rows, 1):
+            marker = ">" if row.label == selected_label else " "
             score = row.score.replace("-", "−")
-            if self.state.stochastic:
+            if state.stochastic:
                 model_logp = (
                     "—" if row.model_log_probability is None
                     else f"{row.model_log_probability:.3f}"
@@ -1976,36 +2294,53 @@ class BeamScreen(_RequestScreen):
             if row.protected:
                 marker = "◆" if marker == " " else ">◆"
             continuation = row.continuation.replace("\n", " ↵ ")
-            table.add_row(
-                marker,
-                str(rank),
-                row.label,
-                row.state,
-                score,
-                continuation,
-                height=None,
-                key=row.label,
-            )
+            values = (marker, str(rank), row.label, row.state, score, continuation)
+            if row.label in table.rows:
+                for key, value in zip(table.columns, values):
+                    if table.get_cell(row.label, key) != value:
+                        table.update_cell(row.label, key, value, update_width=True)
+                # Auto-height continuations must be remeasured as they grow.
+                table.rows[row.label].height = 0
+                table._new_rows.add(row.label)
+                table._require_update_dimensions = True
+            else:
+                table.add_row(*values, height=None, key=row.label)
         selected_index = next(
-            (index for index, row in enumerate(self.state.rows)
-             if row.label == self.selected_label),
+            (index for index, row in enumerate(state.rows)
+             if row.label == selected_label),
             0,
         )
-        if self.state.rows:
+        if state.rows:
             table.move_cursor(row=selected_index, column=0, animate=False)
         table.fit_column()
-        self._render_details()
-        self.query_one("#beam-notice", Static).update(self.state.notice)
-        self.query_one("#beam-notice", Static).display = bool(self.state.notice)
-        hint = (
-            "Enter/→ resume · Esc/Ctrl+D return\nCtrl+K commands · Ctrl+L output · F1 help"
-            if self.state.at_edge else
-            "↑↓ select · ←/→ step · Enter commit\n"
-            "PgUp/Dn details · Esc/Ctrl+D return\n"
-            "Backspace kill · "
-            + ("p protect · " if not self.state.stochastic else "")
-            + "f family\nCtrl+K commands · Ctrl+L output · F1 help"
-        )
+        self._render_details(state, selected_label)
+        self.query_one("#beam-notice", Static).update(state.notice)
+        self._render_hint(state)
+
+        return next_labels, selected_label
+
+    def _render_hint(self, state: BeamViewState) -> None:
+        if self.has_class("-side-by-side"):
+            hint = (
+                "Enter/→ resume · Esc/Ctrl+D return\n"
+                "Ctrl+K commands · Ctrl+L output · F1 help"
+                if state.at_edge else
+                "↑↓ select · ←/→ step · Enter commit · PgUp/Dn details · "
+                "Backspace kill · "
+                + ("p protect · " if not state.stochastic else "")
+                + "f family\nEsc/Ctrl+D return · Ctrl+K commands · "
+                "Ctrl+L output · F1 help"
+            )
+        else:
+            hint = (
+                "Enter/→ resume · Esc/Ctrl+D return\nCtrl+K commands · Ctrl+L output · F1 help"
+                if state.at_edge else
+                "↑↓ select · ←/→ step · Enter commit\n"
+                "PgUp/Dn details · Esc/Ctrl+D return\n"
+                "Backspace kill · "
+                + ("p protect · " if not state.stochastic else "")
+                + "f family\nCtrl+K commands · Ctrl+L output · F1 help"
+            )
         self.query_one("#hint", Static).update(hint)
 
     def set_input_enabled(self, enabled: bool) -> None:
@@ -2021,17 +2356,25 @@ class BeamScreen(_RequestScreen):
         elif key == "f":
             self.action_toggle_families()
 
-    def _render_details(self) -> None:
+    def _render_details(
+        self,
+        state: BeamViewState | None = None,
+        selected_label: str | None = None,
+    ) -> None:
         self.terminal_app.stats["beam_detail_renders"] += 1
-        row = next((item for item in self.state.rows if item.label == self.selected_label), None)
-        label = self.selected_label or "—"
+        using_current_state = state is None
+        state = self.state if state is None else state
+        if selected_label is None and using_current_state:
+            selected_label = self.selected_label
+        row = next((item for item in state.rows if item.label == selected_label), None)
+        label = selected_label or "—"
         protected = " · PROTECTED" if row is not None and row.protected else ""
         rendered = Text(f"SELECTED: {label}{protected}\n", style="bold underline")
         if row is None:
             rendered.append("(no retained branch)")
         else:
             rendered.append(f"STATE: {row.state} · SCORE: {row.score.replace('-', '−')}\n")
-            if self.state.stochastic:
+            if state.stochastic:
                 model_logp = (
                     "—" if row.model_log_probability is None
                     else f"{row.model_log_probability:.3f}"
@@ -2043,7 +2386,7 @@ class BeamScreen(_RequestScreen):
                 else f"{row.step_log_probability:.3f}".replace("-", "−")
             )
             rendered.append(f"Model rank: {model_rank} · Step log-p: {step_logp}\n")
-            if row.model_log_probability is not None and not self.state.stochastic:
+            if row.model_log_probability is not None and not state.stochastic:
                 model_logp = f"{row.model_log_probability:.3f}".replace("-", "−")
                 rendered.append(f"Model log-p: {model_logp}\n")
             if row.family_metadata:
@@ -2075,16 +2418,29 @@ class BeamScreen(_RequestScreen):
 
     @on(DataTable.RowHighlighted, "#beam-table")
     def _on_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        self._select_row(str(event.row_key.value))
+        if self.accepting_input:
+            self._select_row(str(event.row_key.value))
 
     @on(DataTable.RowSelected, "#beam-table")
     def _on_row_selected(self, event: DataTable.RowSelected) -> None:
-        self._select_row(str(event.row_key.value))
+        if self.accepting_input:
+            self._select_row(str(event.row_key.value))
 
     def _select_row(self, label: str) -> None:
         if label in self._labels and label != self.selected_label:
-            self.selected_label = label
-            self._render_details()
+            with self.app.batch_update():
+                self.selected_label = label
+                table = self.query_one("#beam-table", _CommandTemplateDataTable)
+                for row in self.state.rows:
+                    marker = ">" if row.label == label else " "
+                    if row.protected:
+                        marker = "◆" if marker == " " else ">◆"
+                    if table.get_cell(row.label, "marker") != marker:
+                        table.update_cell(
+                            row.label, "marker", marker, update_width=False,
+                        )
+                self._render_details()
+                self._flush_pending_widget_refreshes()
         if label in self._labels:
             self.query_one("#beam-input", TextArea).focus()
 
@@ -2178,10 +2534,33 @@ class BeamScreen(_RequestScreen):
         widget.focus()
 
 
-class _SingleKeyHint(Static):
-    """Focusable target for single-key requests, which have no editor widget."""
+class _SingleKeyInput(Input):
+    """A real Textual key target that submits exactly one non-shortcut key."""
 
-    can_focus = True
+    async def _on_key(self, event: events.Key) -> None:
+        screen = self.screen
+        if not isinstance(screen, PromptScreen) or not screen.accepting_input:
+            return
+        if event.key == "backspace":
+            screen.submit("\x7f")
+        elif event.key not in {
+            "escape", "ctrl+d", "ctrl+c", "enter", "pageup", "pagedown",
+            "ctrl+l", "f1", "ctrl+k",
+        }:
+            screen.submit(event.character if event.character is not None else event.key)
+        event.stop()
+        event.prevent_default()
+
+
+class _PageReturnInput(Input):
+    """Focused page command target; scrolling remains owned by page bindings."""
+
+    async def _on_key(self, event: events.Key) -> None:
+        screen = self.screen
+        if isinstance(screen, PromptScreen) and screen.accepting_input and event.key == "q":
+            screen.submit("")
+        event.stop()
+        event.prevent_default()
 
 
 class PromptScreen(_RequestScreen):
@@ -2207,6 +2586,61 @@ class PromptScreen(_RequestScreen):
         self._escape_pending = False
         self._error = ""
 
+    @staticmethod
+    def layout_key(state: PromptRequest) -> tuple[bool, bool, bool, bool]:
+        """Return the flags that determine the mounted prompt widget tree."""
+        return state.page, state.single_key, state.multiline, bool(state.body)
+
+    def update_request(self, lifecycle: _RequestLifecycle) -> None:
+        """Refresh compatible prompt content without replacing its widgets."""
+        assert isinstance(lifecycle.state, PromptRequest)
+        next_state = lifecycle.state
+        assert self.layout_key(next_state) == self.layout_key(self.state)
+
+        self.accepting_input = False
+        self._submitted = False
+        with self.app.batch_update():
+            self.set_input_enabled(False)
+            self.lifecycle = lifecycle
+            self.state = next_state
+            self.generation = lifecycle.generation
+            self.terminal_app._active_request = lifecycle
+            self._escape_pending = False
+            self._error = ""
+
+            if next_state.page:
+                body = self.query_one("#page-body", Static)
+                body.update(Text(next_state.body))
+                self.query_one("#page-scroll", VerticalScroll).scroll_to(
+                    y=0, animate=False, immediate=True, force=True,
+                )
+                self.query_one("#page-return", _PageReturnInput).value = ""
+            else:
+                self.query_one("#prompt-label", Static).update(next_state.prompt)
+                if next_state.body:
+                    body = self.query_one("#prompt-body", VerticalScroll)
+                    body.query_one(Static).update(Text(next_state.body))
+                    body.scroll_to(y=0, animate=False, immediate=True, force=True)
+                if next_state.multiline:
+                    self.query_one("#multiline-input", TextArea).text = ""
+                elif next_state.single_key:
+                    self.query_one("#single-key-hint", _SingleKeyInput).value = ""
+                else:
+                    self.query_one("#prompt-input", Input).value = ""
+
+            status = self.query_one("#prompt-status", Static)
+            status.update("")
+            status.display = False
+            status.remove_class("feedback-error")
+            status.add_class("feedback-info")
+
+        self.call_after_refresh(self._enable_input_and_focus)
+
+    def _enable_input_and_focus(self) -> None:
+        self._enable_input()
+        if self.accepting_input:
+            self._focus_prompt_target()
+
     def compose_request(self) -> ComposeResult:
         group_classes = "page" if self.state.page else ""
         with Vertical(id="prompt-group", classes=group_classes):
@@ -2214,6 +2648,9 @@ class PromptScreen(_RequestScreen):
                 yield VerticalScroll(
                     Static(Text(self.state.body), id="page-body"),
                     id="page-scroll",
+                )
+                yield _PageReturnInput(
+                    "", id="page-return", placeholder="Enter, Esc or q returns",
                 )
             else:
                 if self.state.body:
@@ -2234,7 +2671,9 @@ class PromptScreen(_RequestScreen):
                     else:
                         yield Input("", id="prompt-input", placeholder="Response")
                 else:
-                    yield _SingleKeyHint("Press a key", id="single-key-hint")
+                    yield _SingleKeyInput(
+                        "", id="single-key-hint", placeholder="Press a key",
+                    )
             yield Static(id="prompt-status", classes="feedback-info")
         yield Static(id="hint", classes="hint")
 
@@ -2252,13 +2691,19 @@ class PromptScreen(_RequestScreen):
         self.query_one("#hint", Static).update(hint)
         self.call_after_refresh(self._focus_prompt_target)
 
+    def on_screen_resume(self, _event: events.ScreenResume) -> None:
+        # Modal dismissal restores Textual's previous child focus. Reassert the
+        # request's owner so a page/single-key request remains directly usable.
+        if self.accepting_input:
+            self.call_after_refresh(self._focus_prompt_target)
+
     def _focus_prompt_target(self) -> None:
         if self.state.multiline:
             self.query_one("#multiline-input", TextArea).focus()
         elif self.state.page:
-            self.query_one("#page-scroll", VerticalScroll).focus()
+            self.query_one("#page-return", _PageReturnInput).focus()
         elif self.state.single_key:
-            self.query_one("#single-key-hint", _SingleKeyHint).focus()
+            self.query_one("#single-key-hint", _SingleKeyInput).focus()
         else:
             self.query_one("#prompt-input", Input).focus()
 
@@ -2384,8 +2829,9 @@ class HelpScreen(ModalScreen[None]):
         Binding("question_mark", "close_help", "Close help", show=False, priority=True),
     ]
 
-    def __init__(self, document: Text) -> None:
+    def __init__(self, terminal_app: PolicyEditorApp, document: Text) -> None:
         super().__init__()
+        self.terminal_app = terminal_app
         self.document = document
 
     def compose(self) -> ComposeResult:
@@ -2408,6 +2854,12 @@ class HelpScreen(ModalScreen[None]):
 
     def action_close_help(self) -> None:
         self.dismiss(None)
+        self.terminal_app.call_after_refresh(self._restore_request_focus)
+
+    def _restore_request_focus(self) -> None:
+        screen = self.terminal_app._active_screen
+        if isinstance(screen, PromptScreen) and screen.accepting_input:
+            screen._focus_prompt_target()
 
 
 class OutputScreen(ModalScreen[None]):
@@ -2442,11 +2894,15 @@ class OutputScreen(ModalScreen[None]):
         log = self.query_one("#output-body", RichLog)
         previous_scroll_y = log.scroll_y
         following_tail = previous_scroll_y >= log.max_scroll_y
-        log.clear()
         history = "".join(self.terminal_app._output_chunks)
-        if history:
-            log.write(Text(history), scroll_end=False)
-            self.terminal_app.stats["rich_log_writes"] += 1
+        # A history rollover replaces the bounded view wholesale. Suspend
+        # compositor paints until the replacement content is ready so the
+        # cleared RichLog can never become its own visible frame.
+        with self.terminal_app.batch_update():
+            log.clear()
+            if history:
+                log.write(Text(history), scroll_end=False)
+                self.terminal_app.stats["rich_log_writes"] += 1
 
         def restore_scroll() -> None:
             if following_tail:
@@ -2476,6 +2932,12 @@ class OutputScreen(ModalScreen[None]):
 
     def action_close_output(self) -> None:
         self.dismiss(None)
+        self.terminal_app.call_after_refresh(self._restore_request_focus)
+
+    def _restore_request_focus(self) -> None:
+        screen = self.terminal_app._active_screen
+        if isinstance(screen, PromptScreen) and screen.accepting_input:
+            screen._focus_prompt_target()
 
 
 class TextualTerminalSession(AbstractContextManager["TextualTerminalSession"]):

@@ -9,14 +9,14 @@ Core tests assert observable state, persisted records, replay results, and may a
 
 | ID | Terminal contract | Active evidence |
 | --- | --- | --- |
-| T01 | one Textual app accepts choice, review, EDGE, beam, page, prompt, and isolated chord requests across screen transitions | `test_terminal_lifecycle.py`, `test_chord.py` |
+| T01 | Pilot covers Choice, review, EDGE, Beam, prompt, page, and isolated chord screen transitions; the POSIX driver matrix verifies review, page, single-key, chord, and multiline paste submission | `test_terminal_lifecycle.py`, `test_chord.py`, `test_textual_driver_request_matrix.py` |
 | T02 | engine-owned insertion previews run on the request owner; search warming runs on an executor and delivers generation-tagged results on the UI thread | `test_search_warm_terminal.py` |
 | T03 | invalid choice commands remain editable; a submitted screen keeps a focused read-only command bar through owner-thread handoff and rejects queued input | `test_terminal_lifecycle.py`, `test_textual_migration_journey.py`, `test_textual_driver_pty.py` |
 | T04 | EDGE blank Enter, Ctrl+C, and Ctrl+D preserve their command, interrupt, and cancellation values; the non-TTY path remains text-only | `test_terminal_lifecycle.py`, `test_terminal_scenarios.py` |
 | T05 | Choice feedback navigation, search-lens rank selection, authored-text editing, context paging, and review reactivation retain their command results | `test_terminal_lifecycle.py` |
-| T06 | beam shortcuts, selection, stochastic score formatting, and prompt modes return the requested values | `test_terminal_lifecycle.py` |
+| T06 | Pilot verifies Beam shortcuts, selection, stochastic formatting, and prompt-mode values; actual-driver submitted values are asserted for page, single-key, chord, and multiline composition | `test_terminal_lifecycle.py`, `test_textual_driver_request_matrix.py` |
 | T07 | ordinary rank browsing does not mutate speculative backend state before engine commit | `test_selection_warm_terminal.py` |
-| T08 | row selection preserves immediate command focus across repeated clicks; Beam uses remaining height; a POSIX runtime journey applies Choice, EDGE, prompt, Beam advance/select/return, and discards handoff input | `test_textual_migration_journey.py`, `test_textual_responsive_layout.py`, `test_textual_driver_pty.py` |
+| T08 | row selection preserves immediate command focus across repeated clicks; Edge and compatible Prompt requests reuse mounted widgets; the POSIX Beam journey keeps one screen through 30 Right-key advances, gated waiting, and synchronized resize while preserving complete captured panes and input focus | `test_textual_transition_matrix.py`, `test_textual_migration_journey.py`, `test_textual_responsive_layout.py`, `test_textual_driver_pty.py` |
 | T09 | captured output retains exactly the trailing 16,000 characters across oversized and incremental writes; an open or reopened viewer shows that history and preserves paging away from the tail | `test_terminal_lifecycle.py` |
 | T10 | Choice renders the full prepared context tail by default, records cumulative rendered-character work as the tail grows, and does not jump to the tail while the user pages away | `test_terminal_lifecycle.py` |
 

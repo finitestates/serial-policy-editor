@@ -7,11 +7,15 @@ from dataclasses import replace
 import pytest
 from rich.text import Text
 from textual.widgets import DataTable, Static
-
 from trajectory_editor.terminal_contracts import ChoiceFeedback
 from trajectory_editor.textual_tui import BeamScreen, ChoiceScreen, PolicyEditorApp
 
-from tests.core.textual_support import beam_state, choice_state, install_request, run_pilot
+from tests.core.textual_support import (
+    beam_state,
+    choice_state,
+    install_request,
+    run_pilot,
+)
 
 
 def _plain(value: object) -> str:

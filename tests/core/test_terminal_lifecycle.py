@@ -14,7 +14,7 @@ import pytest
 from rich.text import Text
 from textual import events
 from textual.containers import VerticalScroll
-from textual.widgets import DataTable, Input, Static, TextArea
+from textual.widgets import DataTable, Input, RichLog, Static, TextArea
 from trajectory_editor.core.candidates import Candidate
 from trajectory_editor.edge_help import edge_help
 from trajectory_editor.terminal_contracts import (
@@ -279,6 +279,111 @@ def test_output_modal_matches_the_bounded_history_while_open_and_after_reopen():
                 segment.text for line in reopened_log.lines for segment in line
             ) == expected
             assert len(reopened_log.lines) <= limit + 1
+
+    run_pilot(scenario)
+
+
+@pytest.mark.parametrize("follow_tail", [False, True], ids=("scrolled-up", "at-tail"))
+def test_output_rollover_repaints_complete_history_in_one_batch_and_keeps_scroll(
+    monkeypatch, follow_tail,
+):
+    async def scenario():
+        app = PolicyEditorApp()
+        app.OUTPUT_HISTORY_LIMIT = 600
+        initial = "".join(
+            f"{index:03d}:" + "." * 15 + "\n" for index in range(29)
+        )
+        addition = "NEW-" + "n" * 76
+
+        async with app.run_test(size=(80, 24)) as pilot:
+            await install_request(app, pilot, prompt_state())
+            app.write_output(initial)
+            app.start_output()
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, OutputScreen)
+            log = screen.query_one("#output-body", RichLog)
+            assert log.max_scroll_y > 0
+
+            if follow_tail:
+                log.scroll_end(animate=False, immediate=True)
+            else:
+                log.scroll_to(y=0, animate=False, immediate=True)
+            await pilot.pause()
+            previous_scroll = log.scroll_y
+            previous_max_scroll = log.max_scroll_y
+            assert (previous_scroll == previous_max_scroll) is follow_tail
+
+            operations = []
+            original_clear = RichLog.clear
+            original_write = RichLog.write
+
+            def tracked_clear(widget):
+                if widget is log:
+                    operations.append(("clear", app._batch_count))
+                return original_clear(widget)
+
+            def tracked_write(widget, *args, **kwargs):
+                if widget is log:
+                    operations.append(("write", app._batch_count))
+                return original_write(widget, *args, **kwargs)
+
+            monkeypatch.setattr(RichLog, "clear", tracked_clear)
+            monkeypatch.setattr(RichLog, "write", tracked_write)
+
+            display_passes = []
+
+            def capture_display_pass():
+                if app.screen is not screen:
+                    return
+                display_passes.append(
+                    {
+                        "heading": _text(screen.query_one(".section", Static)),
+                        "hint": _text(screen.query_one("#hint", Static)),
+                        "history": "".join(
+                            segment.text for line in log.lines for segment in line
+                        ),
+                        "visible": tuple(
+                            log.render_line(row).text for row in range(log.size.height)
+                        ),
+                        "scroll_y": log.scroll_y,
+                        "max_scroll_y": log.max_scroll_y,
+                    }
+                )
+
+            app.post_display_hook = capture_display_pass
+            expected = (initial + addition)[-app.OUTPUT_HISTORY_LIMIT :]
+            expected_display = expected.replace("\n", "")
+            app.write_output(addition)
+            await pilot.pause()
+
+            assert operations == [("clear", 1), ("write", 1)]
+            assert display_passes
+            assert all(frame["heading"] == "Captured output" for frame in display_passes)
+            assert all(
+                frame["hint"] == "PgUp/PgDn scroll · Esc/q/Ctrl+L closes"
+                for frame in display_passes
+            )
+            assert all(frame["history"] == expected_display for frame in display_passes)
+            assert all(any(line.strip() for line in frame["visible"]) for frame in display_passes)
+            assert all(
+                frame["scroll_y"]
+                == (frame["max_scroll_y"] if follow_tail else previous_scroll)
+                for frame in display_passes
+            )
+            assert "".join(app._output_chunks) == expected
+            assert log.scroll_y == (log.max_scroll_y if follow_tail else previous_scroll)
+            if follow_tail:
+                assert all(
+                    any("NEW-" in line for line in frame["visible"])
+                    for frame in display_passes
+                )
+            else:
+                assert log.scroll_y < log.max_scroll_y
+                assert all(
+                    not any("NEW-" in line for line in frame["visible"])
+                    for frame in display_passes
+                )
 
     run_pilot(scenario)
 
