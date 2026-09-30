@@ -35,70 +35,12 @@ timestamps; report sampling gaps with those bounds.
 
 ## Verify user-visible behavior before hand-back
 
-Use this workflow for terminal/UI changes and for any bug report whose symptom
-depends on what a person sees. A final widget state or passing unit suite is not
-evidence that intermediate output was correct.
-
-1. **Turn the report into an observable contract.** Record the exact entry
-   point, input sequence, expected screen/output, dimensions, and the visible
-   state that would count as failure. Trace that route through the production
-   caller before changing code. Use a deterministic backend or fixture where
-   possible so unrelated model/runtime variance cannot hide the defect.
-2. **Capture the failing behavior before fixing it.** Drive the actual
-   application path. For Textual, use the production driver in a POSIX PTY;
-   send keys/mouse input through the PTY and synchronize on explicit readiness
-   or barriers, not arbitrary sleeps. Preserve raw PTY bytes, terminal size and
-   resize events, ordered write/display markers, input/request generations,
-   widget identity, pane geometry, cursor/focus, and the decoded terminal grid
-   with cell styles. Save the capture before assertions so failures retain
-   their evidence.
-3. **Assert every visible boundary, not just the settled screen.** Hook actual
-   compositor display passes and enqueue each marker through the same ordered
-   writer path as terminal bytes. At every pass assert the user-visible
-   contract: required content is present, pane bounds fit, wrapped text is
-   complete, selection/focus/styles remain correct, and preserved regions are
-   not erased or replaced by transient blank/partial layouts. Keep expected
-   content changes separate from unrelated redraws. Test a slow/gated result,
-   a fast result, repeated input, resize, and the relevant modal/return paths.
-4. **Prove the test can detect the defect.** Add small negative controls that
-   intentionally produce the class of failure under test—for example, paint
-   one incomplete table pass, clear a preserved pane, remount a same-kind
-   screen, or drop focus styling. The corresponding assertion must fail on
-   that control and pass on the corrected production journey. Do not accept
-   positive counters, widget identity alone, or a final screenshot as a visual
-   oracle.
-5. **Reconstruct and inspect the captured output.** Replay the raw ANSI/UTF-8
-   PTY stream at each recorded marker through a terminal emulator (the current
-   helper uses pyte), verify the replayed grid against the independently
-   captured grid, and export selected frames or a sequence as SVG/PNG. Inspect
-   the failure and corrected sequence at original cell dimensions. Keep the
-   capture JSON and raw byte stream beside the images so another developer can
-   rerender the evidence instead of relying on a description.
-6. **Measure timing at the layer that owns the symptom.** PTY byte offsets
-   establish ordering only. When duration matters, timestamp input, writes,
-   and display markers with a monotonic clock at capture time. For
-   compositor-visible flashes, also retain a desktop recording and use its
-   frame presentation timestamps; report first bad, last bad, nearest good
-   frames, and sampling gaps. Do not equate a Textual callback, PTY write, or
-   terminal-emulator replay frame with a physical monitor refresh.
-7. **Hand back a reproducible result.** Include the exact command and
-   environment, the scenario and dimensions, links to raw and rendered
-   artifacts, the frame/event range where failure appears, the assertions that
-   rejected it, and the same evidence from the fixed build. State precisely
-   which layer was observed (widget, PTY stream, terminal replay, desktop
-   recording, or physical display). When required evidence is absent, inspect
-   the capture format and source, identify the missing measurement, and add
-   that instrumentation to the next run; do not stop at “unknown” or ask the
-   user to rediscover the issue.
-
-For the observability model behind this workflow—what each test layer can and cannot establish, why ordered invalid frames do not require timestamps, and how synchronized updates affect presentation eligibility—see [`tests/VISIBLE_FRAME_CORRECTNESS.md`](tests/VISIBLE_FRAME_CORRECTNESS.md).
-
-For current Textual journeys, `core/scripts/record_textual_journey.py` records
-the production PTY test and exports marked grids; `core/scripts/render_textual_capture.py`
-replays selected display markers as styled images. The reusable Beam example,
-including old-build negative results and ordered-frame assertions, is in
-`tests/core/test_textual_driver_pty.py` and
-`tests/core/test_textual_render_stability.py`.
+Follow [Terminal rendering validation and handoff](tests/TERMINAL_RENDERING_GUIDE.md)
+for terminal/UI changes. It is the canonical workflow, command reference,
+artifact map and handoff checklist. Intermediate production-driver transitions
+must be inspected and asserted; settled screenshots alone are insufficient.
+See [Visible-frame correctness](tests/VISIBLE_FRAME_CORRECTNESS.md) for replay
+interpretation. Root `AGENTS.md` governs evidence acceptance.
 
 Version metadata in `core/pyproject.toml`, `vector/pyproject.toml`, and
 `core/src/trajectory_editor/version.py` must agree. The vector package's core

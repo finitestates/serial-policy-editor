@@ -1,5 +1,8 @@
 # Terminal API and fallback behavior
 
+For the required validation workflow, commands and evidence index, see
+[Terminal rendering validation and handoff](tests/TERMINAL_RENDERING_GUIDE.md).
+
 `TerminalIO(...)` is the application's terminal entry point. Construct it once
 per interactive run and enter `with io.session():` around that run. When both
 standard streams are usable TTYs and Textual is installed, the session starts

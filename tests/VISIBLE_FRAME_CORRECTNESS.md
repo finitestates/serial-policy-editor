@@ -1,5 +1,8 @@
 # Visible-frame correctness in terminal tests
 
+For the required validation workflow, commands and evidence index, see
+[Terminal rendering validation and handoff](TERMINAL_RENDERING_GUIDE.md).
+
 The terminal test suite observes several different layers of the UI. Those
 layers answer different questions and should not be treated as interchangeable.
 

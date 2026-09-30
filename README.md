@@ -1,5 +1,8 @@
 # Serial Policy Editor
 
+For the required validation workflow, commands and evidence index, see
+[Terminal rendering validation and handoff](tests/TERMINAL_RENDERING_GUIDE.md).
+
 Serial Policy Editor is a terminal editor for steering a local language model
 one token, text insertion, or delegated span at a time. Episodes can be
 replayed, rewound, forked, searched, and exported through the projector.

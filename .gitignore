@@ -21,3 +21,6 @@ pyvenv.cfg
 
 # Separate local checkouts for experimental branches
 .worktrees/
+
+# Local terminal capture runs (durable regression evidence is curated separately)
+/terminal-reconstructions/
