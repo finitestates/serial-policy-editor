@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Replace the live Textual UI and its thread bridge with a synchronous curses
+  renderer for choices, EDGE, beam branches, prompts, and chord composition.
+  The episode-owning thread retains backend, action, and storage ownership.
+- Add a Ctrl+K command picker and F1 help. Keep EDGE commands available from
+  the live edge view and command picker.
+- Preserve the plain terminal fallback for piped or noninteractive use.
+
 ## v0.8.5 — 2026-09-27
 
 - Remove global token budgets and the abandoned control-track state. Episodes

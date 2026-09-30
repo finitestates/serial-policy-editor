@@ -11,9 +11,13 @@ from trajectory_editor.core.sampling import draw_token
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_ui import InteractivePolicy, _choice_from_observation
 from trajectory_editor.episode_hash import token_prefix_sha256
-from trajectory_editor.live_tui import LIVE_STYLES, PreviewPending, _render_choice, action_preview
+from trajectory_editor.tui_render import PreviewPending, _render_choice, action_preview
 from trajectory_editor.teacher_commands import (
     CommandKind, CommandState, interpret_command, parse_command,
+)
+from trajectory_editor.ui_themes import (
+    LIVE_THEME_NAMES, is_dark_terminal, resolve_live_theme, semantic_style,
+    theme_palette,
 )
 
 pytestmark = pytest.mark.current_workflow
@@ -49,6 +53,18 @@ def _preview(raw, choice, candidates, **kwargs):
         choice, raw, candidates, lambda text, mode: text,
         default_hold_tokens=24, default_search_radius=2, **kwargs,
     )
+
+
+def _contrast_ratio(foreground: str, background: str) -> float:
+    def luminance(color: str) -> float:
+        channels = [int(color[index:index + 2], 16) / 255 for index in (1, 3, 5)]
+        linear = [value / 12.92 if value <= .04045 else ((value + .055) / 1.055) ** 2.4
+                  for value in channels]
+        return .2126 * linear[0] + .7152 * linear[1] + .0722 * linear[2]
+
+    first, second = luminance(foreground), luminance(background)
+    lighter, darker = max(first, second), min(first, second)
+    return (lighter + .05) / (darker + .05)
 
 
 @pytest.mark.parametrize("raw", [
@@ -106,24 +122,41 @@ def test_malformed_commands_never_look_ready(raw):
     assert preview.detail == interpretation.message
 
 
-def test_invalid_and_incomplete_cues_are_static_and_textual():
+def test_invalid_and_incomplete_cues_are_static_and_styled():
     _, choice, candidates = _decision()
-    for raw, marker, style in (
-        ("h /", "INVALID ·", "class:invalid"),
-        ("t", "INCOMPLETE ·", "class:hint"),
+    for raw, marker in (
+        ("h /", "INVALID ·"),
+        ("t", "INCOMPLETE ·"),
     ):
-        fragments = _render_choice(
+        rendered = _render_choice(
             choice, candidates, raw, None, lambda text, mode: text, None,
             default_hold_tokens=24,
         )
-        assert any(marker in text and fragment_style == style
-                   for fragment_style, text in fragments)
+        assert marker in rendered.plain
+        assert rendered.spans
 
 
-    for theme in LIVE_STYLES.values():
-        invalid_style = theme.get_attrs_for_style_str("class:invalid")
-        assert not invalid_style.blink
-        assert "red" not in invalid_style.color
+    for theme in LIVE_THEME_NAMES:
+        assert "blink" not in semantic_style("invalid", theme).lower()
+    monochrome_style = semantic_style("invalid", "monochrome")
+    assert "underline" in monochrome_style and "red" not in monochrome_style
+    high_contrast = theme_palette("high-contrast", environment={"COLORTERM": "truecolor"})
+    for foreground in (
+        high_contrast.foreground, high_contrast.primary, high_contrast.secondary,
+        high_contrast.accent, high_contrast.error, high_contrast.muted,
+    ):
+        assert _contrast_ratio(foreground, high_contrast.background) >= 4.5
+
+
+def test_theme_selection_respects_color_environment_and_ansi_fallback():
+    assert resolve_live_theme(None, environment={}) == "amber-cyan"
+    assert resolve_live_theme(None, environment={"NO_COLOR": ""}) == "monochrome"
+    assert is_dark_terminal({})
+    assert not is_dark_terminal({"COLORFGBG": "0;15"})
+    assert theme_palette("amber-cyan", environment={}).primary == "ansi_yellow"
+    assert theme_palette(
+        "amber-cyan", environment={"COLORTERM": "truecolor", "COLORFGBG": "0;15"}
+    ).background == "#FFFDF7"
 
 
 def test_submit_reinterprets_the_actual_buffer_and_blank_accepts_proposal():

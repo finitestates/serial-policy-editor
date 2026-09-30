@@ -10,7 +10,7 @@ from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_ui import InteractivePolicy
 from trajectory_editor.episode_cli import build_parser, main
-from trajectory_editor.live_tui import _render_review
+from trajectory_editor.tui_render import _render_review
 from trajectory_editor.plain_tui import display_candidates
 from trajectory_editor.teacher_commands import (
     CommandKind, ForkAddress, ForkAddressKind, parse_command, parse_fork_address,
@@ -53,7 +53,7 @@ def test_review_labels_an_interior_action_boundary_as_inside():
         context_text_tail="P",
         position={"kind": "action-boundary", "action_kind": "write", "side": "inside"},
     )
-    rendered = "".join(text for _, text in _render_review(review))
+    rendered = _render_review(review).plain
 
     assert "WRITE inside" in rendered
 

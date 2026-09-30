@@ -59,9 +59,8 @@ preparation, and ends after its specified final action. It includes normal
 observation/sampling, token-ledger work, and session finalization. The in-process
 JSONL scenarios also include parsing/export, each marked as a phase. Reference
 full-prefix oracles, warmup, model hashing, report writing, and input waits are
-outside this interval. A phase remainder remains explicit. Rendering a rich
-terminal is outside these headless scenarios; `tui_transitions.py` is a
-separately labeled terminal-only benchmark.
+outside this interval. A phase remainder remains explicit. Terminal rendering
+is outside these headless scenarios.
 
 `backend_eval_wall_s` is the union of reset, eval, and branch-positioning
 service intervals, including adapter work, cache handling, logit retrieval,
@@ -139,9 +138,3 @@ diagnostic does not replace the full harness's provenance/comparison checks.
 For normal cache truncation, `restore` evaluates one input position; evaluating
 the entire starting prefix identifies a full rebuild (expected with cache off,
 or possible when the installed binding cannot truncate its cache).
-
-`tui_transitions.py` now includes chord display, chord advance and return to the
-regular menu, and can load the pre-consolidation request types for historical
-comparisons. It measures prepared views separately from inference. See
-[the investigation](CHORD_PERF_REVIEW.md) for the measured results and remaining
-optimization targets.

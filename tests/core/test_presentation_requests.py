@@ -6,15 +6,11 @@ from dataclasses import replace
 
 import pytest
 
-from tests.fakes import ConformingFakeBackend, ScriptedIO, SpeculativeFakeBackend
+from tests.fakes import ConformingFakeBackend, ScriptedIO
 from tests.core.runtime_helpers import LiveScriptedIO
 from trajectory_editor.core.sampler_config import SamplerConfig
-from trajectory_editor.edge_help import edge_help
-from trajectory_editor.edge_tui import _edge_header
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_ui import InteractivePolicy
-from trajectory_editor.plain_tui import read_edge
-from trajectory_editor.terminal_contracts import EdgeViewState
 from trajectory_editor.teacher_commands import HELP_TEXT
 
 pytestmark = pytest.mark.current_workflow
@@ -170,52 +166,3 @@ def test_bias_feedback_is_in_next_choice_request():
     assert action.rank == 1
     assert terminal.states[1].feedback.title == "BIAS UPDATED"
     assert terminal.states[1].choice != terminal.states[0].choice
-
-
-def test_edge_help_is_shared_by_plain_and_live_with_mode_specific_actions():
-    for mode in ("episode", "session"):
-        state = EdgeViewState("one", 2, "temp=1", mode=mode)
-        plain = ScriptedIO(["q"])
-        assert read_edge(plain, state) == "q"
-        plain_text = "".join(plain.output)
-        live_text = "".join(fragment for _, fragment in _edge_header(
-            episode_id=state.episode_id, boundary=state.boundary,
-            sampler_summary=state.sampler_summary, mode=mode,
-        ))
-        for item in edge_help(mode):
-            assert f"[{item.command}] {item.description}" in plain_text
-            assert item.command in live_text and item.description in live_text
-    assert "save WORKSPACE [ID]" not in "".join(
-        item.command for item in edge_help("episode")
-    )
-
-
-@pytest.mark.parametrize("submitted_rank", (1, 2))
-def test_ordinary_choice_has_no_speculative_warm_callback(submitted_rank):
-    class WarmCapture(LiveScriptedIO):
-        def __init__(self):
-            super().__init__([])
-            self.target = None
-
-        def read_choice(self, state):
-            candidate = state.resolve_candidate(2)
-            self.target = (candidate.rank, candidate.token_id)
-            assert state.warm_search_token is None
-            assert state.cancel_search_warm is None
-            return str(submitted_rank)
-
-    terminal = WarmCapture()
-    backend = SpeculativeFakeBackend()
-    engine = EpisodeEngine(
-        backend, initial_text="P", initial_token_ids=[7],
-        sampling=SamplerConfig(temperature=0.0),
-    )
-    observation = engine.observe()
-    action = InteractivePolicy(io=terminal, menu_size=1).choose(engine, observation)
-    assert terminal.target == (2, 2)
-    assert action.rank == submitted_rank
-    assert backend.eval_calls == []
-
-    engine.apply(action)
-    assert backend.tokens == [7, submitted_rank]
-    assert backend.eval_calls == [(submitted_rank,)]

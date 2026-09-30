@@ -10,12 +10,12 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
-    "prompt-toolkit>=3.0,<4",
     "PyYAML>=6",
+    "rich>=13",
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=9,<10"]
+test = ["pytest>=9,<10", "pyte>=0.8.2,<1"]
 llama = ["llama-cpp-python>=0.3"]
 transformers = ["torch>=2.1", "transformers>=4.45,<6"]
 transformers-accelerate = [

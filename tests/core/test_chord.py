@@ -1,7 +1,6 @@
 """Chord previews never enter episode history; selection uses ordinary actions."""
 
 from contextlib import contextmanager
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -18,9 +17,7 @@ from trajectory_editor.episode_replay_source import replay_procedure
 from trajectory_editor.episode_store import EpisodeStore
 from trajectory_editor.episode_ui import _choice_from_observation
 from trajectory_editor.episode_hash import token_prefix_sha256
-from trajectory_editor.live_tui import action_preview
-from trajectory_editor.persistent_tui import PersistentTerminalSession, _Request
-from trajectory_editor.terminal_contracts import PromptRequest
+from trajectory_editor.tui_render import action_preview
 from trajectory_editor.teacher_plan import load_teacher_tape_jsonl
 
 
@@ -284,38 +281,6 @@ def test_live_choice_preview_recognizes_chord_and_validates_ranks():
     invalid = action_preview(choice, "chord 1 9", candidates, lambda text, mode: text)
     assert not invalid.valid and invalid.label == "invalid chord"
     assert tuple(runtime.token_ids) == before
-
-
-@pytest.mark.current_workflow
-def test_live_chord_prompt_uses_only_current_preview_body():
-    terminal = PersistentTerminalSession()
-    terminal._notice = "Model loaded."
-    terminal.application = SimpleNamespace(
-        layout=SimpleNamespace(focus=lambda control: None), invalidate=lambda: None,
-    )
-    terminal._show(_Request(PromptRequest(
-        "Chord > ", body="a (1) | b (2)", isolated=True,
-    )))
-    assert terminal._prompt_view.body.text == "a (1) | b (2)"
-    assert terminal._notice == ""
-    terminal._show(_Request(PromptRequest("Next > ")))
-    assert terminal._prompt_view.body.text == ""
-
-    class ChordIO(ScriptedIO):
-        def __init__(self):
-            super().__init__(["", "q", "c", "a"])
-            self.bodies = []
-
-        def prompt(self, request):
-            assert request.isolated
-            self.bodies.append(request.body)
-            return self.read(request.prompt)
-
-    io = ChordIO()
-    result, actions = chord_menu(io, Chord(engine(), (1, 2)))
-    assert result == "select" and actions == (SelectRawRank(1), Accept())
-    assert len(io.bodies) == 4
-    assert not any("Model loaded" in body for body in io.bodies)
 
 
 class BranchBackend(ConformingFakeBackend):

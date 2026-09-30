@@ -2,7 +2,7 @@
 
 Requires an explicitly selected local GGUF. No downloads or database writes.
 Use the same interpreter/model/settings with --package-root pointing at source
-copies of each revision. Terminal painting is measured by tui_transitions.py.
+copies of each revision. Terminal rendering is outside this benchmark.
 """
 from __future__ import annotations
 

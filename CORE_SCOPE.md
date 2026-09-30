@@ -21,19 +21,30 @@ By design, a replay tape is not a 1-to-1 reconstruction of every action taken du
 
 ## Main-program capabilities
 
-The regular installation should support:
+New, replayed, and restored episodes use the same in-memory runtime. A normal
+run does not create a database; an SQLite workspace is optional and is used
+when the user explicitly opens one or saves a live branch. The runtime
+currently supports:
 
-- episode workspaces, replay/resume/fork, rewind, and fork maps;
-- full-vocabulary search and token inspection;
-- llama.cpp and Transformers backends;
-- sampler filtering and draw methods, including CFG and Gumbel draws;
-- naive and conditional bias rules;
-- history penalties;
-- speculative decoding via check/force actions & chording;
-- default menu view and the ability to cycle through displayed columns;
-- raw/model-logit display, including the raw-rank-1 model-gap view;
-- optional loading and application of externally produced vectors;
-- episode export through `projector`.
+- full-vocabulary search, token inspection, rank-addressed selection, rewind,
+  fork, and fork maps;
+- llama.cpp and Transformers inference backends, with backend dependencies
+  installed as optional extras;
+- sampler filters and deterministic or perturb-and-argmax draws, including
+  classifier-free guidance and Gumbel-Max;
+- grouped phrase biases and direct token biases, with bounded surface variants
+  and exact-prefix matching for multi-token terms;
+- repeat, presence, and frequency penalties over recent token history;
+- checked and forced text actions, chord previews, and deterministic or
+  stochastic beam exploration;
+- candidate-order and logit diagnostics, including the raw-rank-1 model-gap
+  view;
+- externally produced steering-vector artifacts and episode projection or
+  portable teacher-tape export.
+
+On a usable TTY, a synchronous curses renderer handles choice, EDGE, beam,
+and prompt requests on the episode-owning thread. Piped and noninteractive
+runs use the plain terminal fallback.
 
 A database or other storage medium can be part of the workspace implementation, but it is not the definition
 of an episode. The runtime owns episode/action meaning; persistence adapts that

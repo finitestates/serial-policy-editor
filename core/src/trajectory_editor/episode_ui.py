@@ -78,14 +78,6 @@ class _ContextRenderCursor:
     def _append_stream(stream: Any, token_id: int) -> str:
         return stream.append([int(token_id)])
 
-    def cancel_prewarm(self) -> None:
-        """Keep the existing adapter hook; review cursors have no warm job."""
-        return None
-
-    def prewarm(self, engine: EpisodeEngine, boundary: int) -> None:
-        """Record the review request without starting renderer work."""
-        return None
-
     def _reset(self, engine: EpisodeEngine, prefix: Any, boundary: int) -> None:
         token_ids = list(prefix)
         stream = self._new_stream(engine)
@@ -473,7 +465,7 @@ class InteractivePolicy:
         observation: EpisodeObservation,
         query: str,
         invoked_as: str,
-    ) -> tuple[SearchLens | None, ChoiceFeedback, tuple[int, int] | None]:
+    ) -> tuple[SearchLens | None, ChoiceFeedback]:
         try:
             token_ids = engine.backend.tokenize(query, add_bos=False, special=False)
         except Exception as exc:
@@ -509,10 +501,7 @@ class InteractivePolicy:
                 ),
                 completion_commands=suggestions,
             )
-            first_token_id = pieces[0][0]
-            return None, feedback, (
-                observation.policy_calculations.raw_rank(first_token_id), first_token_id
-            )
+            return None, feedback
         token_id = int(token_ids[0])
         if not 0 <= token_id < len(observation.logits):
             raise EditorError("the tokenizer returned a token outside the vocabulary")
@@ -531,14 +520,7 @@ class InteractivePolicy:
             lower_rank=max(1, rank - self.search_radius),
             upper_rank=min(len(observation.logits), rank + self.search_radius),
         )
-        return lens, self._search_feedback(lens), (rank, token_id)
-
-    @staticmethod
-    def _search_warm_commands(query: str) -> tuple[str, ...]:
-        commands = ("/" + json.dumps(query, ensure_ascii=False),)
-        if not query.startswith('"'):
-            commands += ("/" + query,)
-        return commands
+        return lens, self._search_feedback(lens)
 
     @staticmethod
     def _search_feedback(lens: SearchLens) -> ChoiceFeedback:
@@ -696,8 +678,6 @@ class InteractivePolicy:
 
         search: SearchLens | None = None
         search_lens_active = False
-        search_warm_target: tuple[int, int] | None = None
-        search_warm_commands: tuple[str, ...] = ()
         feedback: ChoiceFeedback | None = None
         review_boundary: int | None = None
         proposal_prefill_available = not self.manual_acceptance
@@ -775,7 +755,6 @@ class InteractivePolicy:
                     observation.boundary,
                     position=position,
                 )
-                self._context_cursor.prewarm(engine, review_boundary)
             raw = self.io.read_choice(ChoiceViewState(
                 choice,
                 candidates=tuple(exposed[rank] for rank in sorted(exposed)),
@@ -807,31 +786,8 @@ class InteractivePolicy:
                 overlays=self.view_preferences.overlays,
                 default_hold_tokens=self.default_hold_tokens,
                 default_search_radius=self.search_radius,
-                warm_search_token=(
-                    (lambda rank, token_id, generation, cancelled: engine.speculate_accept(
-                        observation,
-                        raw_rank=rank,
-                        token_id=token_id,
-                        generation=generation,
-                        cancelled=cancelled,
-                    ))
-                    if review_boundary is None and search_warm_target is not None
-                    else None
-                ),
-                cancel_search_warm=(
-                    engine.discard_speculative_accept
-                    if review_boundary is None and search_warm_target is not None
-                    else None
-                ),
-                search_warm_target=search_warm_target,
-                search_warm_commands=search_warm_commands,
-                search_warm_prepared=(
-                    search_warm_target is not None
-                    and engine.has_prepared_accept(observation, *search_warm_target)
-                ),
             ))
             if raw is None:
-                self._context_cursor.cancel_prewarm()
                 raise EdgeRequested()
             if (
                 self.seamless
@@ -912,13 +868,9 @@ class InteractivePolicy:
                         )
                     else:
                         review_boundary = min(observation.boundary, review_boundary + 1)
-                    if review_boundary is None:
-                        self._context_cursor.cancel_prewarm()
                     continue
                 if command.kind == CommandKind.FORK:
-                    self._context_cursor.cancel_prewarm()
                     raise ForkRequested(review_boundary)
-                self._context_cursor.cancel_prewarm()
                 review_boundary = None
                 continue
             if command.kind == CommandKind.BIAS:
@@ -1141,31 +1093,19 @@ class InteractivePolicy:
             if command.kind == CommandKind.TOKEN_SEARCH:
                 assert command.search_query is not None
                 try:
-                    found, feedback, next_warm_target = self._search(
+                    found, feedback = self._search(
                         engine,
                         observation,
                         command.search_query,
                         command.invoked_as or raw,
                     )
                 except EditorError as exc:
-                    engine.discard_speculative_accept()
                     search = None
                     search_lens_active = False
-                    search_warm_target = None
-                    search_warm_commands = ()
                     feedback = ChoiceFeedback("error", "SEARCH FAILED", (str(exc),))
                     continue
-                if next_warm_target != search_warm_target:
-                    engine.discard_speculative_accept()
-                search_warm_target = next_warm_target
-                search_warm_commands = (
-                    feedback.completion_commands[:1]
-                    if found is None else self._search_warm_commands(found.query)
-                )
                 if found is not None:
                     search = found
-                    search_warm_target = (found.target_rank, found.token_id)
-                    search_warm_commands = self._search_warm_commands(found.query)
                     search_lens_active = True
                     exposed.update(
                         (candidate.rank, candidate)
@@ -1181,17 +1121,12 @@ class InteractivePolicy:
                 if command.search_rank is not None:
                     rank = command.search_rank
                     candidate = resolve_candidate(rank)
-                    next_warm_target = (rank, candidate.token_id)
-                    if next_warm_target != search_warm_target:
-                        engine.discard_speculative_accept()
                     search = SearchLens(
                         query=candidate.text, token_id=candidate.token_id,
                         target_rank=rank,
                         lower_rank=max(1, rank - self.search_radius),
                         upper_rank=min(len(observation.logits), rank + self.search_radius),
                     )
-                    search_warm_target = next_warm_target
-                    search_warm_commands = self._search_warm_commands(candidate.text)
                 if search is None:
                     feedback = ChoiceFeedback(
                         "error", "NO ACTIVE SEARCH", ("Use /TERM or ms N first.",)
@@ -1207,8 +1142,6 @@ class InteractivePolicy:
                         1, search.lower_rank - int(command.search_rows or 0)
                     )
                 search_lens_active = True
-                search_warm_target = (search.target_rank, search.token_id)
-                search_warm_commands = self._search_warm_commands(search.query)
                 rows = self._lens_candidates(engine, observation, search)
                 exposed.update((candidate.rank, candidate) for candidate in rows)
                 feedback = self._search_feedback(search)

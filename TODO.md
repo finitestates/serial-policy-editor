@@ -20,15 +20,15 @@
 
 ## Decide what 1.0 promises
 
-- [ ] Document supported Python versions, operating systems, model backends, and artifact formats. Say which Python API and CLI behavior users can rely on.
+- [x] Document the Python and operating-system support matrix, model backends, file formats, and the Python API and CLI compatibility promise ([README](README.md#10-support-and-compatibility)).
 - [x] Set a policy for saved workspaces and exported files.
 
 ## Documentation and release readiness
 
 - [x] Remove or correct references to the removed `archive/` tree in the [README](README.md), test inventory, old changelog link, and sampling module comment.
 - [x] Reconcile the release history and prepare the packages, changelog, and README for `0.8.0`; document the `0.7.5` release line and link the test count to the contract matrix.
-- [ ] Choose the Python and operating-system support matrix, then make CI match it. Current test jobs cover Ubuntu with Python 3.10 and the latest Python; real-model checks are opt-in. See [ci.yml](.github/workflows/ci.yml#L17).
-- [ ] Write down the release steps: update the changelog and synchronized versions, build both packages, install the built artifacts in a clean environment, and smoke-test their commands. CI already builds wheels and source archives, checks them with Twine, and runs command help checks ([ci.yml](.github/workflows/ci.yml#L53)); there is no tag-triggered publishing workflow.
+- [x] Choose the Python and operating-system support matrix, then make CI match it: Ubuntu with Python 3.10 and the latest Python; real-model checks remain opt-in. See [ci.yml](.github/workflows/ci.yml#L17) and the [support statement](README.md#10-support-and-compatibility).
+- [x] Write down the release steps: update the changelog and synchronized versions, build both packages, install the built artifacts in a clean environment, and smoke-test their commands. See the [release checklist](DEVELOPMENT.md#release-checklist); CI also builds both distributions, checks them with Twine, and checks command help ([ci.yml](.github/workflows/ci.yml#L53)).
 
 ## Optional if inviting outside contributors
 

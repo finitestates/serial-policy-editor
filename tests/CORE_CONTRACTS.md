@@ -9,10 +9,11 @@ Core tests assert observable state, persisted records, replay results, and may a
 
 | ID | Terminal contract | Active evidence |
 | --- | --- | --- |
-| T01 | one application accepts choice, review, EDGE, page, prompt, and another choice across surface transitions | `test_terminal_lifecycle.py` |
-| T02 | preview callbacks run only on the episode-owning thread; unexpected failures wake the owner while expected validation remains editable | `test_terminal_lifecycle.py` |
-| T03 | submitted and not-yet-rendered requests reject stale input; obsolete and abandoned previews are cancelled | `test_terminal_lifecycle.py` |
-| T04 | exit restores the terminal after ordinary completion, an exception, EOF, or interrupt; plain mode consumes the same request types | `test_terminal_lifecycle.py` |
+| T01 | renderer imports remain behind the terminal boundary; the plain renderer stays isolated from runtime imports | `test_terminal_architecture.py` |
+| T02 | prepared choice requests preserve candidate data, feedback, and diagnostics; historical review does not commit an action or position the backend | `test_presentation_requests.py` |
+| T03 | chord previews remain isolated from episode history and only the selected path's ordinary actions are committed | `test_chord.py` |
+| T04 | interactive launch composes within the terminal session, while piped and noninteractive commands avoid opening the live terminal | `test_launch_terminal_requests.py` |
+| T05 | beam and shared command journeys retain their selected branches and command meaning through scripted terminal adapters | `test_terminal_scenarios.py` |
 
 ## Sampler and action contracts — 8
 

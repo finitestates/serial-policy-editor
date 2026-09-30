@@ -58,3 +58,7 @@ all retained branches and their lineage using the same workspace selection.
 interface is the same whether or not a workspace is open. Version 0.8.5
 requires a fresh workspace; previous-format workspace data is left untouched
 and is not migrated.
+
+On an interactive TTY, the live interface uses Python's synchronous `curses`
+module. It renders and reads input on the episode-owning thread, with no UI
+event loop or stylesheet. Pass `--plain-ui` to use line-oriented input instead.

@@ -81,16 +81,11 @@ def test_detached_root_rebuilds_primary_and_guidance_prefix():
 
 @pytest.mark.current_workflow
 def test_ephemeral_help_and_bare_new_expose_the_polished_commands():
-    from trajectory_editor.edge_tui import _edge_header
+    from trajectory_editor.edge_help import edge_help
 
-    help_text = "".join(
-        fragment
-        for _, fragment in _edge_header(
-            episode_id="#1",
-            boundary=0,
-            sampler_summary="temp=1",
-            mode="session",
-        )
+    help_text = "\n".join(
+        f"[{item.command}] {item.description}"
+        for item in edge_help("session")
     )
     assert "#N" in help_text
     assert "new TEXT" in help_text

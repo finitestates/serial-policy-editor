@@ -1,101 +1,57 @@
 # Terminal API and fallback behavior
 
 `TerminalIO(...)` is the application's terminal entry point. Construct it once
-per interactive run and enter `with io.session():` around that run. A live
-terminal keeps one `PersistentTerminalSession` and one prompt-toolkit
-application until the context exits. A plain or piped terminal uses the same
-context with no live application. Live choice, EDGE, beam, and prompt reads
-require the context to be active; plain requests use that same context.
+per interactive run and enter `with io.session():` around that run. When the
+standard streams are usable TTYs and Python's curses module is available, the
+session opens the synchronous curses renderer. Piped and noninteractive runs
+use the synchronous `plain_tui.py` fallback.
 
-The episode-owning thread prepares `ChoiceViewState`, `EdgeViewState`, and
-`BeamViewState` from `terminal_contracts.py`, then calls the matching
-`io.read_choice(state)`, `io.read_edge(state)`, or `io.read_beam(state)`.
-Choice and EDGE reads return raw command text; beam reads return a `BeamInput`
-with command text and selected branch. The caller alone parses that input and
-applies engine, navigation, replay, or store changes. `PromptRequest` covers
-ordinary input, confirmations and single keys,
-multiline prompt composition, pages, and isolated chord displays through
-`io.prompt(request)`. Existing `read`, `read_key`, `read_multiline_prompt`,
-and `page` methods are small adapters to this request. The chord flow submits
-an isolated `PromptRequest` directly.
+## Request and action ownership
 
-The `TerminalProtocol` describes the shared API. Live prompt-toolkit layouts
-allocate space to their windows and wrap or scroll content from the actual
-render area. Views provide logical content and layout priorities; they do not
-query terminal dimensions. Plain output writes complete text for the terminal
-or pager to display. `io.capabilities.seamless_review` explicitly enables
-Enter to rewind from a review boundary. Policy and EDGE callers do not choose
-a renderer. Adding presentation fields changes the relevant request type;
-readers pass the same request object through to the selected implementation.
+The episode-owning thread prepares the frozen view-state records in
+`terminal_contracts.py` and calls the blocking `TerminalProtocol` methods:
+`read_choice`, `read_edge`, `read_beam`, `prompt`, `read`, `read_key`, `write`,
+or `page`. The protocol also provides a `session()` context manager and a
+`capabilities` property.
+
+Each live request renders and reads on that same thread. Choice and EDGE reads
+return command text; Beam reads return a `BeamInput` with command text and the
+selected branch. The caller interprets commands and applies engine,
+navigation, replay, and storage changes. The terminal UI does not call model,
+engine, or storage code while waiting for input.
+
+While the live session is active, Python stdout and stderr and native file
+descriptor output are captured so they do not overwrite the screen. Captured
+text appears in the bounded output viewer and is written to the original
+streams after the terminal session exits. Explicit `TerminalIO.write(...)`
+messages use the same viewer. The viewer retains the trailing 16,000
+characters.
+
+## Controls
+
+| Request | Controls |
+| --- | --- |
+| Choice | Tab/Shift+Tab browse candidates; Ctrl+G enters a raw rank; PgUp/PgDn scroll context; Ctrl+E expands authored-text input; Ctrl+O inserts a newline; Ctrl+D opens EDGE. |
+| EDGE | Tab cycles commands; Up/Down selects command templates; Enter submits; Ctrl+D returns to the choice. |
+| Beam | Up/Down selects a branch; Enter commits it; Left rewinds; Right advances; Backspace kills; `p` toggles protection; `f` toggles family details; PgUp/PgDn scroll details. |
+| Prompts | Enter submits; Escape then Enter submits multiline text; Escape cancels where supported. |
+| Any live view | Ctrl+K opens the command picker; F1 opens help; Ctrl+L opens captured output. |
+
+The curses renderer updates through curses' virtual-screen refresh calls. It
+uses the names `amber-cyan`, `monochrome`, and `high-contrast`. `NO_COLOR`
+selects monochrome unless a theme is explicitly requested; otherwise
+`amber-cyan` is the default. `COLORFGBG` selects the light or dark palette, with
+dark as the default. Monochrome uses emphasis without color.
 
 ## Where changes belong
 
-- Add teacher syntax and help in `teacher_commands.py`, then handle the parsed
-  command in `episode_ui.py`. Update the short plain action line in
-  `plain_tui.py` and any live key help in `live_tui.py`. Add EDGE syntax in
-  `edge_commands.py`, dispatch it
-  in `episode_cli.py` and/or `session_runtime.py` as appropriate, and update
-  `edge_help.py`. Keep episode, store, and backend effects in those callers.
-- Add a decision field to `ChoiceViewState`, an EDGE field to `EdgeViewState`, a
-  beam field to `BeamViewState`, or an input option to `PromptRequest` in
-  `terminal_contracts.py`. Prepare its value on the episode-owning thread.
-  Render the same request in `plain_tui.py` and the corresponding live view
-  (`live_tui.py`, `edge_tui.py`, `beam_tui.py`, or the prompt surface in
-  `persistent_tui.py`).
-- Add an interactive surface to `PersistentTerminalSession` and route its
-  request through `TerminalIO` in `tui.py`. Keep one application and session
-  across surfaces. Its plain counterpart handles only text display and input.
-  Scripted CLI tests use the request-level `ScriptedIO` adapter in
-  `tests/fakes.py`; its `ScriptedTextIO` base is only for low-level text tests.
-
-`tests/core/test_terminal_architecture.py` checks that production code imports
-`plain_tui` only from terminal selection and does not branch on renderer mode in
-runtime code. `tests/core/test_terminal_scenarios.py` runs common commands
-through both scripted adapters and both episode workflows.
-
-Live views are selected at construction only when enabled, both standard
-streams are usable TTYs with file descriptors, and prompt-toolkit is installed.
-Both backends accept the same teacher and
-EDGE command grammar. Presentation may differ in these ways:
-
-| Request | Live | Plain or piped |
-| --- | --- | --- |
-| Choice | Fullscreen layout, editable command buffer, non-mutating previews and optional initial command | Text table followed by ordinary input; no prefill or previews |
-| Review and feedback | Dedicated review and status areas | Text lines prepared in the same choice request |
-| EDGE | Fullscreen menu | Text menu with the same command meanings |
-| Beam | Wrapped leaderboard with keyboard branch selection | Text leaderboard with typed branch selection |
-| Page | Scrollable in-application page | System text pager |
-| Single key or confirmation | In-application key binding | Unbuffered key on a TTY; first character of an input line when piped |
-| Multiline composition | In-application editor; Escape then Enter submits, Ctrl-D cancels, empty prompts remain editable | Line-oriented prompt; Enter submits one nonempty line, Ctrl-D cancels |
-| Isolated chord | Dedicated prompt body, without prior status history | Body printed before input |
-
-The choice request carries search results, errors, bias feedback, review
-position, and column preferences. Both EDGE renderers use the same command
-labels. Beam actions use the same request boundary in both renderers. Session actions can load saved episodes or explicitly save the current
-branch or branch family. Plain
-input preserves command meanings but has no cursor navigation or previews.
-Initial prompts and bare `new` use the same composition request. For exact
-multiline startup text in plain mode, use `--new-prompt-file FILE` (or
-`new TEXT` for a single-line root at EDGE). An interactive new launch enters
-the terminal session before collecting its prompt or loading the model. A
-piped launch without a source fails validation and does not read stdin.
-
-Callers request pages explicitly with `io.page(text)` and give prompts their
-own `PromptRequest.body` when they need accompanying context. Ordinary
-`io.write(text)` remains status output regardless of line count. This keeps
-help, fork-map selection, confirmations, and chord previews from carrying
-the previous prompt's body into the next workflow.
-
-The live application owns widgets, key bindings, surface transitions, input
-gating, and preview scheduling. Preview callbacks execute on the episode-owning
-thread. Expected preview validation errors remain editable feedback; unexpected
-preview failures propagate, stop the live application, and restore the terminal.
-EOF and interrupts also release the waiting episode thread. A live failure never
-restarts input in plain mode. The active model-free checks in
-`tests/core/test_terminal_lifecycle.py` cover those boundaries, resizing, narrow
-layouts, multiline input, and every live theme. Use
-`benchmarks/tui_transitions.py --package-root CHECKOUT` from the same interpreter
-for each checkout. It loads `CHECKOUT/core/src` directly and reports application,
-fullscreen, redraw, and prepared-view transition measurements. Compare the
-same dimensions and iteration count; the benchmark excludes model, database,
-and terminal-emulator painting time.
+- Add teacher syntax and interpretation in `teacher_commands.py`, then handle
+the parsed command in `episode_ui.py`. Add EDGE syntax in `edge_commands.py`,
+dispatch it in `episode_cli.py` or `session_runtime.py`, and update
+`edge_help.py`.
+- Add prepared display data to the relevant frozen record in
+`terminal_contracts.py`. Prepare it on the episode-owning thread. Shared Rich
+fragments and candidate table builders belong in `tui_render.py`; live curses
+rendering belongs in `curses_tui.py`; plain rendering stays in `plain_tui.py`.
+- Route new reads through `TerminalIO` in `tui.py`. Scripted CLI flows use
+`ScriptedIO` from `tests/fakes.py`.

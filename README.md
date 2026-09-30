@@ -84,6 +84,42 @@ python -m pip install './core[llama]' ./vector
 `policy-editor-vector` does not add Transformers, Torch, Accelerate, or
 CUDA-related dependencies by default.
 
+## 1.0 support and compatibility
+
+The packages require CPython 3.10 or newer. The CI test matrix covers Python
+3.10 and the latest CPython on Ubuntu Linux (`ubuntu-latest`). Ubuntu Linux is
+the supported operating-system target for 1.0; macOS and Windows are not in the
+release test matrix.
+
+Core includes adapters for llama.cpp models in GGUF format and local
+Transformers model directories. The core install itself remains model-free;
+install the optional backend extra that matches the model. CPU/GPU availability
+and native package installation depend on the selected backend and hardware.
+Vector production uses Transformers, while the vector package can import
+llama.cpp cvector GGUF artifacts.
+
+The supported Python API is the public classes, functions, signatures, and
+documented behavior exported by `trajectory_editor` and `trajectory_editor.core`
+in their `__all__` lists. The supported CLI surface is the documented options
+and command forms for `policy-editor` and
+`policy-editor-vector`, including the documented teacher-plan and profile
+formats. Within the 1.x series, incompatible changes to these documented
+interfaces require a major-version change. Internal module paths, undocumented
+aliases, and terminal layout details are not compatibility promises.
+
+| File format | Use |
+| --- | --- |
+| JSONL | Portable teacher plans and exported teacher tapes |
+| JSON | Optional teacher-plan envelope and portable steering-vector artifacts |
+| YAML | Reusable CLI/controller profiles |
+| SQLite | Explicit episode workspaces for save, resume, and saved-episode operations |
+| GGUF | llama.cpp models and importable llama.cpp cvector artifacts |
+
+SQLite workspaces are versioned application data, not an interchange format.
+The current runtime rejects previous workspace schemas without modifying the
+existing files; automatic migration is not part of the 1.x compatibility
+promise. Check the changelog before reusing a workspace after an upgrade.
+
 ## Start the editor
 
 With llama.cpp:
@@ -176,6 +212,11 @@ writes, check/force actions, chord previews, reusable profiles, bias and history
 controls, CFG and perturb-and-argmax draws, rerolls, raw/model/gap logit views, teacher
 replay, rewind, fork, and live-edge continuation.
 
+On a usable TTY, the live editor uses a synchronous curses interface for
+choices, the live edge, beam branches, and prompts. Press Ctrl+K to find command
+templates or F1 for help. Piped and noninteractive runs use the plain terminal
+interface.
+
 ## Vectors
 
 Install the optional vector package when you want to create or inspect
@@ -236,18 +277,22 @@ contract.
 
 ## Active tests
 
-The active suite is divided by package boundary:
+The active suite covers the package contracts and the independent reference
+kernel:
 
 ```bash
 python -m pytest -q tests/core
 python -m pytest -q tests/vectors
+python -m pytest -q reference-kernel
 ```
 
 Core tests cover the contracts documented in
 [`tests/CORE_CONTRACTS.md`](tests/CORE_CONTRACTS.md). Vector tests cover artifact
 interpretation, Transformers-based vector creation, cvector import, portable
 artifact application, and optional production behavior. Real-model backend
-checks are opt-in and skip when their local model is absent.
+checks are opt-in and skip when their local model is absent. The
+`reference-kernel/` suite checks the standalone sampler/replay formulas and
+their parity with the production runtime.
 
 ## Project documents
 
@@ -256,6 +301,6 @@ checks are opt-in and skip when their local model is absent.
 - [Core package](core/README.md) — standalone core installation;
 - [Vector package](vector/README.md) — optional steering-vector tooling;
 - [Core contract matrix](tests/CORE_CONTRACTS.md) — the reduced core suite;
-- [Test inventory](tests/TEST_INVENTORY.md) — active test buckets and their history.
+- [Reference kernel](reference-kernel/) — independent formulas and parity checks.
 
 The version currently represented by the active package manifests is `0.8.5`.
