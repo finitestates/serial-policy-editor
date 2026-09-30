@@ -87,6 +87,8 @@ evidence that intermediate output was correct.
    that instrumentation to the next run; do not stop at “unknown” or ask the
    user to rediscover the issue.
 
+For the observability model behind this workflow—what each test layer can and cannot establish, why ordered invalid frames do not require timestamps, and how synchronized updates affect presentation eligibility—see [`tests/VISIBLE_FRAME_CORRECTNESS.md`](tests/VISIBLE_FRAME_CORRECTNESS.md).
+
 For current Textual journeys, `core/scripts/record_textual_journey.py` records
 the production PTY test and exports marked grids; `core/scripts/render_textual_capture.py`
 replays selected display markers as styled images. The reusable Beam example,

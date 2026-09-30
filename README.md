@@ -301,6 +301,7 @@ their parity with the production runtime.
 - [Core package](core/README.md) — standalone core installation;
 - [Vector package](vector/README.md) — optional steering-vector tooling;
 - [Core contract matrix](tests/CORE_CONTRACTS.md) — the reduced core suite;
+- [Visible-frame correctness](tests/VISIBLE_FRAME_CORRECTNESS.md) — what the terminal harness can and cannot observe across intermediate frames;
 - [Reference kernel](reference-kernel/) — independent formulas and parity checks.
 
 The version currently represented by the active package manifests is `0.8.5`.
