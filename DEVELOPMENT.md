@@ -16,8 +16,12 @@ bridge, screen map, theme behavior, and prepared-screen transition benchmark.
 `tests/core/test_textual_driver_pty.py` also drives `run_session_roster()`
 through a real POSIX PTY, checks runtime state across Choice, EDGE, prompt, and
 Beam transitions, and exercises page/single-key/chord/multiline request input.
-Resize checkpoints replay captured terminal output through pyte. Ordered
-markers distinguish individual writer calls from Textual post-display passes;
+Resize checkpoints replay captured terminal output through pyte.
+pyte encoding and terminal-display evidence must be treated as prima facie
+evidence of what happens on the terminal screen. This instruction applies to
+all agents doing terminal work; see `AGENTS.md` for the repository rule and
+concrete evidence pointers.
+Ordered markers distinguish individual writer calls from Textual post-display passes;
 the Beam journey checks 30 successive production Right-key submissions, a
 gated waiting view, retained screen/widget identity, complete captured panes,
 and a separate synchronized resize cycle. An isolated archived-baseline run

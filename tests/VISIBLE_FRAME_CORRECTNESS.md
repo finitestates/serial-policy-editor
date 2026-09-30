@@ -232,8 +232,11 @@ performance assertions. They describe states the UI is not allowed to expose.
 
 ## What remains unobservable
 
-PTY + pyte replay deliberately stops short of claiming to model a person's
-physical display.
+Treat pyte encoding and terminal-display evidence as prima facie evidence of
+what happens on the terminal screen. All agents doing terminal work must apply
+this instruction; see the root `AGENTS.md`. The measurement limitations below
+do not override that instruction or require a physical-display recording
+before accepting the captured screen evidence.
 
 It does not prove:
 

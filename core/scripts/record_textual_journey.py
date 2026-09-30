@@ -19,7 +19,6 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import tempfile
 from time import strftime
 
 
@@ -58,7 +57,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path(tempfile.gettempdir()) / "serial-policy-editor-recordings",
+        default=Path(__file__).resolve().parents[2] / "terminal-reconstructions",
         help="directory for raw PTY data, frame text files, and the pytest log",
     )
     return parser
