@@ -115,9 +115,16 @@ terminal writes; a test-only marker queued after Textual's `post_display_hook`
 identifies a completed display pass in that same writer queue. The Beam journey
 checks its gated wait, 30 advances, retained widget identity, complete captured
 panes, and settled repaint after synchronized resizes. The retained comparison
-shows the archived baseline failing the same remount assertion. These protocol
-captures do not establish physical-terminal behavior or prove that no
-intermediate partial display is visible.
+shows the archived baseline failing the same remount assertion.
+
+For the observability boundary of these tests, including the distinction between
+application state, settled snapshots, reconstructed ordered terminal states, and
+physical-terminal presentation, see
+[`tests/VISIBLE_FRAME_CORRECTNESS.md`](tests/VISIBLE_FRAME_CORRECTNESS.md).
+In particular, a reconstructed frame can violate a structural UI invariant even
+when its physical display duration is unknown; elapsed time is a separate
+measurement from frame validity.
+
 `benchmarks/tui_transitions.py --package-root CHECKOUT` loads that checkout's
 `core/src` directly and measures prepared-screen submission-to-next-render
 latency at the requested console size. It excludes model, database, and
