@@ -324,7 +324,7 @@ def theme_stylesheet(
     #page-scroll {{ height: 1fr; width: 1fr; }}
     #page-body {{ height: auto; width: 1fr; }}
     #page-return:focus, #single-key-hint:focus {{ color: $background; background: $secondary; text-style: bold; }}
-    #choice-hint {{ height: 1; min-height: 1; max-height: 1; width: 1fr; padding: 0 1; text-wrap: nowrap; text-overflow: ellipsis; }}
+    #choice-hint {{ height: 1; min-height: 1; max-height: 1; width: 1fr; padding: 0 1; text-wrap: nowrap; }}
     #hint {{ height: auto; max-height: 30%; width: 1fr; max-width: 160; padding: 0 1; dock: bottom; text-wrap: wrap; text-align: center; }}
     #edge-header {{ height: auto; padding: 0 1; }}
     #edge-commands {{ margin: 0 1; }}
