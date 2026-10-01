@@ -744,6 +744,9 @@ def main(
                 store=store, load_saved_session=load_saved_session,
                 default_save_id=default_save_id,
             )
+    except KeyboardInterrupt:
+        print("Interrupted.", file=sys.stderr)
+        return 130
     except (EditorError, OSError, RuntimeError, EOFError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

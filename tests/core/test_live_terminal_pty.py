@@ -60,6 +60,17 @@ CHILD = textwrap.dedent(
             time.sleep(0.01)
 
     mode = sys.argv[1]
+    if mode == "cli-interrupt":
+        from unittest.mock import patch
+        from tests.fakes import ConformingFakeBackend
+        from trajectory_editor.episode_cli import main
+
+        with patch(
+            "trajectory_editor.episode_backend_loader.load_backend",
+            side_effect=lambda _args: ConformingFakeBackend(),
+        ):
+            raise SystemExit(main(["--model", "fake", "--new-prompt", "P"]))
+
     io = TerminalIO()
     results = []
     try:
@@ -416,6 +427,26 @@ def test_ctrl_c_interrupts_and_restores_the_terminal(tmp_path):
     assert exit_index > raw.rfind(b"\x1b[?1049h")
     assert raw.find(b"RESULTS") > exit_index
     replay_and_compare(raw, ui.frames())
+
+
+def test_cli_ctrl_c_exits_cleanly_with_brief_message(tmp_path):
+    ui = Session(tmp_path, "cli-interrupt", size=(80, 24))
+    ui.wait_for(lambda f: f["lines"][0].startswith("Step 0") and f["cursor"], what="choice")
+    ui.send("\x03")
+    output = ui.finish()
+    assert os.WIFEXITED(ui.status) and os.WEXITSTATUS(ui.status) == 130, output[-2000:]
+    assert "Interrupted." in output
+    assert "Traceback" not in output
+    raw = bytes(ui.output)
+    exit_index = raw.rfind(b"\x1b[?1049l")
+    assert exit_index > 0
+    assert raw.find(b"Interrupted.") > exit_index
+    frames = ui.frames()
+    replay_and_compare(raw, frames)
+    assert_no_erase_after_entry(raw)
+    assert_frames_are_transactions(raw)
+    for frame in frames:
+        assert_complete_frame(frame)
 
 
 def test_preview_diagnostic_is_off_the_live_canvas_until_ctrl_l(tmp_path):
