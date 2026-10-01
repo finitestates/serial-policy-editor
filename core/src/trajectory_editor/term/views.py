@@ -335,7 +335,7 @@ class ChoiceView(RequestView):
             state.choice, self.command_text, state.candidates, resolve_insertion,
             resolve_candidate=resolve_candidate,
             default_hold_tokens=state.default_hold_tokens,
-            default_search_radius=state.default_search_radius,
+            menu_page_rows=state.menu_page_rows,
         )
         self._preview_key = key
 
@@ -696,9 +696,13 @@ class ChoiceView(RequestView):
         editor_width = max(1, width - len("Command > "))
         editor_rows = editor_height(self.editor, editor_width)
         editor_cap = (8 if height >= 30 else 4) if self._expanded else (4 if height >= 18 else 2)
+        table_rows = (
+            min(state.menu_page_rows, len(state.choice.candidates))
+            if state.search_lens_active else len(rows)
+        )
         slots = [
             Slot("command", 1, min(editor_rows if not self._expanded else editor_cap, editor_cap), priority=0),
-            Slot("table", 2, len(rows) + 1, priority=1, flex=True, share=1.0),
+            Slot("table", 2, table_rows + 1, priority=1, flex=True, share=1.0),
             Slot("preview", 1, 1 if short else min(3, max(1, len(preview_lines))), priority=1),
             Slot("hint", 1, hint_rows, priority=2),
             Slot("feedback", 1 if feedback_lines else 0,

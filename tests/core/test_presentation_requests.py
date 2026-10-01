@@ -121,7 +121,7 @@ def test_choice_requests_preserve_actions_feedback_and_lazy_statistics():
         assert plain.target_token_id == live.target_token_id
         assert plain.logit_view == live.logit_view
         assert plain.default_hold_tokens == live.default_hold_tokens
-        assert plain.default_search_radius == live.default_search_radius
+        assert plain.menu_page_rows == live.menu_page_rows
     assert requests[0][1].feedback.category == "search"
     assert requests[0][1].search_lens_active
     assert requests[0][2].feedback.category == "error"

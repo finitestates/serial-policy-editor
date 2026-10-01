@@ -65,7 +65,8 @@ class ChoiceViewState:
     column_focus: str | None = None
     overlays: frozenset[str] = frozenset()
     default_hold_tokens: int = 100
-    default_search_radius: int = 3
+    # Configured menu depth; the search lens uses this same row capacity.
+    menu_page_rows: int = 12
     warm_search_token: Callable[[int, int, int, Callable[[], bool]], Any] | None = field(
         default=None, repr=False, compare=False
     )

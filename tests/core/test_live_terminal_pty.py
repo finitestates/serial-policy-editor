@@ -141,7 +141,7 @@ CHILD = textwrap.dedent(
                 engine = EpisodeEngine(ConformingFakeBackend(), initial_token_ids=[7],
                                        sampling=SamplerConfig(temperature=0.0))
                 args = SimpleNamespace(
-                    divergence_policy="handoff", table_depth=3, search_radius=3, hold_default=20,
+                    divergence_policy="handoff", table_depth=3, hold_default=20,
                     context_chars=0, manual_acceptance=False, show_policy_rank=None,
                     logit_view="none", output=None, phrase_max_tokens=16, phrase_max_shift=6.0,
                 )
@@ -455,7 +455,9 @@ def test_uncaught_fatal_traceback_survives_after_terminal_restore(tmp_path):
     exit_index = raw.rfind(b"\x1b[?1049l")
     traceback_index = raw.find(b"Traceback")
     assert exit_index > 0 and traceback_index > exit_index
-    assert raw.find(b"ValueError: fatal sentinel") > traceback_index
+    # Python 3.13+ may colorize the exception type and message on a PTY.
+    traceback_text = re.sub(rb"\x1b\[[0-9;]*m", b"", raw[traceback_index:])
+    assert b"ValueError: fatal sentinel" in traceback_text
     assert b"incidental before fatal" not in raw
     assert b"native stderr before fatal" not in raw
     frames = ui.frames()

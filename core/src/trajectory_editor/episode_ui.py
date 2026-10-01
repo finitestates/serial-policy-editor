@@ -59,6 +59,23 @@ class SearchLens:
     upper_rank: int
 
 
+def _search_window(
+    target_rank: int, vocabulary_size: int, menu_size: int
+) -> tuple[int, int]:
+    """Return a centered search slice, leaving one row for an even menu size."""
+    candidate_rows = max(1, menu_size - (1 if menu_size % 2 == 0 else 0))
+    half = candidate_rows // 2
+    lower_rank = target_rank - half
+    upper_rank = target_rank + half
+    if lower_rank < 1:
+        upper_rank += 1 - lower_rank
+        lower_rank = 1
+    if upper_rank > vocabulary_size:
+        lower_rank = max(1, lower_rank - (upper_rank - vocabulary_size))
+        upper_rank = vocabulary_size
+    return lower_rank, upper_rank
+
+
 class _ContextRenderCursor:
     """Persistent rendered contexts for live choices and boundary review."""
 
@@ -298,7 +315,6 @@ class InteractivePolicy:
         *,
         io: TerminalProtocol | None = None,
         menu_size: int = 12,
-        search_radius: int = 3,
         default_hold_tokens: int = 100,
         phrase_max_tokens: int = PHRASE_DEFAULT_MAX_TOKENS,
         phrase_max_shift: float = PHRASE_DEFAULT_MAX_SHIFT,
@@ -311,8 +327,8 @@ class InteractivePolicy:
         session: Any | None = None,
         seamless: bool = False,
     ) -> None:
-        if min(menu_size, search_radius, default_hold_tokens, phrase_max_tokens) < 1:
-            raise EditorError("menu, search, and hold sizes must be positive")
+        if min(menu_size, default_hold_tokens, phrase_max_tokens) < 1:
+            raise EditorError("menu and hold sizes must be positive")
         if (
             type(phrase_max_shift) not in (int, float)
             or not math.isfinite(float(phrase_max_shift))
@@ -321,7 +337,6 @@ class InteractivePolicy:
             raise EditorError("phrase max shift must be finite and nonnegative")
         self.io = io or TerminalIO()
         self.menu_size = menu_size
-        self.search_radius = search_radius
         self.default_hold_tokens = default_hold_tokens
         self.phrase_max_tokens = phrase_max_tokens
         self.phrase_max_shift = float(phrase_max_shift)
@@ -524,12 +539,15 @@ class InteractivePolicy:
                 f"{token_id} renders as {rendered!r}. Search it with {suggestion}"
             )
         rank = observation.policy_calculations.raw_rank(token_id)
+        lower_rank, upper_rank = _search_window(
+            rank, len(observation.logits), self.menu_size
+        )
         lens = SearchLens(
             query=query,
             token_id=token_id,
             target_rank=rank,
-            lower_rank=max(1, rank - self.search_radius),
-            upper_rank=min(len(observation.logits), rank + self.search_radius),
+            lower_rank=lower_rank,
+            upper_rank=upper_rank,
         )
         return lens, self._search_feedback(lens), (rank, token_id)
 
@@ -806,7 +824,7 @@ class InteractivePolicy:
                 column_focus=self.view_preferences.column_focus,
                 overlays=self.view_preferences.overlays,
                 default_hold_tokens=self.default_hold_tokens,
-                default_search_radius=self.search_radius,
+                menu_page_rows=self.menu_size,
                 warm_search_token=(
                     (lambda rank, token_id, generation, cancelled: engine.speculate_accept(
                         observation,
@@ -845,7 +863,7 @@ class InteractivePolicy:
                 menu_size=len(choice.candidates),
                 default_hold_tokens=self.default_hold_tokens,
                 vocabulary_size=len(observation.logits),
-                default_search_radius=self.search_radius,
+                menu_page_rows=self.menu_size,
                 implicit_accept=review_boundary is None,
             )
             if interpretation.state != CommandState.READY:
@@ -1184,11 +1202,14 @@ class InteractivePolicy:
                     next_warm_target = (rank, candidate.token_id)
                     if next_warm_target != search_warm_target:
                         engine.discard_speculative_accept()
+                    lower_rank, upper_rank = _search_window(
+                        rank, len(observation.logits), self.menu_size
+                    )
                     search = SearchLens(
                         query=candidate.text, token_id=candidate.token_id,
                         target_rank=rank,
-                        lower_rank=max(1, rank - self.search_radius),
-                        upper_rank=min(len(observation.logits), rank + self.search_radius),
+                        lower_rank=lower_rank,
+                        upper_rank=upper_rank,
                     )
                     search_warm_target = next_warm_target
                     search_warm_commands = self._search_warm_commands(candidate.text)

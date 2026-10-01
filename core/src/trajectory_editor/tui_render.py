@@ -89,7 +89,7 @@ def action_preview(
     *,
     resolve_candidate: Callable[[int], Candidate] | None = None,
     default_hold_tokens: int = 100,
-    default_search_radius: int = 3,
+    menu_page_rows: int | None = None,
 ) -> ActionPreview:
     """Render the shared interpretation, enriching it with owner-thread previews."""
     interpretation = interpret_command(
@@ -97,7 +97,7 @@ def action_preview(
         menu_size=len(choice.candidates),
         default_hold_tokens=default_hold_tokens,
         vocabulary_size=choice.vocabulary_size or len(candidates),
-        default_search_radius=default_search_radius,
+        menu_page_rows=menu_page_rows,
     )
     if interpretation.state != CommandState.READY:
         first_word = raw.strip().split(maxsplit=1)[0].lower() if raw.strip() else ""
@@ -540,7 +540,7 @@ def _choice_render_fragment_parts(
     search_lens_active: bool = False,
     resolve_candidate: Callable[[int], Candidate] | None = None,
     default_hold_tokens: int = 100,
-    default_search_radius: int = 3,
+    menu_page_rows: int | None = None,
     preview: ActionPreview | None = None,
 ) -> tuple[Fragments, int]:
     preview = preview or action_preview(
@@ -550,7 +550,7 @@ def _choice_render_fragment_parts(
         resolve_insertion,
         resolve_candidate=resolve_candidate,
         default_hold_tokens=default_hold_tokens,
-        default_search_radius=default_search_radius,
+        menu_page_rows=menu_page_rows,
     )
     fragments: Fragments = [
         ("class:status-strong", f"Step {choice.aligned_step} · teacher track\n"),
@@ -772,7 +772,7 @@ def _choice_render_data(
     search_lens_active: bool = False,
     resolve_candidate: Callable[[int], Candidate] | None = None,
     default_hold_tokens: int = 100,
-    default_search_radius: int = 3,
+    menu_page_rows: int | None = None,
     preview: ActionPreview | None = None,
     theme: str = "amber-cyan",
     environment=None,
@@ -796,7 +796,7 @@ def _choice_render_data(
         search_lens_active,
         resolve_candidate,
         default_hold_tokens,
-        default_search_radius,
+        menu_page_rows,
         preview,
     )
     return _render_fragments(fragments, theme=theme, environment=environment), cursor_line
@@ -821,7 +821,7 @@ def _render_choice(
     search_lens_active: bool = False,
     resolve_candidate: Callable[[int], Candidate] | None = None,
     default_hold_tokens: int = 100,
-    default_search_radius: int = 3,
+    menu_page_rows: int | None = None,
     theme: str = "amber-cyan",
     environment=None,
 ) -> Text:
@@ -844,7 +844,7 @@ def _render_choice(
         search_lens_active,
         resolve_candidate,
         default_hold_tokens,
-        default_search_radius,
+        menu_page_rows,
         theme=theme,
         environment=environment,
     )

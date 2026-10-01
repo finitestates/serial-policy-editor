@@ -44,14 +44,14 @@ def _decision():
 def _interpret(raw, choice):
     return interpret_command(
         raw, menu_size=len(choice.candidates), default_hold_tokens=24,
-        vocabulary_size=choice.vocabulary_size, default_search_radius=2,
+        vocabulary_size=choice.vocabulary_size,
     )
 
 
 def _preview(raw, choice, candidates, **kwargs):
     return action_preview(
         choice, raw, candidates, lambda text, mode: text,
-        default_hold_tokens=24, default_search_radius=2, **kwargs,
+        default_hold_tokens=24, **kwargs,
     )
 
 
@@ -90,7 +90,7 @@ def test_ready_preview_carries_the_submitted_command_meaning(raw):
     if raw:
         assert preview.command == parse_command(
             raw, menu_size=len(candidates), default_hold_tokens=24,
-            vocabulary_size=choice.vocabulary_size, default_search_radius=2,
+            vocabulary_size=choice.vocabulary_size,
         )
     else:
         assert preview.command.kind == CommandKind.EDIT
@@ -176,10 +176,10 @@ def test_submit_reinterprets_the_actual_buffer_and_blank_accepts_proposal():
 
     io = ScriptedIO(["x changed"])
     submitted = InteractivePolicy(
-        io=io, default_hold_tokens=24, search_radius=2,
+        io=io, default_hold_tokens=24, menu_size=2,
     ).choose(engine, engine.observe())
     assert io.choice_requests[0].default_hold_tokens == 24
-    assert io.choice_requests[0].default_search_radius == 2
+    assert io.choice_requests[0].menu_page_rows == 2
     assert submitted.kind == "write"
     assert submitted.text == "changed"
 

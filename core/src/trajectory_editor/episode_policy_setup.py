@@ -32,7 +32,6 @@ def _policy(
     return InteractivePolicy(
         io=io,
         menu_size=args.table_depth,
-        search_radius=args.search_radius,
         default_hold_tokens=args.hold_default,
         phrase_max_tokens=getattr(args, "phrase_max_tokens", 16),
         phrase_max_shift=getattr(args, "phrase_max_shift", 6.0),
