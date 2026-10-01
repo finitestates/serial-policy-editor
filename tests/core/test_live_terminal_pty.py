@@ -20,9 +20,11 @@ import sys
 import termios
 import textwrap
 import time
+import unicodedata
 from pathlib import Path
 
 import pytest
+from rich.cells import cell_len
 
 pyte = pytest.importorskip("pyte")
 
@@ -116,6 +118,8 @@ CHILD = textwrap.dedent(
                 os.write(2, b"native stderr during session\n")
             elif mode == "interrupt":
                 io.read_choice(choice_state())
+            elif mode == "unicode-geometry":
+                results.append(io.prompt(prompt_state("Unicode geometry › ")))
             elif mode == "suspend":
                 # pty.fork() makes this child an orphaned job-control group,
                 # where the kernel ignores SIGTSTP. Preserve app.suspend()'s
@@ -306,7 +310,17 @@ def assert_complete_frame(frame: dict) -> None:
     width, height = frame["size"]
     assert "working…" not in body, f"internal busy status in frame {frame['sequence']}"
     assert "Resolving raw rank" not in body, f"internal warm status in frame {frame['sequence']}"
-    assert len(lines) == height and all(len(line) <= width for line in lines)
+    assert len(lines) == height
+    for row, line in enumerate(lines):
+        cells = cell_len(line)
+        assert cells <= width, (
+            f"frame {frame['sequence']} row {row} occupies {cells} cells in a {width}-cell terminal"
+        )
+    if frame["cursor"] is not None:
+        cursor_x, cursor_y = frame["cursor"]
+        assert 0 <= cursor_x < width and 0 <= cursor_y < height, (
+            f"frame {frame['sequence']} cursor {(cursor_x, cursor_y)} is outside {width}x{height}"
+        )
     if any("╭─ " in line for line in lines):
         assert any("closes" in line for line in lines), f"overlay without its hint in frame {frame['sequence']}"
         return
@@ -330,6 +344,78 @@ def assert_complete_frame(frame: dict) -> None:
         assert "Command >" in body and "Candidates" in body or height < 18
     elif lines[0].startswith("LIVE EDGE"):
         assert "Command >" in body
+
+
+def test_frame_completeness_rejects_cell_overflow():
+    """Negative control: a row may fit by codepoints and still exceed terminal cells."""
+    frame = {
+        "sequence": 1,
+        "size": [3, 1],
+        "lines": ["界界"],
+        "cursor": None,
+    }
+    assert len(frame["lines"][0]) <= frame["size"][0]
+    with pytest.raises(AssertionError, match="occupies 4 cells"):
+        assert_complete_frame(frame)
+
+
+def test_production_prompt_geometry_for_wide_and_combining_text(tmp_path):
+    ui = Session(tmp_path, "unicode-geometry", size=(80, 16))
+    entered = "A界e\u0301B"
+    visible = unicodedata.normalize("NFC", entered)
+    try:
+        ui.wait_for(
+            lambda frame: "Unicode geometry ›" in text(frame) and frame["cursor"],
+            what="Unicode geometry prompt",
+        )
+        ui.send(entered)
+        frame = ui.wait_for(
+            lambda candidate: visible in text(candidate) and candidate["cursor"],
+            what="wide and combining input",
+        )
+        row = next(index for index, line in enumerate(frame["lines"]) if visible in line)
+        line = frame["lines"][row]
+        expected_column = cell_len(line[:line.index(visible)]) + cell_len(visible)
+        assert tuple(frame["cursor"]) == (expected_column, row), (
+            f"cursor {frame['cursor']} does not follow {visible!r} at cell column {expected_column}"
+        )
+        ui.send("\r")
+        output = ui.finish()
+    finally:
+        if ui.status is None:
+            try:
+                os.kill(ui.pid, signal.SIGKILL)
+                os.waitpid(ui.pid, 0)
+                ui.pump(0.2)
+            except OSError:
+                pass
+        (tmp_path / "pty.raw").write_bytes(bytes(ui.output))
+
+    assert os.WIFEXITED(ui.status) and os.WEXITSTATUS(ui.status) == 0, output[-2000:]
+    results = json.loads(output.rsplit("RESULTS ", 1)[1].splitlines()[0])
+    assert results == [entered]
+
+    raw = bytes(ui.output)
+    frames = ui.frames()
+    replay_and_compare(raw, frames)
+    assert_no_erase_after_entry(raw)
+    assert_frames_are_transactions(raw)
+    for captured in frames:
+        assert_complete_frame(captured)
+
+    # Negative control: pyte must reject a cursor column that disagrees with
+    # the raw PTY stream at this Unicode editor frame boundary.
+    altered = [dict(captured) for captured in frames]
+    target = next(index for index, captured in enumerate(altered) if visible in text(captured))
+    wrong_cursor = list(altered[target]["cursor"])
+    wrong_cursor[0] = (
+        wrong_cursor[0] + 1
+        if wrong_cursor[0] + 1 < altered[target]["size"][0]
+        else wrong_cursor[0] - 1
+    )
+    altered[target]["cursor"] = wrong_cursor
+    with pytest.raises(AssertionError):
+        replay_and_compare(raw, altered)
 
 
 def test_journey_every_frame_is_complete_and_matches_the_terminal(tmp_path):
