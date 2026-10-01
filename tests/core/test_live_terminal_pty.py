@@ -32,7 +32,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 CHILD = textwrap.dedent(
     r"""
-    import json, os, sys, time
+    import json, os, signal, sys, time
     from dataclasses import replace
     sys.path[:0] = [os.environ["SPE_ROOT"] + "/core/src", os.environ["SPE_ROOT"]]
     from tests.core.term_support import beam_state, choice_state, edge_state, prompt_state
@@ -81,6 +81,15 @@ CHILD = textwrap.dedent(
                 results.append(io.read_key("Key? "))
                 print("printed during session")
             elif mode == "interrupt":
+                io.read_choice(choice_state())
+            elif mode == "suspend":
+                # pty.fork() makes this child an orphaned job-control group,
+                # where the kernel ignores SIGTSTP. Preserve app.suspend()'s
+                # stop/resume flow by substituting an unignorable stop here.
+                kill = os.kill
+                def kill_for_test(pid, signum):
+                    kill(pid, signal.SIGSTOP if signum == signal.SIGTSTP else signum)
+                os.kill = kill_for_test
                 io.read_choice(choice_state())
             elif mode == "diagnostic":
                 from trajectory_editor.core.errors import EditorError
@@ -169,6 +178,19 @@ class Session:
                 return frames[-1]
         last = self.frames()[-1]["lines"] if self.frames() else []
         raise AssertionError(f"timed out waiting for {what}; last frame:\n" + "\n".join(last))
+
+    def wait_stopped(self, timeout: float = 10.0) -> int:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.pump(0.02)
+            done, status = os.waitpid(self.pid, os.WNOHANG | os.WUNTRACED)
+            if done:
+                if os.WIFSTOPPED(status):
+                    return status
+                self.status = status
+                raise AssertionError(f"child exited instead of stopping: {status}")
+        excerpt = self.output[-2000:].decode("utf-8", "replace")
+        raise AssertionError("child did not stop after Ctrl+Z:\n" + excerpt)
 
     def send(self, data: bytes | str, *, settle: float = 0.0) -> None:
         os.write(self.fd, data.encode() if isinstance(data, str) else data)
@@ -339,8 +361,10 @@ def test_journey_every_frame_is_complete_and_matches_the_terminal(tmp_path):
             try:
                 os.kill(ui.pid, signal.SIGKILL)
                 os.waitpid(ui.pid, 0)
+                ui.pump(0.2)
             except OSError:
                 pass
+        (tmp_path / "pty.raw").write_bytes(bytes(ui.output))
 
     assert os.WIFEXITED(ui.status) and os.WEXITSTATUS(ui.status) == 0, output[-2000:]
     results = json.loads(output.rsplit("RESULTS ", 1)[1].splitlines()[0])
@@ -423,6 +447,8 @@ def test_preview_diagnostic_is_off_the_live_canvas_until_ctrl_l(tmp_path):
                 os.waitpid(ui.pid, 0)
             except OSError:
                 pass
+        ui.pump(0.2)
+        (tmp_path / "pty.raw").write_bytes(bytes(ui.output))
     assert os.WIFEXITED(ui.status) and os.WEXITSTATUS(ui.status) == 0, output[-2000:]
     assert 'RESULTS ["interrupted"]' in output
     raw = bytes(ui.output)
@@ -480,8 +506,13 @@ def test_real_runtime_journey_through_choice_beam_and_edge(tmp_path):
         output = ui.finish()
     finally:
         if ui.status is None:
-            os.kill(ui.pid, signal.SIGKILL)
-            os.waitpid(ui.pid, 0)
+            try:
+                os.kill(ui.pid, signal.SIGKILL)
+                os.waitpid(ui.pid, 0)
+            except OSError:
+                pass
+        ui.pump(0.2)
+        (tmp_path / "pty.raw").write_bytes(bytes(ui.output))
     assert os.WIFEXITED(ui.status) and os.WEXITSTATUS(ui.status) == 0, output[-2000:]
     assert "RESULTS [" in output
     raw = bytes(ui.output)
@@ -499,3 +530,104 @@ def test_real_runtime_journey_through_choice_beam_and_edge(tmp_path):
                 assert f"SELECTED: {marked.split()[2]}" in "\n".join(lines)
         elif lines[0].startswith("Step "):
             assert "Command >" in "\n".join(lines)
+
+
+def test_resize_signals_coalesce_and_preserve_editor_state(tmp_path):
+    ui = Session(tmp_path, "interrupt", size=(80, 24))
+    try:
+        ui.wait_for(lambda f: f["lines"][0].startswith("Step 0") and f["cursor"], what="choice")
+        ui.send("2")
+        ui.wait_for(lambda f: "Command > 2" in text(f), what="typed command")
+
+        # A resize notification with unchanged geometry should not repaint.
+        ui.pump(0.1)
+        frame_count = len(ui.frames())
+        output_count = len(ui.output)
+        os.kill(ui.pid, signal.SIGWINCH)
+        ui.pump(0.2)
+        assert len(ui.frames()) == frame_count
+        assert len(ui.output) == output_count
+
+        # The small-terminal screen is temporary; request/editor state survives it.
+        ui.resize(30, 2)
+        small = ui.wait_for(
+            lambda f: tuple(f["size"]) == (30, 2) and "Enlarge the terminal" in text(f),
+            what="minimum-size screen",
+        )
+        assert "Command > 2" not in text(small)
+
+        # Several geometry changes arrive without waiting for intermediate
+        # frames. The UI must settle on the TTY's latest size and retain input.
+        for size in ((110, 32), (70, 20), (120, 40)):
+            ui.resize(*size)
+        final = ui.wait_for(
+            lambda f: tuple(f["size"]) == (120, 40) and "Command > 2" in text(f),
+            what="latest resize with editor text preserved",
+        )
+        assert tuple(final["size"]) == (120, 40)
+        assert "Command > 2" in text(final)
+        ui.send("\x03")
+        output = ui.finish()
+    finally:
+        if ui.status is None:
+            try:
+                os.kill(ui.pid, signal.SIGKILL)
+                os.waitpid(ui.pid, 0)
+            except OSError:
+                pass
+        ui.pump(0.2)
+        (tmp_path / "pty.raw").write_bytes(bytes(ui.output))
+
+    assert os.WIFEXITED(ui.status) and os.WEXITSTATUS(ui.status) == 0, output[-2000:]
+    raw = bytes(ui.output)
+    frames = ui.frames()
+    replay_and_compare(raw, frames)
+    assert_no_erase_after_entry(raw)
+    assert_frames_are_transactions(raw)
+    for frame in frames:
+        assert_complete_frame(frame)
+
+
+def test_ctrl_z_sigcont_reenters_terminal_once(tmp_path):
+    ui = Session(tmp_path, "suspend", size=(80, 24))
+    try:
+        ui.wait_for(lambda f: f["lines"][0].startswith("Step 0") and f["cursor"], what="choice")
+        initial_frames = len(ui.frames())
+        ui.send("\x1a")
+        stopped = ui.wait_stopped()
+        assert os.WSTOPSIG(stopped) == signal.SIGSTOP
+        before_resume = len(ui.frames())
+
+        os.kill(ui.pid, signal.SIGCONT)
+        resumed = ui.wait_for(
+            lambda f: f["sequence"] > before_resume
+            and f["lines"][0].startswith("Step 0") and f["cursor"],
+            what="choice after SIGCONT",
+        )
+        ui.pump(0.15)
+        assert len(ui.frames()) == before_resume + 1
+        assert resumed["sequence"] == initial_frames + 1
+        ui.send("\x03")
+        output = ui.finish()
+    finally:
+        if ui.status is None:
+            try:
+                os.kill(ui.pid, signal.SIGKILL)
+                os.waitpid(ui.pid, 0)
+            except OSError:
+                pass
+        ui.pump(0.2)
+        (tmp_path / "pty.raw").write_bytes(bytes(ui.output))
+
+    assert os.WIFEXITED(ui.status) and os.WEXITSTATUS(ui.status) == 0, output[-2000:]
+    assert 'RESULTS ["interrupted"]' in output
+    raw = bytes(ui.output)
+    frames = ui.frames()
+    replay_and_compare(raw, frames)
+    assert_frames_are_transactions(raw)
+    assert raw.count(b"\x1b[?1049h") == 2
+    assert raw.count(b"\x1b[?1049l") == 2
+    assert raw.count(b"\x1b[2J") == 2
+    assert ERASES.findall(raw) == [b"\x1b[2J", b"\x1b[2J"]
+    for frame in frames:
+        assert_complete_frame(frame)

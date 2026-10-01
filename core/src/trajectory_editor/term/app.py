@@ -232,11 +232,23 @@ class TerminalApp:
                         got_input = True
                         self._dispatch(self._parser.feed(self._decoder.decode(data)))
                     else:
+                        # App posts and signal notifications share this pipe.
+                        # Posted callbacks dirty the UI when they run below;
+                        # SIGWINCH/SIGCONT only force a fresh size query.
+                        notifications = bytearray()
                         try:
-                            while os.read(self._wake_read, 4096):
-                                pass
+                            while True:
+                                data = os.read(self._wake_read, 4096)
+                                if not data:
+                                    break
+                                notifications.extend(data)
                         except (BlockingIOError, OSError):
                             pass
+                        if os.name == "posix" and any(
+                            bytes((signum,)) in notifications
+                            for signum in (signal.SIGWINCH, signal.SIGCONT)
+                        ):
+                            self._last_size_check = 0.0
                 if not got_input and self._parser.pending:
                     self._dispatch(self._parser.flush())
                 self._run_posted()
@@ -556,6 +568,7 @@ class TerminalSession(AbstractContextManager["TerminalSession"]):
         self._closing = False
         self._generation = 0
         self._previous_signal_handlers: dict[signal.Signals, Any] = {}
+        self._previous_signal_wakeup_fd: int | None = None
 
     def __enter__(self) -> TerminalSession:  # noqa: PYI034
         if self._thread is not None:
@@ -588,6 +601,8 @@ class TerminalSession(AbstractContextManager["TerminalSession"]):
 
     def __exit__(self, exc_type, exc, traceback) -> bool:
         self._closing = True
+        # Stop routing signals to the app before its wake pipe is closed.
+        self._restore_signal_handlers()
         app = self.application
         if app is not None and self._thread is not None and self._thread.is_alive():
             app.stop()
@@ -595,7 +610,6 @@ class TerminalSession(AbstractContextManager["TerminalSession"]):
             self._thread.join()
         if app is not None:
             app.close_executors()
-        self._restore_signal_handlers()
         if exc_type is None and self._failure is not None and not isinstance(self._failure, EOFError):
             raise self._failure
         return False
@@ -614,23 +628,34 @@ class TerminalSession(AbstractContextManager["TerminalSession"]):
             return
 
         def wake(_signum: int, _frame: Any) -> None:
-            app = self.application
-            if app is not None and app.running:
-                app.post(lambda: None)
+            # CPython's wakeup fd writes the signal number to the selector
+            # pipe. Keep the Python handler free of locks and queue updates.
+            return None
 
-        def resumed(_signum: int, _frame: Any) -> None:
-            app = self.application
-            if app is not None and app.running:
-                app.post(app.resume)
-
-        for signum, handler in ((signal.SIGWINCH, wake), (signal.SIGCONT, resumed)):
-            self._previous_signal_handlers[signum] = signal.signal(signum, handler)
+        app = self.application
+        assert app is not None
+        try:
+            for signum in (signal.SIGWINCH, signal.SIGCONT):
+                self._previous_signal_handlers[signum] = signal.signal(signum, wake)
+            # The fd is process-global. These bytes wake select; the event
+            # loop reads the TTY size, while suspend() owns terminal re-entry.
+            self._previous_signal_wakeup_fd = signal.set_wakeup_fd(
+                app._wake_write, warn_on_full_buffer=False,
+            )
+        except BaseException:
+            self._restore_signal_handlers()
+            raise
 
     def _restore_signal_handlers(self) -> None:
         if threading.current_thread() is threading.main_thread():
+            if self._previous_signal_wakeup_fd is not None:
+                signal.set_wakeup_fd(
+                    self._previous_signal_wakeup_fd, warn_on_full_buffer=False,
+                )
+                self._previous_signal_wakeup_fd = None
             for signum, handler in self._previous_signal_handlers.items():
                 signal.signal(signum, handler)
-        self._previous_signal_handlers.clear()
+            self._previous_signal_handlers.clear()
 
     def _read(self, state: Any) -> Any:
         if threading.get_ident() != self._owner:

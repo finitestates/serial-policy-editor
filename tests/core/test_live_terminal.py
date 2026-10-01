@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import select
+import signal
 from dataclasses import replace
 
 import pytest
@@ -13,6 +16,7 @@ from trajectory_editor.terminal_contracts import (
     BoundaryReview,
     ChoiceFeedback,
 )
+from trajectory_editor.term.app import TerminalApp, TerminalSession
 from trajectory_editor.ui_themes import LIVE_THEME_NAMES
 
 from tests.core.term_support import (
@@ -54,6 +58,32 @@ def _review(**changes):
         review=BoundaryReview(2, 1, "historical text", {"kind": "token-boundary"}),
         **changes,
     )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="terminal signals are POSIX")
+def test_terminal_signals_wake_selector_without_posting_from_the_handler(monkeypatch):
+    app = TerminalApp(input_fd=0, output_fd=1)
+    app.running = True
+    session = TerminalSession(input_fd=0, output_fd=1)
+    session.application = app
+    posted = []
+    monkeypatch.setattr(app, "post", lambda *args: posted.append(args))
+    try:
+        session._install_signal_handlers()
+        os.kill(os.getpid(), signal.SIGWINCH)
+        os.kill(os.getpid(), signal.SIGCONT)
+        ready, _, _ = select.select([app._wake_read], [], [], 1.0)
+        assert ready, "terminal signals did not wake the selector pipe"
+        wake_bytes = os.read(app._wake_read, 4096)
+        assert bytes((signal.SIGWINCH,)) in wake_bytes
+        assert bytes((signal.SIGCONT,)) in wake_bytes
+        assert posted == [], "signal handlers must not enter the lock-taking callback queue"
+    finally:
+        session._restore_signal_handlers()
+        app.running = False
+        app.close_executors()
+        os.close(app._wake_read)
+        os.close(app._wake_write)
 
 
 # -- one request of each kind ---------------------------------------------------
