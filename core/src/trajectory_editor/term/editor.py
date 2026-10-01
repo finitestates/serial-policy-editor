@@ -182,17 +182,17 @@ def wrap_editor(text: str, cursor: int, width: int) -> tuple[list[list[str]], tu
     column = 0
     cursor_position = (0, 0)
     for index, character in enumerate(text):
+        shown = _display_char(character)
+        size = get_character_cell_size(shown)
         if index == cursor:
-            if column >= width:
+            if column >= width and size > 0:
                 rows.append([])
                 column = 0
-            cursor_position = (len(rows) - 1, column)
+            cursor_position = (len(rows) - 1, min(column, width - 1))
         if character == "\n":
             rows.append([])
             column = 0
             continue
-        shown = _display_char(character)
-        size = max(1, get_character_cell_size(shown))
         if column + size > width:
             rows.append([])
             column = 0

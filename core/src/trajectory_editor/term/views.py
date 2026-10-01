@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 
@@ -86,7 +87,7 @@ def pack_hint(text: str, width: int, height: int) -> list[str]:
     items = [item.strip() for part in text.split("\n") for item in part.split(" · ") if item.strip()]
     lines: list[str] = []
     for item in items:
-        if lines and len(lines[-1]) + 3 + len(item) <= width:
+        if lines and cell_len(lines[-1]) + cell_len(" · ") + cell_len(item) <= width:
             lines[-1] += " · " + item
         else:
             lines.append(item)
@@ -180,7 +181,7 @@ class RequestView:
         label_style = ctx.styles("prompt-label") if self.accepting else ctx.styles("muted")
         x = canvas.put(0, y, label_text, label_style)
         for row in range(1, height):
-            canvas.put(0, y + row, " " * len(label_text))
+            canvas.put(0, y + row, " " * cell_len(label_text))
         field_width = max(1, width - x)
         field_style = ctx.styles("prompt-input-idle") if read_only else self.input_style(ctx)
         draw_editor(
@@ -201,8 +202,9 @@ class RequestView:
         muted = ctx.styles("hint")
         for offset in range(height):
             line = lines[offset] if offset < len(lines) else ""
-            clipped = clip(((line, muted),), width) if len(line) > width else ((line, muted),)
-            size = min(width, len(line))
+            line_width = cell_len(line)
+            clipped = clip(((line, muted),), width) if line_width > width else ((line, muted),)
+            size = min(width, line_width)
             left = max(0, (width - size) // 2)
             ctx.canvas.put(0, y + offset, " " * left)
             ctx.canvas.put_line(left, y + offset, clipped, width=width - left)
@@ -693,7 +695,7 @@ class ChoiceView(RequestView):
 
         hint = self._hint(height, width)
         hint_rows = 1 if short else min(2, len(pack_hint(hint, width, 99)))
-        editor_width = max(1, width - len("Command > "))
+        editor_width = max(1, width - cell_len("Command > "))
         editor_rows = editor_height(self.editor, editor_width)
         editor_cap = (8 if height >= 30 else 4) if self._expanded else (4 if height >= 18 else 2)
         table_rows = (

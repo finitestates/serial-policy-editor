@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 
@@ -74,7 +75,7 @@ class DocumentOverlay(Overlay):
         draw_lines(ctx, self.lines(ctx, max(1, iw - 2 * pad - 1)), ix + pad, iy, iw - 2 * pad, body_height, self.scroll)
         hint = self.hint()
         line = clip(((hint, ctx.styles("hint")),), iw)
-        size = min(iw, len(hint))
+        size = min(iw, cell_len(hint))
         ctx.canvas.put_line(ix + max(0, (iw - size) // 2), iy + ih - 1, line, width=min(iw, size))
         ctx.canvas.cursor = None
 
@@ -148,9 +149,10 @@ class PaletteOverlay(Overlay):
         y = 0 if canvas.height < 14 else 1
         ix, iy, iw, ih = draw_box(ctx, x, y, width, height, "Commands")
         label = "› "
+        label_width = cell_len(label)
         canvas.put(ix, iy, label, styles("prompt-label"))
         input_style = styles("prompt-input-focus")
-        draw_editor(canvas, self.query, ix + len(label), iy, max(1, iw - len(label)), 1,
+        draw_editor(canvas, self.query, ix + label_width, iy, max(1, iw - label_width), 1,
                     style=input_style, placeholder="Search commands",
                     placeholder_style=input_style + Style(dim=True))
         rows = max(0, ih - 1)
