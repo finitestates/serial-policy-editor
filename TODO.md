@@ -2,10 +2,11 @@
 
 ## Product polish
 
-- [ ] Decide whether speculative execution for token selection earns its complexity. Measure its latency benefit on supported backends and weigh it against the warmup, cancellation, and promotion logic. If the benefit is small or inconsistent, remove that path and keep selection on the ordinary commit flow.
-- [ ] Bring non-runtime menus into line with the main runtime menu’s visual conventions. Review screens such as EDGE, search/review, and setup; make selection, context, status, and available commands easy to read in the same way.
+- [x] Keep speculative token prewarming only for active search matches. Ordinary candidate navigation and selection use the normal commit path; search warming runs off the UI thread, cancels when its target changes, and promotes only an exact match. Covered by the [ordinary-selection regression](tests/core/test_selection_warm_terminal.py) and [search-warm tests](tests/core/test_search_warm_terminal.py).
+- [ ] Identify and validate a viable path to improve overall terminal rendering. Menu conventions across EDGE, search/review, and setup have improved, but the rendered output remains unsatisfactory; no concrete rendering change is selected.
+- [x] Strengthen terminal-rendering validation with production PTY frame capture, raw-byte replay through pyte at every frame boundary, completeness checks, and negative controls. See the [rendering guide](tests/TERMINAL_RENDERING_GUIDE.md) and [PTY journeys](tests/core/test_live_terminal_pty.py).
 - [x] Add an end-to-end regression for Tab/Enter through `run_plan()`, checking the recorded action and next view. The [selection test](tests/core/test_selection_warm_terminal.py) checks the ordinary selection flow and confirms that candidate navigation does not trigger speculative warming.
-- [ ] Remove stale functions/data fields/tests/aliases; cut-down on processes that make reads/writes/copies for no obvious purpose.
+- [x] Complete a focused cleanup of confirmed stale aliases/functions and obsolete model-identity/persistence fields. Larger BranchState/registry overlap remains a separate architectural question.
 - [x] Fix the bias system. Right now, it is a lot of residual complexity lacking a clear identity about what it is trying to accomplish.
 
 ## Replay authoring and independent correctness
