@@ -6,8 +6,6 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
-
-from tests.fakes import ConformingFakeBackend, ScriptedIO
 from trajectory_editor.core.actions import Write
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_cli import main
@@ -17,6 +15,8 @@ from trajectory_editor.episode_session import LiveSession
 from trajectory_editor.episode_store import EpisodeStore
 from trajectory_editor.session_runtime import session_edge_menu
 from trajectory_editor.teacher_plan import load_teacher_tape_jsonl
+
+from tests.fakes import ConformingFakeBackend, ScriptedIO
 
 
 def _run(
@@ -84,6 +84,53 @@ def test_ephemeral_bare_reroll_picks_a_fresh_seed(tmp_path):
     reroll_steps = [step for step in tape.plan if step.action.kind == "reroll"]
     assert len(reroll_steps) == 1
     assert reroll_steps[0].action.seed == 99
+
+
+@pytest.mark.parametrize("workspace", [False, True])
+def test_yaml_teacher_plan_sampler_is_a_default_with_cli_overrides(
+    tmp_path, workspace,
+):
+    plan = tmp_path / "teacher.yaml"
+    plan.write_text(
+        """format: serial-policy-tape
+version: 1
+prompt: Prompt
+environment:
+  sampler:
+    temperature: 0.25
+    top_p: 0.8
+    seed: 42
+steps: []
+""",
+        encoding="utf-8",
+    )
+    backend = ConformingFakeBackend()
+    captured = {}
+
+    def capture_run(*_args, roster, **_kwargs):
+        captured["sampling"] = roster.active_session.engine.sampling
+        return 0
+
+    arguments = [
+        "--model", "fake", "--plain-ui", "--teacher-plan", str(plan),
+        "--temperature", "0.9",
+    ]
+    if workspace:
+        arguments.extend(["--workspace", str(tmp_path / "episodes.sqlite3")])
+    with (
+        patch("trajectory_editor.episode_backend_loader.load_backend", return_value=backend),
+        patch(
+            "trajectory_editor.episode_backend_loader.load_episode_backend",
+            return_value=(backend, backend.provenance(), False),
+        ),
+        patch("trajectory_editor.session_runtime.run_session_roster", side_effect=capture_run),
+        patch("trajectory_editor.episode_cli.TerminalIO", return_value=ScriptedIO([])),
+    ):
+        assert main(arguments) == 0
+
+    assert captured["sampling"].temperature == 0.9
+    assert captured["sampling"].top_p == 0.8
+    assert captured["sampling"].seed == 42
 
 
 @pytest.mark.invariant

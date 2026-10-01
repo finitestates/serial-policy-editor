@@ -43,9 +43,40 @@ a workspace:
 
 ```bash
 policy-editor --model model.gguf --new-prompt 'Tell a story'
-policy-editor --model model.gguf --teacher-plan plan.jsonl --new-prompt 'Tell a story'
+policy-editor --model model.gguf --teacher-plan plan.yaml
 policy-editor --workspace --model model.gguf --new-prompt 'Tell a story'
 ```
+
+Teacher plans can be YAML or the existing JSONL tape format. A YAML plan keeps
+the prompt, optional initial sampler defaults, recording metadata, and ordered
+action/observation steps in one file:
+
+```yaml
+format: serial-policy-tape
+version: 1
+prompt: |-
+  Tell a short story.
+environment:
+  sampler:
+    temperature: 0.7
+    top_k: 40
+steps:
+  - step: 0
+    action:
+      kind: write
+      mode: exact
+      text: "Once upon a time."
+    observation:
+      token_ids: [101, 202]
+      stop_reason: completed
+```
+
+Each step is one submitted action; its observation can contain multiple token
+IDs. In handoff mode, every action needs an observation. Ballistic mode permits
+omitting observations. Explicit CLI sampler options override the plan's initial
+sampler values. `--procedure --projector ID` prints this same executable YAML,
+and `--export-teacher-plan ID FILE.yaml` writes it to a file. Use a `.jsonl`
+suffix to retain the existing JSONL export format.
 
 At EDGE, `fork N` creates and selects a live branch, `rewind N` changes the
 selected branch, and `branches`/`switch N` navigate retained branches.

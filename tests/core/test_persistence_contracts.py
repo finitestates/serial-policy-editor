@@ -3,18 +3,19 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
-
-from tests.fakes import ConformingFakeBackend
 from trajectory_editor.core.actions import Accept, Hold, Write
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.episode_replay_source import replay_procedure
+from trajectory_editor.episode_store import EpisodeStore
 from trajectory_editor.projector import (
     project_episode,
     project_fork_map,
     project_lineage,
     project_procedure,
 )
-from trajectory_editor.episode_store import EpisodeStore
+from trajectory_editor.teacher_plan import load_teacher_tape_yaml
+
+from tests.fakes import ConformingFakeBackend
 
 pytestmark = pytest.mark.invariant
 
@@ -132,9 +133,15 @@ def test_p04_exports_preserve_procedure_and_lineage_semantics(tmp_path):
         lineage = project_lineage(store, child_id)
         relation_rows = store.episode_relation_rows()
 
+    procedure_path = tmp_path / "procedure.yaml"
+    procedure_path.write_text(procedure, encoding="utf-8")
+    executable = load_teacher_tape_yaml(procedure_path, require_observations=True)
+
     assert plain.text == "P A"
-    assert "P       : P" in procedure
-    assert "0 : x  A" in procedure
+    assert executable.envelope["prompt"] == "P"
+    assert executable.plan[0].action == Write(" A", mode="exact")
+    assert executable.plan[0].expectation is not None
+    assert executable.plan[0].expectation.token_ids == (1,)
     assert "fork family:" in lineage
     assert "child" in lineage
     assert [

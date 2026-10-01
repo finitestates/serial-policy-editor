@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import argparse
 import math
+import sys
 from contextlib import ExitStack
 from dataclasses import dataclass
-import sys
 from pathlib import Path
 from typing import Any, Literal
 
@@ -21,8 +21,11 @@ from . import (
     session_runtime,
 )
 from .backend_factory import BACKEND_NAMES
-from .decoder import KV_CACHE_TYPES
-from .core.errors import EditorError
+from .controller_profiles import (
+    explicit_option_dests,
+    load_controller_profile,
+    profile_arguments,
+)
 from .core.cli_config import (
     add_core_sampler_arguments,
     apply_activation_artifact,
@@ -31,29 +34,28 @@ from .core.cli_config import (
     sampler_overrides_from_args,
     sampler_overrides_present,
 )
+from .core.errors import EditorError
 from .core.sampler_config import SamplerConfig
-from .episode_lifecycle import (
-    POLICY_FIELDS, _visible_tokens, _restore_engine,
-    _spr_engine_from_source,
-)
+from .decoder import KV_CACHE_TYPES
 from .episode_engine import EpisodeEngine
+from .episode_lifecycle import (
+    POLICY_FIELDS,
+    _restore_engine,
+    _spr_engine_from_source,
+    _visible_tokens,
+)
 from .episode_replay_source import build_source_replay_recipe
-from .spr_recipe import ReplaySamplerPolicy, ReplayPlacement, compose_replay_plan
+from .episode_store import EpisodeStore
 from .projector import (
     project_episode,
     project_lineage,
     project_procedure,
 )
-from .episode_store import EpisodeStore
-from .controller_profiles import (
-    explicit_option_dests,
-    load_controller_profile,
-    profile_arguments,
-)
+from .spr_recipe import ReplayPlacement, ReplaySamplerPolicy, compose_replay_plan
+from .teacher_plan import TeacherTape, export_teacher_tape, load_teacher_tape
 from .tui import TerminalIO
 from .ui_themes import LIVE_THEME_NAMES
 from .version import VERSION
-from .teacher_plan import TeacherTape, export_teacher_tape, load_teacher_tape_jsonl
 
 
 @dataclass(frozen=True)
@@ -91,7 +93,7 @@ def _select_launch_source(args: argparse.Namespace) -> LaunchSource:
     if args.teacher_plan is not None:
         if any(value is not None for value in (args.replay, args.resume, args.fork_from)):
             raise EditorError("--teacher-plan currently starts a new episode only")
-        teacher_tape = load_teacher_tape_jsonl(
+        teacher_tape = load_teacher_tape(
             args.teacher_plan,
             envelope_path=args.teacher_plan_envelope,
             require_observations=args.divergence_policy == "handoff",
@@ -207,15 +209,15 @@ def build_parser(
     )
     parser.add_argument(
         "--teacher-plan", type=Path, metavar="FILE",
-        help="execute a portable JSONL teacher tape from a new prompt",
+        help="execute a YAML or JSONL teacher plan from a new prompt",
     )
     parser.add_argument(
         "--teacher-plan-envelope", type=Path, metavar="FILE",
-        help="optional JSON sidecar describing a portable teacher tape",
+        help="optional JSON sidecar for a teacher plan (YAML plans include their header)",
     )
     parser.add_argument(
         "--export-teacher-plan", nargs=2, type=Path, metavar=("EPISODE_ID", "FILE"),
-        help="export an episode as a portable JSONL teacher tape",
+        help="export an episode as YAML or JSONL according to FILE extension",
     )
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--new-prompt", metavar="TEXT")
@@ -240,7 +242,7 @@ def build_parser(
     )
     source.add_argument("--fork-from", metavar="EPISODE_ID")
     source.add_argument("--projector", metavar="EPISODE_ID")
-    parser.add_argument("--procedure", action="store_true", help="show a manual replay procedure with --projector")
+    parser.add_argument("--procedure", action="store_true", help="show an executable YAML replay procedure with --projector")
     source.add_argument("--list", action="store_true", dest="list_episodes")
     parser.add_argument("--at", type=int, metavar="BOUNDARY")
     parser.add_argument(
@@ -534,7 +536,11 @@ def main(
             from uuid import uuid4
 
             from .episode_identity import backend_provenance_with_identity
-            from .episode_live_restore import model_change_session, new_live_session, restore_live_session
+            from .episode_live_restore import (
+                model_change_session,
+                new_live_session,
+                restore_live_session,
+            )
             from .episode_session import BranchIdentity, LiveSession, LiveSessionRoster
 
             args._model_changed = model_changed
@@ -596,7 +602,10 @@ def main(
                     )
             elif selection.kind == "new":
                 initial_text = args.new_prompt if args.new_prompt is not None else episode_prompts.read_prompt_file(args.new_prompt_file)
-                sampling = apply_activation_artifact(sampler_from_args(args), activation_artifact, args)
+                source_sampling = getattr(teacher_tape, "initial_sampling", None)
+                sampling = apply_activation_artifact(
+                    sampler_from_args(args, source_sampling), activation_artifact, args
+                )
                 engine = EpisodeEngine(
                     backend, sampling=sampling,
                     initial_text=initial_text,

@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import math
-import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from .core.actions import Accept, EndGeneration, Hold, Phrase, Reroll, SelectRawRank, SetSampler, Write
+from .core.actions import SetSampler
 from .core.errors import EditorError
 from .episode_lineage import EpisodeRelation, LineageNode, LineageView
 from .episode_lineage_source import EpisodeLineageReader, build_lineage_view
@@ -50,11 +49,10 @@ def _recompute_missing_metrics(
     if not missing:
         return
 
-    from .core.sampler_config import SamplerConfig
     from .episode_backend_loader import load_cfg_guidance_backend, load_episode_backend
     from .episode_engine import EpisodeEngine
     from .run_loop import run_plan
-    from .spr_recipe import ReplaySamplerPolicy, ReplayPlacement, compose_replay_plan
+    from .spr_recipe import ReplayPlacement, ReplaySamplerPolicy, compose_replay_plan
 
     owned_backend = backend is None
     owned_guidance = False
@@ -520,106 +518,19 @@ def project_episode(
     )
 
 
-def _procedure_text(text: str) -> str:
-    """Escape control characters without losing Unicode or leading spaces."""
-    import json
-    return json.dumps(text, ensure_ascii=False)[1:-1].replace(r'\"', '"')
-
-
 def project_procedure(store: EpisodeStore, episode_id: str) -> str:
-    """Render the same surviving procedure used by replay, without a model."""
-    from pathlib import PurePosixPath
-    from .core.sampler_config import SamplerConfig
+    """Render the surviving procedure as an executable YAML teacher plan."""
+    from .teacher_plan import TAPE_FORMAT, TAPE_VERSION, teacher_tape_yaml_text
 
     episode = store.get_episode(episode_id)
     steps = replay_procedure(store, episode_id)
-    initial = SamplerConfig.from_record(episode["initial_sampling"])
-    backend = episode["backend"]
-    model = backend.get("filename") or backend.get("model_path") or backend.get("model") or "unknown"
-    model = PurePosixPath(str(model).replace(chr(92), "/")).name
-    fields = {
-        key: getattr(initial, key)
-        for key in initial.__dataclass_fields__
-        if key not in {"token_biases", "bias_groups"}
+    envelope = {
+        "format": TAPE_FORMAT,
+        "version": TAPE_VERSION,
+        "prompt": episode["initial_text"],
+        "environment": {
+            "backend": episode["backend"],
+            "sampler": episode["initial_sampling"],
+        },
     }
-    lines = [
-        f"MODEL   : {_procedure_text(model)}",
-        f"BACKEND : {_procedure_text(str(backend.get('backend', 'unknown')))}",
-        "SAMPLER : " + " ".join(f"{key}={value}" for key, value in fields.items()),
-        f"P       : {_procedure_text(str(episode['initial_text']))}",
-        "",
-    ]
-    rows: list[tuple[int, str, str | None]] = []
-    current = initial
-    boundary = 0
-
-    if initial.token_biases:
-        lines.insert(3, f"TOKENS  : {[item.to_dict() for item in initial.token_biases]!r}")
-    if initial.bias_groups:
-        lines.insert(4, f"GROUPS  : {[group.to_dict() for group in initial.bias_groups]!r}")
-
-    for step in steps:
-        boundary = step["boundary"]
-        action = step["action"]
-        tokens = step["tokens"]
-        result = "".join(str(token["text"]) for token in tokens)
-        comment: str | None = _procedure_text(result)
-        if isinstance(action, SetSampler):
-            updated = action.sampling
-            if updated != current:
-                payload = json.dumps(
-                    updated.to_dict(),
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-                rows.append((boundary, "s " + payload, None))
-            current = updated
-            continue
-        if isinstance(action, SelectRawRank):
-            command = str(action.rank)
-        elif isinstance(action, Accept):
-            # Legacy acceptance can only be printed as its recorded source rank.
-            command = (
-                str(tokens[0]["raw_rank"])
-                if tokens and tokens[0].get("raw_rank") is not None
-                else "accept"
-            )
-        elif isinstance(action, Write):
-            command = ("t " if action.mode == "continuation" else "x ") + action.text
-            if any(ord(char) < 32 or ord(char) == 127 for char in action.text):
-                command = ("t " if action.mode == "continuation" else "x ") + _procedure_text(action.text)
-                comment = "display-escaped write; control characters must be pasted literally"
-            else:
-                comment = None
-        elif isinstance(action, Phrase):
-            command = (
-                "force" if action.force else "check"
-            ) + ("x " if action.mode == "exact" else " ") + action.text
-            if any(ord(char) < 32 or ord(char) == 127 for char in action.text):
-                prefix = "forcex " if action.force and action.mode == "exact" else (
-                    "force " if action.force else "checkx " if action.mode == "exact" else "check "
-                )
-                command = prefix + _procedure_text(action.text)
-                comment = "display-escaped phrase; control characters must be pasted literally"
-            else:
-                comment = None
-        elif isinstance(action, Hold):
-            marker = {"sentence": ". ", "newline": "| ", None: ""}[action.boundary]
-            command = f"h {marker}{action.limit}"
-        elif isinstance(action, EndGeneration):
-            command = "e!"
-        elif isinstance(action, Reroll):
-            command = f"reroll {action.seed}"
-            comment = None
-        else:
-            raise EditorError(f"cannot render procedure action {action!r}")
-        rows.append((boundary, command, comment))
-    # Finite procedures return live control, never seal the destination.
-    if not rows or rows[-1][1] not in {"q", "e!"}:
-        rows.append((boundary, "q", None))
-    width = max((len(f"{at} : {command}") for at, command, _ in rows), default=0)
-    for at, command, comment in rows:
-        line = f"{at} : {command}"
-        lines.append(line if comment is None else line.ljust(width) + " #" + comment)
-    return chr(10).join(lines)
+    return teacher_tape_yaml_text(envelope, steps)
