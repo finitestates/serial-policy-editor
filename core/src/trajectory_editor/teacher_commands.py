@@ -179,13 +179,15 @@ HELP_TEXT = """Commands:
                     matching tokens stay whole; no lookahead or trailing tokens
   m                  return to the main table without disclosing rows
   m N                return to the main table and reveal N more ranked rows
-  /TERM              find one exact token and show its backend-rank neighborhood
+  /TERM              find one exact token and center it in its backend-rank neighborhood
   /"\\n"              JSON escapes preserve exact whitespace/control characters
-  ms N               explore the neighborhood of backend rank N
+  ms N               center a neighborhood on backend rank N
   Ctrl+G             explore the numeric rank currently in the input
   ms                 return to the active token-search neighborhood
   ms + [N]           expand toward larger ranks / lower backend probability
+                     N defaults to the configured table depth
   ms - [N]           expand toward smaller ranks / higher backend probability
+                     N defaults to the configured table depth
   c                  cycle middle-column focus: logit → gap_k1 → margin → z → pct → decode_pct
   C                  clear all overlays and shortcuts
   overlay NAME       toggle any named overlay alongside the others
@@ -735,7 +737,7 @@ def parse_command(
     menu_size: int,
     default_hold_tokens: int,
     vocabulary_size: int | None = None,
-    default_search_radius: int = 3,
+    menu_page_rows: int | None = None,
 ) -> TeacherCommand:
     beam = parse_beam(raw, vocabulary_size=vocabulary_size)
     if beam is not None:
@@ -928,7 +930,7 @@ def parse_command(
         if len(parts) not in {2, 3} or parts[1] not in {"+", "-"}:
             raise EditorError("use ms, ms N, ms + [N], or ms - [N]")
         if len(parts) == 2:
-            rows = default_search_radius
+            rows = menu_size if menu_page_rows is None else menu_page_rows
         else:
             try:
                 rows = int(parts[2])
@@ -1007,7 +1009,7 @@ def interpret_command(
     menu_size: int,
     default_hold_tokens: int,
     vocabulary_size: int,
-    default_search_radius: int = 3,
+    menu_page_rows: int | None = None,
     implicit_accept: bool = True,
 ) -> CommandInterpretation:
     """Classify a draft and carry the exact command to the submit path.
@@ -1054,7 +1056,7 @@ def interpret_command(
             menu_size=menu_size,
             default_hold_tokens=default_hold_tokens,
             vocabulary_size=vocabulary_size,
-            default_search_radius=default_search_radius,
+            menu_page_rows=menu_page_rows,
         )
     except EditorError as exc:
         return CommandInterpretation(raw, CommandState.INVALID, message=str(exc))

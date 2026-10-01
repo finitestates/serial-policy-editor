@@ -86,7 +86,7 @@ def _submission_target(state: ChoiceViewState, raw: Any) -> tuple[int, int] | No
         menu_size=len(state.choice.candidates),
         default_hold_tokens=state.default_hold_tokens,
         vocabulary_size=state.choice.vocabulary_size or len(state.candidates),
-        default_search_radius=state.default_search_radius,
+        menu_page_rows=state.menu_page_rows,
     )
     command = interpretation.command
     if command is None or command.kind != CommandKind.EDIT or command.action is None:

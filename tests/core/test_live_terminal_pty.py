@@ -141,7 +141,7 @@ CHILD = textwrap.dedent(
                 engine = EpisodeEngine(ConformingFakeBackend(), initial_token_ids=[7],
                                        sampling=SamplerConfig(temperature=0.0))
                 args = SimpleNamespace(
-                    divergence_policy="handoff", table_depth=3, search_radius=3, hold_default=20,
+                    divergence_policy="handoff", table_depth=3, hold_default=20,
                     context_chars=0, manual_acceptance=False, show_policy_rank=None,
                     logit_view="none", output=None, phrase_max_tokens=16, phrase_max_shift=6.0,
                 )

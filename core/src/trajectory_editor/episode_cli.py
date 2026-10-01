@@ -263,8 +263,10 @@ def build_parser(
         metavar="FILE",
         help="load reusable CLI values from a YAML controller profile",
     )
-    parser.add_argument("--table-depth", type=int, default=12)
-    parser.add_argument("--search-radius", type=int, default=3)
+    parser.add_argument(
+        "--table-depth", type=int, default=12,
+        help="row capacity shared by the main menu and centered token-search view",
+    )
     parser.add_argument("--hold-default", type=int, default=100)
     parser.add_argument(
         "--phrase-max-tokens",

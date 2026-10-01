@@ -37,7 +37,7 @@ def test_m01_full_vocabulary_search_is_nonmutating():
     episode = runtime()
     observation = episode.observe()
     before = list(episode.backend.tokens)
-    policy = InteractivePolicy(io=ScriptedIO(["/P", "8"]), menu_size=1, search_radius=1)
+    policy = InteractivePolicy(io=ScriptedIO(["/P", "8"]), menu_size=1)
 
     action = policy.choose(episode, observation)
 
