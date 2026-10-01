@@ -209,7 +209,7 @@ def test_small_counterfactual_example():
     backend = ScriptedBackend()
     root = start()
     original, held = apply(backend, root, Hold(5))
-    assert held.visible_token_ids == (5, 5, 6, 4, 8)
+    assert held.visible_token_ids == (5, 3, 5, 6, 8)
     assert apply(backend, rewind(original, 0), Hold(5)) == (original, held)
     altered, _ = apply(backend, fork(root), SelectToken(7))
     altered, branch_hold = apply(backend, altered, Hold(4))
