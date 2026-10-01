@@ -213,3 +213,47 @@ def test_reroll_rejects_bad_seeds(seed):
         ProductionReroll(seed)
     with pytest.raises(EditorError):
         action_from_dict({"kind": "reroll", "seed": seed})
+
+
+@pytest.mark.parametrize('kernel', ['categorical', 'gumbel-max', 'gaussian-max', 'logistic-max', 'laplace-max', 'uniform-max', 'student-t-max'])
+@pytest.mark.parametrize('df', [0.5, 3.0, 7.0])
+def test_all_draw_kernels_and_scales(kernel, df):
+    from reference_kernel import DRAW_KERNELS
+    from trajectory_editor.core.sampling import DRAW_KERNELS as production_kernels
+    assert set(DRAW_KERNELS) == set(production_kernels)
+    reference = Distribution((4, 1, 7), (.2, .5, .3), (.1, .9, .4))
+    production = SparseDistribution(np.array(reference.ids), np.array(reference.probabilities), np.array(reference.scores))
+    for scale in (0., .7, 1., 2.):
+        policy = Policy(draw_kernel=kernel, gaussian_noise_std=scale, perturb_noise_std=scale, student_t_df=df, gumbel_noise_scale=scale)
+        for seed in (-3, 17, 12345):
+            world = World.for_prefix(seed, (1, 2, 3))
+            for boundary in (0, 1, 29):
+                expected = draw_token(production, seed=seed, stream_fingerprint=world.stream_fingerprint, aligned_step=boundary, kernel=kernel, gaussian_noise_std=scale, perturb_noise_std=scale, student_t_df=df, gumbel_noise_scale=scale)
+                assert draw(reference, world, boundary, kernel, policy=policy) == expected
+
+
+@pytest.mark.parametrize('settings', [
+    {}, {'top_p': .7}, {'min_p': .4}, {'typical_p': .8}, {'tail_free_z': .6},
+    {'top_k': 6, 'top_p': .8, 'min_p': .1, 'typical_p': .9, 'tail_free_z': .8},
+    {'temperature': 0}, {'temperature': .7, 'repeat_penalty': 1.2, 'presence_penalty': .3, 'frequency_penalty': .4, 'repeat_last_n': -1},
+])
+def test_filter_and_history_parity(settings):
+    from trajectory_editor.core.policy_calculations import PolicyCalculations
+    logits = np.array([.2, -.5, 3., 1.7, .4, 1., -.8, .5])
+    history = (1, 2, 1, 4)
+    config = SamplerConfig(**({'top_k': None, 'top_p': 1., 'min_p': 0.} | settings))
+    actual = PolicyCalculations(logits, config, history).distribution
+    expected = Policy(**settings).distribution(logits, history)
+    assert expected.ids == tuple(actual.ids)
+    assert expected.probabilities == pytest.approx(actual.probabilities)
+    assert expected.scores == pytest.approx(actual.scores)
+
+
+def test_model_rank_gumbel_matches_production():
+    dist = Distribution((4, 1, 7), (.2, .5, .3), (.1, .9, .4))
+    production = SparseDistribution(np.array(dist.ids), np.array(dist.probabilities), np.array(dist.scores))
+    ranks = {4: 2, 1: 5, 7: 1}
+    world = World.for_prefix(17, (1, 2))
+    policy = Policy(draw_kernel='gumbel-max', gumbel_noise_address='model-rank')
+    for step in range(20):
+        assert draw(dist, world, step, 'gumbel-max', policy=policy, model_ranks=ranks) == draw_token(production, seed=17, stream_fingerprint=world.stream_fingerprint, aligned_step=step, kernel='gumbel-max', gumbel_noise_address='model-rank', candidate_model_ranks=np.array([ranks[i] for i in dist.ids]))

@@ -15,6 +15,7 @@ platforms; this module does not promise bitwise cross-platform model parity.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from collections import Counter
 import hashlib
 import math
 import re
@@ -22,6 +23,7 @@ from typing import Protocol, Sequence, TypeAlias
 
 
 RNG_SCHEME = "blake2b64-token-prefix-quantile-v2"
+DRAW_KERNELS = ("categorical", "gumbel-max", "gaussian-max", "logistic-max", "laplace-max", "uniform-max", "student-t-max")
 MIN_SEED, MAX_SEED = -(1 << 63), (1 << 63) - 1
 
 
@@ -95,14 +97,41 @@ class Policy:
     excluded_token_ids: tuple[int, ...] = ()
     biases: tuple[tuple[int, float], ...] = ()
     draw_kernel: str = "categorical"
+    top_p: float = 1.0
+    min_p: float = 0.0
+    typical_p: float = 1.0
+    tail_free_z: float = 1.0
+    gaussian_noise_std: float = 1.0
+    perturb_noise_std: float = 1.0
+    student_t_df: float = 3.0
+    gumbel_noise_address: str = "token-id"
+    gumbel_noise_scale: float = 1.0
+    repeat_penalty: float = 1.0
+    repeat_last_n: int = 64
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
 
     def __post_init__(self) -> None:
         if not isinstance(self.temperature, (int, float)) or not math.isfinite(self.temperature) or self.temperature < 0:
             raise ValueError("temperature must be finite and nonnegative")
         if self.top_k is not None and (type(self.top_k) is not int or self.top_k < 1):
             raise ValueError("top_k must be a positive integer or None")
-        if self.draw_kernel not in ("categorical", "gumbel-max"):
+        if self.draw_kernel not in DRAW_KERNELS:
             raise ValueError("unsupported draw kernel")
+        for name in ("top_p", "typical_p", "tail_free_z"):
+            value = getattr(self, name)
+            if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value <= 1:
+                raise ValueError(f"{name} must be in (0, 1]")
+        for name in ("min_p", "gaussian_noise_std", "perturb_noise_std", "gumbel_noise_scale", "student_t_df", "repeat_penalty", "presence_penalty", "frequency_penalty"):
+            value = getattr(self, name)
+            if type(value) not in (int, float) or not math.isfinite(value):
+                raise ValueError(f"{name} must be finite")
+        if not 0 <= self.min_p <= 1 or min(self.gaussian_noise_std, self.perturb_noise_std, self.gumbel_noise_scale) < 0 or min(self.student_t_df, self.repeat_penalty) <= 0:
+            raise ValueError("invalid sampler scale")
+        if type(self.repeat_last_n) is not int or self.repeat_last_n < -1:
+            raise ValueError("repeat_last_n must be -1 or nonnegative")
+        if self.gumbel_noise_address not in ("token-id", "model-rank"):
+            raise ValueError("unsupported Gumbel address")
         excluded = _tokens(self.excluded_token_ids)
         biases = tuple((i, float(v)) for i, v in self.biases)
         if any(type(i) is not int or i < 0 or not math.isfinite(v) for i, v in biases):
@@ -113,10 +142,10 @@ class Policy:
         object.__setattr__(self, "biases", biases)
 
     def distribution(self, logits: Sequence[float], prefix_token_ids: Sequence[int]) -> Distribution:
-        """Score candidates in float64, then sort by score and token ID.
+        """Score and filter candidates in float64 with production ordering.
 
-        The prefix is available to a policy; this minimal policy uses fixed
-        biases only. A client can compute history-aware logits in its backend.
+        Apply history penalties, fixed biases and production-order filters.
+        The entirely unfiltered path retains token-ID order for CDF parity.
         """
         values = tuple(float(v) for v in logits)
         if not values or any(not math.isfinite(v) for v in values):
@@ -124,6 +153,11 @@ class Policy:
         _tokens(prefix_token_ids)
         if any(i >= len(values) for i in self.excluded_token_ids) or any(i >= len(values) for i, _ in self.biases):
             raise ValueError("policy token ID exceeds vocabulary")
+        history = tuple(prefix_token_ids) if self.repeat_last_n == -1 else tuple(prefix_token_ids)[-self.repeat_last_n:] if self.repeat_last_n else ()
+        if (self.repeat_penalty != 1 or self.presence_penalty != 0 or self.frequency_penalty != 0) and any(i >= len(values) for i in history):
+            raise ValueError("history token ID exceeds vocabulary")
+        counts = Counter(history)
+        values = tuple((v * self.repeat_penalty if v < 0 else v / self.repeat_penalty) - self.presence_penalty - counts[i] * self.frequency_penalty if i in counts else v for i, v in enumerate(values))
         bias = dict(self.biases)
         eligible = [i for i in range(len(values)) if i not in self.excluded_token_ids]
         if not eligible:
@@ -134,10 +168,44 @@ class Policy:
         scores = {i: (values[i] + bias.get(i, 0.0)) / float(self.temperature) for i in eligible}
         if any(not math.isfinite(v) for v in scores.values()):
             raise ValueError("policy produced non-finite scores")
-        ids = tuple(sorted(eligible, key=lambda i: (-scores[i], i))[: self.top_k])
-        weights = [math.exp(scores[i] - scores[ids[0]]) for i in ids]
-        total = sum(weights)
-        return Distribution(ids, tuple(w / total for w in weights), tuple(scores[i] for i in ids))
+        ids = sorted(eligible, key=lambda i: (-scores[i], i))[:self.top_k] if self.top_k is not None else eligible.copy()
+        def probabilities(candidates):
+            maximum = max(scores[j] for j in candidates)
+            weights = [math.exp(scores[i] - maximum) for i in candidates]
+            total = sum(weights)
+            return [w / total for w in weights]
+        def cutoff(masses, threshold):
+            cumulative = 0.0
+            for index, mass in enumerate(masses):
+                cumulative += mass
+                if cumulative >= threshold:
+                    return index + 1
+            return len(masses)
+        if self.typical_p < 1 and len(ids) > 1:
+            ids.sort(key=lambda i: (-scores[i], i))
+            probs = probabilities(ids)
+            tiny = float.fromhex("0x1p-1022")
+            entropy = -sum(p * math.log(max(p, tiny)) for p in probs)
+            order = sorted(range(len(ids)), key=lambda j: (abs(-math.log(max(probs[j], tiny)) - entropy), ids[j]))
+            ids = [ids[j] for j in order[:cutoff([probs[j] for j in order], self.typical_p)]]
+        if self.typical_p < 1 or self.tail_free_z < 1:
+            ids.sort(key=lambda i: (-scores[i], i))
+        if self.tail_free_z < 1 and len(ids) >= 3:
+            probs = probabilities(ids)
+            first = [abs(a-b) for a,b in zip(probs, probs[1:])]
+            second = [abs(a-b) for a,b in zip(first, first[1:])]
+            total = sum(second)
+            if total > 0:
+                ids = ids[:cutoff([v/total for v in second], self.tail_free_z)+1]
+        # Production preserves token-ID order for its entirely unfiltered path.
+        if self.top_k is None and self.typical_p == self.tail_free_z == self.top_p == 1 and self.min_p == 0:
+            ids.sort()
+        if self.top_p < 1:
+            ids = ids[:cutoff(probabilities(ids), self.top_p)]
+        if self.min_p > 0:
+            probs = probabilities(ids)
+            ids = [i for i,p in zip(ids, probs) if p >= self.min_p * max(probs)]
+        return Distribution(tuple(ids), tuple(probabilities(ids)), tuple(scores[i] for i in ids))
 
 
 @dataclass(frozen=True)
@@ -159,25 +227,100 @@ class Distribution:
             raise ValueError("scores must be finite")
 
 
-def draw(distribution: Distribution, world: World, boundary: int, kernel: str) -> int:
+def draw(distribution: Distribution, world: World, boundary: int, kernel: str, *, policy: Policy | None = None, model_ranks: dict[int, int] | None = None) -> int:
+    quantile = position_uniform(world, boundary)
     if kernel == "categorical":
-        u = position_uniform(world, boundary)
+        u = quantile
         cumulative = 0.0
         for token_id, p in zip(distribution.ids, distribution.probabilities):
             cumulative += p
             if u < cumulative:  # production searchsorted(..., side="right")
                 return token_id
         return distribution.ids[-1]
-    if kernel == "gumbel-max":
-        def rank(index: int) -> tuple[float, int]:
-            token_id = distribution.ids[index]
-            u = position_uniform_token(world, boundary, token_id)
-            # Rounding the 64-bit quantile to float64 can produce 1.0.
-            noise = math.inf if u == 1.0 else -math.log(-math.log(u))
-            return distribution.scores[index] + noise, -token_id
+    policy = policy or Policy(draw_kernel=kernel)
+    if kernel not in DRAW_KERNELS:
+        raise ValueError("unsupported draw kernel")
+    def rank(index):
+        token_id = distribution.ids[index]
+        scale = policy.gumbel_noise_scale if kernel == "gumbel-max" else policy.gaussian_noise_std if kernel == "gaussian-max" else policy.perturb_noise_std
+        if scale == 0:
+            return distribution.scores[index], -token_id
+        def uniform(lane=0):
+            if kernel == "gumbel-max":
+                if policy.gumbel_noise_address == "token-id":
+                    return position_uniform_token(world, boundary, token_id)
+                if model_ranks is None:
+                    raise ValueError("model ranks required")
+                payload = f"{RNG_SCHEME}:gumbel-max:model-rank:{world.seed}:{world.stream_fingerprint}:{boundary}:{model_ranks[token_id]}"
+            else:
+                family = "gaussian-max" if kernel == "gaussian-max" else "perturb-max"
+                payload = f"{RNG_SCHEME}:{family}:{world.seed}:{world.stream_fingerprint}:{boundary}:{token_id}:{lane}"
+            value = int.from_bytes(hashlib.blake2b(payload.encode(), digest_size=8).digest(), "big")
+            return (value + .5) / float(1 << 64) if kernel in ("gumbel-max", "gaussian-max") else ((value >> 12) + .5) / float(1 << 52)
+        u = uniform()
+        if kernel == "gumbel-max":
+            noise = math.inf if u == 1 else -math.log(-math.log(u))
+        elif kernel == "gaussian-max":
+            noise = math.sqrt(-2 * math.log(u)) * math.cos(2 * math.pi * uniform(1))
+        elif kernel == "logistic-max":
+            noise = math.sqrt(3) / math.pi * (math.log(u) - math.log1p(-u))
+        elif kernel == "laplace-max":
+            noise = (math.log(2*u) if u < .5 else -math.log(2*(1-u))) / math.sqrt(2)
+        elif kernel == "uniform-max":
+            noise = math.sqrt(3) * (2*u-1)
+        else:
+            noise = _student_noise(uniform, policy.student_t_df)
+        result = distribution.scores[index] + scale * noise
+        if not math.isfinite(result) and not (kernel == "gumbel-max" and scale == 1):
+            raise ValueError("noise produced non-finite ranking scores")
+        return result, -token_id
+    return distribution.ids[max(range(len(distribution.ids)), key=rank)]
 
-        return distribution.ids[max(range(len(distribution.ids)), key=rank)]
-    raise ValueError("unsupported draw kernel")
+
+def _student_noise(uniform, df):
+    if df == 3:
+        normals = []
+        for lane in (0, 2):
+            radius = math.sqrt(-2 * math.log(uniform(lane)))
+            angle = 2 * math.pi * uniform(lane+1)
+            normals.extend((radius * math.cos(angle), radius * math.sin(angle)))
+        return normals[0] / math.sqrt(sum(n*n for n in normals[1:]))
+    lane = 0
+    def next_uniform():
+        nonlocal lane
+        value = uniform(lane)
+        lane += 1
+        return value
+    def normal():
+        return math.sqrt(-2 * math.log(next_uniform())) * math.cos(2 * math.pi * next_uniform())
+    numerator = normal()
+    shape = df / 2
+    if shape == 0:
+        log_gamma = -math.inf
+    else:
+        boosted = max(shape, shape+1 if shape < 1 else shape)
+        d = boosted - 1/3
+        c = 1 / math.sqrt(9*d)
+        for _ in range(128):
+            z = normal()
+            base = 1+c*z
+            if base <= 0:
+                continue
+            cube = base * base * base
+            u = next_uniform()
+            if u < 1-.0331*z**4 or math.log(u) < .5*z*z+d*(1-cube+math.log(cube)):
+                log_gamma = math.log(d)+math.log(cube)
+                break
+        else:
+            raise ValueError("Student-t gamma draw did not converge")
+        if shape < 1:
+            log_gamma += math.log(next_uniform()) / shape
+    if numerator == 0:
+        return 0.0
+    magnitude = math.log(abs(numerator)) - .5*(math.log(2)+log_gamma-math.log(df)) - .5*math.log(3)
+    if magnitude > math.log(float.fromhex("0x1.fffffffffffffp+1023")):
+        return math.copysign(math.inf, numerator)
+    return math.copysign(math.exp(magnitude), numerator)
 
 
 @dataclass(frozen=True)
@@ -229,10 +372,12 @@ def observe(backend: Backend, branch: Branch) -> Observation:
     if branch.state.ended:
         raise ValueError("no live boundary after termination")
     prefix = branch.state.token_ids
-    distribution = branch.policy.distribution(backend.logits(prefix), prefix)
+    logits = tuple(backend.logits(prefix))
+    distribution = branch.policy.distribution(logits, prefix)
+    ranks = {i: rank for rank, i in enumerate(sorted(range(len(logits)), key=lambda i: (-logits[i], i)), 1)}
     boundary = branch.state.boundary
     return Observation(branch.state.boundary, boundary, prefix, distribution,
-                       draw(distribution, branch.world, boundary, branch.policy.draw_kernel))
+                       draw(distribution, branch.world, boundary, branch.policy.draw_kernel, policy=branch.policy, model_ranks=ranks))
 
 
 def rewind(branch: Branch, boundary: int) -> Branch:

@@ -10,7 +10,7 @@
 
 ## Replay authoring and independent correctness
 
-- [ ] Build a minimal `reference-kernel-oracle` that invokes llama.cpp directly and stays independent of `episode_engine` and its sampling path. Limit its actions to accepting the proposal and `hold X`. Compare its token sequences with the editor under matching inputs, and include a small reproducible demonstration of how deterministic sampler draw coordinates can produce different behavior.
+- [x] Build a minimal independent model oracle with `atomic` proposal menus and `pattern` continuation. Supports llama.cpp and Transformers, text/JSONL output, production sampler parity, and a reproducible draw-coordinate demonstration. See [usage and scope](reference-kernel/README.md) and [oracle checks](reference-kernel/test_reference_kernel_oracle.py).
 - [ ] Define a plain-text teacher-plan format modeled on `--procedure`, then add a parser with useful line-numbered errors. Check whether the current procedure view includes everything replay needs; decide what grammar and expected-result details the format must add. Keep JSONL plans usable.
 
 ## Tokenizer identity and streaming
