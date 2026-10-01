@@ -807,28 +807,24 @@ def test_focus_selection_and_headings_are_styled_in_every_theme(harness, theme):
                    for row in ui.canvas.cells for _char, style in row)
 
 
-def test_python_and_native_output_is_captured_and_standard_fds_are_restored():
+def test_python_and_native_output_is_silenced_and_standard_fds_are_restored():
     import subprocess
     import sys
 
     script = r"""
 import os
 import sys
-from trajectory_editor.tui import _ProcessOutputCapture, _SessionOutput
+from trajectory_editor.tui import _ProcessOutputSilencer
 
-stdout = _SessionOutput()
-stderr = _SessionOutput()
-capture = _ProcessOutputCapture(stdout, stderr)
-capture.start()
+silencer = _ProcessOutputSilencer()
+silencer.start()
 try:
     os.write(1, b"native stdout")
     os.write(2, b"native stderr")
     sys.stdout.write(" python stdout")
     sys.stderr.write(" python stderr")
 finally:
-    capture.stop()
-assert stdout.getvalue() == "native stdout python stdout"
-assert stderr.getvalue() == "native stderr python stderr"
+    silencer.stop()
 print("standard descriptors restored")
 """
     from pathlib import Path

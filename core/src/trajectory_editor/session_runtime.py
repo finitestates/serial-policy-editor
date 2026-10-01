@@ -310,12 +310,16 @@ def session_edge_menu(
         io.write("This command is not available in this session.")
 
 
-def _print_final_text(session: LiveSession, output: Any | None) -> None:
+def _print_final_text(session: LiveSession, output: Any | None, io: Any) -> None:
     text = session.engine.text
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(text, encoding="utf-8")
-        print(f"Text: {output}", flush=True)
+        write_after_session = getattr(io, "write_after_session", None)
+        if callable(write_after_session):
+            write_after_session(f"Text: {output}")
+        else:
+            print(f"Text: {output}", flush=True)
     else:
         print("\n--- final text ---")
         print(text)
@@ -377,7 +381,7 @@ def run_session_roster(
             else:
                 result = None
             if session.engine.ended:
-                _print_final_text(session, args.output)
+                _print_final_text(session, args.output, io)
                 action, value = session_edge_menu(io, roster, store=store)
             elif result is None:
                 continue
@@ -413,7 +417,7 @@ def run_session_roster(
             else:
                 result = None
             if session.engine.ended:
-                _print_final_text(session, args.output)
+                _print_final_text(session, args.output, io)
                 action, value = session_edge_menu(io, roster, store=store)
             elif result is None:
                 continue
@@ -433,7 +437,7 @@ def run_session_roster(
                     f"{session.engine.boundary}; live edge reached."
                 )
             if session.engine.ended:
-                _print_final_text(session, args.output)
+                _print_final_text(session, args.output, io)
             action, value = session_edge_menu(io, roster, store=store)
 
         session = roster.active_session
@@ -442,11 +446,11 @@ def run_session_roster(
             return 0
         if action == "end":
             if session.engine.ended:
-                _print_final_text(session, args.output)
+                _print_final_text(session, args.output, io)
                 roster.discard()
                 return 0
             session.quit("menu-end")
-            _print_final_text(session, args.output)
+            _print_final_text(session, args.output, io)
             # Ending is an in-memory terminal state. Return to EDGE once so
             # the user can explicitly save that final state before quitting.
             continue

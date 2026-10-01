@@ -72,6 +72,28 @@ CHILD = textwrap.dedent(
             raise SystemExit(main(["--model", "fake", "--new-prompt", "P"]))
 
     io = TerminalIO()
+    if mode == "fatal":
+        with io.session():
+            io.read_choice(choice_state())
+            print("incidental before fatal")
+            os.write(2, b"native stderr before fatal\n")
+            raise ValueError("fatal sentinel")
+    if mode == "explicit-output":
+        from pathlib import Path
+        from types import SimpleNamespace
+        from trajectory_editor.session_runtime import _print_final_text
+
+        with io.session():
+            io.read_choice(choice_state())
+            print("incidental before saved output")
+            _print_final_text(
+                SimpleNamespace(engine=SimpleNamespace(text="saved final text")),
+                Path(os.environ["SPE_FINAL_OUTPUT"]),
+                io,
+            )
+        print("outside output")
+        raise SystemExit(0)
+
     results = []
     try:
         with io.session():
@@ -91,6 +113,7 @@ CHILD = textwrap.dedent(
                 results.append(io.prompt(prompt_state(multiline=True)))
                 results.append(io.read_key("Key? "))
                 print("printed during session")
+                os.write(2, b"native stderr during session\n")
             elif mode == "interrupt":
                 io.read_choice(choice_state())
             elif mode == "suspend":
@@ -405,14 +428,67 @@ def test_journey_every_frame_is_complete_and_matches_the_terminal(tmp_path):
     sizes = {tuple(frame["size"]) for frame in frames}
     assert {(100, 30), (140, 40), (80, 24), (160, 50)} <= sizes
 
-    # The terminal is restored and process output appears only afterwards.
+    # Incidental process output is silenced; explicit output after the session survives.
     exit_index = raw.rfind(b"\x1b[?1049l")
     assert exit_index > 0
     assert raw.rfind(b"\x1b[?25h") > raw.rfind(b"\x1b[?25l")
     for enabled, restored in ((b"\x1b[?2004h", b"\x1b[?2004l"), (b"\x1b[?1006h", b"\x1b[?1006l"),
                               (b"\x1b[?1000h", b"\x1b[?1000l"), (b"\x1b[?7l", b"\x1b[?7h")):
         assert raw.rfind(restored) > raw.rfind(enabled)
-    assert raw.find(b"printed during session") > exit_index
+    def assert_process_output_was_silenced(output):
+        assert b"printed during session" not in output
+        assert b"native stderr during session" not in output
+
+    assert_process_output_was_silenced(raw)
+    with pytest.raises(AssertionError):
+        assert_process_output_was_silenced(raw + b"printed during session")
+    assert raw.find(b"RESULTS") > exit_index
+
+
+def test_uncaught_fatal_traceback_survives_after_terminal_restore(tmp_path):
+    ui = Session(tmp_path, "fatal", size=(80, 24))
+    ui.wait_for(lambda f: f["lines"][0].startswith("Step 0") and f["cursor"], what="choice")
+    ui.send("1\r")
+    output = ui.finish()
+    assert os.WIFEXITED(ui.status) and os.WEXITSTATUS(ui.status) == 1, output[-2000:]
+    raw = bytes(ui.output)
+    exit_index = raw.rfind(b"\x1b[?1049l")
+    traceback_index = raw.find(b"Traceback")
+    assert exit_index > 0 and traceback_index > exit_index
+    assert raw.find(b"ValueError: fatal sentinel") > traceback_index
+    assert b"incidental before fatal" not in raw
+    assert b"native stderr before fatal" not in raw
+    frames = ui.frames()
+    replay_and_compare(raw, frames)
+    assert_no_erase_after_entry(raw)
+    assert_frames_are_transactions(raw)
+    for frame in frames:
+        assert_complete_frame(frame)
+
+
+def test_explicit_saved_output_is_emitted_after_terminal_restore(tmp_path):
+    saved_text = tmp_path / "final.txt"
+    ui = Session(
+        tmp_path, "explicit-output", size=(80, 24),
+        env={"SPE_FINAL_OUTPUT": str(saved_text)},
+    )
+    ui.wait_for(lambda f: f["lines"][0].startswith("Step 0") and f["cursor"], what="choice")
+    ui.send("1\r")
+    output = ui.finish()
+    assert os.WIFEXITED(ui.status) and os.WEXITSTATUS(ui.status) == 0, output[-2000:]
+    assert saved_text.read_text() == "saved final text"
+    raw = bytes(ui.output)
+    exit_index = raw.rfind(b"\x1b[?1049l")
+    assert exit_index > 0
+    assert raw.find(f"Text: {saved_text}".encode()) > exit_index
+    assert raw.find(b"outside output") > exit_index
+    assert b"incidental before saved output" not in raw
+    frames = ui.frames()
+    replay_and_compare(raw, frames)
+    assert_no_erase_after_entry(raw)
+    assert_frames_are_transactions(raw)
+    for frame in frames:
+        assert_complete_frame(frame)
 
 
 def test_ctrl_c_interrupts_and_restores_the_terminal(tmp_path):
