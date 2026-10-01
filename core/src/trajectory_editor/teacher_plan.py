@@ -1,25 +1,27 @@
-"""Portable JSONL tapes for executable policy replay.
+"""Portable YAML and JSONL tapes for executable policy replay.
 
 The tape is deliberately only the action procedure and optional observations.
-An envelope describes the circumstances in which it was recorded, but is
-advisory: callers may always run the tape under different conditions.
+The envelope carries the starting prompt, optional sampler defaults, and
+recording circumstances. CLI sampler options can override those defaults.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-import json
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from .core.actions import action_from_dict
 from .core.errors import EditorError
 from .core.results import ReplayExpectation
+from .core.sampler_config import SamplerConfig
 from .episode_replay_source import replay_procedure
 from .run_loop import ReplayPlan, TapeStep
 from .surviving_procedure import ProcedureRecord, project_surviving_procedure
-
 
 TAPE_FORMAT = "serial-policy-tape"
 TAPE_VERSION = 1
@@ -27,10 +29,49 @@ TAPE_VERSION = 1
 
 @dataclass(frozen=True)
 class TeacherTape:
-    """An executable plan plus its optional, non-binding description."""
+    """An executable plan plus its prompt and optional initial configuration."""
 
     plan: ReplayPlan
     envelope: dict[str, Any]
+    initial_sampling: SamplerConfig | None = None
+
+
+class _DuplicateKeyLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects duplicate mapping keys."""
+
+
+def _construct_unique_mapping(
+    loader: _DuplicateKeyLoader,
+    node: yaml.MappingNode,
+    deep: bool = False,
+) -> dict[Any, Any]:
+    result: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in result
+        except TypeError as exc:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                "found an unhashable mapping key",
+                key_node.start_mark,
+            ) from exc
+        if duplicate:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"duplicate key {key!r}",
+                key_node.start_mark,
+            )
+        result[key] = loader.construct_object(value_node, deep=deep)
+    return result
+
+
+_DuplicateKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
 
 
 def _validate_envelope(value: object, *, label: str) -> dict[str, Any]:
@@ -54,6 +95,145 @@ def _validate_envelope(value: object, *, label: str) -> dict[str, Any]:
     result["version"] = TAPE_VERSION
     result.pop("type", None)
     return result
+
+
+def _initial_sampling(envelope: Mapping[str, Any], *, label: str) -> SamplerConfig | None:
+    environment = envelope.get("environment")
+    if not isinstance(environment, Mapping) or "sampler" not in environment:
+        return None
+    sampler = environment["sampler"]
+    if sampler is None:
+        return None
+    if not isinstance(sampler, Mapping):
+        raise EditorError(f"{label}: environment.sampler must be an object")
+    values = SamplerConfig().to_dict()
+    values.update(sampler)
+    try:
+        return SamplerConfig.from_record(values)
+    except EditorError as exc:
+        raise EditorError(f"{label}: invalid environment.sampler: {exc}") from exc
+
+
+def _load_yaml(text: str, *, path: Path) -> object:
+    try:
+        return yaml.load(text, Loader=_DuplicateKeyLoader)
+    except yaml.YAMLError as exc:
+        mark = getattr(exc, "problem_mark", None)
+        location = f"{path}:{mark.line + 1}:{mark.column + 1}" if mark else str(path)
+        detail = getattr(exc, "problem", None) or str(exc)
+        raise EditorError(f"{location}: invalid teacher-plan YAML: {detail}") from exc
+
+
+def _validate_yaml_step_fields(records: list[object], *, path: Path) -> None:
+    step_fields = {"step", "action", "observation"}
+    observation_fields = {"token_ids", "terminal_token_id", "stop_reason"}
+    action_fields = {
+        "accept": {"kind"},
+        "select": {"kind", "rank", "selected_rank"},
+        "select-raw-rank": {"kind", "rank", "selected_rank"},
+        "insert": {"kind", "text", "supplied_text", "mode", "insert_mode"},
+        "write": {"kind", "text", "supplied_text", "mode", "insert_mode"},
+        "check-phrase": {"kind", "text", "supplied_text", "mode", "max_tokens", "max_shift"},
+        "force-phrase": {"kind", "text", "supplied_text", "mode", "max_tokens", "max_shift"},
+        "hold": {"kind", "limit", "requested_visible_tokens", "boundary"},
+        "teacher-eog": {"kind"},
+        "end-generation": {"kind"},
+        "reroll": {"kind", "seed"},
+        "set-sampler": {"kind", "sampling"},
+    }
+    for ordinal, record in enumerate(records):
+        if not isinstance(record, Mapping):
+            continue
+        unknown = set(record) - step_fields
+        if unknown:
+            names = ", ".join(sorted(map(repr, unknown)))
+            raise EditorError(f"{path}: teacher plan step {ordinal}: unknown fields: {names}")
+        action = record.get("action")
+        if isinstance(action, Mapping):
+            kind = action.get("kind")
+            allowed = action_fields.get(kind) if isinstance(kind, str) else None
+            if allowed is not None:
+                unknown = set(action) - allowed
+                if unknown:
+                    names = ", ".join(sorted(map(repr, unknown)))
+                    raise EditorError(
+                        f"{path}: teacher plan step {ordinal}: unknown action fields: {names}"
+                    )
+        observation = record.get("observation")
+        if isinstance(observation, Mapping):
+            unknown = set(observation) - observation_fields
+            if unknown:
+                names = ", ".join(sorted(map(repr, unknown)))
+                raise EditorError(
+                    f"{path}: teacher plan step {ordinal}: unknown observation fields: {names}"
+                )
+
+
+def load_teacher_tape_yaml(
+    path: Path,
+    *,
+    envelope_path: Path | None = None,
+    require_observations: bool = False,
+) -> TeacherTape:
+    """Load one human-readable YAML document containing a teacher tape."""
+    selected = Path(path)
+    try:
+        payload = _load_yaml(selected.read_text(encoding="utf-8"), path=selected)
+    except OSError as exc:
+        raise EditorError(f"could not read teacher plan {selected}: {exc}") from exc
+    if not isinstance(payload, Mapping):
+        raise EditorError(f"{selected}: expected a YAML mapping")
+    allowed_fields = {"format", "type", "version", "prompt", "environment", "steps"}
+    unknown = set(payload) - allowed_fields
+    if unknown:
+        names = ", ".join(sorted(map(repr, unknown)))
+        raise EditorError(f"{selected}: unknown top-level fields: {names}")
+    records = payload.get("steps")
+    if not isinstance(records, list):
+        raise EditorError(f"{selected}: steps must be a list")
+    _validate_yaml_step_fields(records, path=selected)
+
+    sidecar: dict[str, Any] = {}
+    if envelope_path is not None:
+        try:
+            sidecar = _validate_envelope(
+                json.loads(envelope_path.read_text(encoding="utf-8")),
+                label=f"teacher tape envelope {envelope_path}",
+            )
+        except OSError as exc:
+            raise EditorError(f"could not read teacher tape envelope {envelope_path}: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise EditorError(f"{envelope_path}: invalid JSON: {exc.msg}") from exc
+    embedded = _validate_envelope(
+        {key: value for key, value in payload.items() if key != "steps"},
+        label=str(selected),
+    )
+    envelope = {**sidecar, **embedded}
+    try:
+        plan = load_teacher_plan(records, require_observations=require_observations)
+    except EditorError as exc:
+        raise EditorError(f"{selected}: {exc}") from exc
+    return TeacherTape(plan, envelope, _initial_sampling(envelope, label=str(selected)))
+
+
+def load_teacher_tape(
+    path: Path,
+    *,
+    envelope_path: Path | None = None,
+    require_observations: bool = False,
+) -> TeacherTape:
+    """Load a YAML plan by suffix or retain the existing JSONL tape reader."""
+    if Path(path).suffix.lower() in {".yaml", ".yml"}:
+        return load_teacher_tape_yaml(
+            path,
+            envelope_path=envelope_path,
+            require_observations=require_observations,
+        )
+    return load_teacher_tape_jsonl(
+        path,
+        envelope_path=envelope_path,
+        require_observations=require_observations,
+    )
 
 
 def load_teacher_plan(
@@ -127,7 +307,54 @@ def load_teacher_tape_jsonl(
     except OSError as exc:
         raise EditorError(f"could not read teacher plan {path}: {exc}") from exc
     envelope = {**sidecar, **embedded}
-    return TeacherTape(load_teacher_plan(records, require_observations=require_observations), envelope)
+    plan = load_teacher_plan(records, require_observations=require_observations)
+    return TeacherTape(plan, envelope, _initial_sampling(envelope, label=str(path)))
+
+
+def teacher_tape_yaml_text(envelope: Mapping[str, Any], steps: Iterable[Any]) -> str:
+    """Serialize typed teacher steps as one editable YAML document."""
+    normalized = _validate_envelope(envelope, label="teacher tape")
+    document: dict[str, Any] = {
+        "format": TAPE_FORMAT,
+        "version": TAPE_VERSION,
+    }
+    if "prompt" in normalized:
+        document["prompt"] = normalized["prompt"]
+    if "environment" in normalized:
+        document["environment"] = dict(normalized["environment"])
+
+    records: list[dict[str, Any]] = []
+    for ordinal, step in enumerate(steps):
+        if isinstance(step, Mapping):
+            action = step["action"]
+            expectation = step.get("expectation")
+        else:
+            action = step.action
+            expectation = step.expectation
+        action_record = action if isinstance(action, Mapping) else action.to_dict()
+        record: dict[str, Any] = {
+            "step": ordinal,
+            "action": dict(action_record),
+        }
+        if expectation is not None:
+            if isinstance(expectation, Mapping):
+                observation = dict(expectation)
+            else:
+                observation = {
+                    "token_ids": list(expectation.token_ids),
+                    "terminal_token_id": expectation.terminal_token_id,
+                    "stop_reason": expectation.stop_reason,
+                }
+            record["observation"] = observation
+        records.append(record)
+    document["steps"] = records
+    return yaml.safe_dump(
+        document,
+        allow_unicode=True,
+        default_flow_style=False,
+        sort_keys=False,
+        width=100,
+    )
 
 
 def _write_teacher_tape(
@@ -137,9 +364,18 @@ def _write_teacher_tape(
     *,
     envelope_path: Path | None,
 ) -> dict[str, Any]:
-    """Write either a stored or live procedure through one serializer."""
+    """Write a stored or live procedure as YAML or JSONL by file suffix."""
 
     try:
+        if path.suffix.lower() in {".yaml", ".yml"}:
+            path.write_text(teacher_tape_yaml_text(envelope, steps), encoding="utf-8")
+            if envelope_path is not None:
+                envelope_path.write_text(
+                    json.dumps(envelope, ensure_ascii=False, indent=2, sort_keys=True)
+                    + "\n",
+                    encoding="utf-8",
+                )
+            return envelope
         with path.open("w", encoding="utf-8") as handle:
             if envelope_path is None:
                 header = {
@@ -221,7 +457,7 @@ def export_teacher_tape(
     *,
     envelope_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Export a stored episode as JSONL plus an optional JSON envelope sidecar."""
+    """Export a stored episode as YAML or JSONL plus an optional JSON sidecar."""
     episode = store.get_episode(episode_id)
     initial = episode["initial_sampling"]
     envelope = {
@@ -244,9 +480,9 @@ def export_live_teacher_tape(
     *,
     envelope_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Export the currently selected non-durable branch as a portable tape."""
+    """Export the selected non-durable branch as a portable YAML or JSONL tape."""
     environment = dict(getattr(session, "environment", {}))
-    branch_state = getattr(session, "branch_state")
+    branch_state = session.branch_state
     if callable(branch_state):
         branch_state = branch_state()
     environment["sampler"] = branch_state.initial_sampling.to_dict()
@@ -264,4 +500,15 @@ def export_live_teacher_tape(
     )
 
 
-__all__ = ["TAPE_FORMAT", "TAPE_VERSION", "TeacherTape", "export_live_teacher_tape", "export_teacher_tape", "load_teacher_plan", "load_teacher_tape_jsonl"]
+__all__ = [
+    "TAPE_FORMAT",
+    "TAPE_VERSION",
+    "TeacherTape",
+    "export_live_teacher_tape",
+    "export_teacher_tape",
+    "load_teacher_plan",
+    "load_teacher_tape",
+    "load_teacher_tape_jsonl",
+    "load_teacher_tape_yaml",
+    "teacher_tape_yaml_text",
+]

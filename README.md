@@ -112,9 +112,9 @@ aliases, and terminal layout details are not compatibility promises.
 
 | File format | Use |
 | --- | --- |
-| JSONL | Portable teacher plans and exported teacher tapes |
+| JSONL | Existing portable teacher tapes |
 | JSON | Optional teacher-plan envelope and portable steering-vector artifacts |
-| YAML | Reusable CLI/controller profiles |
+| YAML | Executable teacher plans and reusable CLI/controller profiles |
 | SQLite | Explicit episode workspaces for save, resume, and saved-episode operations |
 | GGUF | llama.cpp models and importable llama.cpp cvector artifacts |
 

@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from . import edge_commands, episode_backend_loader, episode_policy_setup
+from .beam import BeamRequested, BeamSearch, beam_menu
+from .chord import Chord, ChordRequested, chord_menu
 from .core.actions import Reroll
 from .core.cli_config import (
     apply_activation_artifact,
@@ -15,13 +17,12 @@ from .core.cli_config import (
     sampler_override,
 )
 from .core.errors import EditorError
-from .core.sampler_config import SamplerConfig
-from .chord import Chord, ChordRequested, chord_menu
-from .beam import BeamRequested, BeamSearch, beam_menu
 from .edge_status import sampler_summary
 from .episode_engine import EpisodeEngine
 from .episode_prompts import read_new_prompt, read_prompt_file
 from .episode_replay_source import build_source_replay_recipe
+from .episode_session import LiveSession, LiveSessionRoster
+from .projector import project_live_fork_map
 from .run_loop import (
     EdgeRequested,
     ForkRequested,
@@ -29,8 +30,6 @@ from .run_loop import (
     SeamlessRewindRequested,
     run_plan,
 )
-from .episode_session import LiveSession, LiveSessionRoster
-from .projector import project_live_fork_map
 from .teacher_plan import export_live_teacher_tape
 from .terminal_contracts import EdgeViewState, PromptRequest, TerminalProtocol
 
@@ -60,8 +59,7 @@ def session_edge_menu(
 
     def resolve_branch(reference: str) -> str:
         cleaned = reference.strip()
-        if cleaned.startswith("#"):
-            cleaned = cleaned[1:]
+        cleaned = cleaned.removeprefix("#")
         return branch_aliases().get(cleaned, cleaned)
 
     def branch_number(branch_id: str) -> str:
@@ -579,8 +577,8 @@ def run_session_roster(
                 io.write("Source replay requires a workspace.")
                 continue
             from .spr_recipe import (
-                ReplaySamplerPolicy,
                 ReplayPlacement,
+                ReplaySamplerPolicy,
                 compose_replay_plan,
             )
 
@@ -622,7 +620,8 @@ def run_new_session(
     )
     backend = episode_backend_loader.load_backend(args)
     provenance = backend.provenance()
-    sampling = sampler_from_args(args)
+    source_sampling = getattr(teacher_tape, "initial_sampling", None)
+    sampling = sampler_from_args(args, source_sampling)
     activation_artifact = None
     if args.activation_strength is not None and args.activation_vector is None:
         raise EditorError("--steering-strength requires --steering-vector")
@@ -662,4 +661,4 @@ def run_new_session(
     )
 
 
-__all__ = ["session_edge_menu", "run_new_session", "run_session_roster"]
+__all__ = ["run_new_session", "run_session_roster", "session_edge_menu"]
