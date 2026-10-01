@@ -37,15 +37,17 @@ blocking `TerminalProtocol` methods: `read_choice`, `read_edge`, `read_beam`,
 
 For a live read, the owning thread posts the request to the UI thread and waits
 on a `concurrent.futures.Future`. The view resolves that future once, when the
-user submits or cancels. After submission the view stays on screen, marked
-`working…`, until the next request replaces it; input typed meanwhile is
-dropped so it cannot leak into the next request. Choice and EDGE results are raw
-command text; beam reads return a `BeamInput`. The caller alone interprets
-commands and applies engine, navigation, replay, or storage changes.
+user submits or cancels. After submission the view stays on screen until the
+next request replaces it; input typed meanwhile is dropped so it cannot leak
+into the next request. Choice and EDGE results are raw command text; beam reads
+return a `BeamInput`. The caller alone interprets commands and applies engine,
+navigation, replay, or storage changes.
 
 Token and insertion previews that need engine-owned state are queued back to the
 owning thread while it waits. Search warming runs on a worker thread and posts
-its generation-tagged result to the UI thread.
+its generation-tagged result to the UI thread. Preview and warm-up failures are
+kept as diagnostics in the Ctrl+L captured-output viewer; the live view shows
+only a short actionable preview status when one is needed.
 
 During a live session, incidental stdout and stderr are held in memory and do
 not reach the screen. They are flushed to the original streams after the

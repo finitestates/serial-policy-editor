@@ -95,16 +95,46 @@ def test_input_after_submit_is_dropped_until_the_next_request(harness):
     assert ui.result() == "y"
 
 
-def test_submitted_view_stays_displayed_and_marked_busy_until_replaced(harness):
+def test_raw_rank_can_be_submitted_while_its_optional_preview_is_pending(harness):
+    ui = harness(choice_state(resolve_candidate=lambda _rank: None))
+    ui.type("5")
+    assert not ui.lifecycle.owner_queue.empty()
+    assert "Resolving raw rank" not in ui.text
+    assert "Press Enter to select raw rank 5." in ui.text
+    ui.press("enter")
+    assert ui.result() == "5"
+
+
+def test_submitted_view_stays_displayed_without_internal_status_until_replaced(harness):
     ui = harness(choice_state())
     ui.press("1", "enter")
     assert ui.result() == "1"
     assert "Step 0" in ui.text and "' alpha'" in ui.text
-    assert "working…" in ui.text
+    assert "Command > 1" in ui.text
+    assert "working…" not in ui.text
     assert ui.canvas.cursor is None
     ui.show(edge_state())
     assert "LIVE EDGE" in ui.text
     assert "working…" not in ui.text
+
+
+def test_preview_exception_details_are_only_in_captured_output(harness):
+    from trajectory_editor.core.errors import EditorError
+
+    def fail_preview(_rank):
+        raise EditorError("backend diagnostic detail")
+
+    ui = harness(choice_state(resolve_candidate=fail_preview))
+    ui.type("5")
+    ui.run_previews()
+    ui.frame()
+    assert "preview unavailable" in ui.text.lower()
+    assert "backend diagnostic detail" not in ui.text
+    assert "backend diagnostic detail" in ui.app.output_history()
+    ui.press("ctrl+l")
+    assert "Captured output" in ui.text
+    assert "[diagnostic] candidate preview failed" in ui.text
+    assert "backend diagnostic detail" in ui.text
 
 
 # -- choice -----------------------------------------------------------------------

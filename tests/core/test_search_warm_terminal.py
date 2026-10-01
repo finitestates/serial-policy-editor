@@ -41,7 +41,7 @@ def _engine(loop: LiveLoop, state):
         yield future
 
 
-def test_search_warm_runs_on_worker_shows_pending_rank_and_delivers_to_ui_thread():
+def test_search_warm_runs_on_worker_without_screen_chatter_and_delivers_to_ui_thread():
     entered = threading.Event()
     release = threading.Event()
     calls = []
@@ -61,13 +61,12 @@ def test_search_warm_runs_on_worker_shows_pending_rank_and_delivers_to_ui_thread
             completions.append(threading.current_thread().name), original(*args),
         )
         assert entered.wait(2)
-        pending = loop.wait_for(lambda text: "Resolving raw rank 2…" in text)
+        pending = loop.wait_for(lambda text: "Command >" in text)
+        assert "Resolving raw rank" not in pending
         release.set()
-        settled = loop.wait_for(lambda text: "Resolving raw rank" not in text)
-        # Resolution changes only the hint line; nothing else moves.
-        before, after = pending.splitlines(), settled.splitlines()
-        assert len(before) == len(after)
-        assert [index for index, (a, b) in enumerate(zip(before, after)) if a != b] == [len(after) - 1]
+        settled = loop.wait_for(lambda _text: bool(completions))
+        # Background cache work does not repaint the user's view with progress text.
+        assert pending == settled
         assert calls[0][:2] == (2, 3)
         assert completions == ["spe-terminal-ui"]
         assert calls[0][3] != threading.get_ident()
@@ -76,6 +75,38 @@ def test_search_warm_runs_on_worker_shows_pending_rank_and_delivers_to_ui_thread
         assert result == "2"
         assert app.stats["warm_dispatches"] == 1
         assert app.stats["promotions"] == 1
+
+
+def test_search_warm_failure_is_available_in_output_without_painting_the_view():
+    entered = threading.Event()
+    release = threading.Event()
+
+    def warm(_raw_rank, _token_id, _generation, _cancelled):
+        entered.set()
+        release.wait(2)
+        raise RuntimeError("backend cache diagnostic")
+
+    loop = LiveLoop()
+    for future in _engine(loop, _search_state(warm, lambda: None)):
+        app = loop.app
+        assert entered.wait(2)
+        screen = loop.frame()
+        assert "backend cache diagnostic" not in screen
+        assert "Resolving raw rank" not in screen
+        release.set()
+        loop.wait_for(
+            lambda _text: "backend cache diagnostic" in loop.on_ui(app.output_history),
+        )
+        assert "backend cache diagnostic" not in loop.frame()
+        loop.keys("\x0c")
+        output = loop.wait_for(lambda text: "[diagnostic]" in text)
+        assert "search warm-up failed" in output
+        assert "RuntimeError: backend cache diagnostic" in output
+        loop.keys("\x0c")
+        loop.wait_for(lambda text: "Captured output" not in text)
+        loop.keys("2\r")
+        result, _engine_thread = future.result(timeout=5)
+        assert result == "2"
 
 
 def test_selecting_a_different_rank_cancels_the_search_warm():
@@ -89,7 +120,8 @@ def test_selecting_a_different_rank_cancels_the_search_warm():
     loop = LiveLoop()
     for future in _engine(loop, _search_state(warm, lambda: cancelled_threads.append(threading.current_thread().name))):
         assert entered.wait(2)
-        loop.wait_for(lambda text: "Resolving raw rank" not in text and "Command >" in text)
+        loop.wait_for(lambda text: "Command >" in text)
+        assert "Resolving raw rank" not in loop.frame()
         loop.keys("1\r")
         result, _engine_thread = future.result(timeout=5)
         assert result == "1"

@@ -19,6 +19,7 @@ import signal
 import sys
 import threading
 import time
+import traceback
 from collections import Counter, deque
 from collections.abc import Callable
 from concurrent.futures import CancelledError as FutureCancelledError
@@ -456,8 +457,6 @@ class TerminalApp:
                 view.warm_completed(target, True, None)
             return
         generation = lifecycle.generation
-        if isinstance(view, ChoiceView):
-            view.warm_started(target)
         lifecycle.warm_future = self.warm_executor.submit(
             state.warm_search_token, target[0], target[1], generation,
             lifecycle.warm_cancelled.is_set,
@@ -514,6 +513,11 @@ class TerminalApp:
                 self._output_chars -= excess
             else:
                 self._output_chars -= len(oldest)
+
+    def write_diagnostic(self, context: str, error: BaseException) -> None:
+        """Keep technical details in the optional Ctrl+L output history."""
+        details = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+        self.write_output(f"[diagnostic] {context}\n{details.rstrip()}\n")
 
     def output_history(self) -> str:
         if len(self._output_chunks) > 1:

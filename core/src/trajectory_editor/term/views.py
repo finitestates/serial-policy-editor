@@ -191,10 +191,6 @@ class RequestView:
             placeholder_style=self.input_style(ctx) + Style(dim=True),
             show_cursor=self.accepting and not read_only,
         )
-        if not self.accepting:
-            busy = " working… "
-            if field_width > len(busy) + 4:
-                canvas.put(width - len(busy), y, busy, ctx.styles("pending"))
 
     def draw_hint(self, ctx: RenderContext, text: str, y: int, height: int) -> None:
         """Centered key hints, re-flowed on ' · ' boundaries to fit the width."""
@@ -235,8 +231,7 @@ class ChoiceView(RequestView):
         self._preview_key: tuple[int, str] | None = None
         self._preview: ActionPreview | None = None
         self._local_feedback: ChoiceFeedback | None = None
-        self._preview_error: str | None = None
-        self._warm_pending_target: tuple[int, int] | None = None
+        self._preview_notice: str | None = None
         self._navigation = self._navigation_commands()
         self._last_focus: int | None = None
         self._refresh_preview()
@@ -286,7 +281,7 @@ class ChoiceView(RequestView):
     def on_edit(self) -> None:
         self._completion_owned = self.editor.replace_on_type
         self._local_feedback = None
-        self._preview_error = None
+        self._preview_notice = None
         self._expanded = self._expanded and _is_writing(self.command_text)
         self.context_scroll.follow = True
         self._refresh_preview()
@@ -354,13 +349,15 @@ class ChoiceView(RequestView):
             return
         if error is not None:
             if key[1] == "candidate" and isinstance(error, EditorError):
+                self.app.write_diagnostic("candidate preview failed", error)
                 self._preview = ActionPreview(
                     kind="effect", label="selected raw rank",
-                    detail=f"Candidate preview unavailable: {error}",
+                    detail="Candidate preview unavailable; see Ctrl+L captured output.",
                     valid=False, state="invalid", command=preview.command,
                 )
             else:
-                self._preview_error = f"Preview unavailable: {type(error).__name__}: {error}"
+                self.app.write_diagnostic("choice preview failed", error)
+                self._preview_notice = "Preview unavailable; see Ctrl+L captured output."
         elif key[1] == "insertion":
             self._preview = ActionPreview(
                 kind="insertion", label=preview.label, detail=preview.detail,
@@ -372,18 +369,13 @@ class ChoiceView(RequestView):
                 command=preview.command,
             )
 
-    def warm_started(self, target: tuple[int, int]) -> None:
-        self._warm_pending_target = target
-
-    def warm_completed(self, target: tuple[int, int], value: bool,
+    def warm_completed(self, target: tuple[int, int], _value: bool,
                        error: BaseException | None) -> None:
         if target != self.state.search_warm_target:
             return
-        self._warm_pending_target = None
+        # Warm-up is speculative, so failures belong in diagnostics only.
         if error is not None:
-            self._preview_error = f"Search warm-up unavailable: {type(error).__name__}: {error}"
-        elif value:
-            self._preview_error = None
+            self.app.write_diagnostic("search warm-up failed; cold search continues", error)
 
     def _navigate(self, direction: int) -> None:
         state = self.state
@@ -591,8 +583,8 @@ class ChoiceView(RequestView):
             rendered.append(_safe_context_text(feedback.title) + "\n", style=ctx.styles(f"feedback-{category}"))
             for line in feedback.lines:
                 rendered.append("  " + _safe_context_text(line) + "\n", style=ctx.styles("feedback-detail"))
-        if self._preview_error:
-            rendered.append(self._preview_error + "\n", style=ctx.styles("feedback-error"))
+        if self._preview_notice:
+            rendered.append(self._preview_notice + "\n", style=ctx.styles("feedback-error"))
         return rendered
 
     def _preview_text(self) -> Text:
@@ -625,8 +617,8 @@ class ChoiceView(RequestView):
             feedback.append(_safe_context_text(current.title) + "\n")
             for line in current.lines:
                 feedback.append("  " + _safe_context_text(line) + "\n")
-        if self._preview_error:
-            feedback.append(self._preview_error + "\n")
+        if self._preview_notice:
+            feedback.append(self._preview_notice + "\n")
         sections.append(("Feedback", feedback))
         for title, content in sections:
             document.append(f"\n{title}\n", style="bold")
@@ -660,23 +652,6 @@ class ChoiceView(RequestView):
             self._render_review(ctx)
         else:
             self._render_live(ctx)
-
-    def _hint_line(self, ctx: RenderContext, hint: str) -> list[tuple[str, Style | None]] | None:
-        if self._warm_pending_target is None:
-            return None
-        return [
-            (f"Resolving raw rank {self._warm_pending_target[0]}…", ctx.styles("pending")),
-            (" · " + hint.replace("\n", " · "), ctx.styles("hint")),
-        ]
-
-    def _draw_hint_or_warm(self, ctx: RenderContext, hint: str, y: int, height: int) -> None:
-        warm = self._hint_line(ctx, hint)
-        if warm is None:
-            self.draw_hint(ctx, hint, y, height)
-            return
-        ctx.canvas.put_line(0, y, clip(tuple(warm), ctx.canvas.width), width=ctx.canvas.width)
-        for row in range(1, height):
-            ctx.canvas.put(0, y + row, "")
 
     def _render_live(self, ctx: RenderContext) -> None:
         canvas = ctx.canvas
@@ -766,7 +741,7 @@ class ChoiceView(RequestView):
             self.draw_command_row(ctx, "Command >", y, heights["command"])
             y += heights["command"]
         if heights["hint"]:
-            self._draw_hint_or_warm(ctx, hint, y, heights["hint"])
+            self.draw_hint(ctx, hint, y, heights["hint"])
 
     def _render_review(self, ctx: RenderContext) -> None:
         canvas = ctx.canvas
@@ -806,7 +781,7 @@ class ChoiceView(RequestView):
             self.draw_command_row(ctx, "Review >", y, 1, read_only=True)
             y += 1
         if heights["hint"]:
-            self._draw_hint_or_warm(ctx, hint, y, heights["hint"])
+            self.draw_hint(ctx, hint, y, heights["hint"])
 
 
 # ---------------------------------------------------------------------------

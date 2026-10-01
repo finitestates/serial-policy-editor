@@ -194,8 +194,9 @@ def action_preview(
                     candidate = resolve_candidate(rank)
                 except PreviewPending:
                     return ActionPreview(
-                        kind="pending", label="selected raw rank",
-                        detail=f"Resolving raw rank {rank}…", state="pending",
+                        kind="effect", label="selected raw rank",
+                        detail=(f"Press Enter to select raw rank {rank}. "
+                                "This token is not shown in the current menu."),
                         command=command,
                     )
                 except EditorError as exc:

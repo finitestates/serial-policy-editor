@@ -82,6 +82,12 @@ CHILD = textwrap.dedent(
                 print("printed during session")
             elif mode == "interrupt":
                 io.read_choice(choice_state())
+            elif mode == "diagnostic":
+                from trajectory_editor.core.errors import EditorError
+                state = choice_state()
+                def fail_candidate(rank):
+                    raise EditorError(f"engine detail for rank {rank}")
+                results.append(io.read_choice(replace(state, resolve_candidate=fail_candidate)))
             elif mode == "runtime":
                 from types import SimpleNamespace
                 from tests.fakes import ConformingFakeBackend
@@ -242,6 +248,8 @@ def assert_complete_frame(frame: dict) -> None:
     lines = frame["lines"]
     body = text(frame)
     width, height = frame["size"]
+    assert "working…" not in body, f"internal busy status in frame {frame['sequence']}"
+    assert "Resolving raw rank" not in body, f"internal warm status in frame {frame['sequence']}"
     assert len(lines) == height and all(len(line) <= width for line in lines)
     if any("╭─ " in line for line in lines):
         assert any("closes" in line for line in lines), f"overlay without its hint in frame {frame['sequence']}"
@@ -275,7 +283,11 @@ def test_journey_every_frame_is_complete_and_matches_the_terminal(tmp_path):
         ui.send("\t")
         ui.wait_for(lambda f: "Command > 1" in text(f), what="tab staged rank 1")
         ui.send("\r")
-        ui.wait_for(lambda f: "working…" in text(f), what="busy marker")
+        submitted = ui.wait_for(
+            lambda f: f["lines"][0].startswith("Step 0")
+            and f["cursor"] is None and "Command > 1" in text(f),
+            what="submitted choice without a status marker",
+        )
         # The engine is still working: typed keys are dropped, the view stays whole.
         ui.send("zzz\r", settle=0.3)
         busy = ui.frames()[-1]
@@ -347,6 +359,14 @@ def test_journey_every_frame_is_complete_and_matches_the_terminal(tmp_path):
     assert_frames_are_transactions(raw)
     for frame in frames:
         assert_complete_frame(frame)
+    tainted = dict(submitted)
+    tainted["lines"] = list(submitted["lines"])
+    command_row = next(index for index, line in enumerate(tainted["lines"]) if "Command >" in line)
+    tainted["lines"][command_row] = tainted["lines"][command_row].replace(
+        "Command >", "working… Command >", 1,
+    )
+    with pytest.raises(AssertionError):
+        assert_complete_frame(tainted)
     sizes = {tuple(frame["size"]) for frame in frames}
     assert {(100, 30), (140, 40), (80, 24), (160, 50)} <= sizes
 
@@ -372,6 +392,46 @@ def test_ctrl_c_interrupts_and_restores_the_terminal(tmp_path):
     assert exit_index > raw.rfind(b"\x1b[?1049h")
     assert raw.find(b"RESULTS") > exit_index
     replay_and_compare(raw, ui.frames())
+
+
+def test_preview_diagnostic_is_off_the_live_canvas_until_ctrl_l(tmp_path):
+    ui = Session(tmp_path, "diagnostic", size=(80, 24))
+    try:
+        ui.wait_for(lambda f: f["lines"][0].startswith("Step 0") and f["cursor"], what="choice")
+        ui.send("5")
+        preview = ui.wait_for(
+            lambda f: "preview unavailable" in text(f).lower(), what="generic preview notice",
+        )
+        assert "engine detail for rank 5" not in text(preview)
+        ui.send("\x0c")
+        diagnostic = ui.wait_for(
+            lambda f: "[diagnostic] candidate preview failed" in text(f),
+            what="captured preview diagnostic",
+        )
+        assert "engine detail for rank 5" in text(diagnostic)
+        ui.send("q")
+        ui.wait_for(
+            lambda f: f["lines"][0].startswith("Step 0") and "Captured output" not in text(f),
+            what="choice restored after diagnostics",
+        )
+        ui.send("\x03")
+        output = ui.finish()
+    finally:
+        if ui.status is None:
+            try:
+                os.kill(ui.pid, signal.SIGKILL)
+                os.waitpid(ui.pid, 0)
+            except OSError:
+                pass
+    assert os.WIFEXITED(ui.status) and os.WEXITSTATUS(ui.status) == 0, output[-2000:]
+    assert 'RESULTS ["interrupted"]' in output
+    raw = bytes(ui.output)
+    frames = ui.frames()
+    replay_and_compare(raw, frames)
+    assert_no_erase_after_entry(raw)
+    assert_frames_are_transactions(raw)
+    for frame in frames:
+        assert_complete_frame(frame)
 
 
 def test_replay_oracle_rejects_a_torn_frame(tmp_path):
