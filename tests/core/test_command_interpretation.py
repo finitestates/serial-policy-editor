@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-from textual.theme import Theme
 
 from tests.fakes import ConformingFakeBackend, ScriptedIO
 from trajectory_editor.core.actions import Reroll
@@ -18,7 +17,7 @@ from trajectory_editor.teacher_commands import (
 )
 from trajectory_editor.ui_themes import (
     LIVE_THEME_NAMES, is_dark_terminal, resolve_live_theme, semantic_style,
-    textual_theme_values, theme_palette, theme_stylesheet,
+    theme_palette,
 )
 
 pytestmark = pytest.mark.current_workflow
@@ -138,22 +137,25 @@ def test_invalid_and_incomplete_cues_are_static_and_textual():
 
 
     for theme in LIVE_THEME_NAMES:
-        stylesheet = theme_stylesheet(theme)
-        assert "blink" not in stylesheet.lower()
         assert "blink" not in semantic_style("invalid", theme).lower()
     monochrome_style = semantic_style("invalid", "monochrome")
     assert "underline" in monochrome_style and "red" not in monochrome_style
-    high_contrast = theme_palette("high-contrast", environment={"COLORTERM": "truecolor"})
-    for foreground in (
-        high_contrast.foreground, high_contrast.primary, high_contrast.secondary,
-        high_contrast.accent, high_contrast.error, high_contrast.muted,
-    ):
-        assert _contrast_ratio(foreground, high_contrast.background) >= 4.5
+    for theme in ("high-contrast", "chill"):
+        for colorfgbg in ("15;0", "0;15"):
+            palette = theme_palette(theme, environment={"COLORTERM": "truecolor", "COLORFGBG": colorfgbg})
+            for foreground in (
+                palette.foreground, palette.primary, palette.secondary,
+                palette.accent, palette.error, palette.muted,
+            ):
+                assert _contrast_ratio(foreground, palette.background) >= 4.5
 
 
 def test_theme_selection_respects_color_environment_and_ansi_fallback():
     assert resolve_live_theme(None, environment={}) == "amber-cyan"
     assert resolve_live_theme(None, environment={"NO_COLOR": ""}) == "monochrome"
+    assert resolve_live_theme(None, environment={"SPE_THEME": "chill"}) == "chill"
+    assert resolve_live_theme(None, environment={"SPE_THEME": "chill", "NO_COLOR": ""}) == "monochrome"
+    assert resolve_live_theme("high-contrast", environment={"SPE_THEME": "chill"}) == "high-contrast"
     assert is_dark_terminal({})
     assert not is_dark_terminal({"COLORFGBG": "0;15"})
     assert theme_palette("amber-cyan", environment={}).primary == "ansi_yellow"
@@ -162,18 +164,9 @@ def test_theme_selection_respects_color_environment_and_ansi_fallback():
     ).background == "#FFFDF7"
 
 
-def test_functional_scrollbars_use_quiet_theme_colors_including_no_color():
-    environments = [({"COLORTERM": "truecolor"}, name) for name in LIVE_THEME_NAMES]
-    no_color = {"NO_COLOR": ""}
-    environments.append((no_color, resolve_live_theme(None, environment=no_color)))
-
-    for environment, name in environments:
-        palette = theme_palette(name, environment=environment)
-        colors = Theme(**textual_theme_values(palette)).to_color_system().generate()
-
-        assert colors["scrollbar"] == palette.muted
-        assert colors["scrollbar-hover"] == palette.secondary
-        assert colors["scrollbar-background"] == palette.background
+def test_256_color_terminals_get_theme_palettes_and_basic_terminals_get_ansi_names():
+    assert theme_palette("chill", environment={"TERM": "xterm-256color"}).secondary == "#8FD3C7"
+    assert theme_palette("chill", environment={"TERM": "xterm"}).secondary == "ansi_cyan"
 
 
 def test_submit_reinterprets_the_actual_buffer_and_blank_accepts_proposal():

@@ -42,7 +42,7 @@ currently supports:
 - externally produced steering-vector artifacts and episode projection or
   portable teacher-tape export.
 
-On a usable TTY, Textual renders choice, EDGE, beam, and prompt requests in
+On a usable TTY, the live interface renders choice, EDGE, beam, and prompt requests in
 separate screens through one app running on a dedicated UI thread. The
 synchronous episode thread keeps engine and storage ownership. Piped and
 noninteractive runs use the plain terminal fallback.

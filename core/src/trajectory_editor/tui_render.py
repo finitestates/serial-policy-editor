@@ -681,19 +681,16 @@ def _choice_render_fragment_parts(
 
 def _render_review_fragment_parts(
     review: BoundaryReview,
-    *,
-    seamless: bool = False,
 ) -> Fragments:
     position = dict(review.position)
     fragments: Fragments = [
         (
             "class:status-strong",
             (
-                f"Review boundary {review.aligned_step} · "
-                f"active boundary {review.active_aligned_step}\n"
+                f"REWIND  ·  boundary {review.aligned_step} / "
+                f"{review.active_aligned_step}\n"
             ),
         ),
-        ("class:section", "HISTORICAL BOUNDARY REVIEW\n"),
     ]
     if position.get("kind") == "inside-span":
         label = str(position.get("span_type") or "span").replace("-", " ").upper()
@@ -703,8 +700,8 @@ def _render_review_fragment_parts(
                 (
                     "class:muted",
                     (
-                        f" · {position.get('offset_visible_tokens')}/"
-                        f"{position.get('total_visible_tokens')} visible tokens realized\n"
+                        f"  ·  {position.get('offset_visible_tokens')}/"
+                        f"{position.get('total_visible_tokens')} tokens realized\n"
                     ),
                 ),
             ]
@@ -712,52 +709,32 @@ def _render_review_fragment_parts(
     elif position.get("kind") == "action-boundary":
         label = str(position.get("action_kind") or "action").replace("-", " ").upper()
         side = {
-            "before": "start",
-            "inside": "inside",
-            "after": "end",
+            "before": "Before",
+            "inside": "Inside",
+            "after": "After",
         }.get(position.get("side"), "boundary")
         fragments.extend(
             [
-                ("class:proposal-label", f"{label} {side}"),
+                ("class:proposal-label", f"{side} {label}"),
                 (
                     "class:muted",
-                    " · Enter deletes the continuation from this token boundary\n",
+                    "  ·  action boundary\n",
                 ),
             ]
         )
     else:
-        fragments.append(("class:proposal-label", "recorded token boundary\n"))
+        fragments.append(("class:proposal-label", "token boundary\n"))
     if review.next_token is not None:
         token = dict(review.next_token)
         fragments.extend(
             [
-                ("class:muted", "next recorded token · "),
-                ("", repr(token.get("text"))),
-                (
-                    "class:muted",
-                    f" · token {token.get('token_id')} · {token.get('origin')}\n",
-                ),
+                ("class:muted", "Next recorded: "),
+                ("class:proposal-label", repr(token.get("text"))),
+                ("", "\n"),
             ]
         )
-    fragments.extend(
-        [
-            ("class:help-key", "["),
-            ("class:muted", " previous  "),
-            ("class:help-key", "]"),
-            ("class:muted", " next  "),
-            ("class:help-key", "f"),
-            ("class:muted", " fork here  "),
-            ("class:help-key", "esc"),
-            ("class:muted", " live\n"),
-            (
-                "class:prompt-label",
-                (
-                    "History · Enter deletes the continuation and resumes here\n"
-                    if seamless else "Review action · Enter submits bare f\n"
-                ),
-            ),
-        ]
-    )
+    else:
+        fragments.append(("class:muted", "At the live edge\n"))
     return fragments
 
 
@@ -876,12 +853,11 @@ def _render_choice(
 def _render_review(
     review: BoundaryReview,
     *,
-    seamless: bool = False,
     theme: str = "amber-cyan",
     environment=None,
 ) -> Text:
     return _render_fragments(
-        _render_review_fragment_parts(review, seamless=seamless),
+        _render_review_fragment_parts(review),
         theme=theme,
         environment=environment,
     )

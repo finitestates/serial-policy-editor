@@ -55,7 +55,7 @@ def test_review_labels_an_interior_action_boundary_as_inside():
     )
     rendered = _render_review(review).plain
 
-    assert "WRITE inside" in rendered
+    assert "Inside WRITE" in rendered
 
 
 @pytest.mark.parametrize(

@@ -24,6 +24,11 @@ from .ui_themes import resolve_live_theme
 __all__ = ["TerminalIO"]
 
 
+def _live_terminal_supported() -> bool:
+    """The live interface needs POSIX termios; elsewhere use the plain UI."""
+    return os.name == "posix" and importlib.util.find_spec("termios") is not None
+
+
 def _live_stream_ready(stream) -> bool:
     try:
         return bool(stream.isatty()) and stream.fileno() >= 0
@@ -50,7 +55,7 @@ class _SessionOutput(StringIO):
 
 
 class _ProcessOutputCapture:
-    """Keep native stdout/stderr writes off the TTY while Textual is active."""
+    """Keep native stdout/stderr writes off the TTY while the live UI is active."""
 
     def __init__(self, stdout_capture: _SessionOutput, stderr_capture: _SessionOutput):
         self.stdout_capture = stdout_capture
@@ -176,7 +181,7 @@ class TerminalIO:
             requested
             and _live_stream_ready(sys.stdin)
             and _live_stream_ready(sys.stdout)
-            and importlib.util.find_spec("textual") is not None
+            and _live_terminal_supported()
         )
         self._live_session: object | None = None
 
@@ -200,7 +205,7 @@ class TerminalIO:
             return
         if self._live_session is not None:
             raise RuntimeError("live session is already active")
-        from .textual_tui import TextualTerminalSession
+        from .term.app import TerminalSession
 
         stdout, stderr = sys.stdout, sys.stderr
         captured_out = _SessionOutput()
@@ -208,7 +213,7 @@ class TerminalIO:
         process_output = _ProcessOutputCapture(captured_out, captured_err)
         try:
             terminal_output = process_output.start()
-            session = TextualTerminalSession(
+            session = TerminalSession(
                 theme=self._live_theme,
                 terminal_output=terminal_output,
             )
@@ -221,7 +226,7 @@ class TerminalIO:
         finally:
             process_output.stop()
             # CLI summaries and errors belong to the restored normal screen.
-            # Native and Python output are flushed after Textual restores the TTY.
+            # Native and Python output are flushed after the live UI restores the TTY.
             stdout.write(captured_out.getvalue())
             stderr.write(captured_err.getvalue())
             stdout.flush()

@@ -1,98 +1,86 @@
 # Terminal API and fallback behavior
 
-For the required validation workflow, commands and evidence index, see
-[Terminal rendering validation and handoff](tests/TERMINAL_RENDERING_GUIDE.md).
-
 `TerminalIO(...)` is the application's terminal entry point. Construct it once
 per interactive run and enter `with io.session():` around that run. When both
-standard streams are usable TTYs and Textual is installed, the session starts
-one `PolicyEditorApp` on a dedicated UI thread and event loop. Piped or
-noninteractive use keeps the synchronous `plain_tui.py` fallback.
+standard streams are TTYs on a POSIX system, the session starts the live
+interface in `trajectory_editor/term/`. Piped or noninteractive use keeps the
+synchronous `plain_tui.py` fallback.
+
+## How the live interface draws
+
+The live interface is immediate-mode: every frame is a pure function of one UI
+state snapshot.
+
+- One UI thread (`spe-terminal-ui`) owns all UI state. Other threads only
+  *post* work to it (`TerminalApp.post`); they never touch views or the
+  terminal.
+- The UI thread's loop drains every ready input byte and posted event, then
+  renders the whole screen into a cell canvas (`term/canvas.py`) from the
+  current state (`term/views.py`, `term/overlays.py`).
+- `FrameWriter` (`term/driver.py`) compares the canvas with the previous frame
+  and rewrites only the changed lines, inside one synchronized-output
+  transaction (`CSI ? 2026 h … l`) and one `write()`. After the initial clear it
+  never erases: lines are overwritten in place, so even a terminal without
+  synchronized output never shows a blank or partly cleared screen.
+- Resize is just another frame at the new size: the next render reads the
+  terminal size and repaints every line.
+
+Because a frame is computed from one snapshot, it cannot mix two states (for
+example a Beam table selecting one branch while the details show another).
 
 ## Thread and request model
 
 The episode-owning thread keeps the model backend and SQLite connection. It
 prepares the frozen view-state records in `terminal_contracts.py` and calls the
 blocking `TerminalProtocol` methods: `read_choice`, `read_edge`, `read_beam`,
-`prompt`, `read`, `read_key`, `write`, or `page`. The protocol also provides a
-`session()` context manager and `capabilities` property.
+`prompt`, `read`, `read_key`, `write`, or `page`.
 
-For a live read, the owning thread posts a screen request to Textual with
-`App.call_from_thread(...)` and waits on a `concurrent.futures.Future`. The
-screen resolves that future once, when the user submits or cancels. A submitted
-screen disables its input before dismissal, so later queued keystrokes cannot
-become the next request's input. Choice and EDGE results are raw command text;
-beam reads return a `BeamInput` with command text and selected branch. The
-caller alone interprets commands and applies engine, navigation, replay, or
-storage changes.
+For a live read, the owning thread posts the request to the UI thread and waits
+on a `concurrent.futures.Future`. The view resolves that future once, when the
+user submits or cancels. After submission the view stays on screen, marked
+`working…`, until the next request replaces it; input typed meanwhile is
+dropped so it cannot leak into the next request. Choice and EDGE results are raw
+command text; beam reads return a `BeamInput`. The caller alone interprets
+commands and applies engine, navigation, replay, or storage changes.
 
-Token and insertion previews that need engine-owned state are queued back to
-the episode thread. Search warming runs on a Textual-owned executor, and its
-generation-tagged result returns to the UI through `call_from_thread`. The UI
-thread never calls engine or backend state directly.
+Token and insertion previews that need engine-owned state are queued back to the
+owning thread while it waits. Search warming runs on a worker thread and posts
+its generation-tagged result to the UI thread.
 
 During a live session, incidental stdout and stderr are held in memory and do
-not enter the live screen. The captured text is flushed to the original streams
-only after the session exits, once Textual has restored the terminal. Explicit
-`TerminalIO.write(...)` messages remain available in the app's docked `RichLog`.
-The viewer retains the same trailing 16,000 characters whether it stays open or
-is reopened; large writes and history rollover keep that limit.
+not reach the screen. They are flushed to the original streams after the
+session restores the terminal. Explicit `TerminalIO.write(...)` messages are
+kept (trailing 16,000 characters) for the Ctrl+L output viewer.
 
-## Screens and controls
+Ctrl+C during a request raises `KeyboardInterrupt` from that request; while the
+engine is working it interrupts the main thread, as in a plain CLI. Ctrl+Z
+suspends to the shell and repaints on resume. Every exit path restores the
+terminal modes (alternate screen, cursor, mouse, bracketed paste, autowrap).
 
-Each request type has one Textual screen. Clicking a Choice, EDGE, or Beam row
-keeps command focus in the editor through mouse-down and row selection. The
-focused command bar remains read-only during owner-thread handoff, then becomes
-editable when the next request is ready. The POSIX request matrix verifies a
-gated stale paste is discarded and fresh multiline paste is preserved; the
-runtime journey also checks queued key and mouse rejection during its tested
-handoff. These cases do not cover every request and modal lifecycle.
+## Views and keys
 
-| Screen | Contents and behavior |
+| View | Contents and keys |
 | --- | --- |
-| `ChoiceScreen` | Scrollable prepared context, candidate `DataTable`, preview and feedback, editable command area, and read-only historical review. Context follows the prepared tail, which is unlimited by default. PgUp/PgDn control context scrolling; Ctrl+E expands authored-text input; Alt+Enter inserts a newline in `t` and `x` commands. |
-| `EdgeScreen` | Episode or session status, sampler summary, mode-specific commands from `edge_help()`, and a command input. Blank Enter submits an empty command so the engine can continue. |
-| `BeamScreen` | Survivor table, shared context, selected-branch details, notice, and command input. Same-kind Beam commands update the mounted screen in a batch. Wrapped table rows and the flexible continuation column are fitted before the compositor pass. The table and details use the remaining terminal height; below 120 columns they stack. |
-| `PromptScreen` | One parameterized screen for ordinary input, single keys, multiline composition, scrollable pages, and isolated chord composition. Page return and single-key capture use focused input targets so the production driver delivers keys through Textual's input-widget path. |
-| `HelpScreen` | Scrollable modal help shown over the active request screen. |
+| Choice | Context (follows the tail; PgUp/PgDn page it), proposal preview, feedback, candidate table, command line, hints. Tab/Shift+Tab and ↑/↓ cycle candidates and completions; click a row to stage its rank; Ctrl+G explores a rank; Ctrl+E expands authored text and Alt+Enter adds a newline; `[`/`]` open review from an empty command; F2 shows the full context, preview, and feedback. A prefilled command is replaced by typing. |
+| Review | Historical boundary header, context, read-only command line. Enter, Esc, `[`, `]`, and `f` return the review contract values; any other key returns to the live edge. |
+| EDGE | Header, command templates (↑/↓ or click to stage), command line. Blank Enter continues; Ctrl+D quits. |
+| Beam | Survivor table and selected-branch details, side by side from 120 columns and stacked below that. ↑/↓ select, ←/→ rewind/advance, Enter commits, Backspace/`p`/`f` kill/protect/toggle families on an empty command, Esc returns. |
+| Prompt | Ordinary input, single key, multiline composition (Esc then Enter submits), scrollable page, and isolated chord display. |
 
-The transition matrix verifies mounted-screen reuse for repeated Edge and
-compatible Prompt requests. The production Beam journey separately asserts
-screen/table/detail/editor identity through 30 advances and checks each
-captured display pass at 80×24 and 160×50. These are bounded test journeys;
-Choice reuse and every cancellation/modal combination are not all asserted by
-that matrix.
-
-Ctrl+K opens Textual's fuzzy command palette. Selecting a command inserts its
-template into the active input. `?` opens the full command list as a modal.
-Edge commands are displayed in the Edge screen and are also searchable in the
-palette. Help is not printed into the Edge status area on every refresh.
-
-Choice and EDGE reads return command text; beam reads return `BeamInput`.
-`PromptRequest` covers ordinary input, confirmations and single keys,
-multiline composition, pages, and isolated chord displays through
-`io.prompt(request)`. The POSIX request matrix checks actual driver submission
-for page return (`q` returns `""`; Enter/Esc also return), single-key values
-(including Backspace as DEL), chord selection, and multiline paste. `read`,
-`read_key`, and `page` are small adapters to this request. The chord flow
-submits an isolated `PromptRequest` directly.
-
-`SEAMLESS_REACTIVATE` distinguishes Enter in a seamless historical review from
-Escape and ordinary command text. `io.capabilities.seamless_review` tells
-callers whether that behavior is enabled. View-state records remain the
-engine-facing seam: Textual screens render them, while the caller retains
-command and state authority.
+On every view: F1 help, Ctrl+K command search, Ctrl+L captured output.
+Layouts allocate rows by priority, so the command line and hints stay visible at
+every size; below 20×3 the screen asks to be enlarged.
 
 ## Themes
 
-`resolve_live_theme(requested, *, environment)` retains the names
-`amber-cyan`, `monochrome`, and `high-contrast`. With no explicit choice,
-`NO_COLOR` selects monochrome; otherwise amber-cyan is the default.
-`COLORFGBG` selects a light or dark palette, with dark as the default. When
-`COLORTERM=truecolor`, the Textual stylesheet and Rich spans use hex colors;
-other terminals use named ANSI colors. Monochrome uses bold, underline, and
-reverse video without color. High-contrast foreground and semantic colors meet
-WCAG AA contrast against their light or dark background.
+`resolve_live_theme(requested, *, environment)` accepts `amber-cyan` (default),
+`chill`, `ink`, `monochrome`, and `high-contrast`; `SPE_THEME` sets a default, and
+`NO_COLOR` selects monochrome. `COLORFGBG` selects the light or dark palette.
+Truecolor and 256-color terminals get the theme's own palette and background;
+basic terminals use ANSI colors on the terminal's own background. Every palette
+color meets WCAG AA contrast against its background. The command field is a
+quiet raised field (underlined on basic terminals); the colored prompt label and
+the caret mark focus.
 
 ## Where changes belong
 
@@ -101,34 +89,24 @@ WCAG AA contrast against their light or dark background.
   dispatch it in `episode_cli.py` or `session_runtime.py`, and update
   `edge_help.py`.
 - Add prepared display data to the relevant frozen record in
-  `terminal_contracts.py`. Prepare it on the episode-owning thread. Shared Rich
-  fragments and candidate table builders belong in `tui_render.py`; interactive
-  widgets belong in `textual_tui.py`; plain rendering stays in `plain_tui.py`.
-- Route new reads through `TerminalIO` in `tui.py`. Keep one app and session
-  across request screens. Scripted CLI tests use `ScriptedIO` from
-  `tests/fakes.py`.
+  `terminal_contracts.py`, prepared on the episode-owning thread. Shared Rich
+  fragments and candidate rows belong in `tui_render.py`; live views belong in
+  `term/views.py`; plain rendering stays in `plain_tui.py`.
+- Route new reads through `TerminalIO` in `tui.py`. Scripted CLI tests use
+  `ScriptedIO` from `tests/fakes.py`.
 
-`tests/core/test_terminal_architecture.py` checks that runtime imports stay at
-the terminal boundary, Textual remains lazy, and the plain fallback stays
-isolated. Pilot tests exercise screen state and layout; POSIX PTY tests exercise
-the custom driver, multi-turn runtime bridge, tested handoff input rejection,
-terminal cleanup, and output replayed through pyte. Resize checkpoints show the
-screen at recorded resize offsets. Ordered writer markers identify individual
-terminal writes; a test-only marker queued after Textual's `post_display_hook`
-identifies a completed display pass in that same writer queue. The Beam journey
-checks its gated wait, 30 advances, retained widget identity, complete captured
-panes, and settled repaint after synchronized resizes. The retained comparison
-shows the archived baseline failing the same remount assertion.
+## Tests
 
-For the observability boundary of these tests, including the distinction between
-application state, settled snapshots, reconstructed ordered terminal states, and
-physical-terminal presentation, see
-[`tests/VISIBLE_FRAME_CORRECTNESS.md`](tests/VISIBLE_FRAME_CORRECTNESS.md).
-In particular, a reconstructed frame can violate a structural UI invariant even
-when its physical display duration is unknown; elapsed time is a separate
-measurement from frame validity.
-
-`benchmarks/tui_transitions.py --package-root CHECKOUT` loads that checkout's
-`core/src` directly and measures prepared-screen submission-to-next-render
-latency at the requested console size. It excludes model, database, and
-terminal-painting time.
+- `tests/core/test_live_terminal.py` drives each view headlessly through the
+  real key parser (`tests/core/term_support.py: Harness`) and asserts submitted
+  values, layouts at several sizes, overlays, and styles.
+- `tests/core/test_live_terminal_fuzz.py` runs Hypothesis-generated key, paste,
+  click, wheel, and resize sequences on every view and checks each frame.
+- `tests/core/test_live_terminal_pty.py` runs the production session on a real
+  PTY (scripted requests and the real `run_session_roster` runtime), replays the
+  raw bytes through pyte, and requires the terminal to equal the intended frame
+  at every frame boundary; it also checks every frame for completeness, the
+  absence of erase operations, and terminal restoration. Its negative controls
+  show the checks reject a torn line, an erase, and a mixed-state Beam frame.
+- `core/scripts/render_live_screens.py` renders any view, size, and theme to
+  HTML/PNG for visual review.

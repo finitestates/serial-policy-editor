@@ -19,8 +19,7 @@ from trajectory_editor.episode_ui import _choice_from_observation
 from trajectory_editor.episode_hash import token_prefix_sha256
 from trajectory_editor.tui_render import action_preview
 from trajectory_editor.terminal_contracts import PromptRequest
-from trajectory_editor.textual_tui import OutputScreen, PolicyEditorApp
-from tests.core.textual_support import install_request, run_pilot
+from tests.core.term_support import Harness
 from trajectory_editor.teacher_plan import load_teacher_tape_jsonl
 
 
@@ -288,31 +287,19 @@ def test_live_choice_preview_recognizes_chord_and_validates_ranks():
 
 @pytest.mark.current_workflow
 def test_live_chord_prompt_uses_only_current_preview_body():
-    async def scenario():
-        app = PolicyEditorApp()
-        async with app.run_test(size=(100, 32)) as pilot:
-            await install_request(
-                app,
-                pilot,
-                PromptRequest("Chord > ", body="a (1) | b (2)", isolated=True),
-            )
-            screen = app._active_screen
-            assert "a (1) | b (2)" in screen.query_one("#prompt-body Static").content.plain
-            app.write_output("Model loaded.")
-            assert "Model loaded" not in screen.query_one("#prompt-body Static").content.plain
-            assert app.stats["rich_log_writes"] == 0
-            await pilot.press("ctrl+l")
-            await pilot.pause()
-            assert isinstance(app.screen, OutputScreen)
-            assert app.stats["rich_log_writes"] == 1
-            await pilot.press("escape")
-            await pilot.pause()
-            assert app.screen is screen
-            assert app.focused is screen.query_one("#prompt-input")
-            await pilot.press("a", "enter")
-            await pilot.pause()
-            await install_request(app, pilot, PromptRequest("Next > "), generation=2)
-            assert not app._active_screen.query("#prompt-body")
+    with Harness(PromptRequest("Chord > ", body="a (1) | b (2)", isolated=True), size=(100, 32)) as ui:
+        assert "a (1) | b (2)" in ui.text
+        ui.app.write_output("Model loaded.")
+        ui.frame()
+        assert "Model loaded" not in ui.text
+        ui.press("ctrl+l")
+        assert "Captured output" in ui.text and "Model loaded" in ui.text
+        ui.press("escape")
+        assert "Model loaded" not in ui.text
+        ui.press("a", "enter")
+        assert ui.result() == "a"
+        ui.show(PromptRequest("Next > "))
+        assert "a (1) | b (2)" not in ui.text
 
     class ChordIO(ScriptedIO):
         def __init__(self):
@@ -329,8 +316,6 @@ def test_live_chord_prompt_uses_only_current_preview_body():
     assert result == "select" and actions == (SelectRawRank(1), Accept())
     assert len(io.bodies) == 4
     assert not any("Model loaded" in body for body in io.bodies)
-
-    run_pilot(scenario)
 
 
 class BranchBackend(ConformingFakeBackend):

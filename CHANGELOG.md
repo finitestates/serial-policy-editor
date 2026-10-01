@@ -2,15 +2,20 @@
 
 ## Unreleased
 
-- Replace the live terminal UI with Textual screens for choices and historical
-  review, EDGE, beam branches, prompts, and isolated chord composition. The
-  synchronous engine now exchanges screen requests and results across a
-  dedicated UI thread while keeping backend and storage ownership.
-- Add Ctrl+K fuzzy command search and `?` modal help. Remove the repeated static
-  command block from the EDGE status area; EDGE commands remain visible in its
-  command table.
-- Add light and dark variants for the three live themes and preserve the plain
-  terminal fallback for piped or noninteractive use.
+- Replace the live terminal UI with an immediate-mode interface for choices and
+  historical review, EDGE, beam branches, prompts, and isolated chord
+  composition. One UI thread renders each frame from one state snapshot and
+  writes only changed lines in a single synchronized, erase-free transaction,
+  removing the flashes, tears, and mixed-state frames of the previous UI. The
+  synchronous engine keeps backend and storage ownership. Textual is no longer
+  a dependency.
+- Add Ctrl+K fuzzy command search, F1 help, F2 choice details, ↑/↓ candidate and
+  EDGE template browsing, mouse row selection, and a `working…` marker while the
+  engine computes.
+- Add the `chill` and `ink` themes and `SPE_THEME`, and replace the solid
+  command bar with a quiet raised field; 256-color terminals now get each
+  theme's own palette. Light and dark variants and the plain fallback for piped
+  or noninteractive use are kept.
 
 ## v0.8.5 — 2026-09-27
 

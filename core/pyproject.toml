@@ -11,11 +11,11 @@ requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
     "PyYAML>=6",
-    "textual==8.2.8",
+    "rich>=13,<16",
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=9,<10", "pyte>=0.8.2,<1"]
+test = ["pytest>=9,<10", "pyte>=0.8.2,<1", "hypothesis>=6,<7"]
 llama = ["llama-cpp-python>=0.3"]
 transformers = ["torch>=2.1", "transformers>=4.45,<6"]
 transformers-accelerate = [
@@ -41,4 +41,4 @@ policy-editor = "trajectory_editor.episode_cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["trajectory_editor", "trajectory_editor.core"]
+packages = ["trajectory_editor", "trajectory_editor.core", "trajectory_editor.term"]

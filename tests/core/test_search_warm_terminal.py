@@ -1,36 +1,22 @@
-"""Search rank warming runs off the Textual thread and returns by generation."""
+"""Search rank warming runs off the UI thread and returns by generation."""
 
 from __future__ import annotations
 
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from rich.text import Text
-from textual.widgets import Static
 from trajectory_editor.terminal_contracts import ChoiceFeedback
-from trajectory_editor.textual_tui import PolicyEditorApp, TextualTerminalSession
 
-from tests.core.textual_support import (
-    choice_state,
-    install_request,
-    run_pilot,
-    submitted,
-)
+from tests.core.term_support import LiveLoop, choice_state
 
 pytestmark = pytest.mark.current_workflow
-
-
-def _plain(widget: Static) -> str:
-    value = widget.content
-    return value.plain if isinstance(value, Text) else str(value)
 
 
 def _search_state(warm, cancel, *, initial_tab_command="2"):
     base = choice_state()
     return choice_state(
-        feedback=ChoiceFeedback(
-            "search", "SEARCH RESULTS", initial_tab_command=initial_tab_command,
-        ),
+        feedback=ChoiceFeedback("search", "SEARCH RESULTS", initial_tab_command=initial_tab_command),
         search_lens_active=True,
         target_token_id=3,
         display_candidates=(base.candidates[1],),
@@ -41,101 +27,71 @@ def _search_state(warm, cancel, *, initial_tab_command="2"):
     )
 
 
-def test_search_warm_runs_on_worker_shows_pending_rank_and_delivers_to_ui_thread():
-    async def scenario():
-        ui_thread = threading.get_ident()
+def _engine(loop: LiveLoop, state):
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-engine") as engine:
         entered = threading.Event()
-        release = threading.Event()
-        calls = []
-        completions = []
 
-        def warm(raw_rank, token_id, generation, cancelled):
-            calls.append((raw_rank, token_id, generation, threading.get_ident()))
-            entered.set()
-            release.wait(2)
-            return not cancelled()
+        def run():
+            with loop:
+                entered.set()
+                return loop.session.read_choice(state), threading.get_ident()
 
-        app = PolicyEditorApp()
+        future = engine.submit(run)
+        assert entered.wait(5)
+        yield future
+
+
+def test_search_warm_runs_on_worker_shows_pending_rank_and_delivers_to_ui_thread():
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+    completions = []
+
+    def warm(raw_rank, token_id, generation, cancelled):
+        calls.append((raw_rank, token_id, generation, threading.get_ident()))
+        entered.set()
+        release.wait(2)
+        return not cancelled()
+
+    loop = LiveLoop()
+    for future in _engine(loop, _search_state(warm, lambda: None)):
+        app = loop.app
         original = app._warm_completed
-
-        def on_ui_completion(*args):
-            completions.append(threading.get_ident())
-            return original(*args)
-
-        app._warm_completed = on_ui_completion
-        async with app.run_test(size=(120, 40)) as pilot:
-            state = _search_state(warm, lambda: None)
-            lifecycle = await install_request(app, pilot, state, generation=31)
-            screen = app._active_screen
-            assert entered.wait(1)
-            pending_line = screen.query_one("#hint", Static)
-            assert "Resolving raw rank 2…" in _plain(pending_line)
-            assert pending_line.size.height == 1
-            before_resolution = tuple(
-                (selector, screen.query_one(selector).region.y, screen.query_one(selector).region.height)
-                for selector in ("#context-scroll", "#choice-table", "#choice-input", "#hint")
-            )
-            release.set()
-            for _ in range(20):
-                await pilot.pause(.02)
-                if screen._warm_pending_target is None:
-                    break
-            assert screen._warm_pending_target is None
-            assert pending_line.size.height == 1
-            assert "Resolving raw rank" not in _plain(pending_line)
-            after_resolution = tuple(
-                (selector, screen.query_one(selector).region.y, screen.query_one(selector).region.height)
-                for selector in ("#context-scroll", "#choice-table", "#choice-input", "#hint")
-            )
-            assert after_resolution == before_resolution
-            assert calls == [(2, 3, 31, calls[0][3])]
-            assert calls[0][3] != ui_thread
-            assert completions == [ui_thread]
-            assert app.stats["warm_dispatches"] == 1
-            await pilot.press("tab", "enter")
-            await pilot.pause()
-            assert submitted(lifecycle) == "2"
-            assert lifecycle.submitted_target == (2, 3)
-
-            terminal = TextualTerminalSession()
-            terminal.application = app
-            terminal._finish_warm(lifecycle)
-            assert app.stats["promotions"] == 1
-
-    run_pilot(scenario)
+        app._warm_completed = lambda *args, original=original: (
+            completions.append(threading.current_thread().name), original(*args),
+        )
+        assert entered.wait(2)
+        pending = loop.wait_for(lambda text: "Resolving raw rank 2…" in text)
+        release.set()
+        settled = loop.wait_for(lambda text: "Resolving raw rank" not in text)
+        # Resolution changes only the hint line; nothing else moves.
+        before, after = pending.splitlines(), settled.splitlines()
+        assert len(before) == len(after)
+        assert [index for index, (a, b) in enumerate(zip(before, after)) if a != b] == [len(after) - 1]
+        assert calls[0][:2] == (2, 3)
+        assert completions == ["spe-terminal-ui"]
+        assert calls[0][3] != threading.get_ident()
+        loop.keys("\t\r")
+        result, _engine_thread = future.result(timeout=5)
+        assert result == "2"
+        assert app.stats["warm_dispatches"] == 1
+        assert app.stats["promotions"] == 1
 
 
 def test_selecting_a_different_rank_cancels_the_search_warm():
-    async def scenario():
-        ui_thread = threading.get_ident()
-        cancelled_threads = []
-        entered = threading.Event()
+    cancelled_threads = []
+    entered = threading.Event()
 
-        def warm(raw_rank, token_id, generation, cancelled):
-            entered.set()
-            return True
+    def warm(raw_rank, token_id, generation, cancelled):
+        entered.set()
+        return True
 
-        def cancel():
-            cancelled_threads.append(threading.get_ident())
-
-        app = PolicyEditorApp()
-        async with app.run_test(size=(120, 40)) as pilot:
-            state = _search_state(warm, cancel)
-            lifecycle = await install_request(app, pilot, state, generation=32)
-            assert entered.wait(1)
-            for _ in range(10):
-                await pilot.pause(.02)
-                if lifecycle.warm_future.done():
-                    break
-            await pilot.press("1", "enter")
-            await pilot.pause()
-            assert submitted(lifecycle) == "1"
-            assert lifecycle.submitted_target == (1, 2)
-            assert lifecycle.warm_cancelled.is_set()
-            terminal = TextualTerminalSession()
-            terminal.application = app
-            terminal._finish_warm(lifecycle)
-            assert cancelled_threads and cancelled_threads[0] != ui_thread
-            assert app.stats["promotions"] == 0
-
-    run_pilot(scenario)
+    loop = LiveLoop()
+    for future in _engine(loop, _search_state(warm, lambda: cancelled_threads.append(threading.current_thread().name))):
+        assert entered.wait(2)
+        loop.wait_for(lambda text: "Resolving raw rank" not in text and "Command >" in text)
+        loop.keys("1\r")
+        result, _engine_thread = future.result(timeout=5)
+        assert result == "1"
+        assert cancelled_threads and cancelled_threads[0].startswith("spe-search-warm")
+        assert loop.app.stats["promotions"] == 0

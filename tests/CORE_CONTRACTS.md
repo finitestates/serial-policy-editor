@@ -9,16 +9,16 @@ Core tests assert observable state, persisted records, replay results, and may a
 
 | ID | Terminal contract | Active evidence |
 | --- | --- | --- |
-| T01 | Pilot covers Choice, review, EDGE, Beam, prompt, page, and isolated chord screen transitions; the POSIX driver matrix verifies review, page, single-key, chord, and multiline paste submission | `test_terminal_lifecycle.py`, `test_chord.py`, `test_textual_driver_request_matrix.py` |
-| T02 | engine-owned insertion previews run on the request owner; search warming runs on an executor and delivers generation-tagged results on the UI thread | `test_search_warm_terminal.py` |
-| T03 | invalid choice commands remain editable; a submitted screen keeps a focused read-only command bar through owner-thread handoff and rejects queued input | `test_terminal_lifecycle.py`, `test_textual_migration_journey.py`, `test_textual_driver_pty.py` |
-| T04 | EDGE blank Enter, Ctrl+C, and Ctrl+D preserve their command, interrupt, and cancellation values; the non-TTY path remains text-only | `test_terminal_lifecycle.py`, `test_terminal_scenarios.py` |
-| T05 | Choice feedback navigation, search-lens rank selection, authored-text editing, context paging, and review reactivation retain their command results | `test_terminal_lifecycle.py` |
-| T06 | Pilot verifies Beam shortcuts, selection, stochastic formatting, and prompt-mode values; actual-driver submitted values are asserted for page, single-key, chord, and multiline composition | `test_terminal_lifecycle.py`, `test_textual_driver_request_matrix.py` |
+| T01 | Choice, review, EDGE, Beam, prompt, page, single-key, multiline, and isolated chord requests submit their contract values through the real key parser; the production PTY session submits the same values for typed, pasted, clicked, and multiline input | `test_live_terminal.py`, `test_chord.py`, `test_live_terminal_pty.py` |
+| T02 | engine-owned insertion previews run on the request owner; search warming runs on a worker and delivers generation-tagged results on the UI thread | `test_search_warm_terminal.py`, `test_live_terminal.py` |
+| T03 | invalid choice commands remain editable; a submitted view stays displayed and marked busy until replaced, and input typed meanwhile is dropped | `test_live_terminal.py`, `test_live_terminal_pty.py` |
+| T04 | EDGE blank Enter, Ctrl+C, and Ctrl+D preserve their command, interrupt, and cancellation values; interrupt and exit restore the terminal; the non-TTY path remains text-only | `test_live_terminal.py`, `test_live_terminal_pty.py`, `test_terminal_scenarios.py` |
+| T05 | Choice feedback navigation, search-lens rank selection, authored-text editing, context paging, and review reactivation retain their command results | `test_live_terminal.py` |
+| T06 | Beam shortcuts, selection, stochastic formatting, and prompt-mode values are asserted headlessly and on the production PTY | `test_live_terminal.py`, `test_live_terminal_pty.py` |
 | T07 | ordinary rank browsing does not mutate speculative backend state before engine commit | `test_selection_warm_terminal.py` |
-| T08 | row selection preserves immediate command focus across repeated clicks; Edge and compatible Prompt requests reuse mounted widgets; the POSIX Beam journey keeps one screen through 30 Right-key advances, gated waiting, and synchronized resize while preserving complete captured panes and input focus | `test_textual_transition_matrix.py`, `test_textual_migration_journey.py`, `test_textual_responsive_layout.py`, `test_textual_driver_pty.py` |
-| T09 | captured output retains exactly the trailing 16,000 characters across oversized and incremental writes; an open or reopened viewer shows that history and preserves paging away from the tail | `test_terminal_lifecycle.py` |
-| T10 | Choice renders the full prepared context tail by default, records cumulative rendered-character work as the tail grows, and does not jump to the tail while the user pages away | `test_terminal_lifecycle.py` |
+| T08 | on the production PTY (scripted requests, 30 Beam advances with resizes both ways, and the real runtime), the terminal equals every intended frame, every frame is complete and from one request, and no erase is written after startup; generated input journeys keep every view complete with a visible caret at every size | `test_live_terminal_pty.py`, `test_live_terminal_fuzz.py`, `test_live_terminal.py` |
+| T09 | captured output retains exactly the trailing 16,000 characters across oversized and incremental writes; the viewer follows the tail and preserves paging away from it | `test_live_terminal.py` |
+| T10 | Choice renders the full prepared context tail by default and does not jump to the tail while the user pages away | `test_live_terminal.py` |
 
 ## Sampler and action contracts — 8
 

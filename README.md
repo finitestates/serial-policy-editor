@@ -215,9 +215,11 @@ writes, check/force actions, chord previews, reusable profiles, bias and history
 controls, CFG and perturb-and-argmax draws, rerolls, raw/model/gap logit views, teacher
 replay, rewind, fork, and live-edge continuation.
 
-On a usable TTY, the live editor uses Textual screens for choices, the live
-edge, beam branches, and prompts. Press Ctrl+K to search command templates or
-`?` to open the full command list. Piped and noninteractive runs keep the plain
+On a usable TTY, the live editor draws full-screen views for choices, the live
+edge, beam branches, and prompts. Press Ctrl+K to search command templates, F1
+for the full command list, and Ctrl+L for captured output. Choose a theme with
+`--theme` (`amber-cyan`, `chill`, `ink`, `monochrome`, `high-contrast`) or set a
+default with `SPE_THEME=chill`. Piped and noninteractive runs keep the plain
 terminal interface.
 
 ## Vectors
@@ -304,7 +306,6 @@ their parity with the production runtime.
 - [Core package](core/README.md) — standalone core installation;
 - [Vector package](vector/README.md) — optional steering-vector tooling;
 - [Core contract matrix](tests/CORE_CONTRACTS.md) — the reduced core suite;
-- [Visible-frame correctness](tests/VISIBLE_FRAME_CORRECTNESS.md) — what the terminal harness can and cannot observe across intermediate frames;
 - [Reference kernel](reference-kernel/) — independent formulas and parity checks.
 
 The version currently represented by the active package manifests is `0.8.5`.

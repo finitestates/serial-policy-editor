@@ -6,7 +6,7 @@ It is not intended to preserve any historical obligations.
 ## Kept
 
 - The interactive decision UI, including full-vocabulary `/TERM` search.
-- Plain fallback and Textual live terminal interface.
+- Plain fallback and live terminal interface.
 - llama.cpp and Hugging Face Transformers backends.
 - The sampler pipeline: temperature, top-k/top-p/min-p, repetition, presence,
   and frequency penalties, deterministic seed/boundary behavior.

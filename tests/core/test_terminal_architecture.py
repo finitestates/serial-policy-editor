@@ -13,13 +13,17 @@ from trajectory_editor.terminal_contracts import TerminalProtocol
 pytestmark = pytest.mark.current_workflow
 
 SOURCE = Path(__file__).resolve().parents[2] / "core" / "src" / "trajectory_editor"
-RENDERERS = {"plain_tui", "textual_tui"}
+RENDERERS = {"plain_tui", "term"}
 PRESENTATION = RENDERERS | {"tui", "tui_render", "candidate_columns", "ui_themes"}
 PLAIN_FORBIDDEN = {
     "teacher_commands", "edge_commands", "episode_cli", "episode_ui",
     "episode_store", "episode_engine", "episode_session", "session_runtime",
     "episode_backend_loader", "run_loop",
 }
+
+
+def _presentation(path: Path) -> bool:
+    return path.stem in PRESENTATION or path.parent.name == "term"
 
 
 def test_production_imports_keep_renderers_at_the_terminal_boundary():
@@ -36,14 +40,14 @@ def test_production_imports_keep_renderers_at_the_terminal_boundary():
                 continue
             if "plain_tui" in imported and path.stem != "tui":
                 violations.append(f"{path.name}:{node.lineno}: plain renderer import")
-            if path.stem not in PRESENTATION and imported & RENDERERS:
+            if not _presentation(path) and imported & RENDERERS:
                 violations.append(f"{path.name}:{node.lineno}: renderer import")
             if path.stem == "plain_tui" and imported & PLAIN_FORBIDDEN:
                 violations.append(f"{path.name}:{node.lineno}: runtime import")
     assert not violations, "\n".join(violations)
 
 
-def test_textual_is_lazy_and_the_plain_fallback_stays_isolated():
+def test_live_ui_is_lazy_and_the_plain_fallback_stays_isolated():
     tui_source = (SOURCE / "tui.py").read_text()
     tree = ast.parse(tui_source)
     module_imports = {
@@ -57,6 +61,7 @@ def test_textual_is_lazy_and_the_plain_fallback_stays_isolated():
         for node in tree.body
         if isinstance(node, ast.ImportFrom)
     )
+    assert "term" not in {(node.module or "") for node in tree.body if isinstance(node, ast.ImportFrom)}
     assert "textual" not in module_imports
 
     plain_tree = ast.parse((SOURCE / "plain_tui.py").read_text())
@@ -67,13 +72,13 @@ def test_textual_is_lazy_and_the_plain_fallback_stays_isolated():
         elif isinstance(node, ast.ImportFrom):
             plain_imports.add((node.module or "").split(".", 1)[0])
     assert "textual" not in plain_imports
-    assert "textual_tui" not in plain_imports
+    assert "term" not in plain_imports
 
 
 def test_runtime_does_not_branch_on_renderer_or_probe_terminal_methods():
     violations = []
     for path in SOURCE.rglob("*.py"):
-        if path.stem in PRESENTATION or path.stem == "terminal_contracts":
+        if _presentation(path) or path.stem == "terminal_contracts":
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
