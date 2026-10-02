@@ -14,7 +14,7 @@ No model is downloaded by this harness. A selected missing path is an error.
 
 ```bash
 .venv/bin/python -m benchmarks.real_model run \
-  --model-root /home/realityisfire/Documents/serial-policy-editor-lab/models \
+  --model-root /path/to/models \
   --profile benchmarks/profiles/llama_1b_smoke.yaml \
   --profile benchmarks/profiles/gpt2_cpu_smoke.yaml
 ```

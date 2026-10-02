@@ -12,6 +12,10 @@ The active project is intentionally small:
 - `core/` — the standalone runtime and `policy-editor` command;
 - `vector/` — optional conventional activation/steering-vector production.
 
+Isolated implementation experiments and their agent handoffs live in
+[`experiments/`](experiments/README.md); they are kept outside the release
+packages.
+
 ## Get only the files you need
 
 These commands use Git sparse checkout. They leave the repository metadata and

@@ -1,0 +1,3 @@
+[workspace]
+members = ["episode-history", "sampler", "terminal-ui"]
+resolver = "3"

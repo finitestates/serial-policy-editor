@@ -1,0 +1,54 @@
+# Rust terminal PTY experiment
+
+**Status:** the standalone process has a passing PTY smoke path and one
+fixture-backed Choice turn. This is an integration experiment, not the
+production terminal UI.
+
+## Process modes
+
+The default mode keeps the original editable-input smoke journey: type a value,
+submit it, resize, then submit `quit`. The `--choice` mode uses the Rust sampler
+and episode-history libraries through the same process loop. It loads
+[`fixtures/choice-turn.json`](fixtures/choice-turn.json), calculates the
+filtered candidate view and proposal, displays the proposal and raw ranks, and
+accepts the existing `accept` command on Enter. Numeric commands select a
+displayed raw rank.
+
+The fixture's expected semantic result is data in the fixture. The complete
+authored cell grids and cursor positions are kept separately in
+[`fixtures/choice-screen-contract.json`](fixtures/choice-screen-contract.json);
+the test does not derive expected grids from the process frame log. The
+initial context is represented as an exact-write seed attempt in the typed
+history, so the accepted proposal extends boundary 3 to boundary 4.
+
+After acceptance, Choice mode remains active for capture and resize. Press
+`q`, Ctrl-C, or Ctrl-D to exit cleanly.
+
+## Capture and semantic sidecars
+
+The process writes intended terminal frames and cumulative PTY byte offsets to
+the JSONL path in `SPE_TERMINAL_FRAME_LOG`. In Choice mode it also requires
+`SPE_TERMINAL_SEMANTIC_LOG` and writes the canonical action, selected token,
+evidence, before/after boundary, and typed history there. The semantic file is
+separate from stdout/stderr and the frame log.
+
+The Python test uses the same `Session` PTY driver as the production journeys.
+It preserves raw PTY bytes, replays each ordered frame through `pyte`, checks
+complete rows and cursor state, checks the authored checkpoints, and uses a
+deliberately removed proposal row as a negative control.
+
+## Run
+
+From the repository root:
+
+```sh
+cargo build --manifest-path experiments/rust-port/terminal-ui/Cargo.toml --locked
+core/.venv/bin/python -m pytest -q tests/core/test_live_terminal_pty.py -k compiled_rust
+core/.venv/bin/python -m pytest -q tests/core/test_live_terminal_pty.py
+```
+
+For workspace-wide Rust formatting, tests, and Clippy, use the shared commands
+in [`../README.md`](../README.md).
+
+The test contract checks terminal cells and cursor state through `pyte`; it
+does not compare styles.
