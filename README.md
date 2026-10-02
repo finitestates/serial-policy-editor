@@ -4,8 +4,8 @@ For the required validation workflow, commands and evidence index, see
 [Terminal rendering validation and handoff](tests/TERMINAL_RENDERING_GUIDE.md).
 
 Serial Policy Editor is a terminal editor for steering a local language model
-one token, text insertion, or delegated span at a time. Episodes can be
-replayed, rewound, forked, searched, and exported through the projector.
+one decision at a time. You can select tokens, write text, or delegate a span;
+episodes can be replayed, rewound, forked, searched, and exported.
 
 The active project is intentionally small:
 
@@ -211,13 +211,15 @@ policy-editor --profile profile.yaml --new-prompt 'Once upon a time'
 ```
 
 The editor supports sequential token selection, full-vocabulary search, text
-writes, check/force actions, chord previews, reusable profiles, bias and history
-controls, CFG and perturb-and-argmax draws, rerolls, raw/model/gap logit views, teacher
-replay, rewind, fork, and live-edge continuation.
+writes, check/force actions, chord composition, reusable profiles, bias and
+history controls, CFG and perturb-and-argmax draws, rerolls, logit views,
+teacher replay, rewind, fork, and live-edge continuation.
 
-On a usable TTY, the live editor draws full-screen views for choices, the live
-edge, beam branches, and prompts. Press Ctrl+K to search command templates, F1
-for the full command list, and Ctrl+L for captured output. Choose a theme with
+On a usable TTY, the live editor draws full-screen views for choices, historical
+review, the live edge, beam branches, prompts, and chord composition. Press
+Ctrl+K to search command templates, F1 for the full command list, F2 for choice
+details, and Ctrl+L for captured output. Arrow keys browse candidates and EDGE
+templates. Choose a theme with
 `--theme` (`amber-cyan`, `chill`, `ink`, `monochrome`, `high-contrast`) or set a
 default with `SPE_THEME=chill`. Piped and noninteractive runs keep the plain
 terminal interface.
