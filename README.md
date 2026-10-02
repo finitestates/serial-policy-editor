@@ -267,7 +267,7 @@ New sessions run in memory and do not create a database. Pass `--workspace`
 (optionally followed by a path) to open or create an SQLite workspace for
 saved-episode operations. At EDGE, `save` materializes the selected branch and
 `save-family` materializes all retained branches; unsaved session history is
-discarded when the process exits. Version 0.8.5 requires a fresh workspace:
+discarded when the process exits. Version 1.0.0 requires a fresh workspace:
 previous-format workspace data is left untouched and is not migrated.
 
 Replay tapes are storage-independent sequences of teacher actions with
@@ -308,4 +308,4 @@ their parity with the production runtime.
 - [Core contract matrix](tests/CORE_CONTRACTS.md) — the reduced core suite;
 - [Reference kernel](reference-kernel/) — independent formulas and parity checks.
 
-The version currently represented by the active package manifests is `0.8.5`.
+The version currently represented by the active package manifests is `1.0.0`.

@@ -86,6 +86,6 @@ episode; without a workspace argument it uses the `--workspace` selection or
 defaults to `episodes.sqlite3`. `save-family [WORKSPACE [ROOT_ID]]` materializes
 all retained branches and their lineage using the same workspace selection.
 `quit` and process exit discard unsaved in-memory history. The live terminal
-interface is the same whether or not a workspace is open. Version 0.8.5
+interface is the same whether or not a workspace is open. Version 1.0.0
 requires a fresh workspace; previous-format workspace data is left untouched
 and is not migrated.

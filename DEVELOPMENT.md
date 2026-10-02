@@ -1,6 +1,6 @@
 # Development branches
 
-The active release represented by this tree is `v0.8.5`. Interactive and
+The active release represented by this tree is `v1.0.0`. Interactive and
 replayed execution run through the in-memory runtime; SQLite workspaces are
 used for explicit restoration and saving. Sampler changes and rerolls are
 ordered actions, and episodes no longer have a global token budget.

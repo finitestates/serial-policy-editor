@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.0.0 — 2026-10-02
 
 - Replace the live terminal UI with an immediate-mode interface for choices and
   historical review, EDGE, beam branches, prompts, and isolated chord
