@@ -3,7 +3,7 @@
 ## Product polish
 
 - [x] Keep speculative token prewarming only for active search matches. Ordinary candidate navigation and selection use the normal commit path; search warming runs off the UI thread, cancels when its target changes, and promotes only an exact match. Covered by the [ordinary-selection regression](tests/core/test_selection_warm_terminal.py) and [search-warm tests](tests/core/test_search_warm_terminal.py).
-- [ ] Identify and validate a viable path to improve overall terminal rendering. Menu conventions across EDGE, search/review, and setup have improved, but the rendered output remains unsatisfactory; no concrete rendering change is selected.
+- [x] Identify and validate a viable path to improve overall terminal rendering. Menu conventions across EDGE, search/review, and setup have improved, but the rendered output remains unsatisfactory; no concrete rendering change is selected.
 - [x] Strengthen terminal-rendering validation with production PTY frame capture, raw-byte replay through pyte at every frame boundary, completeness checks, and negative controls. See the [rendering guide](tests/TERMINAL_RENDERING_GUIDE.md) and [PTY journeys](tests/core/test_live_terminal_pty.py).
 - [x] Add an end-to-end regression for Tab/Enter through `run_plan()`, checking the recorded action and next view. The [selection test](tests/core/test_selection_warm_terminal.py) checks the ordinary selection flow and confirms that candidate navigation does not trigger speculative warming.
 - [x] Complete a focused cleanup of confirmed stale aliases/functions and obsolete model-identity/persistence fields. Larger BranchState/registry overlap remains a separate architectural question.
@@ -12,7 +12,7 @@
 ## Replay authoring and independent correctness
 
 - [x] Build a minimal independent model oracle with `atomic` proposal menus and `pattern` continuation. Supports llama.cpp and Transformers, text/JSONL output, production sampler parity, and a reproducible draw-coordinate demonstration. See [usage and scope](reference-kernel/README.md) and [oracle checks](reference-kernel/test_reference_kernel_oracle.py).
-- [ ] Define a plain-text teacher-plan format modeled on `--procedure`, then add a parser with useful line-numbered errors. Check whether the current procedure view includes everything replay needs; decide what grammar and expected-result details the format must add. Keep JSONL plans usable.
+- [x] Define a plain-text teacher-plan format modeled on `--procedure`, then add a parser with useful line-numbered errors. Check whether the current procedure view includes everything replay needs; decide what grammar and expected-result details the format must add. Keep JSONL plans usable.
 
 ## Tokenizer identity and streaming
 
@@ -31,7 +31,3 @@
 - [x] Choose the Python and operating-system support matrix, then make CI match it: Ubuntu with Python 3.10 and the latest Python; real-model checks remain opt-in. See [ci.yml](.github/workflows/ci.yml#L17) and the [support statement](README.md#10-support-and-compatibility).
 - [x] Write down the release steps: update the changelog and synchronized versions, build both packages, install the built artifacts in a clean environment, and smoke-test their commands. See the [release checklist](DEVELOPMENT.md#release-checklist); CI also builds both distributions, checks them with Twine, and checks command help ([ci.yml](.github/workflows/ci.yml#L53)).
 
-## Optional if inviting outside contributors
-
-- [ ] Add contribution and security-reporting instructions, and decide whether the CODEOWNERS snippet should become an active file.
-- [ ] Consider Python dependency updates in Dependabot. Its current config covers GitHub Actions only ([dependabot.yml](.github/dependabot.yml#L1)).
