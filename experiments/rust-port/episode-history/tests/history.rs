@@ -1,4 +1,4 @@
-use _native::execute_request;
+use episode_history_native::execute_request;
 use serde_json::Value;
 
 #[test]

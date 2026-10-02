@@ -34,18 +34,27 @@ per pytest session and runs it through the existing `Session` launcher. On
 denied. This establishes the test seam only; the production terminal UI is
 still Python.
 
-### 1. Consolidate and integrate the proven kernels
+### 1. Integrate the proven kernels — implemented experiment
 
-Use the sampler and episode-history experiments as the starting point for a
-reusable Rust library. Keep Python facades around them during migration. Avoid
-converting full-vocabulary NumPy arrays to Python lists at every decision;
-measure and improve the boundary before making performance claims. Keep
-Python-side validation where the Rust adapter still delegates canonicalization
-to `SamplerConfig`.
+The first integration is one deterministic candidate-choice turn in the
+compiled Rust terminal process. It uses fixture logits, the existing Rust
+sampler and episode-history kernels, and the current PTY/pyte harness. The
+fixture, semantic record, screen contract, and validation evidence are in
+[`NEXT_SLICE.md`](NEXT_SLICE.md).
 
-**Gate:** run shared Python/Rust fixtures and the focused core contracts with
-exact token IDs, winners, action records, and boundaries. Keep documented
-floating-point tolerances narrow and separate from exact replay assertions.
+Keep Python facades around the kernels for parity checks. Avoid converting
+full-vocabulary NumPy arrays to Python lists at every decision; keep this slice
+fixture-driven and leave the production inference boundary undecided. The
+sampler's Python binding is optional so its arithmetic can be called as a
+normal Rust library.
+
+**Gate passed for this slice:** the shared Python/Rust fixture agrees on exact
+candidate order, proposal token, action, token IDs, and root-relative
+boundaries. Probability comparisons use a relative tolerance of `1e-12` and an
+absolute tolerance of `1e-14`. The PTY test replays every frame from raw bytes
+and compares the authored `choice.ready`, `choice.accepted`, and both
+`choice.resized` geometries. It also retains a negative control that removes
+the proposal row.
 
 ### 2. Move policy calculations
 

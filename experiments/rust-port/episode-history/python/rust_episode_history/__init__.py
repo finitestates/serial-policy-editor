@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from dataclasses import fields
 from typing import Any
 
-from . import _native
+from . import episode_history_native as _native
 
 from trajectory_editor.core.actions import (
     PolicyAction,

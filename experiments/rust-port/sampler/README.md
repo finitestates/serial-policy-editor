@@ -9,13 +9,14 @@ remains the released implementation and the reference for behavior during
 this experiment. Do not move or replace production code as part of the first
 pass.
 
-## What to build
+## Implemented scope
 
-Implement the full numeric sampler as a Rust library, and make it callable from
-Python through a small binding. The Rust code should own the sampling
-calculations. The Python side may convert NumPy arrays and Python values into
-plain inputs, call Rust, and convert results back to the existing Python-facing
-types.
+The Rust library implements the numeric sampler and is callable from Python
+through a small binding. Rust owns the sampling calculations. The Python side
+converts NumPy arrays and Python values at the boundary, calls Rust, and
+converts results back to the existing Python-facing types. The next integration
+slice will also make this arithmetic callable from a Rust process without
+initializing Python; see [`../NEXT_SLICE.md`](../NEXT_SLICE.md).
 
 Use the current `sampling.py` as the authoritative behavioral specification.
 Cover its public functions and behavior, including:
@@ -84,22 +85,22 @@ together, and split files when it makes the code easier to follow. The fixtures
 should be readable data shared by the Rust tests and the Python comparison
 script, not a second hand-written sampler.
 
-## Work sequence
+## Implementation and review sequence
 
-1. Read `sampling.py` and its tests before coding. Write down the functions,
-   validation rules, tie-breaking, and RNG details the port must preserve.
-2. Create a normal Rust library and implement the pure algorithms. Use Rust
-   unit tests and `cargo fmt`/`cargo clippy` to keep the code legible.
-3. Add shared parity cases. For each case, run Python and Rust on identical
-   inputs and compare outputs. Use exact comparison for integer IDs and
-   discrete choices; use a documented tight tolerance for floating-point
-   results where different math libraries produce rounding differences. Also
-   verify that sampler draws and winners match exactly on the fixtures,
-   because those affect replay. Do not hide a mismatch by widening the
-   tolerance without explaining it.
-4. Add the PyO3/maturin binding and a Python adapter in this experiment. Check
-   that errors become useful Python exceptions and that NumPy inputs are
-   validated rather than silently reshaped or truncated.
+1. Treat `sampling.py` and its tests as the behavioral specification. Preserve
+   the functions, validation rules, tie-breaking, and RNG details.
+2. Keep the pure algorithms in the Rust library and use Rust unit tests plus
+   `cargo fmt`/`cargo clippy` to keep the code legible.
+3. Extend shared parity cases when a contract changes. For each case, run
+   Python and Rust on identical inputs and compare outputs. Use exact
+   comparison for integer IDs and discrete choices; use a documented tight
+   tolerance for floating-point results where different math libraries
+   produce rounding differences. Also verify that sampler draws and winners
+   match exactly on the fixtures, because those affect replay. Do not hide a
+   mismatch by widening the tolerance without explaining it.
+4. Preserve the PyO3/maturin binding and Python adapter. Check that errors
+   become useful Python exceptions and that NumPy inputs are validated rather
+   than silently reshaped or truncated.
 5. Run the existing focused Python sampler and replay tests against the
    unchanged Python implementation as a baseline. Then run the shared
    differential fixtures against both implementations and exercise the Rust

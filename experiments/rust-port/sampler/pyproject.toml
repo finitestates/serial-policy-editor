@@ -11,5 +11,5 @@ dependencies = ["numpy>=1.24"]
 
 [tool.maturin]
 python-source = "python"
-module-name = "rust_sampler._native"
-
+module-name = "rust_sampler.rust_sampler_native"
+features = ["python"]

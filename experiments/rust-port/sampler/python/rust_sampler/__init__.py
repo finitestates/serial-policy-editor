@@ -15,7 +15,7 @@ from typing import Protocol
 
 import numpy as np
 
-from . import _native
+from . import rust_sampler_native as _native
 
 try:
     from trajectory_editor.core.errors import EditorError

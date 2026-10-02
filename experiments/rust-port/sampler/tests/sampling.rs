@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use _native::{
+use rust_sampler_native::{
     DrawOptions, SparseDistribution, apply_filter, conditional_gumbel_top_k, draw_token,
     gaussian_ranking_scores, gumbel_ranking_scores, perturbation_ranking_scores, position_uniform,
     position_uniform_token, rank, ranking_ids, top_ids,
@@ -81,7 +81,10 @@ fn draw_options<'a>(case: &'a Value, ranks: Option<&'a [String]>) -> DrawOptions
 #[test]
 fn shared_rng_and_rank_fixtures_match_python() {
     let fixture = fixtures();
-    assert_eq!(fixture["rng_scheme"].as_str(), Some(_native::RNG_SCHEME));
+    assert_eq!(
+        fixture["rng_scheme"].as_str(),
+        Some(rust_sampler_native::RNG_SCHEME)
+    );
     let tolerance = fixture["float_tolerance"].as_f64().unwrap();
     for case in fixture["rng_cases"].as_array().unwrap() {
         let actual = position_uniform(

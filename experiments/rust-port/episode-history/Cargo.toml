@@ -6,7 +6,7 @@ description = "Experimental Rust port of root-relative episode action history"
 license = "MIT"
 
 [lib]
-name = "_native"
+name = "episode_history_native"
 crate-type = ["cdylib", "rlib"]
 
 [features]

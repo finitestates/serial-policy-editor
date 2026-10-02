@@ -11,7 +11,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 EXPERIMENT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "core" / "src"))
 
-from rust_episode_history import _native  # noqa: E402
+from rust_episode_history import episode_history_native as _native  # noqa: E402
 from generate_fixtures import python_result  # noqa: E402
 
 
@@ -50,4 +50,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "fixture_id": "choice-turn-v1",
+  "input": {
+    "context": {
+      "boundary": 3,
+      "token_ids": [10, 11, 12],
+      "token_text": ["The ", "cat ", "sat"]
+    },
+    "candidate_token_ids": [17, 23, 31],
+    "token_text": {
+      "17": " on",
+      "23": " by",
+      "31": " down"
+    },
+    "logits": [
+      -20.0, -20.0, -20.0, -20.0, -20.0, -20.0, -20.0, -20.0,
+      -20.0, -20.0, -20.0, -20.0, -20.0, -20.0, -20.0, -20.0,
+      -20.0, 3.0, -20.0, -20.0, -20.0, -20.0, -20.0, 2.9,
+      -20.0, -20.0, -20.0, -20.0, -20.0, -20.0, -20.0, 2.8
+    ],
+    "sampler": {
+      "temperature": 1.0,
+      "top_k": 3,
+      "top_p": 1.0,
+      "min_p": 0.0,
+      "typical_p": 1.0,
+      "tail_free_z": 1.0,
+      "draw_kernel": "categorical",
+      "seed": 17,
+      "stream_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "boundary": 3
+    }
+  },
+  "expected": {
+    "proposal_token_id": 23,
+    "candidate_order": [17, 23, 31],
+    "candidate_ranks": [1, 2, 3],
+    "candidate_probabilities": [
+      0.36716540111092555,
+      0.3322249935333473,
+      0.3006096053557273
+    ],
+    "command": "accept",
+    "action": {"kind": "accept"},
+    "selected_token_id": 23,
+    "resolved_text": " by",
+    "boundary_before": 3,
+    "boundary_after": 4,
+    "visible_token_ids": [10, 11, 12, 23],
+    "visible_text": "The cat sat by",
+    "evidence": {
+      "boundary": 3,
+      "sampling_boundary": 3,
+      "token_id": 23,
+      "text": " by",
+      "proposal_token_id": 23,
+      "raw_model_nll": null,
+      "raw_rank": null,
+      "policy_rank": null,
+      "decoder_probability": 0.3322249935333473,
+      "proposal_agreement": true,
+      "is_eog": false,
+      "realized_visible": true
+    }
+  }
+}

@@ -48,6 +48,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "episode-history"
+version = "0.1.0"
+dependencies = [
+ "pyo3",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -200,6 +209,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-terminal-ui-smoke"
+version = "0.1.0"
+dependencies = [
+ "episode-history",
+ "libc",
+ "rust-sampler",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -212,6 +232,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]

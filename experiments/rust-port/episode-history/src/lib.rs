@@ -867,7 +867,7 @@ fn execute_json(input: &str) -> String {
 
 #[cfg(feature = "python")]
 #[pymodule]
-fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
+fn episode_history_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(execute_json, module)?)?;
     Ok(())
 }

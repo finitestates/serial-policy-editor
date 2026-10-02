@@ -8,10 +8,6 @@ use std::collections::HashSet;
 
 use blake2::digest::consts::{U8, U16};
 use blake2::{Blake2b, Digest};
-use pyo3::create_exception;
-use pyo3::exceptions::PyValueError;
-use pyo3::prelude::*;
-use pyo3::types::PyModule;
 
 pub const RNG_SCHEME: &str = "blake2b64-token-prefix-quantile-v2";
 pub const MIN_SEED: i64 = i64::MIN;
@@ -32,13 +28,21 @@ pub const PERTURB_MAX_KERNELS: &[&str] = &[
     "uniform-max",
 ];
 
-create_exception!(_native, NativeEditorError, PyValueError);
-
 #[derive(Debug)]
 pub enum SamplingError {
     Editor(String),
     Value(String),
 }
+
+impl std::fmt::Display for SamplingError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Editor(message) | Self::Value(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for SamplingError {}
 
 pub type SamplingResult<T> = Result<T, SamplingError>;
 
@@ -49,13 +53,6 @@ impl SamplingError {
 
     fn value(message: impl Into<String>) -> Self {
         Self::Value(message.into())
-    }
-}
-
-fn into_pyerr(error: SamplingError) -> PyErr {
-    match error {
-        SamplingError::Editor(message) => NativeEditorError::new_err(message),
-        SamplingError::Value(message) => PyValueError::new_err(message),
     }
 }
 
@@ -1123,392 +1120,410 @@ pub fn seed_search_candidate(
     Ok(draw_token(distribution, candidate_options)? == token_id)
 }
 
-fn make_distribution(
-    ids: Vec<i64>,
-    probabilities: Vec<f64>,
-    scores: Option<Vec<f64>>,
-) -> SparseDistribution {
-    SparseDistribution {
-        ids,
-        probabilities,
-        scores,
+#[cfg(feature = "python")]
+mod python {
+    use super::*;
+    use pyo3::create_exception;
+    use pyo3::exceptions::PyValueError;
+    use pyo3::prelude::*;
+    use pyo3::types::PyModule;
+
+    create_exception!(_native, NativeEditorError, PyValueError);
+
+    fn into_pyerr(error: SamplingError) -> PyErr {
+        match error {
+            SamplingError::Editor(message) => NativeEditorError::new_err(message),
+            SamplingError::Value(message) => PyValueError::new_err(message),
+        }
     }
-}
 
-#[pyfunction(name = "softmax")]
-fn py_softmax(values: Vec<f64>) -> PyResult<Vec<f64>> {
-    softmax(&values).map_err(into_pyerr)
-}
+    fn make_distribution(
+        ids: Vec<i64>,
+        probabilities: Vec<f64>,
+        scores: Option<Vec<f64>>,
+    ) -> SparseDistribution {
+        SparseDistribution {
+            ids,
+            probabilities,
+            scores,
+        }
+    }
 
-#[pyfunction(name = "top_ids")]
-fn py_top_ids(values: Vec<f64>, count: i64) -> PyResult<Vec<i64>> {
-    top_ids(&values, count).map_err(into_pyerr)
-}
+    #[pyfunction(name = "softmax")]
+    fn py_softmax(values: Vec<f64>) -> PyResult<Vec<f64>> {
+        softmax(&values).map_err(into_pyerr)
+    }
 
-#[pyfunction(name = "validated_logits")]
-fn py_validated_logits(values: Vec<f64>) -> PyResult<Vec<f64>> {
-    validated_logits(&values).map_err(into_pyerr)
-}
+    #[pyfunction(name = "top_ids")]
+    fn py_top_ids(values: Vec<f64>, count: i64) -> PyResult<Vec<i64>> {
+        top_ids(&values, count).map_err(into_pyerr)
+    }
 
-#[pyfunction(name = "rank")]
-fn py_rank(values: Vec<f64>, token_id: i64) -> PyResult<usize> {
-    rank(&values, token_id).map_err(into_pyerr)
-}
+    #[pyfunction(name = "validated_logits")]
+    fn py_validated_logits(values: Vec<f64>) -> PyResult<Vec<f64>> {
+        validated_logits(&values).map_err(into_pyerr)
+    }
 
-#[pyfunction(name = "apply_filter")]
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::type_complexity)]
-fn py_apply_filter(
-    adjusted: Vec<f64>,
-    temperature: f64,
-    top_k: Option<i64>,
-    top_p: f64,
-    min_p: f64,
-    typical_p: f64,
-    tail_free_z: f64,
-) -> PyResult<(Vec<f64>, Vec<Option<Vec<i64>>>, bool, bool)> {
-    apply_filter(
-        &adjusted,
-        temperature,
-        top_k,
-        top_p,
-        min_p,
-        typical_p,
-        tail_free_z,
-    )
-    .map(|result| {
-        (
-            result.scaled_logits,
-            result.stages.into_iter().collect(),
-            result.greedy,
-            result.unfiltered,
+    #[pyfunction(name = "rank")]
+    fn py_rank(values: Vec<f64>, token_id: i64) -> PyResult<usize> {
+        rank(&values, token_id).map_err(into_pyerr)
+    }
+
+    #[pyfunction(name = "apply_filter")]
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::type_complexity)]
+    fn py_apply_filter(
+        adjusted: Vec<f64>,
+        temperature: f64,
+        top_k: Option<i64>,
+        top_p: f64,
+        min_p: f64,
+        typical_p: f64,
+        tail_free_z: f64,
+    ) -> PyResult<(Vec<f64>, Vec<Option<Vec<i64>>>, bool, bool)> {
+        apply_filter(
+            &adjusted,
+            temperature,
+            top_k,
+            top_p,
+            min_p,
+            typical_p,
+            tail_free_z,
         )
-    })
-    .map_err(into_pyerr)
-}
+        .map(|result| {
+            (
+                result.scaled_logits,
+                result.stages.into_iter().collect(),
+                result.greedy,
+                result.unfiltered,
+            )
+        })
+        .map_err(into_pyerr)
+    }
 
-#[pyfunction(name = "probability")]
-fn py_probability(ids: Vec<i64>, probabilities: Vec<f64>, token_id: i64) -> f64 {
-    make_distribution(ids, probabilities, None).probability(token_id)
-}
+    #[pyfunction(name = "probability")]
+    fn py_probability(ids: Vec<i64>, probabilities: Vec<f64>, token_id: i64) -> f64 {
+        make_distribution(ids, probabilities, None).probability(token_id)
+    }
 
-#[pyfunction(name = "position_uniform")]
-fn py_position_uniform(seed: i64, fingerprint: &str, boundary: &str) -> PyResult<f64> {
-    position_uniform(seed, fingerprint, boundary).map_err(into_pyerr)
-}
+    #[pyfunction(name = "position_uniform")]
+    fn py_position_uniform(seed: i64, fingerprint: &str, boundary: &str) -> PyResult<f64> {
+        position_uniform(seed, fingerprint, boundary).map_err(into_pyerr)
+    }
 
-#[pyfunction(name = "position_uniform_token")]
-fn py_position_uniform_token(
-    seed: i64,
-    fingerprint: &str,
-    boundary: &str,
-    token_id: &str,
-) -> PyResult<f64> {
-    position_uniform_token(seed, fingerprint, boundary, token_id).map_err(into_pyerr)
-}
+    #[pyfunction(name = "position_uniform_token")]
+    fn py_position_uniform_token(
+        seed: i64,
+        fingerprint: &str,
+        boundary: &str,
+        token_id: &str,
+    ) -> PyResult<f64> {
+        position_uniform_token(seed, fingerprint, boundary, token_id).map_err(into_pyerr)
+    }
 
-#[pyfunction(name = "position_uniform_model_rank")]
-fn py_position_uniform_model_rank(
-    seed: i64,
-    fingerprint: &str,
-    boundary: &str,
-    model_rank: &str,
-) -> PyResult<f64> {
-    position_uniform_model_rank(seed, fingerprint, boundary, model_rank).map_err(into_pyerr)
-}
+    #[pyfunction(name = "position_uniform_model_rank")]
+    fn py_position_uniform_model_rank(
+        seed: i64,
+        fingerprint: &str,
+        boundary: &str,
+        model_rank: &str,
+    ) -> PyResult<f64> {
+        position_uniform_model_rank(seed, fingerprint, boundary, model_rank).map_err(into_pyerr)
+    }
 
-#[pyfunction(name = "conditional_gumbel_top_k")]
-#[allow(clippy::too_many_arguments)]
-fn py_conditional_gumbel_top_k(
-    log_probabilities: Vec<f64>,
-    count: usize,
-    parent_score: f64,
-    parent_log_probability: f64,
-    seed: i64,
-    fingerprint: &str,
-    boundary: &str,
-    prefix_token_ids: Vec<u64>,
-) -> PyResult<Vec<(usize, f64)>> {
-    conditional_gumbel_top_k(
-        &log_probabilities,
-        count,
-        parent_score,
-        parent_log_probability,
-        seed,
-        fingerprint,
-        boundary,
-        &prefix_token_ids,
-    )
-    .map_err(into_pyerr)
-}
+    #[pyfunction(name = "conditional_gumbel_top_k")]
+    #[allow(clippy::too_many_arguments)]
+    fn py_conditional_gumbel_top_k(
+        log_probabilities: Vec<f64>,
+        count: usize,
+        parent_score: f64,
+        parent_log_probability: f64,
+        seed: i64,
+        fingerprint: &str,
+        boundary: &str,
+        prefix_token_ids: Vec<u64>,
+    ) -> PyResult<Vec<(usize, f64)>> {
+        conditional_gumbel_top_k(
+            &log_probabilities,
+            count,
+            parent_score,
+            parent_log_probability,
+            seed,
+            fingerprint,
+            boundary,
+            &prefix_token_ids,
+        )
+        .map_err(into_pyerr)
+    }
 
-#[pyfunction(name = "gaussian_ranking_scores")]
-fn py_gaussian_ranking_scores(
-    ids: Vec<i64>,
-    probabilities: Vec<f64>,
-    scores: Option<Vec<f64>>,
-    seed: i64,
-    fingerprint: &str,
-    boundary: &str,
-    noise_std: f64,
-) -> PyResult<Vec<f64>> {
-    gaussian_ranking_scores(
-        &make_distribution(ids, probabilities, scores),
-        seed,
-        fingerprint,
-        boundary,
-        noise_std,
-    )
-    .map_err(into_pyerr)
-}
+    #[pyfunction(name = "gaussian_ranking_scores")]
+    fn py_gaussian_ranking_scores(
+        ids: Vec<i64>,
+        probabilities: Vec<f64>,
+        scores: Option<Vec<f64>>,
+        seed: i64,
+        fingerprint: &str,
+        boundary: &str,
+        noise_std: f64,
+    ) -> PyResult<Vec<f64>> {
+        gaussian_ranking_scores(
+            &make_distribution(ids, probabilities, scores),
+            seed,
+            fingerprint,
+            boundary,
+            noise_std,
+        )
+        .map_err(into_pyerr)
+    }
 
-#[pyfunction(name = "perturbation_ranking_scores")]
-#[allow(clippy::too_many_arguments)]
-fn py_perturbation_ranking_scores(
-    ids: Vec<i64>,
-    probabilities: Vec<f64>,
-    scores: Option<Vec<f64>>,
-    seed: i64,
-    fingerprint: &str,
-    boundary: &str,
-    kernel: &str,
-    noise_std: f64,
-    student_t_df: f64,
-) -> PyResult<Vec<f64>> {
-    perturbation_ranking_scores(
-        &make_distribution(ids, probabilities, scores),
-        seed,
-        fingerprint,
-        boundary,
-        kernel,
-        noise_std,
-        student_t_df,
-    )
-    .map_err(into_pyerr)
-}
-
-#[pyfunction(name = "gumbel_ranking_scores")]
-#[allow(clippy::too_many_arguments)]
-fn py_gumbel_ranking_scores(
-    ids: Vec<i64>,
-    probabilities: Vec<f64>,
-    scores: Option<Vec<f64>>,
-    seed: i64,
-    fingerprint: &str,
-    boundary: &str,
-    noise_address: &str,
-    candidate_model_ranks: Option<Vec<String>>,
-    noise_scale: f64,
-) -> PyResult<Vec<f64>> {
-    gumbel_ranking_scores(
-        &make_distribution(ids, probabilities, scores),
-        seed,
-        fingerprint,
-        boundary,
-        noise_address,
-        candidate_model_ranks.as_deref(),
-        noise_scale,
-    )
-    .map_err(into_pyerr)
-}
-
-#[pyfunction(name = "draw_token")]
-#[allow(clippy::too_many_arguments)]
-fn py_draw_token(
-    ids: Vec<i64>,
-    probabilities: Vec<f64>,
-    scores: Option<Vec<f64>>,
-    seed: i64,
-    fingerprint: &str,
-    boundary: &str,
-    kernel: &str,
-    gaussian_noise_std: f64,
-    perturb_noise_std: f64,
-    student_t_df: f64,
-    gumbel_noise_address: &str,
-    candidate_model_ranks: Option<Vec<String>>,
-    gumbel_noise_scale: f64,
-) -> PyResult<i64> {
-    draw_token(
-        &make_distribution(ids, probabilities, scores),
-        DrawOptions {
+    #[pyfunction(name = "perturbation_ranking_scores")]
+    #[allow(clippy::too_many_arguments)]
+    fn py_perturbation_ranking_scores(
+        ids: Vec<i64>,
+        probabilities: Vec<f64>,
+        scores: Option<Vec<f64>>,
+        seed: i64,
+        fingerprint: &str,
+        boundary: &str,
+        kernel: &str,
+        noise_std: f64,
+        student_t_df: f64,
+    ) -> PyResult<Vec<f64>> {
+        perturbation_ranking_scores(
+            &make_distribution(ids, probabilities, scores),
             seed,
             fingerprint,
             boundary,
             kernel,
-            gaussian_noise_std,
-            perturb_noise_std,
+            noise_std,
             student_t_df,
-            gumbel_noise_address,
-            candidate_model_ranks: candidate_model_ranks.as_deref(),
-            gumbel_noise_scale,
-        },
-    )
-    .map_err(into_pyerr)
-}
+        )
+        .map_err(into_pyerr)
+    }
 
-#[pyfunction(name = "gumbel_winner")]
-fn py_gumbel_winner(ids: Vec<i64>, ranking_scores: Vec<f64>) -> PyResult<i64> {
-    winner(
-        &make_distribution(ids, Vec::new(), None),
-        &ranking_scores,
-        "gumbel",
-    )
-    .map_err(into_pyerr)
-}
-
-#[pyfunction(name = "gaussian_winner")]
-fn py_gaussian_winner(ids: Vec<i64>, ranking_scores: Vec<f64>) -> PyResult<i64> {
-    winner(
-        &make_distribution(ids, Vec::new(), None),
-        &ranking_scores,
-        "gaussian",
-    )
-    .map_err(into_pyerr)
-}
-
-#[pyfunction(name = "perturbation_winner")]
-fn py_perturbation_winner(ids: Vec<i64>, ranking_scores: Vec<f64>) -> PyResult<i64> {
-    winner(
-        &make_distribution(ids, Vec::new(), None),
-        &ranking_scores,
-        "perturb",
-    )
-    .map_err(into_pyerr)
-}
-
-#[pyfunction(name = "gumbel_ranked_ids")]
-#[allow(clippy::too_many_arguments)]
-fn py_gumbel_ranked_ids(
-    ids: Vec<i64>,
-    probabilities: Vec<f64>,
-    scores: Option<Vec<f64>>,
-    seed: i64,
-    fingerprint: &str,
-    boundary: &str,
-    noise_address: &str,
-    candidate_model_ranks: Option<Vec<String>>,
-    noise_scale: f64,
-) -> PyResult<Vec<i64>> {
-    let distribution = make_distribution(ids, probabilities, scores);
-    let ranking = gumbel_ranking_scores(
-        &distribution,
-        seed,
-        fingerprint,
-        boundary,
-        noise_address,
-        candidate_model_ranks.as_deref(),
-        noise_scale,
-    )
-    .map_err(into_pyerr)?;
-    ranking_ids(&distribution, &ranking).map_err(into_pyerr)
-}
-
-#[pyfunction(name = "validate_seed_search_target")]
-#[allow(clippy::too_many_arguments)]
-fn py_validate_seed_search_target(
-    ids: Vec<i64>,
-    probabilities: Vec<f64>,
-    scores: Option<Vec<f64>>,
-    token_id: i64,
-    current_seed: i64,
-    fingerprint: &str,
-    boundary: &str,
-    kernel: &str,
-    gaussian_noise_std: f64,
-    perturb_noise_std: f64,
-    student_t_df: f64,
-    gumbel_noise_address: &str,
-    candidate_model_ranks: Option<Vec<String>>,
-    gumbel_noise_scale: f64,
-) -> PyResult<()> {
-    validate_seed_search_target(
-        &make_distribution(ids, probabilities, scores),
-        token_id,
-        DrawOptions {
-            seed: current_seed,
-            fingerprint,
-            boundary,
-            kernel,
-            gaussian_noise_std,
-            perturb_noise_std,
-            student_t_df,
-            gumbel_noise_address,
-            candidate_model_ranks: candidate_model_ranks.as_deref(),
-            gumbel_noise_scale,
-        },
-    )
-    .map_err(into_pyerr)
-}
-
-#[pyfunction(name = "seed_search_candidate")]
-#[allow(clippy::too_many_arguments)]
-fn py_seed_search_candidate(
-    ids: Vec<i64>,
-    probabilities: Vec<f64>,
-    scores: Option<Vec<f64>>,
-    token_id: i64,
-    seed: i64,
-    fingerprint: &str,
-    boundary: &str,
-    kernel: &str,
-    gaussian_noise_std: f64,
-    perturb_noise_std: f64,
-    student_t_df: f64,
-    gumbel_noise_address: &str,
-    candidate_model_ranks: Option<Vec<String>>,
-    gumbel_noise_scale: f64,
-) -> PyResult<bool> {
-    seed_search_candidate(
-        &make_distribution(ids, probabilities, scores),
-        token_id,
-        seed,
-        DrawOptions {
+    #[pyfunction(name = "gumbel_ranking_scores")]
+    #[allow(clippy::too_many_arguments)]
+    fn py_gumbel_ranking_scores(
+        ids: Vec<i64>,
+        probabilities: Vec<f64>,
+        scores: Option<Vec<f64>>,
+        seed: i64,
+        fingerprint: &str,
+        boundary: &str,
+        noise_address: &str,
+        candidate_model_ranks: Option<Vec<String>>,
+        noise_scale: f64,
+    ) -> PyResult<Vec<f64>> {
+        gumbel_ranking_scores(
+            &make_distribution(ids, probabilities, scores),
             seed,
             fingerprint,
             boundary,
-            kernel,
-            gaussian_noise_std,
-            perturb_noise_std,
-            student_t_df,
-            gumbel_noise_address,
-            candidate_model_ranks: candidate_model_ranks.as_deref(),
-            gumbel_noise_scale,
-        },
-    )
-    .map_err(into_pyerr)
-}
+            noise_address,
+            candidate_model_ranks.as_deref(),
+            noise_scale,
+        )
+        .map_err(into_pyerr)
+    }
 
-#[pymodule]
-fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add(
-        "NativeEditorError",
-        module.py().get_type::<NativeEditorError>(),
-    )?;
-    module.add("RNG_SCHEME", RNG_SCHEME)?;
-    module.add("MIN_SEED", MIN_SEED)?;
-    module.add("MAX_SEED", MAX_SEED)?;
-    module.add("DRAW_KERNELS", DRAW_KERNELS)?;
-    module.add("PERTURB_MAX_KERNELS", PERTURB_MAX_KERNELS)?;
-    module.add_function(wrap_pyfunction!(py_softmax, module)?)?;
-    module.add_function(wrap_pyfunction!(py_top_ids, module)?)?;
-    module.add_function(wrap_pyfunction!(py_validated_logits, module)?)?;
-    module.add_function(wrap_pyfunction!(py_rank, module)?)?;
-    module.add_function(wrap_pyfunction!(py_apply_filter, module)?)?;
-    module.add_function(wrap_pyfunction!(py_probability, module)?)?;
-    module.add_function(wrap_pyfunction!(py_position_uniform, module)?)?;
-    module.add_function(wrap_pyfunction!(py_position_uniform_token, module)?)?;
-    module.add_function(wrap_pyfunction!(py_position_uniform_model_rank, module)?)?;
-    module.add_function(wrap_pyfunction!(py_conditional_gumbel_top_k, module)?)?;
-    module.add_function(wrap_pyfunction!(py_gaussian_ranking_scores, module)?)?;
-    module.add_function(wrap_pyfunction!(py_perturbation_ranking_scores, module)?)?;
-    module.add_function(wrap_pyfunction!(py_gumbel_ranking_scores, module)?)?;
-    module.add_function(wrap_pyfunction!(py_draw_token, module)?)?;
-    module.add_function(wrap_pyfunction!(py_gumbel_winner, module)?)?;
-    module.add_function(wrap_pyfunction!(py_gaussian_winner, module)?)?;
-    module.add_function(wrap_pyfunction!(py_perturbation_winner, module)?)?;
-    module.add_function(wrap_pyfunction!(py_gumbel_ranked_ids, module)?)?;
-    module.add_function(wrap_pyfunction!(py_validate_seed_search_target, module)?)?;
-    module.add_function(wrap_pyfunction!(py_seed_search_candidate, module)?)?;
-    Ok(())
+    #[pyfunction(name = "draw_token")]
+    #[allow(clippy::too_many_arguments)]
+    fn py_draw_token(
+        ids: Vec<i64>,
+        probabilities: Vec<f64>,
+        scores: Option<Vec<f64>>,
+        seed: i64,
+        fingerprint: &str,
+        boundary: &str,
+        kernel: &str,
+        gaussian_noise_std: f64,
+        perturb_noise_std: f64,
+        student_t_df: f64,
+        gumbel_noise_address: &str,
+        candidate_model_ranks: Option<Vec<String>>,
+        gumbel_noise_scale: f64,
+    ) -> PyResult<i64> {
+        draw_token(
+            &make_distribution(ids, probabilities, scores),
+            DrawOptions {
+                seed,
+                fingerprint,
+                boundary,
+                kernel,
+                gaussian_noise_std,
+                perturb_noise_std,
+                student_t_df,
+                gumbel_noise_address,
+                candidate_model_ranks: candidate_model_ranks.as_deref(),
+                gumbel_noise_scale,
+            },
+        )
+        .map_err(into_pyerr)
+    }
+
+    #[pyfunction(name = "gumbel_winner")]
+    fn py_gumbel_winner(ids: Vec<i64>, ranking_scores: Vec<f64>) -> PyResult<i64> {
+        winner(
+            &make_distribution(ids, Vec::new(), None),
+            &ranking_scores,
+            "gumbel",
+        )
+        .map_err(into_pyerr)
+    }
+
+    #[pyfunction(name = "gaussian_winner")]
+    fn py_gaussian_winner(ids: Vec<i64>, ranking_scores: Vec<f64>) -> PyResult<i64> {
+        winner(
+            &make_distribution(ids, Vec::new(), None),
+            &ranking_scores,
+            "gaussian",
+        )
+        .map_err(into_pyerr)
+    }
+
+    #[pyfunction(name = "perturbation_winner")]
+    fn py_perturbation_winner(ids: Vec<i64>, ranking_scores: Vec<f64>) -> PyResult<i64> {
+        winner(
+            &make_distribution(ids, Vec::new(), None),
+            &ranking_scores,
+            "perturb",
+        )
+        .map_err(into_pyerr)
+    }
+
+    #[pyfunction(name = "gumbel_ranked_ids")]
+    #[allow(clippy::too_many_arguments)]
+    fn py_gumbel_ranked_ids(
+        ids: Vec<i64>,
+        probabilities: Vec<f64>,
+        scores: Option<Vec<f64>>,
+        seed: i64,
+        fingerprint: &str,
+        boundary: &str,
+        noise_address: &str,
+        candidate_model_ranks: Option<Vec<String>>,
+        noise_scale: f64,
+    ) -> PyResult<Vec<i64>> {
+        let distribution = make_distribution(ids, probabilities, scores);
+        let ranking = gumbel_ranking_scores(
+            &distribution,
+            seed,
+            fingerprint,
+            boundary,
+            noise_address,
+            candidate_model_ranks.as_deref(),
+            noise_scale,
+        )
+        .map_err(into_pyerr)?;
+        ranking_ids(&distribution, &ranking).map_err(into_pyerr)
+    }
+
+    #[pyfunction(name = "validate_seed_search_target")]
+    #[allow(clippy::too_many_arguments)]
+    fn py_validate_seed_search_target(
+        ids: Vec<i64>,
+        probabilities: Vec<f64>,
+        scores: Option<Vec<f64>>,
+        token_id: i64,
+        current_seed: i64,
+        fingerprint: &str,
+        boundary: &str,
+        kernel: &str,
+        gaussian_noise_std: f64,
+        perturb_noise_std: f64,
+        student_t_df: f64,
+        gumbel_noise_address: &str,
+        candidate_model_ranks: Option<Vec<String>>,
+        gumbel_noise_scale: f64,
+    ) -> PyResult<()> {
+        validate_seed_search_target(
+            &make_distribution(ids, probabilities, scores),
+            token_id,
+            DrawOptions {
+                seed: current_seed,
+                fingerprint,
+                boundary,
+                kernel,
+                gaussian_noise_std,
+                perturb_noise_std,
+                student_t_df,
+                gumbel_noise_address,
+                candidate_model_ranks: candidate_model_ranks.as_deref(),
+                gumbel_noise_scale,
+            },
+        )
+        .map_err(into_pyerr)
+    }
+
+    #[pyfunction(name = "seed_search_candidate")]
+    #[allow(clippy::too_many_arguments)]
+    fn py_seed_search_candidate(
+        ids: Vec<i64>,
+        probabilities: Vec<f64>,
+        scores: Option<Vec<f64>>,
+        token_id: i64,
+        seed: i64,
+        fingerprint: &str,
+        boundary: &str,
+        kernel: &str,
+        gaussian_noise_std: f64,
+        perturb_noise_std: f64,
+        student_t_df: f64,
+        gumbel_noise_address: &str,
+        candidate_model_ranks: Option<Vec<String>>,
+        gumbel_noise_scale: f64,
+    ) -> PyResult<bool> {
+        seed_search_candidate(
+            &make_distribution(ids, probabilities, scores),
+            token_id,
+            seed,
+            DrawOptions {
+                seed,
+                fingerprint,
+                boundary,
+                kernel,
+                gaussian_noise_std,
+                perturb_noise_std,
+                student_t_df,
+                gumbel_noise_address,
+                candidate_model_ranks: candidate_model_ranks.as_deref(),
+                gumbel_noise_scale,
+            },
+        )
+        .map_err(into_pyerr)
+    }
+
+    #[pymodule]
+    fn rust_sampler_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
+        module.add(
+            "NativeEditorError",
+            module.py().get_type::<NativeEditorError>(),
+        )?;
+        module.add("RNG_SCHEME", RNG_SCHEME)?;
+        module.add("MIN_SEED", MIN_SEED)?;
+        module.add("MAX_SEED", MAX_SEED)?;
+        module.add("DRAW_KERNELS", DRAW_KERNELS)?;
+        module.add("PERTURB_MAX_KERNELS", PERTURB_MAX_KERNELS)?;
+        module.add_function(wrap_pyfunction!(py_softmax, module)?)?;
+        module.add_function(wrap_pyfunction!(py_top_ids, module)?)?;
+        module.add_function(wrap_pyfunction!(py_validated_logits, module)?)?;
+        module.add_function(wrap_pyfunction!(py_rank, module)?)?;
+        module.add_function(wrap_pyfunction!(py_apply_filter, module)?)?;
+        module.add_function(wrap_pyfunction!(py_probability, module)?)?;
+        module.add_function(wrap_pyfunction!(py_position_uniform, module)?)?;
+        module.add_function(wrap_pyfunction!(py_position_uniform_token, module)?)?;
+        module.add_function(wrap_pyfunction!(py_position_uniform_model_rank, module)?)?;
+        module.add_function(wrap_pyfunction!(py_conditional_gumbel_top_k, module)?)?;
+        module.add_function(wrap_pyfunction!(py_gaussian_ranking_scores, module)?)?;
+        module.add_function(wrap_pyfunction!(py_perturbation_ranking_scores, module)?)?;
+        module.add_function(wrap_pyfunction!(py_gumbel_ranking_scores, module)?)?;
+        module.add_function(wrap_pyfunction!(py_draw_token, module)?)?;
+        module.add_function(wrap_pyfunction!(py_gumbel_winner, module)?)?;
+        module.add_function(wrap_pyfunction!(py_gaussian_winner, module)?)?;
+        module.add_function(wrap_pyfunction!(py_perturbation_winner, module)?)?;
+        module.add_function(wrap_pyfunction!(py_gumbel_ranked_ids, module)?)?;
+        module.add_function(wrap_pyfunction!(py_validate_seed_search_target, module)?)?;
+        module.add_function(wrap_pyfunction!(py_seed_search_candidate, module)?)?;
+        Ok(())
+    }
 }

@@ -1,115 +1,60 @@
-# Rust terminal UI PTY slice
+# Rust terminal PTY experiment
 
-**Status:** the first PTY smoke slice is implemented as an isolated Rust
-binary and Python integration test. There is no production Rust UI or runtime
-wiring yet.
+**Status:** the standalone process has a passing PTY smoke path and one
+fixture-backed Choice turn. This is an integration experiment, not the
+production terminal UI.
 
-## Current implementation
+## Process modes
 
-[`src/main.rs`](src/main.rs) is a small terminal process with one editable
-ASCII input, Enter submission, a `quit` test command, a visible cursor, and a
-geometry line updated after `SIGWINCH`. It renders complete rows in
-synchronized, erase-free frame transactions and writes the intended grid and
-cumulative PTY byte offset to `SPE_TERMINAL_FRAME_LOG`.
+The default mode keeps the original editable-input smoke journey: type a value,
+submit it, resize, then submit `quit`. The `--choice` mode uses the Rust sampler
+and episode-history libraries through the same process loop. It loads
+[`fixtures/choice-turn.json`](fixtures/choice-turn.json), calculates the
+filtered candidate view and proposal, displays the proposal and raw ranks, and
+accepts the existing `accept` command on Enter. Numeric commands select a
+displayed raw rank.
 
-The `Session` in `tests/core/test_live_terminal_pty.py` accepts a child argv
-while retaining its existing Python launch path. The Rust integration test
-builds this crate once per pytest session, starts it under the same POSIX PTY,
-checks input and both resize directions through the existing pyte oracle, and
-changes an expected cursor as a negative control. Pytest keeps `pty.raw` and
-`frames.jsonl` in its per-test temporary directory.
+The fixture's expected semantic result is data in the fixture. The complete
+authored cell grids and cursor positions are kept separately in
+[`fixtures/choice-screen-contract.json`](fixtures/choice-screen-contract.json);
+the test does not derive expected grids from the process frame log. The
+initial context is represented as an exact-write seed attempt in the typed
+history, so the accepted proposal extends boundary 3 to boundary 4.
 
-From the repository root, run the PTY integration test or the complete PTY
-journey module with:
+After acceptance, Choice mode remains active for capture and resize. Press
+`q`, Ctrl-C, or Ctrl-D to exit cleanly.
+
+## Capture and semantic sidecars
+
+The process writes intended terminal frames and cumulative PTY byte offsets to
+the JSONL path in `SPE_TERMINAL_FRAME_LOG`. In Choice mode it also requires
+`SPE_TERMINAL_SEMANTIC_LOG` and writes the canonical action, selected token,
+evidence, before/after boundary, and typed history there. The semantic file is
+separate from stdout/stderr and the frame log.
+
+The Python test uses the same `Session` PTY driver as the production journeys.
+It preserves raw PTY bytes, replays each ordered frame through `pyte`, checks
+complete rows and cursor state, checks the authored checkpoints, and uses a
+deliberately removed proposal row as a negative control.
+
+## Run
+
+From the repository root:
 
 ```sh
+cargo build --manifest-path experiments/rust-port/terminal-ui/Cargo.toml --locked
 core/.venv/bin/python -m pytest -q tests/core/test_live_terminal_pty.py -k compiled_rust
 core/.venv/bin/python -m pytest -q tests/core/test_live_terminal_pty.py
 ```
 
-The smoke binary is not wired into the released Python package. The later
-views, runtime ownership, and packaging steps in the roadmap remain future
-work.
+The whole experiment workspace can be checked with:
 
-## Purpose
-
-First prove that a compiled Rust terminal process can be driven by the current
-Python PTY harness and checked with the existing `pyte` replay oracle. Keep
-this slice small: it establishes the test seam, not a partial port of the live
-editor.
-
-Relevant existing pieces:
-
-- PTY process driver, raw byte capture, frame replay, resize, transaction, and
-  completeness checks: `tests/core/test_live_terminal_pty.py`;
-- in-process Python-only view/parser harness: `tests/core/term_support.py`;
-- required workflow and evidence handoff: `tests/TERMINAL_RENDERING_GUIDE.md`.
-
-## First implementation
-
-1. Generalize the PTY `Session` launcher to accept a child argv. Keep its
-   current Python child path and add a path that launches the compiled Rust
-   binary. Build that binary once for the test session.
-2. Add a tiny Rust process with a fixed screen, a visible cursor, one editable
-   input, and a size-dependent line. It should accept printable input and
-   Enter, react to `SIGWINCH` by reading the PTY's current size, and exit
-   cleanly on its test command.
-3. Have the Rust renderer emit intended frames to the file named by
-   `SPE_TERMINAL_FRAME_LOG`. Keep the log separate from PTY stdout/stderr so
-   it cannot change the terminal stream under test.
-4. Run the child through the existing PTY capture and `pyte` replay code. Save
-   the raw bytes before assertions, including on failure.
-
-## Frame-log contract
-
-Match the shape consumed by `test_live_terminal_pty.py`:
-
-```json
-{
-  "sequence": 1,
-  "size": [80, 24],
-  "lines": ["..."],
-  "cursor": [12, 3],
-  "end_offset": 184
-}
+```sh
+cargo fmt --manifest-path experiments/rust-port/Cargo.toml --all -- --check
+cargo test --manifest-path experiments/rust-port/Cargo.toml --workspace --locked
+cargo clippy --manifest-path experiments/rust-port/Cargo.toml \
+  --workspace --all-targets --all-features --locked -- -D warnings
 ```
 
-- `sequence` increases once per presented frame.
-- `size` is `[columns, rows]`.
-- `lines` are the intended visible cell rows for that frame.
-- `cursor` is `[x, y]` in terminal cells, or `null` while hidden.
-- `end_offset` is the cumulative number of raw PTY-output bytes through the
-  end of that frame's write transaction. It is a byte count, not a Unicode
-  character count.
-
-The Python oracle feeds bytes through each `end_offset`, resizes `pyte.Screen`
-to the frame geometry, and compares displayed rows and cursor state. Keep this
-as an implementation-neutral sidecar. If the shape needs to change, version
-the format and update both Python and Rust producers/consumers together.
-
-## Pass conditions for the smoke slice
-
-- Python starts the compiled Rust child under a real POSIX PTY and captures its
-  raw output without interpreting it first.
-- The `pyte` replay matches every intended frame boundary, including after a
-  key submission and at both directions of a resize.
-- Each frame has valid cell geometry and cursor placement; frame transactions
-  are complete; the renderer emits no post-startup screen erase.
-- A negative control (for example, a changed expected cursor or truncated
-  output) proves the replay assertion detects a mismatch.
-- The raw capture and frame log remain available in pytest's temporary
-  directory when a check fails.
-
-Use deterministic fixture text and no model backend. Keep the current
-`pyte.ByteStream` as the independent terminal emulator; do not replace it with
-the Rust renderer's own canvas when checking actual output.
-
-## After the smoke slice
-
-Use Rust-side unit tests for view-state and input-reducer behavior, then grow
-the real-process PTY journeys as views migrate: Choice, EDGE, prompt, review,
-Beam, chord, mouse input, cancellation/suspend, and generated resize/input
-sequences. Check every intermediate frame and retain deliberate negative
-controls. PTY results establish emitted screen behavior for the tested
-journeys and terminal sizes; they are one necessary part of evaluating
-smoothness.
+The test contract checks terminal cells and cursor state through `pyte`; it
+does not compare styles.

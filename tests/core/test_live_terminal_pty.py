@@ -33,6 +33,10 @@ pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX PTY journeys")
 
 ROOT = Path(__file__).resolve().parents[2]
 RUST_TERMINAL_MANIFEST = ROOT / "experiments/rust-port/terminal-ui/Cargo.toml"
+RUST_CHOICE_FIXTURE = ROOT / "experiments/rust-port/terminal-ui/fixtures/choice-turn.json"
+RUST_CHOICE_SCREEN_CONTRACT = (
+    ROOT / "experiments/rust-port/terminal-ui/fixtures/choice-screen-contract.json"
+)
 
 CHILD = textwrap.dedent(
     r"""
@@ -171,6 +175,7 @@ class Session:
         import pty
 
         self.frames_path = tmp_path / "frames.jsonl"
+        self.semantic_path = tmp_path / "semantic.jsonl"
         self.gate = tmp_path / "gate"
         self.output = bytearray()
         self.size = size
@@ -179,6 +184,7 @@ class Session:
             os.environ.update({
                 "SPE_ROOT": str(ROOT), "SPE_GATE": str(self.gate),
                 "SPE_TERMINAL_FRAME_LOG": str(self.frames_path),
+                "SPE_TERMINAL_SEMANTIC_LOG": str(self.semantic_path),
                 "TERM": "xterm-256color", "COLORTERM": "truecolor",
                 **(env or {}),
             })
@@ -286,6 +292,23 @@ def rust_terminal_binary(tmp_path_factory) -> Path:
 
 def text(frame: dict) -> str:
     return "\n".join(frame["lines"])
+
+
+def assert_choice_checkpoint(actual: dict, expected: dict) -> None:
+    name = f"{expected['checkpoint']} ({expected['phase']})"
+    assert actual["size"] == expected["size"], f"{name}: size differs"
+    width, height = expected["size"]
+    assert len(expected["lines"]) == height, f"{name}: authored grid height differs"
+    assert all(cell_len(line) == width for line in expected["lines"]), (
+        f"{name}: authored grid does not declare every cell"
+    )
+    assert all(cell_len(line) == width for line in actual["lines"]), (
+        f"{name}: process frame does not write complete rows"
+    )
+    assert [line.rstrip() for line in actual["lines"]] == [
+        line.rstrip() for line in expected["lines"]
+    ], f"{name}: cell grid differs"
+    assert actual["cursor"] == expected["cursor"], f"{name}: cursor differs"
 
 
 def replay_and_compare(output: bytes, frames: list[dict]) -> None:
@@ -457,6 +480,195 @@ def test_compiled_rust_child_matches_the_pty_screen_oracle(tmp_path, rust_termin
     altered[0]["cursor"] = [x + 1, y]
     with pytest.raises(AssertionError):
         replay_and_compare(raw, altered)
+
+
+def test_compiled_rust_choice_turn_matches_python_and_authored_frames(
+    tmp_path, rust_terminal_binary
+):
+    """The Rust sampler, history, frame log, and pyte oracle share one fixture."""
+    import numpy as np
+
+    from trajectory_editor.core.sampler_config import SamplerConfig
+    from trajectory_editor.core.sampling import (
+        SparseDistribution,
+        _softmax,
+        apply_candidate_filter,
+        draw_token,
+        raw_rank,
+    )
+    from trajectory_editor.teacher_commands import interpret_command
+
+    fixture = json.loads(RUST_CHOICE_FIXTURE.read_text(encoding="utf-8"))
+    screen_contract = json.loads(RUST_CHOICE_SCREEN_CONTRACT.read_text(encoding="utf-8"))
+    input_data = fixture["input"]
+    expected = fixture["expected"]
+    sampler_data = input_data["sampler"]
+    logits = np.asarray(input_data["logits"], dtype=np.float64)
+    sampler = SamplerConfig(
+        temperature=sampler_data["temperature"],
+        top_k=sampler_data["top_k"],
+        top_p=sampler_data["top_p"],
+        min_p=sampler_data["min_p"],
+        typical_p=sampler_data["typical_p"],
+        tail_free_z=sampler_data["tail_free_z"],
+        draw_kernel=sampler_data["draw_kernel"],
+        seed=sampler_data["seed"],
+    )
+    filtered = apply_candidate_filter(logits, sampler)
+    active_ids = filtered.stages["after_min_p"]
+    assert active_ids.tolist() == expected["candidate_order"]
+    scores = filtered.scaled_logits[active_ids]
+    probabilities = _softmax(scores)
+    reference_distribution = SparseDistribution(active_ids, probabilities, scores)
+    proposal = draw_token(
+        reference_distribution,
+        seed=sampler.seed,
+        stream_fingerprint=sampler_data["stream_fingerprint"],
+        aligned_step=sampler_data["boundary"],
+        kernel=sampler.draw_kernel,
+    )
+    assert proposal == expected["proposal_token_id"]
+    assert [raw_rank(logits, int(token_id)) for token_id in active_ids] == (
+        expected["candidate_ranks"]
+    )
+    assert probabilities.tolist() == pytest.approx(
+        expected["candidate_probabilities"], rel=1e-12, abs=1e-14
+    )
+    parsed = interpret_command(
+        expected["command"], menu_size=len(active_ids), default_hold_tokens=24,
+        vocabulary_size=len(logits),
+    )
+    assert parsed.command.action.kind.value == expected["action"]["kind"]
+    assert input_data["context"]["boundary"] == sampler_data["boundary"]
+    reference_text = "".join(input_data["context"]["token_text"])
+    reference_text += input_data["token_text"][str(expected["selected_token_id"])]
+    assert reference_text == expected["visible_text"]
+
+    contract_frames = screen_contract["frames"]
+    ready_contract = next(
+        item for item in contract_frames if item["checkpoint"] == "choice.ready"
+    )
+    accepted_contract = next(
+        item for item in contract_frames if item["checkpoint"] == "choice.accepted"
+    )
+    resized_contracts = [
+        item for item in contract_frames if item["checkpoint"] == "choice.resized"
+    ]
+    assert [item["size"] for item in resized_contracts] == [[80, 24], [100, 30]]
+    assert len(ready_contract["lines"]) == 30
+    assert len(accepted_contract["lines"]) == 30
+    assert all(len(item["lines"]) == item["size"][1] for item in resized_contracts)
+
+    ui = Session(
+        tmp_path,
+        "rust-choice",
+        size=(100, 30),
+        argv=[str(rust_terminal_binary), "--choice"],
+    )
+    try:
+        ready = ui.wait_for(
+            lambda frame: frame["lines"][0].startswith("Rust Choice / fixture turn")
+            and "Proposal: rank" in text(frame),
+            what="Rust Choice ready frame",
+        )
+        assert_choice_checkpoint(ready, ready_contract)
+
+        ui.send("accept\r")
+        accepted = ui.wait_for(
+            lambda frame: "Choice committed" in text(frame),
+            what="accepted Choice frame",
+        )
+        assert_choice_checkpoint(accepted, accepted_contract)
+
+        ui.resize(80, 24)
+        compact = ui.wait_for(
+            lambda frame: tuple(frame["size"]) == (80, 24)
+            and "Choice committed" in text(frame),
+            what="accepted Choice at 80x24",
+        )
+        assert_choice_checkpoint(compact, resized_contracts[0])
+
+        ui.resize(100, 30)
+        restored = ui.wait_for(
+            lambda frame: tuple(frame["size"]) == (100, 30)
+            and "Choice committed" in text(frame),
+            what="accepted Choice returned to 100x30",
+        )
+        assert_choice_checkpoint(restored, resized_contracts[1])
+        ui.send("q")
+        output = ui.finish()
+    finally:
+        if ui.status is None:
+            try:
+                os.kill(ui.pid, signal.SIGKILL)
+                os.waitpid(ui.pid, 0)
+            except OSError:
+                pass
+        ui.pump(0.2)
+        (tmp_path / "pty.raw").write_bytes(bytes(ui.output))
+
+    assert os.WIFEXITED(ui.status) and os.WEXITSTATUS(ui.status) == 0, output[-2000:]
+    raw = bytes(ui.output)
+    frames = ui.frames()
+    replay_and_compare(raw, frames)
+    assert_no_erase_after_entry(raw)
+    assert_frames_are_transactions(raw)
+    for frame in frames:
+        assert_complete_frame(frame)
+
+    # Negative control: removing the proposal text must violate the authored contract.
+    broken_ready = dict(ready)
+    broken_ready["lines"] = list(ready["lines"])
+    proposal_row = next(
+        index
+        for index, line in enumerate(broken_ready["lines"])
+        if "Proposal: rank" in line
+    )
+    broken_ready["lines"][proposal_row] = " " * ready["size"][0]
+    with pytest.raises(AssertionError, match="cell grid differs"):
+        assert_choice_checkpoint(broken_ready, ready_contract)
+
+    semantic_lines = [
+        json.loads(line)
+        for line in ui.semantic_path.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    assert len(semantic_lines) == 1
+    semantic = semantic_lines[0]
+    assert semantic["checkpoint"] == "choice.accepted"
+    assert semantic["action"] == expected["action"]
+    assert semantic["proposal_token_id"] == expected["proposal_token_id"]
+    assert semantic["selected_token_id"] == expected["selected_token_id"]
+    assert semantic["boundary_before"] == expected["boundary_before"]
+    assert semantic["boundary_after"] == expected["boundary_after"]
+    assert semantic["visible_token_ids"] == expected["visible_token_ids"]
+    assert semantic["visible_text"] == expected["visible_text"]
+    for field, expected_value in expected["evidence"].items():
+        if field == "decoder_probability":
+            assert semantic["evidence"][field] == pytest.approx(
+                expected_value, rel=1e-12, abs=1e-14
+            )
+        else:
+            assert semantic["evidence"][field] == expected_value
+    attempts = semantic["history"]["attempts"]
+    assert attempts[-1]["action"] == expected["action"]
+    assert attempts[-1]["outcome"]["boundary_before"] == expected["boundary_before"]
+    assert attempts[-1]["outcome"]["boundary_after"] == expected["boundary_after"]
+    recorded_evidence = attempts[-1]["outcome"]["evidence"][0]
+    assert recorded_evidence["decoder_probability"] == pytest.approx(
+        expected["evidence"]["decoder_probability"], rel=1e-12, abs=1e-14
+    )
+    recorded_discrete_evidence = {
+        key: value
+        for key, value in recorded_evidence.items()
+        if key != "decoder_probability"
+    }
+    expected_discrete_evidence = {
+        key: value
+        for key, value in expected["evidence"].items()
+        if key != "decoder_probability"
+    }
+    assert recorded_discrete_evidence == expected_discrete_evidence
 
 
 def test_production_prompt_geometry_for_wide_and_combining_text(tmp_path):
