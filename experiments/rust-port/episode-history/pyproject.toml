@@ -1,0 +1,14 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "rust-episode-history-experiment"
+version = "0.1.0"
+description = "Experimental Rust implementation of policy-editor episode history"
+requires-python = ">=3.10"
+
+[tool.maturin]
+python-source = "python"
+module-name = "rust_episode_history._native"
+features = ["python"]

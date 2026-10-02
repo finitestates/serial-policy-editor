@@ -1,0 +1,989 @@
+{
+  "conditional_case": {
+    "boundary": "1208925819614629174706176",
+    "count": 4,
+    "expected": [
+      [
+        1,
+        0.25
+      ],
+      [
+        0,
+        -2.0561344415614795
+      ],
+      [
+        3,
+        -1.1489822431075258
+      ],
+      [
+        2,
+        -2.5365562589883335
+      ]
+    ],
+    "fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "log_probabilities": [
+      -0.1,
+      -0.5,
+      -1.3,
+      -2.2
+    ],
+    "parent_log_probability": -0.7,
+    "parent_score": 0.25,
+    "prefix_token_ids": [
+      9,
+      2,
+      9
+    ],
+    "seed": 9223372036854775807
+  },
+  "draw_cases": [
+    {
+      "boundary": "3",
+      "expected": {
+        "draw": 1,
+        "ranking_scores": null
+      },
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ids": [
+        4,
+        1,
+        7
+      ],
+      "kernel": "categorical",
+      "name": "categorical",
+      "options": {},
+      "probabilities": [
+        0.2,
+        0.5,
+        0.3
+      ],
+      "scores": [
+        0.1,
+        0.9,
+        0.4
+      ],
+      "seed": 17
+    },
+    {
+      "boundary": "3",
+      "expected": {
+        "draw": 1,
+        "ranked_ids": [
+          1,
+          4,
+          7
+        ],
+        "ranking_scores": [
+          0.4302192233802822,
+          3.030219427142236,
+          -0.8853700262015795
+        ],
+        "winner": 1
+      },
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ids": [
+        4,
+        1,
+        7
+      ],
+      "kernel": "gumbel-max",
+      "name": "gumbel-token-order-a",
+      "options": {},
+      "probabilities": [
+        0.2,
+        0.5,
+        0.3
+      ],
+      "scores": [
+        0.1,
+        0.9,
+        0.4
+      ],
+      "seed": 17
+    },
+    {
+      "boundary": "3",
+      "expected": {
+        "draw": 1,
+        "ranked_ids": [
+          1,
+          4,
+          7
+        ],
+        "ranking_scores": [
+          -0.8853700262015795,
+          0.4302192233802822,
+          3.030219427142236
+        ],
+        "winner": 1
+      },
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ids": [
+        7,
+        4,
+        1
+      ],
+      "kernel": "gumbel-max",
+      "name": "gumbel-token-order-b",
+      "options": {},
+      "probabilities": [
+        0.3,
+        0.2,
+        0.5
+      ],
+      "scores": [
+        0.4,
+        0.1,
+        0.9
+      ],
+      "seed": 17
+    },
+    {
+      "boundary": "3",
+      "expected": {
+        "draw": 7,
+        "ranked_ids": [
+          7,
+          1,
+          4
+        ],
+        "ranking_scores": [
+          -0.22969726857500014,
+          -0.16954468085223462,
+          0.9099221100446949
+        ],
+        "winner": 7
+      },
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ids": [
+        4,
+        1,
+        7
+      ],
+      "kernel": "gumbel-max",
+      "name": "gumbel-model-rank",
+      "options": {
+        "candidate_model_ranks": [
+          8,
+          2,
+          5
+        ],
+        "gumbel_noise_address": "model-rank"
+      },
+      "probabilities": [
+        0.2,
+        0.5,
+        0.3
+      ],
+      "scores": [
+        0.1,
+        0.9,
+        0.4
+      ],
+      "seed": 17
+    },
+    {
+      "boundary": "3",
+      "expected": {
+        "draw": 1,
+        "ranked_ids": [
+          1,
+          7,
+          4
+        ],
+        "ranking_scores": [
+          0.1,
+          0.9,
+          0.4
+        ],
+        "winner": 1
+      },
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ids": [
+        4,
+        1,
+        7
+      ],
+      "kernel": "gumbel-max",
+      "name": "gumbel-zero-scale",
+      "options": {
+        "gumbel_noise_scale": 0.0
+      },
+      "probabilities": [
+        0.2,
+        0.5,
+        0.3
+      ],
+      "scores": [
+        0.1,
+        0.9,
+        0.4
+      ],
+      "seed": 17
+    },
+    {
+      "boundary": "3",
+      "expected": {
+        "draw": 1,
+        "ranking_scores": [
+          0.1,
+          0.9,
+          0.4
+        ],
+        "winner": 1
+      },
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ids": [
+        4,
+        1,
+        7
+      ],
+      "kernel": "gaussian-max",
+      "name": "gaussian-zero-noise",
+      "options": {
+        "gaussian_noise_std": 0.0
+      },
+      "probabilities": [
+        0.2,
+        0.5,
+        0.3
+      ],
+      "scores": [
+        0.1,
+        0.9,
+        0.4
+      ],
+      "seed": 17
+    },
+    {
+      "boundary": "3",
+      "expected": {
+        "draw": 7,
+        "ranking_scores": [
+          0.46575328901794233,
+          0.4608326532941388,
+          0.722308487938172
+        ],
+        "winner": 7
+      },
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ids": [
+        4,
+        1,
+        7
+      ],
+      "kernel": "gaussian-max",
+      "name": "gaussian-noise",
+      "options": {
+        "gaussian_noise_std": 0.75
+      },
+      "probabilities": [
+        0.2,
+        0.5,
+        0.3
+      ],
+      "scores": [
+        0.1,
+        0.9,
+        0.4
+      ],
+      "seed": 17
+    },
+    {
+      "boundary": "3",
+      "expected": {
+        "draw": 7,
+        "ranking_scores": [
+          -0.042742018027474044,
+          -0.06090308288481516,
+          0.5968627866851572
+        ],
+        "winner": 7
+      },
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ids": [
+        4,
+        1,
+        7
+      ],
+      "kernel": "logistic-max",
+      "name": "logistic",
+      "options": {},
+      "probabilities": [
+        0.2,
+        0.5,
+        0.3
+      ],
+      "scores": [
+        0.1,
+        0.9,
+        0.4
+      ],
+      "seed": 17
+    },
+    {
+      "boundary": "4",
+      "expected": {
+        "draw": 4,
+        "ranking_scores": [
+          1.1273490814415241,
+          -0.285930210820705,
+          -3.030907091293164
+        ],
+        "winner": 4
+      },
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ids": [
+        4,
+        1,
+        7
+      ],
+      "kernel": "student-t-max",
+      "name": "student-t-df3",
+      "options": {},
+      "probabilities": [
+        0.2,
+        0.5,
+        0.3
+      ],
+      "scores": [
+        1.0,
+        0.0,
+        -2.0
+      ],
+      "seed": 19
+    },
+    {
+      "boundary": "4",
+      "expected": {
+        "draw": 4,
+        "ranking_scores": [
+          1.1548433753682406,
+          -0.21768683159309302,
+          -5.2981054479822145
+        ],
+        "winner": 4
+      },
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ids": [
+        4,
+        1,
+        7
+      ],
+      "kernel": "student-t-max",
+      "name": "student-t-df1",
+      "options": {
+        "student_t_df": 1.0
+      },
+      "probabilities": [
+        0.2,
+        0.5,
+        0.3
+      ],
+      "scores": [
+        1.0,
+        0.0,
+        -2.0
+      ],
+      "seed": 19
+    },
+    {
+      "boundary": "4",
+      "expected": {
+        "draw": 4,
+        "ranking_scores": [
+          1.1406911427996493,
+          -0.19271903128852677,
+          -9.604609145346073
+        ],
+        "winner": 4
+      },
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ids": [
+        4,
+        1,
+        7
+      ],
+      "kernel": "student-t-max",
+      "name": "student-t-df-half",
+      "options": {
+        "student_t_df": 0.5
+      },
+      "probabilities": [
+        0.2,
+        0.5,
+        0.3
+      ],
+      "scores": [
+        1.0,
+        0.0,
+        -2.0
+      ],
+      "seed": 19
+    },
+    {
+      "boundary": "3",
+      "expected": {
+        "draw": 7,
+        "ranking_scores": [
+          0.0025547516144388133,
+          0.04368034863680614,
+          0.5374532019274154
+        ],
+        "winner": 7
+      },
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ids": [
+        4,
+        1,
+        7
+      ],
+      "kernel": "laplace-max",
+      "name": "laplace",
+      "options": {},
+      "probabilities": [
+        0.2,
+        0.5,
+        0.3
+      ],
+      "scores": [
+        0.1,
+        0.9,
+        0.4
+      ],
+      "seed": 17
+    },
+    {
+      "boundary": "3",
+      "expected": {
+        "draw": 7,
+        "ranking_scores": [
+          -0.1229744914459025,
+          -0.31608393723978667,
+          0.7059871495300124
+        ],
+        "winner": 7
+      },
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ids": [
+        4,
+        1,
+        7
+      ],
+      "kernel": "uniform-max",
+      "name": "uniform",
+      "options": {},
+      "probabilities": [
+        0.2,
+        0.5,
+        0.3
+      ],
+      "scores": [
+        0.1,
+        0.9,
+        0.4
+      ],
+      "seed": 17
+    },
+    {
+      "boundary": "3",
+      "expected": {
+        "draw": 1,
+        "ranked_ids": [
+          1,
+          3,
+          3
+        ],
+        "ranking_scores": [
+          -0.21062024045902195,
+          2.630219427142236,
+          -0.01062024045902199
+        ],
+        "winner": 1
+      },
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ids": [
+        3,
+        1,
+        3
+      ],
+      "kernel": "gumbel-max",
+      "name": "duplicate-token-ids",
+      "options": {},
+      "probabilities": [
+        0.25,
+        0.25,
+        0.5
+      ],
+      "scores": [
+        0.5,
+        0.5,
+        0.7
+      ],
+      "seed": 17
+    }
+  ],
+  "filter_cases": [
+    {
+      "config": {
+        "min_p": 0.8,
+        "tail_free_z": 1.0,
+        "temperature": 0.0,
+        "top_k": 4,
+        "top_p": 0.3,
+        "typical_p": 1.0
+      },
+      "expected": {
+        "diagnostics": {
+          "filter": "standard",
+          "greedy": true
+        },
+        "scaled_logits": [
+          2.0,
+          2.0,
+          1.0,
+          -0.5,
+          -0.5,
+          -4.0
+        ],
+        "stages": {
+          "after_min_p": [
+            0
+          ],
+          "after_tail_free": [
+            0
+          ],
+          "after_temperature": [
+            0
+          ],
+          "after_top_k": [
+            0
+          ],
+          "after_top_p": [
+            0
+          ],
+          "after_typical": [
+            0
+          ]
+        }
+      },
+      "logits": [
+        2.0,
+        2.0,
+        1.0,
+        -0.5,
+        -0.5,
+        -4.0
+      ],
+      "name": "greedy"
+    },
+    {
+      "config": {
+        "min_p": 0.0,
+        "tail_free_z": 1.0,
+        "temperature": 1.0,
+        "top_k": null,
+        "top_p": 1.0,
+        "typical_p": 1.0
+      },
+      "expected": {
+        "diagnostics": {
+          "filter": "standard",
+          "unfiltered": true
+        },
+        "scaled_logits": [
+          2.0,
+          2.0,
+          1.0,
+          -0.5,
+          -0.5,
+          -4.0
+        ],
+        "stages": {
+          "after_min_p": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "after_tail_free": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "after_temperature": null,
+          "after_top_k": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "after_top_p": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "after_typical": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ]
+        }
+      },
+      "logits": [
+        2.0,
+        2.0,
+        1.0,
+        -0.5,
+        -0.5,
+        -4.0
+      ],
+      "name": "neutral"
+    },
+    {
+      "config": {
+        "min_p": 0.03,
+        "tail_free_z": 0.85,
+        "temperature": 0.7,
+        "top_k": 6,
+        "top_p": 0.8,
+        "typical_p": 0.72
+      },
+      "expected": {
+        "diagnostics": {
+          "filter": "standard",
+          "tail_free_z": 0.85,
+          "typical_p": 0.72
+        },
+        "scaled_logits": [
+          8.571428571428571,
+          5.714285714285714,
+          4.285714285714286,
+          2.857142857142857,
+          0.0,
+          -1.4285714285714286
+        ],
+        "stages": {
+          "after_min_p": [
+            0
+          ],
+          "after_tail_free": [
+            0
+          ],
+          "after_temperature": null,
+          "after_top_k": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "after_top_p": [
+            0
+          ],
+          "after_typical": [
+            0
+          ]
+        }
+      },
+      "logits": [
+        6.0,
+        4.0,
+        3.0,
+        2.0,
+        0.0,
+        -1.0
+      ],
+      "name": "all-stages"
+    },
+    {
+      "config": {
+        "min_p": 0.0,
+        "tail_free_z": 1.0,
+        "temperature": 1.0,
+        "top_k": null,
+        "top_p": 1.0,
+        "typical_p": 0.55
+      },
+      "expected": {
+        "diagnostics": {
+          "filter": "standard",
+          "tail_free_z": 1.0,
+          "typical_p": 0.55
+        },
+        "scaled_logits": [
+          5.0,
+          3.0,
+          1.0,
+          0.0,
+          -2.0
+        ],
+        "stages": {
+          "after_min_p": [
+            0
+          ],
+          "after_tail_free": [
+            0
+          ],
+          "after_temperature": null,
+          "after_top_k": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          "after_top_p": [
+            0
+          ],
+          "after_typical": [
+            0
+          ]
+        }
+      },
+      "logits": [
+        5.0,
+        3.0,
+        1.0,
+        0.0,
+        -2.0
+      ],
+      "name": "typical-only"
+    },
+    {
+      "config": {
+        "min_p": 0.0,
+        "tail_free_z": 0.4,
+        "temperature": 1.0,
+        "top_k": null,
+        "top_p": 1.0,
+        "typical_p": 1.0
+      },
+      "expected": {
+        "diagnostics": {
+          "filter": "standard",
+          "tail_free_z": 0.4,
+          "typical_p": 1.0
+        },
+        "scaled_logits": [
+          6.0,
+          2.5,
+          1.0,
+          0.2,
+          -0.3,
+          -1.0
+        ],
+        "stages": {
+          "after_min_p": [
+            0,
+            1
+          ],
+          "after_tail_free": [
+            0,
+            1
+          ],
+          "after_temperature": null,
+          "after_top_k": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "after_top_p": [
+            0,
+            1
+          ],
+          "after_typical": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ]
+        }
+      },
+      "logits": [
+        6.0,
+        2.5,
+        1.0,
+        0.2,
+        -0.3,
+        -1.0
+      ],
+      "name": "tail-free-only"
+    },
+    {
+      "config": {
+        "min_p": 0.09,
+        "tail_free_z": 1.0,
+        "temperature": 1.0,
+        "top_k": null,
+        "top_p": 0.88,
+        "typical_p": 1.0
+      },
+      "expected": {
+        "diagnostics": {
+          "filter": "standard",
+          "tail_free_z": 1.0,
+          "typical_p": 1.0
+        },
+        "scaled_logits": [
+          4.0,
+          3.0,
+          2.0,
+          1.0,
+          0.0
+        ],
+        "stages": {
+          "after_min_p": [
+            0,
+            1,
+            2
+          ],
+          "after_tail_free": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          "after_temperature": null,
+          "after_top_k": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          "after_top_p": [
+            0,
+            1,
+            2
+          ],
+          "after_typical": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ]
+        }
+      },
+      "logits": [
+        4.0,
+        3.0,
+        2.0,
+        1.0,
+        0.0
+      ],
+      "name": "top-p-min-p"
+    }
+  ],
+  "float_tolerance": 1e-14,
+  "rank_case": {
+    "logits": [
+      2.0,
+      2.0,
+      -1.0,
+      2.0,
+      0.0
+    ],
+    "raw_ranks": [
+      1,
+      2,
+      5,
+      3,
+      4
+    ],
+    "top_ids_3": [
+      0,
+      1,
+      3
+    ]
+  },
+  "rng_cases": [
+    {
+      "boundary": "0",
+      "expected": 0.21703402158239746,
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "seed": -9223372036854775808
+    },
+    {
+      "boundary": "18446744073709551616",
+      "expected": 0.034951027618699546,
+      "fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "seed": 9223372036854775807
+    },
+    {
+      "boundary": "9223372036854775808",
+      "expected": 0.8408566284407771,
+      "fingerprint": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "seed": 0
+    }
+  ],
+  "rng_scheme": "blake2b64-token-prefix-quantile-v2",
+  "seed_search_case": {
+    "boundary": "3",
+    "candidate_seeds": [
+      12345,
+      1,
+      0
+    ],
+    "current_seed": 12345,
+    "expected": {
+      "checked": 3,
+      "seed": 0
+    },
+    "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "ids": [
+      1,
+      4,
+      7
+    ],
+    "kernel": "categorical",
+    "probabilities": [
+      0.2,
+      0.5,
+      0.3
+    ],
+    "scores": [
+      0.1,
+      0.9,
+      0.4
+    ],
+    "target": 4
+  },
+  "token_uniform_cases": [
+    {
+      "boundary": "3",
+      "expected": 0.2109956841056792,
+      "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "seed": 17,
+      "token_id": "0"
+    },
+    {
+      "boundary": "18446744073709551616",
+      "expected": 0.28355553169689623,
+      "fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "seed": -9223372036854775808,
+      "token_id": "1208925819614629174706176"
+    }
+  ]
+}

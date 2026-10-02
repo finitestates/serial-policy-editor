@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "rust-sampler-experiment"
+version = "0.1.0"
+description = "Experimental Rust implementation of policy-editor sampling kernels"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "rust_sampler._native"
+
