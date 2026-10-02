@@ -16,6 +16,7 @@ import re
 import select
 import signal
 import struct
+import subprocess
 import sys
 import termios
 import textwrap
@@ -31,6 +32,7 @@ pyte = pytest.importorskip("pyte")
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX PTY journeys")
 
 ROOT = Path(__file__).resolve().parents[2]
+RUST_TERMINAL_MANIFEST = ROOT / "experiments/rust-port/terminal-ui/Cargo.toml"
 
 CHILD = textwrap.dedent(
     r"""
@@ -165,7 +167,7 @@ def _set_size(fd: int, columns: int, rows: int) -> None:
 
 
 class Session:
-    def __init__(self, tmp_path: Path, mode: str, size=(100, 30), env=None) -> None:
+    def __init__(self, tmp_path: Path, mode: str, size=(100, 30), env=None, argv=None) -> None:
         import pty
 
         self.frames_path = tmp_path / "frames.jsonl"
@@ -180,7 +182,8 @@ class Session:
                 "TERM": "xterm-256color", "COLORTERM": "truecolor",
                 **(env or {}),
             })
-            os.execv(sys.executable, [sys.executable, "-c", CHILD, mode])
+            child_argv = list(argv) if argv is not None else [sys.executable, "-c", CHILD, mode]
+            os.execvpe(child_argv[0], child_argv, os.environ)
         self.pid, self.fd = pid, fd
         _set_size(fd, *size)
         self.status: int | None = None
@@ -255,6 +258,30 @@ class Session:
         os.kill(self.pid, signal.SIGKILL)
         os.waitpid(self.pid, 0)
         raise AssertionError("child did not exit:\n" + self.output[-2000:].decode("utf-8", "replace"))
+
+
+@pytest.fixture(scope="session")
+def rust_terminal_binary(tmp_path_factory) -> Path:
+    """Build the standalone smoke child once for this pytest session."""
+    build_dir = tmp_path_factory.mktemp("rust-terminal-ui-build")
+    completed = subprocess.run(
+        [
+            "cargo", "build", "--locked", "--manifest-path", str(RUST_TERMINAL_MANIFEST),
+            "--target-dir", str(build_dir),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, (
+        "could not build Rust terminal PTY smoke child:\n"
+        + completed.stdout
+        + completed.stderr
+    )
+    binary = build_dir / "debug" / "rust-terminal-ui-smoke"
+    assert binary.is_file(), f"cargo did not create the smoke child at {binary}"
+    return binary
 
 
 def text(frame: dict) -> str:
@@ -357,6 +384,79 @@ def test_frame_completeness_rejects_cell_overflow():
     assert len(frame["lines"][0]) <= frame["size"][0]
     with pytest.raises(AssertionError, match="occupies 4 cells"):
         assert_complete_frame(frame)
+
+
+def test_compiled_rust_child_matches_the_pty_screen_oracle(tmp_path, rust_terminal_binary):
+    """The same frame oracle can drive and inspect a standalone Rust process."""
+    ui = Session(
+        tmp_path,
+        "rust-smoke",
+        size=(80, 24),
+        argv=[str(rust_terminal_binary)],
+    )
+    try:
+        initial = ui.wait_for(
+            lambda frame: frame["lines"][0].startswith("Rust terminal PTY smoke"),
+            what="Rust startup frame",
+        )
+        assert "Geometry: 80x24" in text(initial)
+
+        ui.send("hello")
+        ui.wait_for(lambda frame: "Input > hello" in text(frame), what="typed input")
+        ui.send("\r")
+        submitted = ui.wait_for(
+            lambda frame: "Submitted: hello" in text(frame),
+            what="submitted input",
+        )
+        assert "Input >" in text(submitted)
+
+        ui.resize(52, 12)
+        compact = ui.wait_for(
+            lambda frame: "Geometry: 52x12" in text(frame),
+            what="compact resize",
+        )
+        assert tuple(compact["size"]) == (52, 12)
+
+        ui.resize(112, 32)
+        expanded = ui.wait_for(
+            lambda frame: "Geometry: 112x32" in text(frame),
+            what="expanded resize",
+        )
+        assert tuple(expanded["size"]) == (112, 32)
+
+        ui.send("quit")
+        ui.wait_for(lambda frame: "Input > quit" in text(frame), what="test exit command")
+        ui.send("\r")
+        output = ui.finish()
+    finally:
+        if ui.status is None:
+            try:
+                os.kill(ui.pid, signal.SIGKILL)
+                os.waitpid(ui.pid, 0)
+            except OSError:
+                pass
+        ui.pump(0.2)
+        (tmp_path / "pty.raw").write_bytes(bytes(ui.output))
+
+    assert os.WIFEXITED(ui.status) and os.WEXITSTATUS(ui.status) == 0, output[-2000:]
+    raw = bytes(ui.output)
+    frames = ui.frames()
+    replay_and_compare(raw, frames)
+    assert_no_erase_after_entry(raw)
+    assert_frames_are_transactions(raw)
+    for frame in frames:
+        assert_complete_frame(frame)
+
+    sizes = [tuple(frame["size"]) for frame in frames]
+    assert (52, 12) in sizes and (112, 32) in sizes
+    assert sizes.index((52, 12)) < sizes.index((112, 32))
+
+    # Negative control: replay must reject a deliberately incorrect cursor.
+    altered = [dict(frame) for frame in frames]
+    x, y = altered[0]["cursor"]
+    altered[0]["cursor"] = [x + 1, y]
+    with pytest.raises(AssertionError):
+        replay_and_compare(raw, altered)
 
 
 def test_production_prompt_geometry_for_wide_and_combining_text(tmp_path):
