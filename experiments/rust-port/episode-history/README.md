@@ -2,15 +2,19 @@
 
 This is an isolated Rust crate for the in-memory policy action and history
 kernel in `core/src/trajectory_editor/episode_history.py` and
-`core/src/trajectory_editor/core/actions.py`. The Python runtime remains the
-released implementation and behavior oracle. This experiment is not wired
-into episode execution, replay, storage, SQLite, or the terminal UI.
+`core/src/trajectory_editor/core/actions.py`. It remains outside the released
+Python episode runtime, replay, persistence, and SQLite paths. The separate
+[`terminal-ui` experiment](../terminal-ui/README.md) links this crate as a Rust
+library for its fixture-backed Choice turn; that smoke path does not make the
+crate part of the production runtime.
 
 The Rust crate owns typed action, evidence, outcome, attempt, history, and
-truncation values. Its PyO3 entry point accepts one JSON document for a full
-operation and returns one JSON document. The Python adapter converts existing
-Python records at that boundary, so a history does not cross as a sequence of
-per-token or per-field calls.
+truncation values. The plain Rust library is used by the terminal experiment;
+its optional PyO3 entry point accepts one JSON document for a full operation
+and returns one JSON document. The Python adapter converts existing Python
+records at that boundary, so a history does not cross as a sequence of
+per-token or per-field calls. The Python implementation remains the behavior
+oracle.
 
 ## Contract map
 
@@ -54,7 +58,7 @@ built extension against them.
   back through `SamplerConfig.from_record()`.
 - `ActionOutcome.diagnostics` is preserved as a JSON value. The adapter
   requires diagnostics and any future extra payload to be JSON-serializable.
-  SQLite-shaped records and durable-prefix projection stay in Python.
+  Durable-prefix projection stays in Python.
 - The current Rust data model uses unsigned 64-bit ordinals/boundaries/ranks,
   signed 64-bit token IDs and sampling boundaries, and signed 64-bit reroll
   seeds. This matches the runtime's token/seed domain but is narrower than
@@ -76,7 +80,7 @@ independent Rust library tests:
 
 ```sh
 core/.venv/bin/python experiments/rust-port/episode-history/scripts/generate_fixtures.py
-cargo test --manifest-path experiments/rust-port/episode-history/Cargo.toml
+cargo test --manifest-path experiments/rust-port/episode-history/Cargo.toml --locked
 ```
 
 Build/install the thin Python extension into the core test environment and
@@ -89,29 +93,23 @@ core/.venv/bin/maturin build \
   --out /tmp/rust-episode-history-wheel
 # Run this only if the core virtualenv was created without pip.
 core/.venv/bin/python -m ensurepip --upgrade
-core/.venv/bin/python -m pip install --no-deps \
+core/.venv/bin/python -m pip install --force-reinstall --no-deps \
   /tmp/rust-episode-history-wheel/rust_episode_history_experiment-0.1.0-*.whl
 core/.venv/bin/python experiments/rust-port/episode-history/scripts/compare_with_python.py
 core/.venv/bin/python -m pytest -q \
   experiments/rust-port/episode-history/tests/test_python_adapter.py
 ```
 
-Run Rust formatting and lint checks with:
-
-```sh
-cargo fmt --manifest-path experiments/rust-port/episode-history/Cargo.toml -- --check
-cargo clippy --manifest-path experiments/rust-port/episode-history/Cargo.toml --features python --all-targets -- -D warnings
-```
-
-The wheel is an experiment-only package named `rust_episode_history`. Do not
-add it as a dependency of `core`; production promotion would require a
-separate review of parity, packaging, and maintenance costs.
+Maturin enables the optional `python` feature for the wheel build. Workspace-
+wide formatting, tests, and Clippy are listed in [`../README.md`](../README.md);
+the `cargo test` command above runs only this crate. The extension package is
+named `rust_episode_history`. Experiment-wide release boundaries are in
+[`../../README.md`](../../README.md).
 
 ## Rust notes for Python maintainers
 
 `PolicyAction` is an enum: each value is exactly one action variant. History
-records are structs containing their fields. Operations return `Result<T,
-KernelError>`, which makes invalid input explicit at the call site. The
-library uses owned values so records do not borrow memory from Python. No
-`unsafe` code is used. PyO3 is an optional `python` Cargo feature used only
-for the extension build; plain `cargo test` compiles the library without it.
+records are structs containing their fields. Operations return
+`Result<T, KernelError>` for explicit error handling. The library uses owned
+values and no `unsafe` code. PyO3 is an optional `python` feature; ordinary
+Rust tests and the terminal experiment use the library without Python.

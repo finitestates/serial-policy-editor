@@ -47,14 +47,8 @@ core/.venv/bin/python -m pytest -q tests/core/test_live_terminal_pty.py -k compi
 core/.venv/bin/python -m pytest -q tests/core/test_live_terminal_pty.py
 ```
 
-The whole experiment workspace can be checked with:
-
-```sh
-cargo fmt --manifest-path experiments/rust-port/Cargo.toml --all -- --check
-cargo test --manifest-path experiments/rust-port/Cargo.toml --workspace --locked
-cargo clippy --manifest-path experiments/rust-port/Cargo.toml \
-  --workspace --all-targets --all-features --locked -- -D warnings
-```
+For workspace-wide Rust formatting, tests, and Clippy, use the shared commands
+in [`../README.md`](../README.md).
 
 The test contract checks terminal cells and cursor state through `pyte`; it
 does not compare styles.

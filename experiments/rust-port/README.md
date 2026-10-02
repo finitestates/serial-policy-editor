@@ -20,31 +20,28 @@ cargo clippy --manifest-path experiments/rust-port/Cargo.toml \
 
 | Path | Status | Scope |
 | --- | --- | --- |
-| [`sampler/`](sampler/README.md) | Implemented experiment | Numeric filtering, deterministic draws, and sampler helpers from `core/src/trajectory_editor/core/sampling.py`. |
-| [`episode-history/`](episode-history/README.md) | Implemented experiment | Typed actions, in-memory history validation/projection/truncation, and sampler changes. |
+| [`sampler/`](sampler/README.md) | Implemented experiment | Numeric filtering, deterministic draws, and sampler helpers from `core/src/trajectory_editor/core/sampling.py`, plus the history-penalty transform from `core/src/trajectory_editor/core/policy_calculations.py`. |
+| [`episode-history/`](episode-history/README.md) | Implemented experiment | Typed actions, outcomes, evidence, in-memory history validation/truncation, and sampler updates. |
 | [`terminal-ui/`](terminal-ui/README.md) | PTY smoke and fixture Choice turn implemented | Exercise the sampler and history crates through one compiled Rust terminal process and the existing PTY/pyte oracle. No production Rust UI yet. |
 
 The completed integration slice is a deterministic candidate-choice turn
 joining these pieces. Its fixture, semantic result, visual contract, validation
 commands, and evidence are in [`NEXT_SLICE.md`](NEXT_SLICE.md). The Python
 bindings remain available for parity checks; the terminal binary calls the
-sampler and episode-history kernels as Rust libraries.
+sampler and episode-history kernels as Rust libraries. The sampler's completed
+history-penalty kernel and its evidence are recorded in
+[`NEXT_AGENT.md`](NEXT_AGENT.md).
 
 ## Direction
 
 The intended destination is a Rust-owned episode runtime and terminal UI.
 Model-specific inference can remain behind Python adapters for Transformers
 and existing llama.cpp bindings while that provides value. The PTY smoke and
-the bounded Choice interaction are implemented; the next migration stage is
-moving additional policy calculations into Rust.
+fixture-backed Choice turn are implemented. Current kernel work continues
+roadmap stage 2 by moving additional policy calculations into Rust.
 
 See [`ROADMAP.md`](ROADMAP.md) for migration order, boundaries, and gates. The
 PTY smoke contract is in [`terminal-ui/README.md`](terminal-ui/README.md).
 
-## Promotion rule
-
-These experiments are not dependencies of the released Python packages.
-Promote functionality only after behavioral parity, real-process integration,
-packaging, and maintenance costs are reviewed. Preserve the existing Python
-API and CLI during the 1.x line. Do not claim a speedup without repeatable
-measurements against the same inputs and machine.
+Experiment-wide promotion rules are in [`../README.md`](../README.md). Rust
+migration order and its behavioral gates are in [`ROADMAP.md`](ROADMAP.md).

@@ -1,9 +1,10 @@
 use serde_json::Value;
 
 use rust_sampler_native::{
-    DrawOptions, SparseDistribution, apply_filter, conditional_gumbel_top_k, draw_token,
-    gaussian_ranking_scores, gumbel_ranking_scores, perturbation_ranking_scores, position_uniform,
-    position_uniform_token, rank, ranking_ids, top_ids,
+    DrawOptions, SparseDistribution, apply_filter, apply_history_penalties,
+    conditional_gumbel_top_k, draw_token, gaussian_ranking_scores, gumbel_ranking_scores,
+    perturbation_ranking_scores, position_uniform, position_uniform_token, rank, ranking_ids,
+    top_ids,
 };
 
 fn fixtures() -> Value {
@@ -291,4 +292,64 @@ fn fixture_order_variants_keep_token_addressing_attached_to_ids() {
         assert_eq!(left.0, right.0);
         assert!((left.1 - right.1).abs() <= fixture["float_tolerance"].as_f64().unwrap());
     }
+}
+
+#[test]
+fn shared_history_penalty_fixtures_match_python_policy_calculations() {
+    let fixture = fixtures();
+    let tolerance = fixture["float_tolerance"].as_f64().unwrap();
+    for case in fixture["history_penalty_cases"].as_array().unwrap() {
+        let logits = f64s(&case["logits"]);
+        let original_logits = logits.clone();
+        let history = i64s(&case["history_token_ids"]);
+        let config = &case["config"];
+        let actual = apply_history_penalties(
+            &logits,
+            &history,
+            config["repeat_penalty"].as_f64().unwrap(),
+            config["repeat_last_n"].as_i64().unwrap(),
+            config["presence_penalty"].as_f64().unwrap(),
+            config["frequency_penalty"].as_f64().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            logits, original_logits,
+            "{} mutated its input",
+            case["name"]
+        );
+        assert_float_slices(
+            &actual,
+            &f64s(&case["expected"]["adjusted_logits"]),
+            tolerance,
+        );
+        for token_id in 0..logits.len() {
+            assert_eq!(
+                rank(&logits, token_id as i64).unwrap(),
+                case["expected"]["raw_ranks"][token_id].as_u64().unwrap() as usize,
+                "{} raw rank {token_id}",
+                case["name"]
+            );
+            assert_eq!(
+                rank(&actual, token_id as i64).unwrap(),
+                case["expected"]["policy_ranks"][token_id].as_u64().unwrap() as usize,
+                "{} policy rank {token_id}",
+                case["name"]
+            );
+        }
+    }
+}
+
+#[test]
+fn history_penalties_reject_invalid_inputs_and_overflow() {
+    assert!(apply_history_penalties(&[], &[], 1.0, -1, 0.0, 0.0).is_err());
+    assert!(apply_history_penalties(&[f64::NAN], &[], 1.0, -1, 0.0, 0.0).is_err());
+    assert!(apply_history_penalties(&[f64::INFINITY], &[], 1.0, -1, 0.0, 0.0).is_err());
+    assert!(apply_history_penalties(&[1.0], &[-1], 1.0, -1, 0.0, 0.0).is_err());
+    assert!(apply_history_penalties(&[1.0], &[1], 1.0, 0, 0.0, 0.0).is_err());
+    assert!(apply_history_penalties(&[1.0], &[0], 0.0, -1, 0.0, 0.0).is_err());
+    assert!(apply_history_penalties(&[1.0], &[0], f64::INFINITY, -1, 0.0, 0.0).is_err());
+    assert!(apply_history_penalties(&[1.0], &[0], 1.0, -2, 0.0, 0.0).is_err());
+    assert!(apply_history_penalties(&[1.0], &[0], 1.0, -1, f64::NAN, 0.0).is_err());
+    assert!(apply_history_penalties(&[1.0], &[0], 1.0, -1, 0.0, f64::INFINITY).is_err());
+    assert!(apply_history_penalties(&[-1.0e308], &[0], 1.0e308, -1, 0.0, 0.0).is_err());
 }

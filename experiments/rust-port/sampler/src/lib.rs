@@ -168,6 +168,92 @@ pub fn validated_logits(values: &[f64]) -> SamplingResult<Vec<f64>> {
     Ok(values.to_vec())
 }
 
+/// Apply the replayable history penalties to a copy of finite decoder logits.
+///
+/// History IDs are validated against the full vocabulary before selecting the
+/// requested tail, matching the Python policy calculation boundary.
+pub fn apply_history_penalties(
+    logits: &[f64],
+    history_token_ids: &[i64],
+    repeat_penalty: f64,
+    repeat_last_n: i64,
+    presence_penalty: f64,
+    frequency_penalty: f64,
+) -> SamplingResult<Vec<f64>> {
+    let mut adjusted = validated_logits(logits)?;
+    if !repeat_penalty.is_finite() || repeat_penalty <= 0.0 {
+        return Err(SamplingError::editor(
+            "repeat_penalty must be a finite number greater than 0",
+        ));
+    }
+    if repeat_last_n < -1 {
+        return Err(SamplingError::editor(
+            "repeat_last_n must be -1 or a nonnegative integer",
+        ));
+    }
+    if !presence_penalty.is_finite() {
+        return Err(SamplingError::editor(
+            "presence_penalty must be a finite number",
+        ));
+    }
+    if !frequency_penalty.is_finite() {
+        return Err(SamplingError::editor(
+            "frequency_penalty must be a finite number",
+        ));
+    }
+
+    let mut validated_history = Vec::with_capacity(history_token_ids.len());
+    for token_id in history_token_ids {
+        let index = usize::try_from(*token_id)
+            .ok()
+            .filter(|index| *index < logits.len())
+            .ok_or_else(|| {
+                SamplingError::value("history token ids must address the decoder vocabulary")
+            })?;
+        validated_history.push(index);
+    }
+
+    let start = if repeat_last_n == -1 {
+        0
+    } else {
+        let window = usize::try_from(repeat_last_n).unwrap_or(usize::MAX);
+        validated_history.len().saturating_sub(window)
+    };
+    let considered = &validated_history[start..];
+    if considered.is_empty() {
+        return Ok(adjusted);
+    }
+
+    let mut counts = std::collections::HashMap::<usize, usize>::new();
+    for token_id in considered {
+        *counts.entry(*token_id).or_default() += 1;
+    }
+    for (token_id, count) in counts {
+        let original = logits[token_id];
+        let mut value = original;
+        if repeat_penalty != 1.0 {
+            value = if original < 0.0 {
+                original * repeat_penalty
+            } else {
+                original / repeat_penalty
+            };
+        }
+        if presence_penalty != 0.0 {
+            value -= presence_penalty;
+        }
+        if frequency_penalty != 0.0 {
+            value -= count as f64 * frequency_penalty;
+        }
+        if !value.is_finite() {
+            return Err(SamplingError::value(
+                "history penalties produced non-finite policy logits",
+            ));
+        }
+        adjusted[token_id] = value;
+    }
+    Ok(adjusted)
+}
+
 pub fn softmax(values: &[f64]) -> SamplingResult<Vec<f64>> {
     if values.is_empty() || values.iter().any(|value| !value.is_finite()) {
         return Err(SamplingError::value(
@@ -1164,6 +1250,26 @@ mod python {
         validated_logits(&values).map_err(into_pyerr)
     }
 
+    #[pyfunction(name = "apply_history_penalties")]
+    fn py_apply_history_penalties(
+        logits: Vec<f64>,
+        history_token_ids: Vec<i64>,
+        repeat_penalty: f64,
+        repeat_last_n: i64,
+        presence_penalty: f64,
+        frequency_penalty: f64,
+    ) -> PyResult<Vec<f64>> {
+        apply_history_penalties(
+            &logits,
+            &history_token_ids,
+            repeat_penalty,
+            repeat_last_n,
+            presence_penalty,
+            frequency_penalty,
+        )
+        .map_err(into_pyerr)
+    }
+
     #[pyfunction(name = "rank")]
     fn py_rank(values: Vec<f64>, token_id: i64) -> PyResult<usize> {
         rank(&values, token_id).map_err(into_pyerr)
@@ -1507,6 +1613,7 @@ mod python {
         module.add_function(wrap_pyfunction!(py_softmax, module)?)?;
         module.add_function(wrap_pyfunction!(py_top_ids, module)?)?;
         module.add_function(wrap_pyfunction!(py_validated_logits, module)?)?;
+        module.add_function(wrap_pyfunction!(py_apply_history_penalties, module)?)?;
         module.add_function(wrap_pyfunction!(py_rank, module)?)?;
         module.add_function(wrap_pyfunction!(py_apply_filter, module)?)?;
         module.add_function(wrap_pyfunction!(py_probability, module)?)?;

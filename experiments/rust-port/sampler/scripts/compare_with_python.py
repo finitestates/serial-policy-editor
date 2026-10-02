@@ -15,6 +15,8 @@ REPO = ROOT.parent.parent
 sys.path.insert(0, str(REPO / "core" / "src"))
 
 from trajectory_editor.core import sampling as reference  # noqa: E402
+from trajectory_editor.core.policy_calculations import PolicyCalculations  # noqa: E402
+from trajectory_editor.core.sampler_config import SamplerConfig  # noqa: E402
 import rust_sampler as rust  # noqa: E402
 
 
@@ -124,6 +126,29 @@ def main() -> int:
     assert reference.top_raw_ids(logits, 3) == rank_case["top_ids_3"]
     assert rust.top_raw_ids(logits, 3) == rank_case["top_ids_3"]
     checks += 1
+
+    for case in fixture["history_penalty_cases"]:
+        logits = np.asarray(case["logits"], dtype=np.float64)
+        original_logits = logits.copy()
+        history = case["history_token_ids"]
+        config = SamplerConfig(**case["config"])
+        py_policy = PolicyCalculations(logits, config, history)
+        rs_adjusted = rust.apply_history_penalties(logits, history, config)
+        close(rs_adjusted, py_policy.adjusted, tolerance, case["name"])
+        close(
+            rs_adjusted,
+            case["expected"]["adjusted_logits"],
+            tolerance,
+            f"{case['name']} fixture",
+        )
+        np.testing.assert_array_equal(logits, original_logits)
+        for token_id in range(len(logits)):
+            raw_rank = case["expected"]["raw_ranks"][token_id]
+            policy_rank = case["expected"]["policy_ranks"][token_id]
+            assert py_policy.raw_rank(token_id) == rust.raw_rank(logits, token_id) == raw_rank
+            assert py_policy.policy_rank(token_id) == rust.raw_rank(rs_adjusted, token_id) == policy_rank
+            checks += 2
+        checks += 2
 
     for case in fixture["filter_cases"]:
         config = type("Config", (), case["config"])()
@@ -262,7 +287,11 @@ def main() -> int:
     assert py_result == rs_result == expected
     checks += 1
 
-    print(f"Rust/Python parity passed: {checks} value checks across {len(fixture['draw_cases'])} draw cases")
+    print(
+        f"Rust/Python parity passed: {checks} value checks across "
+        f"{len(fixture['draw_cases'])} draw cases and "
+        f"{len(fixture['history_penalty_cases'])} history-penalty cases"
+    )
     return 0
 
 

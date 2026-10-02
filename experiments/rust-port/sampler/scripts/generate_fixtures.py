@@ -9,6 +9,8 @@ from types import SimpleNamespace
 
 import numpy as np
 from trajectory_editor.core import sampling
+from trajectory_editor.core.policy_calculations import PolicyCalculations
+from trajectory_editor.core.sampler_config import SamplerConfig
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -123,6 +125,38 @@ def draw_case(name, ids, probabilities, scores, *, seed=17, fingerprint=FINGERPR
     return result
 
 
+def history_penalty_case(name, logits, history_token_ids, **penalties):
+    config = {
+        "temperature": 1.0,
+        "top_k": None,
+        "top_p": 1.0,
+        "min_p": 0.0,
+        "typical_p": 1.0,
+        "tail_free_z": 1.0,
+        "repeat_penalty": 1.0,
+        "repeat_last_n": -1,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+    }
+    config.update(penalties)
+    values = np.asarray(logits, dtype=np.float64)
+    history = list(history_token_ids)
+    policy = PolicyCalculations(values, SamplerConfig(**config), history)
+    return {
+        "name": name,
+        "logits": logits,
+        "history_token_ids": history,
+        "config": config,
+        "expected": {
+            "adjusted_logits": as_list(policy.adjusted),
+            "raw_ranks": [policy.raw_rank(token_id) for token_id in range(len(values))],
+            "policy_ranks": [
+                policy.policy_rank(token_id) for token_id in range(len(values))
+            ],
+        },
+    }
+
+
 def main():
     rng_cases = [
         {"seed": sampling.MIN_SEED, "fingerprint": FINGERPRINT_A, "boundary": "0"},
@@ -178,6 +212,62 @@ def main():
         draw_case("laplace", [4, 1, 7], [0.2, 0.5, 0.3], [0.1, 0.9, 0.4], kernel="laplace-max"),
         draw_case("uniform", [4, 1, 7], [0.2, 0.5, 0.3], [0.1, 0.9, 0.4], kernel="uniform-max"),
         draw_case("duplicate-token-ids", [3, 1, 3], [0.25, 0.25, 0.5], [0.5, 0.5, 0.7], kernel="gumbel-max"),
+    ]
+
+    history_penalty_cases = [
+        history_penalty_case(
+            "empty-history",
+            [2.0, 0.0, -2.0, 1.0],
+            [],
+            repeat_penalty=2.0,
+            presence_penalty=0.5,
+            frequency_penalty=0.25,
+        ),
+        history_penalty_case(
+            "all-history-repeat-presence-frequency",
+            [2.0, 0.0, -2.0, 1.0],
+            [0, 0, 1, 2],
+            repeat_penalty=2.0,
+            repeat_last_n=-1,
+            presence_penalty=0.5,
+            frequency_penalty=0.25,
+        ),
+        history_penalty_case(
+            "zero-window-is-inactive",
+            [2.0, 0.0, -2.0, 1.0],
+            [0, 1, 1],
+            repeat_penalty=0.5,
+            repeat_last_n=0,
+            presence_penalty=1.0,
+            frequency_penalty=0.75,
+        ),
+        history_penalty_case(
+            "short-positive-tail-repeated-id-and-outside-tail",
+            [2.0, 0.0, -2.0, -1.0],
+            [0, 1, 1, 2],
+            repeat_penalty=1.5,
+            repeat_last_n=3,
+            presence_penalty=0.4,
+            frequency_penalty=0.3,
+        ),
+        history_penalty_case(
+            "positive-tail-longer-than-history-negative-penalties",
+            [2.0, 0.0, -2.0, -1.0],
+            [0, 0, 1],
+            repeat_penalty=0.5,
+            repeat_last_n=9,
+            presence_penalty=-0.5,
+            frequency_penalty=-0.25,
+        ),
+        history_penalty_case(
+            "repeat-off-presence-and-frequency-on",
+            [2.0, 0.0, -2.0],
+            [0, 1, 2, 2],
+            repeat_penalty=1.0,
+            repeat_last_n=-1,
+            presence_penalty=0.25,
+            frequency_penalty=0.5,
+        ),
     ]
 
     conditional = {
@@ -241,6 +331,7 @@ def main():
         },
         "filter_cases": filters,
         "draw_cases": draws,
+        "history_penalty_cases": history_penalty_cases,
         "conditional_case": conditional,
         "seed_search_case": seed_search,
         "float_tolerance": 1e-14,

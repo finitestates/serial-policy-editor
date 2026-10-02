@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pytest
 import rust_sampler as sampling
 from trajectory_editor.core.errors import EditorError
+from trajectory_editor.core.policy_calculations import PolicyCalculations
+from trajectory_editor.core.sampler_config import SamplerConfig
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def distribution(ids=(4, 1, 7), probabilities=(0.2, 0.5, 0.3), scores=(0.1, 0.9, 0.4)):
@@ -163,4 +171,82 @@ def test_empty_vectors_student_t_edges_and_conditional_prefix_validation():
             stream_fingerprint="a" * 64,
             aligned_step=0,
             prefix_token_ids=[1, -1],
+        )
+
+
+def test_history_penalty_fixtures_match_production_policy_calculations():
+    fixture = json.loads(
+        (ROOT / "fixtures" / "sampling-cases.json").read_text(encoding="utf-8")
+    )
+    tolerance = fixture["float_tolerance"]
+    for case in fixture["history_penalty_cases"]:
+        logits = np.asarray(case["logits"], dtype=np.float64)
+        original_logits = logits.copy()
+        history = case["history_token_ids"]
+        config = SamplerConfig(**case["config"])
+        reference = PolicyCalculations(logits, config, history)
+        actual = sampling.apply_history_penalties(logits, history, config)
+
+        np.testing.assert_array_equal(logits, original_logits)
+        np.testing.assert_allclose(
+            actual,
+            reference.adjusted,
+            rtol=0.0,
+            atol=tolerance,
+            err_msg=case["name"],
+        )
+        np.testing.assert_allclose(
+            actual,
+            case["expected"]["adjusted_logits"],
+            rtol=0.0,
+            atol=tolerance,
+            err_msg=case["name"],
+        )
+        assert [reference.raw_rank(token_id) for token_id in range(len(logits))] == case[
+            "expected"
+        ]["raw_ranks"]
+        assert [
+            reference.policy_rank(token_id) for token_id in range(len(logits))
+        ] == case["expected"]["policy_ranks"]
+
+
+def test_history_penalty_validation_matches_python_error_categories():
+    logits = np.asarray([2.0, 0.0, -1.0], dtype=np.float64)
+    active = SamplerConfig(repeat_penalty=1.1)
+    inactive = SamplerConfig(repeat_last_n=0, presence_penalty=0.5)
+
+    with pytest.raises(ValueError, match="one-dimensional"):
+        sampling.apply_history_penalties(logits, np.asarray([[0, 1]]), active)
+    with pytest.raises(ValueError, match="decoder vocabulary"):
+        sampling.apply_history_penalties(logits, [-1], active)
+    with pytest.raises(ValueError, match="decoder vocabulary"):
+        sampling.apply_history_penalties(logits, [3], inactive)
+    with pytest.raises(ValueError, match="finite nonempty"):
+        sampling.apply_history_penalties(np.asarray([np.nan]), [0], active)
+    with pytest.raises(ValueError, match="exact prefix token ids"):
+        sampling.apply_history_penalties(logits, None, active)
+    np.testing.assert_array_equal(
+        sampling.apply_history_penalties(logits, None, inactive), logits
+    )
+
+    wide_window = SamplerConfig(repeat_penalty=1.2, repeat_last_n=1 << 100)
+    wide_history = [0, 1, 1]
+    expected = PolicyCalculations(logits, wide_window, wide_history).adjusted
+    actual = sampling.apply_history_penalties(logits, wide_history, wide_window)
+    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1e-14)
+
+    for kwargs in (
+        {"repeat_penalty": 0.0},
+        {"repeat_penalty": float("inf")},
+        {"repeat_last_n": -2},
+        {"presence_penalty": float("nan")},
+        {"frequency_penalty": float("inf")},
+    ):
+        with pytest.raises(EditorError):
+            SamplerConfig(**kwargs)
+
+    overflowing = SamplerConfig(repeat_penalty=1.0e308)
+    with pytest.raises(ValueError, match="history penalties produced non-finite"):
+        sampling.apply_history_penalties(
+            np.asarray([-1.0e308]), [0], overflowing
         )

@@ -145,6 +145,13 @@ class SamplingFilterConfig(Protocol):
     tail_free_z: float
 
 
+class HistoryPenaltyConfig(Protocol):
+    repeat_penalty: float
+    repeat_last_n: int
+    presence_penalty: float
+    frequency_penalty: float
+
+
 @dataclass(frozen=True)
 class SparseDistribution:
     ids: np.ndarray
@@ -211,6 +218,75 @@ def _validated_logits(logits: np.ndarray) -> np.ndarray:
         raise ValueError("decoder logits must be a finite nonempty one-dimensional array")
     result = _call(_native.validated_logits, vector.tolist())
     return np.asarray(result, dtype=np.float64)
+
+
+def _history_float(config, name: str, *, positive: bool = False) -> float:
+    value = getattr(config, name)
+    message = (
+        "repeat_penalty must be a finite number greater than 0"
+        if positive
+        else f"{name} must be a finite number"
+    )
+    if type(value) not in {int, float}:
+        raise EditorError(message)
+    try:
+        converted = float(value)
+    except OverflowError as exc:
+        raise EditorError(message) from exc
+    if not math.isfinite(converted) or (positive and converted <= 0.0):
+        raise EditorError(message)
+    return converted
+
+
+def _history_ids(value) -> np.ndarray:
+    array = _vector(value, "history token IDs")
+    if len(array) and not np.issubdtype(array.dtype, np.integer):
+        raise ValueError("history token IDs must be a one-dimensional integer array")
+    if array.dtype.kind == "u" and len(array) and int(np.max(array)) > MAX_SEED:
+        raise ValueError("history token IDs must address the decoder vocabulary")
+    try:
+        return np.asarray(array, dtype=np.int64)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("history token IDs must address the decoder vocabulary") from exc
+
+
+def apply_history_penalties(
+    logits: np.ndarray,
+    history_token_ids,
+    config: HistoryPenaltyConfig,
+) -> np.ndarray:
+    """Return Rust-adjusted logits using the production history policy fields."""
+    repeat_penalty = _history_float(config, "repeat_penalty", positive=True)
+    repeat_last_n = getattr(config, "repeat_last_n")
+    if type(repeat_last_n) is not int or repeat_last_n < -1:
+        raise EditorError("repeat_last_n must be -1 or a nonnegative integer")
+    presence_penalty = _history_float(config, "presence_penalty")
+    frequency_penalty = _history_float(config, "frequency_penalty")
+    vector = _validated_logits(logits)
+    if history_token_ids is None:
+        active = repeat_last_n != 0 and (
+            repeat_penalty != 1.0
+            or presence_penalty != 0.0
+            or frequency_penalty != 0.0
+        )
+        if active:
+            raise ValueError("active history penalties require exact prefix token ids")
+        history = np.empty(0, dtype=np.int64)
+    else:
+        history = _history_ids(history_token_ids)
+    # Python accepts an unbounded positive window; every realizable history
+    # is shorter than signed-64-bit max, so this clamp preserves tail meaning.
+    native_repeat_last_n = min(repeat_last_n, MAX_SEED)
+    adjusted = _call(
+        _native.apply_history_penalties,
+        vector.tolist(),
+        history.tolist(),
+        repeat_penalty,
+        native_repeat_last_n,
+        presence_penalty,
+        frequency_penalty,
+    )
+    return np.asarray(adjusted, dtype=np.float64)
 
 
 def _rank(values: np.ndarray, token_id: int) -> int:
