@@ -40,6 +40,7 @@ from ..tui_render import (
 )
 from .editor import TextEditor, draw_editor, editor_height
 from .keys import Key, Mouse
+from .layout import Rect, SplitItem, allocate_vertical_split
 from .palette import (
     BEAM_PALETTE_ENTRIES,
     PaletteEntry,
@@ -698,56 +699,109 @@ class ChoiceView(RequestView):
         editor_width = max(1, width - cell_len("Command > "))
         editor_rows = editor_height(self.editor, editor_width)
         editor_cap = (8 if height >= 30 else 4) if self._expanded else (4 if height >= 18 else 2)
-        table_rows = (
-            min(state.menu_page_rows, len(state.choice.candidates))
-            if state.search_lens_active else len(rows)
+        context_cap = min(8, max(1, height // 4))
+        context_content_rows = min(len(context_lines), context_cap)
+        context_section = context_content_rows + 1
+        editor_preferred = min(editor_rows if not self._expanded else editor_cap, editor_cap)
+        feedback_preferred = (
+            1 if short else min(len(feedback_lines), max(2, height // 6))
+        ) if feedback_lines else 0
+        regions = allocate_vertical_split(
+            Rect(0, 0, width, height), [
+                SplitItem("heading", 1, 1, priority=4),
+                # Content and divider are one preferred section. This keeps
+                # them together when compact layouts cannot fit every region.
+                SplitItem("context_pane", 2, context_section, priority=4, grow_priority=2),
+                SplitItem("preview", 1, 1 if short else min(3, max(1, len(preview_lines))),
+                          priority=2, grow_priority=3),
+                SplitItem("feedback", 1 if feedback_lines else 0, feedback_preferred,
+                          priority=5, grow_priority=4),
+                SplitItem("label", 0 if short else 1, 0 if short else 1, priority=6),
+                SplitItem("table", 2, flex=True, priority=1),
+                SplitItem("command", 1, editor_preferred, priority=0, grow_priority=0),
+                SplitItem("hint", 1, hint_rows, priority=3, grow_priority=1),
+            ],
         )
-        slots = [
-            Slot("command", 1, min(editor_rows if not self._expanded else editor_cap, editor_cap), priority=0),
-            Slot("table", 2, table_rows + 1, priority=1, flex=True, share=1.0),
-            Slot("preview", 1, 1 if short else min(3, max(1, len(preview_lines))), priority=1),
-            Slot("hint", 1, hint_rows, priority=2),
-            Slot("feedback", 1 if feedback_lines else 0,
-                 1 if short else min(len(feedback_lines), max(2, height // 6)), priority=2),
-            Slot("heading", 1, 1, priority=3),
-            Slot("context", 3 if height >= 20 else 1, None, priority=4, flex=True),
-            Slot("label", 0 if short else 1, 0 if short else 1, priority=5),
-        ]
-        heights = allocate(height, slots)
-        y = 0
-        if heights["heading"]:
-            canvas.put_line(0, y, runs(ctx.layout, heading), width=width)
-            y += 1
-        if heights["context"]:
-            draw_lines(ctx, context_lines, 0, y, width, heights["context"], self.context_scroll)
-            y += heights["context"]
-        if heights["preview"]:
-            if heights["preview"] == 1:
-                draw_lines(ctx, [clip(runs(ctx.layout, preview_text), width)], 0, y, width, 1)
+        context_pane = regions["context_pane"]
+        if context_pane.height:
+            context_regions = allocate_vertical_split(
+                context_pane, [
+                    SplitItem("context", 1, context_content_rows, priority=0),
+                    SplitItem("divider", 1, 1, priority=1),
+                ],
+            )
+        else:
+            context_regions = {
+                "context": Rect(context_pane.x, context_pane.y, width, 0),
+                "divider": Rect(context_pane.x, context_pane.y, width, 0),
+            }
+
+        heading_region = regions["heading"]
+        if heading_region.height:
+            canvas.put_line(
+                heading_region.x, heading_region.y, runs(ctx.layout, heading),
+                width=heading_region.width,
+            )
+        context_region = context_regions["context"]
+        if context_region.height:
+            draw_lines(
+                ctx, context_lines, context_region.x, context_region.y,
+                context_region.width, context_region.height, self.context_scroll,
+            )
+        divider_region = context_regions["divider"]
+        if divider_region.height:
+            canvas.put_line(
+                divider_region.x, divider_region.y,
+                (("─" * divider_region.width, styles("pane-divider")),),
+                width=divider_region.width,
+            )
+
+        preview_region = regions["preview"]
+        if preview_region.height:
+            if preview_region.height == 1:
+                draw_lines(
+                    ctx, [clip(runs(ctx.layout, preview_text), preview_region.width)],
+                    preview_region.x, preview_region.y, preview_region.width, 1,
+                )
             else:
-                draw_lines(ctx, preview_lines[:heights["preview"]], 0, y, width, heights["preview"], scrollbar=False)
-            y += heights["preview"]
-        if heights["feedback"]:
-            if heights["feedback"] == 1:
-                draw_lines(ctx, [clip(runs(ctx.layout, feedback_text), width)], 0, y, width, 1)
+                draw_lines(
+                    ctx, preview_lines[:preview_region.height], preview_region.x,
+                    preview_region.y, preview_region.width, preview_region.height,
+                    scrollbar=False,
+                )
+        feedback_region = regions["feedback"]
+        if feedback_region.height:
+            if feedback_region.height == 1:
+                draw_lines(
+                    ctx, [clip(runs(ctx.layout, feedback_text), feedback_region.width)],
+                    feedback_region.x, feedback_region.y, feedback_region.width, 1,
+                )
             else:
-                draw_lines(ctx, feedback_lines[:heights["feedback"]], 0, y, width, heights["feedback"], scrollbar=False)
-            y += heights["feedback"]
-        if heights["label"]:
-            canvas.put_line(0, y, (("Candidates", styles("section")),), width=width)
-            y += 1
-        if heights["table"]:
+                draw_lines(
+                    ctx, feedback_lines[:feedback_region.height], feedback_region.x,
+                    feedback_region.y, feedback_region.width, feedback_region.height,
+                    scrollbar=False,
+                )
+        label_region = regions["label"]
+        if label_region.height:
+            canvas.put_line(
+                label_region.x, label_region.y, (("Candidates", styles("section")),),
+                width=label_region.width,
+            )
+        table_region = regions["table"]
+        if table_region.height:
             draw_table(
-                ctx, columns, rows, 0, y, width, heights["table"],
+                ctx, columns, rows, table_region.x, table_region.y,
+                table_region.width, table_region.height,
                 focus=focus_index, view=self.table_view,
                 on_click=lambda rank: self._select_rank(int(rank)),
             )
-            y += heights["table"]
-        if heights["command"]:
-            self.draw_command_row(ctx, "Command >", y, heights["command"])
-            y += heights["command"]
-        if heights["hint"]:
-            self.draw_hint(ctx, hint, y, heights["hint"])
+        command_region = regions["command"]
+        if command_region.height:
+            self.draw_command_row(ctx, "Command >", command_region.y, command_region.height)
+        hint_region = regions["hint"]
+        if hint_region.height:
+            self.draw_hint(ctx, hint, hint_region.y, hint_region.height)
 
     def _render_review(self, ctx: RenderContext) -> None:
         canvas = ctx.canvas

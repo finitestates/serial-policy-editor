@@ -120,6 +120,15 @@ CHILD = textwrap.dedent(
                 io.read_choice(choice_state())
             elif mode == "unicode-geometry":
                 results.append(io.prompt(prompt_state("Unicode geometry › ")))
+            elif mode == "choice-pane":
+                state = choice_state()
+                context = "\n".join(
+                    f"layout history item {index:03} " + "word " * 12
+                    for index in range(80)
+                )
+                results.append(io.read_choice(replace(
+                    state, choice=replace(state.choice, context_text_tail=context),
+                )))
             elif mode == "suspend":
                 # pty.fork() makes this child an orphaned job-control group,
                 # where the kernel ignores SIGTSTP. Preserve app.suspend()'s
@@ -341,6 +350,10 @@ def assert_complete_frame(frame: dict) -> None:
         assert depth is not None and notice is not None, f"beam frame {frame['sequence']} incomplete"
         assert depth.group(1) == notice.group(1), f"mixed beam generations in frame {frame['sequence']}"
     elif lines[0].startswith("Step "):
+        if height >= 8:
+            assert "─" * width in lines, (
+                f"context/candidate divider missing in frame {frame['sequence']}"
+            )
         assert "Command >" in body and "Candidates" in body or height < 18
     elif lines[0].startswith("LIVE EDGE"):
         assert "Command >" in body
@@ -356,6 +369,22 @@ def test_frame_completeness_rejects_cell_overflow():
     }
     assert len(frame["lines"][0]) <= frame["size"][0]
     with pytest.raises(AssertionError, match="occupies 4 cells"):
+        assert_complete_frame(frame)
+
+
+def test_frame_completeness_rejects_a_missing_choice_divider():
+    """Negative control: a Choice screen without its declared seam is incomplete."""
+    frame = {
+        "sequence": 1,
+        "size": [40, 8],
+        "lines": [
+            "Step 0 · teacher track", "DECISION BOUNDARY", "context", "preview",
+            "Candidates", "rank token-id text", "Command >", "Enter commit",
+        ],
+        "cursor": None,
+    }
+
+    with pytest.raises(AssertionError, match="context/candidate divider missing"):
         assert_complete_frame(frame)
 
 
@@ -529,6 +558,78 @@ def test_journey_every_frame_is_complete_and_matches_the_terminal(tmp_path):
     with pytest.raises(AssertionError):
         assert_process_output_was_silenced(raw + b"printed during session")
     assert raw.find(b"RESULTS") > exit_index
+
+
+def test_choice_pane_content_updates_and_resize_keep_ordered_frames_complete(tmp_path):
+    ui = Session(tmp_path, "choice-pane", size=(80, 24))
+    try:
+        initial = ui.wait_for(
+            lambda frame: frame["lines"][0].startswith("Step 0") and frame["cursor"],
+            what="long-context Choice",
+        )
+        assert "layout history item 079" in text(initial)
+        assert next(row for row, line in enumerate(initial["lines"]) if line == "─" * 80) == 7
+
+        ui.send("\x1b[5~")  # page the context without moving the pane boundary
+        scrolled = ui.wait_for(
+            lambda frame: frame["sequence"] > initial["sequence"],
+            what="scrolled context",
+        )
+        assert scrolled["lines"][1:9] != initial["lines"][1:9]
+        assert next(row for row, line in enumerate(scrolled["lines"]) if line == "─" * 80) == 7
+
+        ui.send("2")
+        preview = ui.wait_for(
+            lambda frame: "Command > 2" in text(frame), what="updated candidate preview",
+        )
+        assert next(row for row, line in enumerate(preview["lines"]) if line == "─" * 80) == 7
+
+        ui.send("\x7f9\r")  # clear the command, then create editable validation feedback
+        feedback = ui.wait_for(
+            lambda frame: "rank must be 1..5" in text(frame).lower(),
+            what="updated Choice feedback",
+        )
+        assert next(row for row, line in enumerate(feedback["lines"]) if line == "─" * 80) == 7
+
+        ui.resize(120, 40)
+        resized = ui.wait_for(
+            lambda frame: tuple(frame["size"]) == (120, 40)
+            and "rank must be 1..5" in text(frame).lower(),
+            what="resized Choice with feedback",
+        )
+        assert next(row for row, line in enumerate(resized["lines"]) if line == "─" * 120) == 9
+
+        ui.send("\x7f1\r")
+        submitted = ui.wait_for(
+            lambda frame: frame["cursor"] is None and "Command > 1" in text(frame),
+            what="submitted Choice after resize",
+        )
+        assert next(row for row, line in enumerate(submitted["lines"]) if line == "─" * 120) == 9
+        output = ui.finish()
+    finally:
+        if ui.status is None:
+            try:
+                os.kill(ui.pid, signal.SIGKILL)
+                os.waitpid(ui.pid, 0)
+                ui.pump(0.2)
+            except OSError:
+                pass
+        (tmp_path / "pty.raw").write_bytes(bytes(ui.output))
+
+    assert os.WIFEXITED(ui.status) and os.WEXITSTATUS(ui.status) == 0, output[-2000:]
+    assert json.loads(output.rsplit("RESULTS ", 1)[1].splitlines()[0]) == ["1"]
+    raw = bytes(ui.output)
+    frames = ui.frames()
+    replay_and_compare(raw, frames)
+    assert_no_erase_after_entry(raw)
+    assert_frames_are_transactions(raw)
+    choice_frames = [frame for frame in frames if frame["lines"][0].startswith("Step 0")]
+    assert len(choice_frames) >= 6
+    for frame in choice_frames:
+        assert_complete_frame(frame)
+        divider = "─" * frame["size"][0]
+        expected_divider_row = 7 if frame["size"][1] == 24 else 9
+        assert next(row for row, line in enumerate(frame["lines"]) if line == divider) == expected_divider_row
 
 
 def test_uncaught_fatal_traceback_survives_after_terminal_restore(tmp_path):

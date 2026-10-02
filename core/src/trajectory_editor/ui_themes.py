@@ -207,6 +207,7 @@ def semantic_style(
         "status-strong": ("rich_primary", "bold"),
         "muted": ("rich_muted", ""),
         "rule": ("rich_muted", ""),
+        "pane-divider": ("rich_muted", ""),
         "section": ("rich_secondary", "bold"),
         "proposal": ("rich_primary", "bold reverse"),
         "proposal-label": ("rich_primary", "bold"),
@@ -237,6 +238,7 @@ def semantic_style(
         style = {
             "status-strong": "bold",
             "section": "bold underline",
+            "pane-divider": "dim",
             "proposal": "bold reverse",
             "proposal-label": "bold underline",
             "effect": "bold",

@@ -10,13 +10,13 @@ from dataclasses import replace
 import pytest
 from trajectory_editor.core.candidates import Candidate
 from trajectory_editor.edge_help import edge_help
+from trajectory_editor.term.app import TerminalApp, TerminalSession
 from trajectory_editor.terminal_contracts import (
     SEAMLESS_REACTIVATE,
     BeamInput,
     BoundaryReview,
     ChoiceFeedback,
 )
-from trajectory_editor.term.app import TerminalApp, TerminalSession
 from trajectory_editor.ui_themes import LIVE_THEME_NAMES
 
 from tests.core.term_support import (
@@ -356,6 +356,59 @@ def test_choice_context_paging_suspends_tail_follow(harness):
     ui.press("pagedown", "pagedown", "pagedown", "pagedown")
     assert ui.view.context_scroll.follow is True
     assert "line 79" in ui.text
+
+
+def test_choice_short_context_has_only_its_content_rows_and_one_divider(harness):
+    state = choice_state()
+    state = replace(state, choice=replace(state.choice, context_text_tail="short context"))
+    ui = harness(state, size=(40, 12))
+
+    assert ui.lines[1] == "DECISION BOUNDARY"
+    assert ui.lines[2] == "short context"
+    assert [row for row, line in enumerate(ui.lines) if line == "─" * 40] == [3]
+    assert ui.row_of("token-id") == 5
+    assert ui.row_of("Command >") == 10
+
+
+def test_choice_long_context_scrolls_inside_its_capped_pane(harness):
+    state = choice_state(feedback=ChoiceFeedback("info", "NOTE", ("one detail",)))
+    tail = "\n".join(f"history item {index:03}" for index in range(60))
+    state = replace(state, choice=replace(state.choice, context_text_tail=tail))
+    ui = harness(state, size=(80, 24))
+    divider_row = next(row for row, line in enumerate(ui.lines) if line == "─" * 80)
+    candidate_row = ui.row_of("Candidates")
+    command_row = ui.row_of("Command >")
+
+    assert divider_row == 7
+    assert ui.view.context_scroll.height == 6
+    assert "history item 059" in ui.text
+
+    ui.wheel(2, 1, down=False)
+    assert ui.view.context_scroll.follow is False
+    ui.press("pageup")
+    assert "history item 059" not in ui.text
+    assert "history item 048" in ui.text
+    assert next(row for row, line in enumerate(ui.lines) if line == "─" * 80) == divider_row
+    assert ui.row_of("Candidates") == candidate_row
+    assert ui.row_of("Command >") == command_row
+
+    ui.wheel(2, divider_row)
+    assert "history item 048" in ui.text  # the divider is outside the context scroll hitbox
+
+
+def test_choice_preview_and_feedback_updates_keep_context_boundary_stable(harness):
+    state = choice_state()
+    state = replace(state, choice=replace(state.choice, context_text_tail="fixed context"))
+    ui = harness(state, size=(80, 24))
+    divider_row = next(row for row, line in enumerate(ui.lines) if line == "─" * 80)
+
+    ui.type("2")
+    assert next(row for row, line in enumerate(ui.lines) if line == "─" * 80) == divider_row
+    ui.press("backspace")
+    ui.type("9")
+    ui.press("enter")
+    assert "rank must be 1..5" in ui.text.lower()
+    assert next(row for row, line in enumerate(ui.lines) if line == "─" * 80) == divider_row
 
 
 def test_choice_context_keeps_long_history_and_wraps_at_any_width(harness):

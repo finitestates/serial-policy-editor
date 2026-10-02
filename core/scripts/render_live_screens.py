@@ -80,7 +80,7 @@ def _overlay(ui: Harness, name: str) -> None:
 
 def canvas_html(ui: Harness, title: str) -> str:
     canvas = ui.canvas
-    console = Console(record=True, width=canvas.width, color_system="truecolor",
+    console = Console(record=True, width=canvas.width, height=canvas.height, color_system="truecolor",
                       file=io.StringIO(), force_terminal=True, legacy_windows=False)
     for y in range(canvas.height):
         row = Text(no_wrap=True, end="\n")
