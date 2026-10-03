@@ -9,6 +9,7 @@ __pycache__/
 .ruff_cache/
 build/
 dist/
+/target/
 
 # Local virtual environments and installed runtime dependencies
 .venv/

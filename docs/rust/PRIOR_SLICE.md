@@ -95,7 +95,7 @@ asserts.
   history forms.
 - Use the Python runtime to establish fixture expectations. Compare discrete
   outputs exactly; keep any floating-point tolerance narrow and documented.
-- Keep changes under `experiments/rust-port/` plus the existing
+- Keep Rust implementation changes in the root workspace plus the existing
   `tests/core/test_live_terminal_pty.py` harness. Do not change `core/src`,
   `core/pyproject.toml`, the released CLI, persistence/SQLite, model backends,
   or production packaging.
@@ -108,9 +108,9 @@ asserts.
 Run from the repository root:
 
 ```sh
-cargo fmt --manifest-path experiments/rust-port/Cargo.toml --all -- --check
-cargo test --manifest-path experiments/rust-port/Cargo.toml --workspace --locked
-cargo clippy --manifest-path experiments/rust-port/Cargo.toml \
+cargo fmt --manifest-path Cargo.toml --all -- --check
+cargo test --manifest-path Cargo.toml --workspace --locked
+cargo clippy --manifest-path Cargo.toml \
   --workspace --all-targets --all-features --locked -- -D warnings
 core/.venv/bin/python -m pytest -q tests/core/test_live_terminal_pty.py -k compiled_rust
 core/.venv/bin/python -m pytest -q tests/core/test_live_terminal_pty.py
@@ -118,8 +118,8 @@ core/.venv/bin/python -m pytest -q tests/core/test_live_terminal_pty.py
 
 Also build the sampler's Python extension with its `python` feature, then run
 its Python comparison script and adapter tests as documented in
-[`sampler/README.md`](sampler/README.md). Run the focused episode-history
-Python adapter checks from [`episode-history/README.md`](episode-history/README.md).
+[`SAMPLER.md`](SAMPLER.md). Run the focused episode-history
+Python adapter checks from [`EPISODE_HISTORY.md`](EPISODE_HISTORY.md).
 
 ## Handoff
 
@@ -148,9 +148,9 @@ production action path.
 Validation run from the repository root:
 
 ```text
-cargo fmt --manifest-path experiments/rust-port/Cargo.toml --all -- --check  PASS
-cargo test --manifest-path experiments/rust-port/Cargo.toml --workspace --locked  PASS
-cargo clippy --manifest-path experiments/rust-port/Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings  PASS
+cargo fmt --manifest-path Cargo.toml --all -- --check  PASS
+cargo test --manifest-path Cargo.toml --workspace --locked  PASS
+cargo clippy --manifest-path Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings  PASS
 core/.venv/bin/python -m pytest -q tests/core/test_live_terminal_pty.py -k compiled_rust  2 passed
 core/.venv/bin/python -m pytest -q tests/core/test_live_terminal_pty.py  14 passed
 ```
@@ -162,14 +162,14 @@ installed; its comparison reported 47 shared cases and its adapter tests
 reported 4 passed. Exact extension and parity commands:
 
 ```sh
-core/.venv/bin/maturin build --manifest-path experiments/rust-port/sampler/Cargo.toml --interpreter core/.venv/bin/python --out /tmp/rust-sampler-wheel
+core/.venv/bin/maturin build --manifest-path sampler/Cargo.toml --interpreter core/.venv/bin/python --out /tmp/rust-sampler-wheel
 core/.venv/bin/python -m pip install --force-reinstall --no-deps /tmp/rust-sampler-wheel/rust_sampler_experiment-0.1.0-cp311-cp311-manylinux_2_34_x86_64.whl
-PYTHONPATH=core/src core/.venv/bin/python experiments/rust-port/sampler/scripts/compare_with_python.py
-PYTHONPATH=core/src core/.venv/bin/python -m pytest -q experiments/rust-port/sampler/tests/test_python_adapter.py
-core/.venv/bin/maturin build --manifest-path experiments/rust-port/episode-history/Cargo.toml --interpreter core/.venv/bin/python --out /tmp/rust-episode-history-wheel
+PYTHONPATH=core/src core/.venv/bin/python sampler/scripts/compare_with_python.py
+PYTHONPATH=core/src core/.venv/bin/python -m pytest -q sampler/tests/test_python_adapter.py
+core/.venv/bin/maturin build --manifest-path episode-history/Cargo.toml --interpreter core/.venv/bin/python --out /tmp/rust-episode-history-wheel
 core/.venv/bin/python -m pip install --force-reinstall --no-deps /tmp/rust-episode-history-wheel/rust_episode_history_experiment-0.1.0-cp311-cp311-manylinux_2_34_x86_64.whl
-core/.venv/bin/python experiments/rust-port/episode-history/scripts/compare_with_python.py
-core/.venv/bin/python -m pytest -q experiments/rust-port/episode-history/tests/test_python_adapter.py
+core/.venv/bin/python episode-history/scripts/compare_with_python.py
+core/.venv/bin/python -m pytest -q episode-history/tests/test_python_adapter.py
 ```
 
 Both native extensions are enabled by their existing `python` Cargo feature.

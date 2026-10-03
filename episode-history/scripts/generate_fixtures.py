@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT / "core" / "src"))
 
 from trajectory_editor.core.actions import (  # noqa: E402

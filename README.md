@@ -12,9 +12,11 @@ The active project is intentionally small:
 - `core/` — the standalone runtime and `policy-editor` command;
 - `vector/` — optional conventional activation/steering-vector production.
 
-Isolated implementation experiments and their agent handoffs live in
-[`experiments/`](experiments/README.md); they are kept outside the release
-packages.
+The repository also has a top-level Cargo workspace for Rust development.
+Its policy and episode-history kernels have Python parity adapters, and its
+terminal process has a PTY test path. The supported release runtime remains in
+`core/` while the Rust migration is evaluated; see [RUST.md](RUST.md).
+Separate short-lived experiments remain under [`experiments/`](experiments/README.md).
 
 ## Get only the files you need
 
@@ -52,7 +54,11 @@ If the repository has already been cloned, the essential commands are simply:
 git sparse-checkout init --cone
 git sparse-checkout set core                 # core only
 # or: git sparse-checkout set core vector     # core plus vector tools
+# or: git sparse-checkout set sampler episode-history terminal-ui docs/rust
 ```
+
+The Rust workspace can be built and its Rust tests can run from that sparse
+checkout. Python parity scripts and the real-model worker also need `core/`.
 
 ## Backend installation
 

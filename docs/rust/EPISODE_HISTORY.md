@@ -4,12 +4,12 @@ This is an isolated Rust crate for the in-memory policy action and history
 kernel in `core/src/trajectory_editor/episode_history.py` and
 `core/src/trajectory_editor/core/actions.py`. It remains outside the released
 Python episode runtime, replay, persistence, and SQLite paths. The separate
-[`terminal-ui` experiment](../terminal-ui/README.md) links this crate as a Rust
+[terminal process](TERMINAL_UI.md) links this crate as a Rust
 library for its fixture-backed Choice turn; that smoke path does not make the
 crate part of the production runtime.
 
 The Rust crate owns typed action, evidence, outcome, attempt, history, and
-truncation values. The plain Rust library is used by the terminal experiment;
+truncation values. The plain Rust library is used by the terminal process;
 its optional PyO3 entry point accepts one JSON document for a full operation
 and returns one JSON document. The Python adapter converts existing Python
 records at that boundary, so a history does not cross as a sequence of
@@ -79,8 +79,8 @@ Generate fixtures after an intentional contract change, then run the
 independent Rust library tests:
 
 ```sh
-core/.venv/bin/python experiments/rust-port/episode-history/scripts/generate_fixtures.py
-cargo test --manifest-path experiments/rust-port/episode-history/Cargo.toml --locked
+core/.venv/bin/python episode-history/scripts/generate_fixtures.py
+cargo test --manifest-path episode-history/Cargo.toml --locked
 ```
 
 Build/install the thin Python extension into the core test environment and
@@ -88,22 +88,22 @@ run the cross-language and adapter checks:
 
 ```sh
 core/.venv/bin/maturin build \
-  --manifest-path experiments/rust-port/episode-history/Cargo.toml \
+  --manifest-path episode-history/Cargo.toml \
   --interpreter core/.venv/bin/python \
   --out /tmp/rust-episode-history-wheel
 # Run this only if the core virtualenv was created without pip.
 core/.venv/bin/python -m ensurepip --upgrade
 core/.venv/bin/python -m pip install --force-reinstall --no-deps \
   /tmp/rust-episode-history-wheel/rust_episode_history_experiment-0.1.0-*.whl
-core/.venv/bin/python experiments/rust-port/episode-history/scripts/compare_with_python.py
+core/.venv/bin/python episode-history/scripts/compare_with_python.py
 core/.venv/bin/python -m pytest -q \
-  experiments/rust-port/episode-history/tests/test_python_adapter.py
+  episode-history/tests/test_python_adapter.py
 ```
 
 Maturin enables the optional `python` feature for the wheel build. Workspace-
-wide formatting, tests, and Clippy are listed in [`../README.md`](../README.md);
+wide formatting, tests, and Clippy are listed in [`../../RUST.md`](../../RUST.md);
 the `cargo test` command above runs only this crate. The extension package is
-named `rust_episode_history`. Experiment-wide release boundaries are in
+named `rust_episode_history`. Python release boundaries are in
 [`../../README.md`](../../README.md).
 
 ## Rust notes for Python maintainers
@@ -112,4 +112,4 @@ named `rust_episode_history`. Experiment-wide release boundaries are in
 records are structs containing their fields. Operations return
 `Result<T, KernelError>` for explicit error handling. The library uses owned
 values and no `unsafe` code. PyO3 is an optional `python` feature; ordinary
-Rust tests and the terminal experiment use the library without Python.
+Rust tests and the terminal process use the library without Python.

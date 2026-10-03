@@ -19,7 +19,7 @@ language-specific objects.
 
 Build a tiny Rust terminal process, launch it from the existing Python PTY
 harness, and verify that the existing `pyte` replay can reconstruct each
-intended frame. See [`terminal-ui/README.md`](terminal-ui/README.md) for scope
+intended frame. See [`TERMINAL_UI.md`](TERMINAL_UI.md) for scope
 and the frame-log contract.
 
 **Gate:** preserve the raw PTY capture; replay every logged frame boundary;

@@ -57,19 +57,19 @@ The sampler extension was built for CPython 3.11 with Maturin and force
 reinstalled into `core/.venv`. The following checks passed:
 
 ```text
-cargo fmt --manifest-path experiments/rust-port/Cargo.toml --all -- --check
+cargo fmt --manifest-path Cargo.toml --all -- --check
 passed
-cargo test --manifest-path experiments/rust-port/Cargo.toml --workspace --locked
+cargo test --manifest-path Cargo.toml --workspace --locked
 passed: 13 Rust tests across episode history, sampler, and terminal worker
-cargo clippy --manifest-path experiments/rust-port/Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings
+cargo clippy --manifest-path Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings
 passed
 core/.venv/bin/python -m pytest -q tests/core/test_sampler_contracts.py
 passed: 24
 core/.venv/bin/python -m pytest -q tests/core/test_live_terminal_pty.py -k compiled_rust
 passed: 2, 12 deselected
-core/.venv/bin/python -m pytest -q experiments/rust-port/sampler/tests/test_python_adapter.py
+core/.venv/bin/python -m pytest -q sampler/tests/test_python_adapter.py
 passed: 10
-PYTHONPATH=core/src core/.venv/bin/python experiments/rust-port/sampler/scripts/compare_with_python.py
+PYTHONPATH=core/src core/.venv/bin/python sampler/scripts/compare_with_python.py
 passed: 279 value checks, including all 3 bias cases
 ```
 

@@ -15,7 +15,7 @@ import time
 import unicodedata
 from uuid import uuid4
 
-ROOT = Path(__file__).resolve().parents[4]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / "core/src"), str(ROOT)]
 
 # This is the pre-0 context: its token-prefix SHA-256 is the stream's 256-bit
@@ -36,9 +36,9 @@ SAMPLER = {
     "gumbel_noise_address": "token-id",
     "gumbel_noise_scale": 1.0,
 }
-LAYOUT_PATH = ROOT / "experiments/rust-port/terminal-ui/fixtures/real-model-screen-layout.json"
-WORKER_PATH = ROOT / "experiments/rust-port/terminal-ui/scripts/real_model_worker.py"
-RUST_BINARY = ROOT / "experiments/rust-port/target/debug/rust-terminal-ui-smoke"
+LAYOUT_PATH = ROOT / "terminal-ui/fixtures/real-model-screen-layout.json"
+WORKER_PATH = ROOT / "terminal-ui/scripts/real_model_worker.py"
+RUST_BINARY = ROOT / "target/debug/rust-terminal-ui-smoke"
 
 
 def _safe_text(value: str) -> str:

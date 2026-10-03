@@ -12,7 +12,7 @@ import sys
 import numpy as np
 
 
-ROOT = Path(__file__).resolve().parents[4]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / "core/src"), str(ROOT)]
 
 from benchmarks.real_model import load_profile  # noqa: E402

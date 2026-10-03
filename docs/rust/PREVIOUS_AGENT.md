@@ -9,7 +9,7 @@ difference.
 The Rust sampler experiment now includes the history-penalty transform from
 `core/src/trajectory_editor/core/policy_calculations.py`. The Python runtime
 remains the released implementation and behavior oracle. The change is limited
-to `experiments/rust-port/sampler/`; it does not port `PolicyCalculations` as a
+to `sampler/`; it does not port `PolicyCalculations` as a
 whole or change production behavior.
 
 The library API is `rust_sampler_native::apply_history_penalties()`. The
@@ -48,7 +48,7 @@ function.
 ## Parity evidence
 
 Six shared cases in
-`experiments/rust-port/sampler/fixtures/sampling-cases.json` are generated from
+`sampler/fixtures/sampling-cases.json` are generated from
 production `PolicyCalculations`. They cover empty and all-history inputs,
 zero, short, and long positive windows, repeated IDs, IDs outside the selected
 tail, positive/zero/negative logits, positive and negative presence/frequency
@@ -74,30 +74,30 @@ checked cases.
 The following commands were run from the repository root:
 
 ```text
-cargo fmt --manifest-path experiments/rust-port/Cargo.toml --all -- --check
+cargo fmt --manifest-path Cargo.toml --all -- --check
   passed
-cargo test --manifest-path experiments/rust-port/Cargo.toml --workspace --locked
+cargo test --manifest-path Cargo.toml --workspace --locked
   passed (7 sampler tests, 1 episode-history test)
-cargo clippy --manifest-path experiments/rust-port/Cargo.toml \
+cargo clippy --manifest-path Cargo.toml \
   --workspace --all-targets --all-features --locked -- -D warnings
   passed
 core/.venv/bin/python -m pytest -q tests/core/test_sampler_contracts.py
   passed (24 tests)
-core/.venv/bin/maturin build --manifest-path experiments/rust-port/sampler/Cargo.toml \
+core/.venv/bin/maturin build --manifest-path sampler/Cargo.toml \
   --interpreter core/.venv/bin/python --out /tmp/rust-sampler-wheel
   passed (CPython 3.11 wheel)
 core/.venv/bin/python -m pip install --force-reinstall --no-deps \
   /tmp/rust-sampler-wheel/rust_sampler_experiment-0.1.0-cp311-cp311-manylinux_2_34_x86_64.whl
   passed
 PYTHONPATH=core/src core/.venv/bin/python \
-  experiments/rust-port/sampler/scripts/compare_with_python.py
+  sampler/scripts/compare_with_python.py
   passed (186 checks, 14 draw cases, 6 history-penalty cases)
 PYTHONPATH=core/src core/.venv/bin/python -m pytest -q \
-  experiments/rust-port/sampler/tests/test_python_adapter.py
+  sampler/tests/test_python_adapter.py
   passed (7 tests)
 ```
 
 `uv` was unavailable, so the built wheel was installed with the pip fallback
-documented in `experiments/rust-port/sampler/README.md`. No speed claim was
+documented in [`SAMPLER.md`](SAMPLER.md). No speed claim was
 measured. This slice is committed on the experiment branch and remains outside
 the released runtime.

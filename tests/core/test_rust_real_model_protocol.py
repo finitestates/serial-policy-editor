@@ -11,7 +11,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT_DIR = ROOT / "experiments/rust-port/terminal-ui/scripts"
+SCRIPT_DIR = ROOT / "terminal-ui/scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 import real_model_worker  # noqa: E402

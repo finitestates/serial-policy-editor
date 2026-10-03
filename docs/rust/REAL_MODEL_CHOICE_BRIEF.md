@@ -23,9 +23,9 @@ evidence are recorded in the [completed fixture Choice slice](PRIOR_SLICE.md).
 
 ## Read these first
 
-- [Rust experiment status and commands](README.md)
+- [Rust workspace status and commands](../../RUST.md)
 - [Rust migration roadmap](ROADMAP.md)
-- [Rust terminal process and PTY contract](terminal-ui/README.md)
+- [Rust terminal process and PTY contract](TERMINAL_UI.md)
 - [Python inference backend contract](../../core/src/trajectory_editor/core/backend.py)
 - [Production token-prefix fingerprint](../../core/src/trajectory_editor/episode_hash.py)
 - [Real-model harness and model-root rules](../../benchmarks/README.md)
@@ -138,7 +138,7 @@ measurements.
 
 ## Scope boundaries
 
-- Keep changes under experiments/rust-port, its focused tests, and the
+- Keep changes under the Rust workspace, its focused tests, and the
   existing PTY test support needed to launch the real-model process.
 - Leave core runtime behavior, production CLI, package dependencies, and
   release configuration unchanged.
@@ -173,15 +173,15 @@ the following from the repository root. /path/to/models is a placeholder for
 the operator's model directory; it is not a default or a machine-specific
 path.
 
-    cargo build --manifest-path experiments/rust-port/terminal-ui/Cargo.toml --locked
-    core/.venv/bin/python experiments/rust-port/terminal-ui/scripts/real_model_choice.py --model-root /path/to/models --profile benchmarks/profiles/gpt2_cpu_smoke.yaml
-    core/.venv/bin/python experiments/rust-port/terminal-ui/scripts/real_model_choice.py --model-root /path/to/models --profile benchmarks/profiles/llama_1b_smoke.yaml
+    cargo build --manifest-path terminal-ui/Cargo.toml --locked
+    core/.venv/bin/python terminal-ui/scripts/real_model_choice.py --model-root /path/to/models --profile benchmarks/profiles/gpt2_cpu_smoke.yaml
+    core/.venv/bin/python terminal-ui/scripts/real_model_choice.py --model-root /path/to/models --profile benchmarks/profiles/llama_1b_smoke.yaml
 
 If the runner uses a different script path or flags, update this brief and
-[terminal-ui/README.md](terminal-ui/README.md) together. For profile behavior
+[TERMINAL_UI.md](TERMINAL_UI.md) together. For profile behavior
 and model-root resolution, follow [benchmarks/README.md](../../benchmarks/README.md).
 Also run the shared Rust workspace formatting, locked tests, and Clippy
-commands from [rust-port/README.md](README.md).
+commands from [RUST.md](../../RUST.md).
 
 The implementation, artifacts, and exact command outcomes are recorded in
 [REAL_MODEL_CHOICE.md](REAL_MODEL_CHOICE.md). Do not treat this preserved

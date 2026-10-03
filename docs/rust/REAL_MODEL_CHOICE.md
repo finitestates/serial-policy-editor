@@ -77,11 +77,11 @@ Both optional inference extras were installed into core/.venv, the same
 interpreter used by the runner. From the repository root, the completed
 commands and outcomes were:
 
-    cargo fmt --manifest-path experiments/rust-port/Cargo.toml --all -- --check
+    cargo fmt --manifest-path Cargo.toml --all -- --check
     passed
-    cargo test --manifest-path experiments/rust-port/Cargo.toml --workspace --locked
+    cargo test --manifest-path Cargo.toml --workspace --locked
     passed: 11 Rust tests across episode history, sampler, and worker protocol
-    cargo clippy --manifest-path experiments/rust-port/Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings
+    cargo clippy --manifest-path Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings
     passed
     core/.venv/bin/python -m pytest -q tests/core/test_rust_real_model_protocol.py
     passed: 4
@@ -89,9 +89,9 @@ commands and outcomes were:
     passed: 2, 12 deselected
     core/.venv/bin/python -m pytest -q tests/core/test_live_terminal_pty.py
     passed: 14
-    core/.venv/bin/python experiments/rust-port/terminal-ui/scripts/real_model_choice.py --model-root /path/to/models --profile benchmarks/profiles/gpt2_cpu_smoke.yaml
+    core/.venv/bin/python terminal-ui/scripts/real_model_choice.py --model-root /path/to/models --profile benchmarks/profiles/gpt2_cpu_smoke.yaml
     passed
-    core/.venv/bin/python experiments/rust-port/terminal-ui/scripts/real_model_choice.py --model-root /path/to/models --profile benchmarks/profiles/llama_1b_smoke.yaml
+    core/.venv/bin/python terminal-ui/scripts/real_model_choice.py --model-root /path/to/models --profile benchmarks/profiles/llama_1b_smoke.yaml
     passed
 
 The real-model invocation creates an isolated run directory containing the

@@ -9,6 +9,10 @@ Develop experimental work in a separate checkout. Promote individual features
 with focused changes and tests; do not merge the entire experimental branch
 into main merely to synchronize repositories.
 
+The Rust workspace is rooted at `Cargo.toml` and its component crates are
+top-level directories. Build, parity, and migration guidance is in
+[`RUST.md`](RUST.md); the supported Python runtime remains in `core/`.
+
 The live TTY interface (`core/src/trajectory_editor/term/`) is immediate-mode:
 one UI thread renders each frame from one state snapshot and writes only the
 changed lines in a single synchronized, erase-free transaction. The synchronous

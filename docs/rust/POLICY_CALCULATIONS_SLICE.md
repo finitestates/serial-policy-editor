@@ -73,15 +73,15 @@ combination and policy kernels against the same backend outputs.
 
 ## Validation
 
-Run the commands listed in [`sampler/README.md`](sampler/README.md). The final
+Run the commands listed in [`SAMPLER.md`](SAMPLER.md). The final
 recorded results are:
 
 ```text
-cargo fmt --manifest-path experiments/rust-port/Cargo.toml --all -- --check
+cargo fmt --manifest-path Cargo.toml --all -- --check
 passed
-cargo test --manifest-path experiments/rust-port/Cargo.toml --workspace --locked
+cargo test --manifest-path Cargo.toml --workspace --locked
 passed: 14 tests across episode history, sampler, and terminal worker
-cargo clippy --manifest-path experiments/rust-port/Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings
+cargo clippy --manifest-path Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings
 passed
 core/.venv/bin/python -m pytest -q tests/core/test_sampler_contracts.py
 passed: 24
@@ -89,9 +89,9 @@ core/.venv/bin/python -m pytest -q tests/core/test_cfg_contracts.py
 passed: 28
 core/.venv/bin/python -m pytest -q tests/core/test_vector_contracts.py
 passed: 6
-core/.venv/bin/python -m pytest -q experiments/rust-port/sampler/tests/test_python_adapter.py
+core/.venv/bin/python -m pytest -q sampler/tests/test_python_adapter.py
 passed: 13
-PYTHONPATH=core/src core/.venv/bin/python experiments/rust-port/sampler/scripts/compare_with_python.py
+PYTHONPATH=core/src core/.venv/bin/python sampler/scripts/compare_with_python.py
 passed: 437 value checks
 ```
 

@@ -20,7 +20,7 @@ from worker_protocol import (
 )
 
 
-ROOT = Path(__file__).resolve().parents[4]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / "core/src"), str(ROOT)]
 
 

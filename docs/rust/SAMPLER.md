@@ -6,8 +6,8 @@ surface around `core/src/trajectory_editor/core/policy_calculations.py`.
 
 The Python package remains the released implementation and behavior oracle.
 This crate is not a production dependency. Repository-wide experiment rules
-are in [`../../README.md`](../../README.md); Rust migration gates are in
-[`../ROADMAP.md`](../ROADMAP.md).
+are in [`../../RUST.md`](../../RUST.md); Rust migration gates are in
+[`ROADMAP.md`](ROADMAP.md).
 
 ## Implemented scope
 
@@ -17,14 +17,14 @@ converts NumPy arrays and Python values at the boundary, calls Rust, and
 converts results back to the existing Python-facing types. The Rust terminal
 process now also calls this library without initializing Python; see the
 completed fixture integration in
-[`../PRIOR_SLICE.md`](../PRIOR_SLICE.md). The history-penalty transform is
+[`PRIOR_SLICE.md`](PRIOR_SLICE.md). The history-penalty transform is
 another implemented kernel in this crate; its completed-slice record and
-validation evidence are in [`../PREVIOUS_AGENT.md`](../PREVIOUS_AGENT.md).
+validation evidence are in [`PREVIOUS_AGENT.md`](PREVIOUS_AGENT.md).
 Direct and grouped token biases are recorded in
-[`../BIAS_SLICE.md`](../BIAS_SLICE.md). The full Stage 2 policy surface,
+[`BIAS_SLICE.md`](BIAS_SLICE.md). The full Stage 2 policy surface,
 validation, and real-model evidence are recorded in
-[`../POLICY_CALCULATIONS_SLICE.md`](../POLICY_CALCULATIONS_SLICE.md). Corrected
-real-model Choice results are in [`../REAL_MODEL_CHOICE.md`](../REAL_MODEL_CHOICE.md).
+[`POLICY_CALCULATIONS_SLICE.md`](POLICY_CALCULATIONS_SLICE.md). Corrected
+real-model Choice results are in [`REAL_MODEL_CHOICE.md`](REAL_MODEL_CHOICE.md).
 
 Use `sampling.py` as the specification for sampler algorithms and
 `policy_calculations.py` for policy transforms and evidence metrics. The
@@ -149,7 +149,7 @@ the crate. Keep the Python binding thin and translate inputs, outputs, and
 errors at that edge. Avoid passing arbitrary Python objects into the Rust
 algorithms.
 
-If a Rust term is unfamiliar, explain it in comments or in this README when it
+If a Rust term is unfamiliar, explain it in comments or in this guide when it
 helps a Python reader:
 
 - A **crate** is a Rust package, roughly like a Python package.
@@ -166,8 +166,7 @@ helps a Python reader:
 ## Files
 
 ```text
-experiments/rust-port/sampler/
-├── README.md
+sampler/
 ├── Cargo.toml
 ├── pyproject.toml
 ├── src/
@@ -211,7 +210,7 @@ environment:
 uv sync --project core --extra test
 uv pip install --python core/.venv/bin/python maturin
 core/.venv/bin/maturin build \
-  --manifest-path experiments/rust-port/sampler/Cargo.toml \
+  --manifest-path sampler/Cargo.toml \
   --interpreter core/.venv/bin/python \
   --out /tmp/rust-sampler-wheel
 uv pip install --reinstall --python core/.venv/bin/python --no-deps \
@@ -269,14 +268,14 @@ z-scores, flat-logit undefined scores, raw-rank preservation, and immutable
 inputs. Rust tests and the adapter comparison consume the shared cases.
 
 Use the workspace format/test/Clippy commands in
-[`../README.md`](../README.md). After installing the wheel, run the Python
+[`../../RUST.md`](../../RUST.md). After installing the wheel, run the Python
 parity and adapter checks from the repository root:
 
 ```sh
 PYTHONPATH=core/src core/.venv/bin/python \
-  experiments/rust-port/sampler/scripts/compare_with_python.py
+  sampler/scripts/compare_with_python.py
 PYTHONPATH=core/src core/.venv/bin/python -m pytest -q \
-  experiments/rust-port/sampler/tests/test_python_adapter.py
+  sampler/tests/test_python_adapter.py
 ```
 
 The comparison uses exact equality for integer IDs, ranks, filter stages, and
@@ -287,7 +286,7 @@ Regenerate expected data only after reviewing the Python reference results:
 
 ```sh
 PYTHONPATH=core/src core/.venv/bin/python \
-  experiments/rust-port/sampler/scripts/generate_fixtures.py
+  sampler/scripts/generate_fixtures.py
 ```
 
 Run the live numeric policy probe against local Transformers and llama.cpp
@@ -295,7 +294,7 @@ profiles with:
 
 ```sh
 PYTHONPATH=core/src core/.venv/bin/python \
-  experiments/rust-port/sampler/scripts/real_model_policy.py \
+  sampler/scripts/real_model_policy.py \
   --model-root "$HOME/Downloads/models" \
   --profile benchmarks/profiles/gpt2_cpu_cfg.yaml \
   --profile benchmarks/profiles/llama_1b_cfg.yaml \

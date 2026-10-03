@@ -4,25 +4,25 @@
 fixture-backed Choice turn. The real-model worker path passed both corrected
 smoke profiles on 2026-10-03 at generated-token boundaries 0 and 1. The
 sampler's Stage 2 policy work is complete as an isolated experiment; its
-evidence is in [`../POLICY_CALCULATIONS_SLICE.md`](../POLICY_CALCULATIONS_SLICE.md).
+evidence is in [`POLICY_CALCULATIONS_SLICE.md`](POLICY_CALCULATIONS_SLICE.md).
 
 The historical real-model results and artifact locations are in
-[`../REAL_MODEL_CHOICE.md`](../REAL_MODEL_CHOICE.md). The original probe scope
-is archived in [`../REAL_MODEL_CHOICE_BRIEF.md`](../REAL_MODEL_CHOICE_BRIEF.md).
+[`REAL_MODEL_CHOICE.md`](REAL_MODEL_CHOICE.md). The original probe scope
+is archived in [`REAL_MODEL_CHOICE_BRIEF.md`](REAL_MODEL_CHOICE_BRIEF.md).
 
 ## Process modes
 
 The default mode keeps the original editable-input smoke journey: type a value,
 submit it, resize, then submit `quit`. The `--choice` mode uses the Rust sampler
 and episode-history libraries through the same process loop. It loads
-[`fixtures/choice-turn.json`](fixtures/choice-turn.json), calculates the
+  [`terminal-ui/fixtures/choice-turn.json`](../../terminal-ui/fixtures/choice-turn.json), calculates the
 filtered candidate view and proposal, displays the proposal and raw ranks, and
 accepts the existing `accept` command on Enter. Numeric commands select a
 displayed raw rank.
 
 The fixture's expected semantic result is data in the fixture. The complete
 authored cell grids and cursor positions are kept separately in
-[`fixtures/choice-screen-contract.json`](fixtures/choice-screen-contract.json);
+  [`terminal-ui/fixtures/choice-screen-contract.json`](../../terminal-ui/fixtures/choice-screen-contract.json);
 the test does not derive expected grids from the process frame log. The
 initial context is represented as an exact-write seed attempt in the typed
 history, so the accepted proposal extends boundary 3 to boundary 4.
@@ -48,13 +48,13 @@ deliberately removed proposal row as a negative control.
 From the repository root:
 
 ```sh
-cargo build --manifest-path experiments/rust-port/terminal-ui/Cargo.toml --locked
+cargo build --manifest-path terminal-ui/Cargo.toml --locked
 core/.venv/bin/python -m pytest -q tests/core/test_live_terminal_pty.py -k compiled_rust
 core/.venv/bin/python -m pytest -q tests/core/test_live_terminal_pty.py
 ```
 
 For workspace-wide Rust formatting, tests, and Clippy, use the shared commands
-in [`../README.md`](../README.md).
+in [`../../RUST.md`](../../RUST.md).
 
 The test contract checks terminal cells and cursor state through `pyte`; it
 does not compare styles.
@@ -84,11 +84,11 @@ extras in the same interpreter used by the runner, and run each profile in a
 separate invocation:
 
 ```sh
-cargo build --manifest-path experiments/rust-port/terminal-ui/Cargo.toml --locked
+cargo build --manifest-path terminal-ui/Cargo.toml --locked
 core/.venv/bin/python -m pip install -e './core[transformers-accelerate]'
 core/.venv/bin/python -m pip install -e './core[llama]'
-core/.venv/bin/python experiments/rust-port/terminal-ui/scripts/real_model_choice.py --model-root /path/to/models --profile benchmarks/profiles/gpt2_cpu_smoke.yaml
-core/.venv/bin/python experiments/rust-port/terminal-ui/scripts/real_model_choice.py --model-root /path/to/models --profile benchmarks/profiles/llama_1b_smoke.yaml
+core/.venv/bin/python terminal-ui/scripts/real_model_choice.py --model-root /path/to/models --profile benchmarks/profiles/gpt2_cpu_smoke.yaml
+core/.venv/bin/python terminal-ui/scripts/real_model_choice.py --model-root /path/to/models --profile benchmarks/profiles/llama_1b_smoke.yaml
 ```
 
 The runner fails when a model, optional dependency, worker operation, decision,

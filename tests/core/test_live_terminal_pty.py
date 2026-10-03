@@ -32,10 +32,10 @@ pyte = pytest.importorskip("pyte")
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX PTY journeys")
 
 ROOT = Path(__file__).resolve().parents[2]
-RUST_TERMINAL_MANIFEST = ROOT / "experiments/rust-port/terminal-ui/Cargo.toml"
-RUST_CHOICE_FIXTURE = ROOT / "experiments/rust-port/terminal-ui/fixtures/choice-turn.json"
+RUST_TERMINAL_MANIFEST = ROOT / "terminal-ui/Cargo.toml"
+RUST_CHOICE_FIXTURE = ROOT / "terminal-ui/fixtures/choice-turn.json"
 RUST_CHOICE_SCREEN_CONTRACT = (
-    ROOT / "experiments/rust-port/terminal-ui/fixtures/choice-screen-contract.json"
+    ROOT / "terminal-ui/fixtures/choice-screen-contract.json"
 )
 
 CHILD = textwrap.dedent(
