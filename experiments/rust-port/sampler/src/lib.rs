@@ -4,7 +4,7 @@
 //! the arithmetic and addressable random draws; `python/rust_sampler` only
 //! checks/converts NumPy values at the extension boundary.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use blake2::digest::consts::{U8, U16};
 use blake2::{Blake2b, Digest};
@@ -54,6 +54,56 @@ impl SamplingError {
     fn value(message: impl Into<String>) -> Self {
         Self::Value(message.into())
     }
+}
+
+/// A compiled token route for one grouped-bias member surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BiasRoute {
+    pub token_ids: Vec<i64>,
+    pub surfaces: Vec<String>,
+}
+
+/// A phrase and its already-tokenized routes. Tokenization stays in Python.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BiasMember {
+    pub text: String,
+    pub literal: bool,
+    pub routes: Vec<BiasRoute>,
+}
+
+/// A named set of phrase members sharing one logit adjustment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BiasGroup {
+    pub name: String,
+    pub members: Vec<BiasMember>,
+    pub bias: f64,
+}
+
+/// A direct adjustment for a single token ID.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BiasToken {
+    pub token_id: i64,
+    pub bias: f64,
+}
+
+/// One route and its match state inside a source-aware contribution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BiasMemberRoute {
+    pub member_text: String,
+    pub member_literal: bool,
+    pub route: BiasRoute,
+    pub active: bool,
+}
+
+/// One direct token or grouped source, optionally active in this context.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BiasContribution {
+    pub token_id: i64,
+    pub amount: f64,
+    pub active: bool,
+    pub source: String,
+    pub group_name: Option<String>,
+    pub member_routes: Vec<BiasMemberRoute>,
 }
 
 fn blake2b8(payload: &[u8]) -> [u8; 8] {
@@ -254,6 +304,308 @@ pub fn apply_history_penalties(
     Ok(adjusted)
 }
 
+/// Add output-head steering adjustments to an owned policy-logit vector.
+///
+/// Python still computes the adjustment vector through the active model
+/// backend. This kernel only applies the already-computed full-vocabulary
+/// values, preserving the same order as `PolicyCalculations`.
+pub fn apply_activation_adjustments(
+    logits: &[f64],
+    activation_adjustments: &[f64],
+    strength: f64,
+) -> SamplingResult<Vec<f64>> {
+    let mut adjusted = validated_logits(logits)?;
+    if !strength.is_finite() {
+        return Err(SamplingError::value(
+            "output-head steering strength must be finite",
+        ));
+    }
+    if activation_adjustments.len() != adjusted.len() {
+        return Err(SamplingError::value(
+            "output-head steering adjustments do not match the policy vocabulary",
+        ));
+    }
+    if activation_adjustments
+        .iter()
+        .any(|value| !value.is_finite())
+    {
+        return Err(SamplingError::value(
+            "output-head steering adjustments must be finite",
+        ));
+    }
+    for (value, adjustment) in adjusted.iter_mut().zip(activation_adjustments) {
+        *value += strength * adjustment;
+    }
+    if adjusted.iter().any(|value| !value.is_finite()) {
+        return Err(SamplingError::value(
+            "output-head steering produced non-finite policy logits",
+        ));
+    }
+    Ok(adjusted)
+}
+
+/// Add sparse per-decision token biases to an owned policy-logit vector.
+pub fn apply_ephemeral_biases(
+    logits: &[f64],
+    ephemeral_biases: &[(i64, f64)],
+) -> SamplingResult<Vec<f64>> {
+    let mut adjusted = validated_logits(logits)?;
+    for (token_id, amount) in ephemeral_biases {
+        let index = usize::try_from(*token_id)
+            .ok()
+            .filter(|index| *index < adjusted.len())
+            .ok_or_else(|| SamplingError::value("ephemeral logit biases are invalid"))?;
+        if !amount.is_finite() {
+            return Err(SamplingError::value("ephemeral logit biases are invalid"));
+        }
+        adjusted[index] += amount;
+    }
+    if adjusted.iter().any(|value| !value.is_finite()) {
+        return Err(SamplingError::value(
+            "ephemeral logit biases produced non-finite policy logits",
+        ));
+    }
+    Ok(adjusted)
+}
+
+/// Combine conditional and unconditional logits using classifier-free guidance.
+pub fn cfg_combine_logits(
+    conditional_logits: &[f64],
+    unconditional_logits: &[f64],
+    scale: f64,
+) -> SamplingResult<Vec<f64>> {
+    let conditional = validated_logits(conditional_logits)?;
+    if unconditional_logits.len() != conditional.len()
+        || unconditional_logits.iter().any(|value| !value.is_finite())
+    {
+        return Err(SamplingError::value(
+            "CFG conditional and unconditional logits must be finite vectors with matching vocabulary",
+        ));
+    }
+    if !scale.is_finite() || scale < 0.0 {
+        return Err(SamplingError::editor(
+            "cfg_scale must be a finite nonnegative number",
+        ));
+    }
+    let adjusted: Vec<f64> = unconditional_logits
+        .iter()
+        .zip(conditional)
+        .map(|(unconditional, conditional)| unconditional + scale * (conditional - unconditional))
+        .collect();
+    if adjusted.iter().any(|value| !value.is_finite()) {
+        return Err(SamplingError::value("CFG produced non-finite logits"));
+    }
+    Ok(adjusted)
+}
+
+fn route_ends_with(history: &[i64], prefix: &[i64]) -> bool {
+    history.len() >= prefix.len() && &history[history.len() - prefix.len()..] == prefix
+}
+
+fn validate_bias_inputs(groups: &[BiasGroup], token_biases: &[BiasToken]) -> SamplingResult<()> {
+    for token in token_biases {
+        if token.token_id < 0 {
+            return Err(SamplingError::value(
+                "bias token ID must address the decoder vocabulary",
+            ));
+        }
+        if !token.bias.is_finite() {
+            return Err(SamplingError::editor("token bias amount must be finite"));
+        }
+    }
+    for group in groups {
+        if !group.bias.is_finite() {
+            return Err(SamplingError::editor("bias group amount must be finite"));
+        }
+        for member in &group.members {
+            for route in &member.routes {
+                if route.token_ids.is_empty()
+                    || route.token_ids.iter().any(|token_id| *token_id < 0)
+                    || route.surfaces.is_empty()
+                    || route.surfaces.iter().any(String::is_empty)
+                {
+                    return Err(SamplingError::value(
+                        "bias route must contain nonnegative token IDs and nonempty surfaces",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn contribution_route_identity(contribution: &BiasContribution) -> Vec<(String, bool, Vec<i64>)> {
+    contribution
+        .member_routes
+        .iter()
+        .map(|member_route| {
+            (
+                member_route.member_text.clone(),
+                member_route.member_literal,
+                member_route.route.token_ids.clone(),
+            )
+        })
+        .collect()
+}
+
+/// Return stable, attributable direct and grouped bias sources.
+///
+/// A group's amount is emitted once for each target token, even if several
+/// member routes in that group reach the same target. Multi-token routes need
+/// exact history because their activation depends on the preceding token IDs.
+pub fn bias_contributions(
+    groups: &[BiasGroup],
+    token_biases: &[BiasToken],
+    history: Option<&[i64]>,
+    include_inactive: bool,
+) -> SamplingResult<Vec<BiasContribution>> {
+    validate_bias_inputs(groups, token_biases)?;
+    if history.is_none()
+        && groups.iter().any(|group| {
+            group.bias != 0.0
+                && group
+                    .members
+                    .iter()
+                    .flat_map(|member| &member.routes)
+                    .any(|route| route.token_ids.len() > 1)
+        })
+    {
+        return Err(SamplingError::editor(
+            "multi-token group biases require exact context token IDs",
+        ));
+    }
+
+    let empty_history = [];
+    let history = history.unwrap_or(&empty_history);
+    let mut contributions = Vec::new();
+
+    for token in token_biases {
+        if token.bias != 0.0 {
+            contributions.push(BiasContribution {
+                token_id: token.token_id,
+                amount: token.bias,
+                active: true,
+                source: format!("token #{}", token.token_id),
+                group_name: None,
+                member_routes: Vec::new(),
+            });
+        }
+    }
+
+    for group in groups {
+        if group.bias == 0.0 {
+            continue;
+        }
+        let mut routes_by_target = BTreeMap::<i64, Vec<BiasMemberRoute>>::new();
+        for member in &group.members {
+            for route in &member.routes {
+                let target = *route.token_ids.last().ok_or_else(|| {
+                    SamplingError::value("bias routes must contain at least one token ID")
+                })?;
+                let prefix = &route.token_ids[..route.token_ids.len() - 1];
+                routes_by_target
+                    .entry(target)
+                    .or_default()
+                    .push(BiasMemberRoute {
+                        member_text: member.text.clone(),
+                        member_literal: member.literal,
+                        route: route.clone(),
+                        active: route_ends_with(history, prefix),
+                    });
+            }
+        }
+        for (token_id, member_routes) in routes_by_target {
+            let active = member_routes.iter().any(|member_route| member_route.active);
+            if active || include_inactive {
+                contributions.push(BiasContribution {
+                    token_id,
+                    amount: group.bias,
+                    active,
+                    source: format!("group '{}'", group.name),
+                    group_name: Some(group.name.clone()),
+                    member_routes,
+                });
+            }
+        }
+    }
+
+    contributions.sort_by(|left, right| {
+        left.token_id
+            .cmp(&right.token_id)
+            .then_with(|| left.source.cmp(&right.source))
+            .then_with(|| {
+                contribution_route_identity(left).cmp(&contribution_route_identity(right))
+            })
+    });
+    Ok(contributions)
+}
+
+/// Sum active sources once per group and target token.
+pub fn active_biases(
+    groups: &[BiasGroup],
+    token_biases: &[BiasToken],
+    history: Option<&[i64]>,
+) -> SamplingResult<BTreeMap<i64, f64>> {
+    let mut totals = BTreeMap::<i64, f64>::new();
+    for contribution in bias_contributions(groups, token_biases, history, false)? {
+        if contribution.active {
+            *totals.entry(contribution.token_id).or_default() += contribution.amount;
+        }
+    }
+    Ok(totals)
+}
+
+/// Return an owned policy-logit vector with active token biases applied.
+pub fn apply_biases(
+    logits: &[f64],
+    groups: &[BiasGroup],
+    token_biases: &[BiasToken],
+    history: Option<&[i64]>,
+) -> SamplingResult<Vec<f64>> {
+    let mut adjusted = validated_logits(logits)?;
+    validate_bias_inputs(groups, token_biases)?;
+    if let Some(history) = history
+        && history
+            .iter()
+            .any(|token_id| usize::try_from(*token_id).map_or(true, |id| id >= logits.len()))
+    {
+        return Err(SamplingError::value(
+            "history token ids must address the decoder vocabulary",
+        ));
+    }
+    for route in groups
+        .iter()
+        .flat_map(|group| &group.members)
+        .flat_map(|member| &member.routes)
+    {
+        if route
+            .token_ids
+            .iter()
+            .any(|token_id| usize::try_from(*token_id).map_or(true, |id| id >= logits.len()))
+        {
+            return Err(SamplingError::value(
+                "bias token id is outside the decoder vocabulary",
+            ));
+        }
+    }
+
+    for (token_id, amount) in active_biases(groups, token_biases, history)? {
+        let index = usize::try_from(token_id)
+            .ok()
+            .filter(|index| *index < adjusted.len())
+            .ok_or_else(|| {
+                SamplingError::value("bias token id is outside the decoder vocabulary")
+            })?;
+        adjusted[index] += amount;
+    }
+    if adjusted.iter().any(|value| !value.is_finite()) {
+        return Err(SamplingError::value(
+            "biases produced non-finite policy logits",
+        ));
+    }
+    Ok(adjusted)
+}
+
 pub fn softmax(values: &[f64]) -> SamplingResult<Vec<f64>> {
     if values.is_empty() || values.iter().any(|value| !value.is_finite()) {
         return Err(SamplingError::value(
@@ -315,6 +667,247 @@ pub fn rank(values: &[f64], token_id: i64) -> SamplingResult<usize> {
         .filter(|value| **value == target)
         .count();
     Ok(1 + higher + tied_before)
+}
+
+fn pairwise_sum(values: &[f64]) -> f64 {
+    if values.len() <= 16 {
+        return values.iter().sum();
+    }
+    let middle = values.len() / 2;
+    pairwise_sum(&values[..middle]) + pairwise_sum(&values[middle..])
+}
+
+/// Lazy raw/policy evidence metrics over two owned logit vectors.
+///
+/// `policy_logits: None` means the policy surface is the raw surface. An
+/// explicit vector keeps its own normalization cache even when its values
+/// happen to equal the raw logits, matching the production identity boundary.
+#[derive(Clone, Debug)]
+pub struct PolicyMetrics {
+    raw_logits: Vec<f64>,
+    policy_logits: Vec<f64>,
+    policy_shares_raw: bool,
+    raw_maximum: Option<f64>,
+    raw_normalization: Option<(f64, f64, f64)>,
+    policy_normalization: Option<(f64, f64, f64)>,
+    logit_mean_std: Option<Option<(f64, f64)>>,
+    raw_ordered: Vec<i64>,
+    policy_ordered: Vec<i64>,
+}
+
+impl PolicyMetrics {
+    pub fn new(raw_logits: &[f64], policy_logits: Option<&[f64]>) -> SamplingResult<Self> {
+        let raw_logits = validated_logits(raw_logits)?;
+        let policy_shares_raw = policy_logits.is_none();
+        let policy_logits = match policy_logits {
+            None => raw_logits.clone(),
+            Some(values) => {
+                let values = validated_logits(values)?;
+                if values.len() != raw_logits.len() {
+                    return Err(SamplingError::value(
+                        "adjusted logits must match the decoder vocabulary",
+                    ));
+                }
+                values
+            }
+        };
+        Ok(Self {
+            raw_logits,
+            policy_logits,
+            policy_shares_raw,
+            raw_maximum: None,
+            raw_normalization: None,
+            policy_normalization: None,
+            logit_mean_std: None,
+            raw_ordered: Vec::new(),
+            policy_ordered: Vec::new(),
+        })
+    }
+
+    fn token_index(&self, token_id: i64) -> SamplingResult<usize> {
+        usize::try_from(token_id)
+            .ok()
+            .filter(|index| *index < self.raw_logits.len())
+            .ok_or_else(|| SamplingError::value("token id is outside the decoder vocabulary"))
+    }
+
+    fn indices(&self, token_ids: &[i64]) -> SamplingResult<Vec<usize>> {
+        token_ids
+            .iter()
+            .map(|token_id| self.token_index(*token_id))
+            .collect()
+    }
+
+    fn normalization(values: &[f64], failure_message: &str) -> SamplingResult<(f64, f64, f64)> {
+        let maximum = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let exponentials: Vec<f64> = values.iter().map(|value| (value - maximum).exp()).collect();
+        let denominator = pairwise_sum(&exponentials);
+        if denominator <= 0.0 || !denominator.is_finite() {
+            return Err(SamplingError::value(failure_message));
+        }
+        Ok((maximum, denominator, maximum + denominator.ln()))
+    }
+
+    fn raw_normalization(&mut self) -> SamplingResult<(f64, f64, f64)> {
+        if let Some(values) = self.raw_normalization {
+            return Ok(values);
+        }
+        let values = Self::normalization(&self.raw_logits, "model soft-max normalization failed")?;
+        self.raw_maximum = Some(values.0);
+        self.raw_normalization = Some(values);
+        if self.policy_shares_raw {
+            self.policy_normalization = Some(values);
+        }
+        Ok(values)
+    }
+
+    fn policy_normalization(&mut self) -> SamplingResult<(f64, f64, f64)> {
+        if let Some(values) = self.policy_normalization {
+            return Ok(values);
+        }
+        if self.policy_shares_raw {
+            return self.raw_normalization();
+        }
+        let values =
+            Self::normalization(&self.policy_logits, "policy soft-max normalization failed")?;
+        self.policy_normalization = Some(values);
+        Ok(values)
+    }
+
+    /// Top raw logit; this does not calculate a vocabulary-wide soft-max.
+    pub fn maximum(&mut self) -> f64 {
+        *self.raw_maximum.get_or_insert_with(|| {
+            self.raw_logits
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max)
+        })
+    }
+
+    pub fn denominator(&mut self) -> SamplingResult<f64> {
+        Ok(self.raw_normalization()?.1)
+    }
+
+    pub fn log_z(&mut self) -> SamplingResult<f64> {
+        Ok(self.raw_normalization()?.2)
+    }
+
+    pub fn raw_probabilities(&mut self, token_ids: &[i64]) -> SamplingResult<Vec<f64>> {
+        let indices = self.indices(token_ids)?;
+        if indices.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (maximum, denominator, _) = self.raw_normalization()?;
+        Ok(indices
+            .into_iter()
+            .map(|index| (self.raw_logits[index] - maximum).exp() / denominator)
+            .collect())
+    }
+
+    pub fn policy_probabilities(&mut self, token_ids: &[i64]) -> SamplingResult<Vec<f64>> {
+        let indices = self.indices(token_ids)?;
+        if indices.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.policy_shares_raw {
+            return self.raw_probabilities(token_ids);
+        }
+        let (maximum, denominator, _) = self.policy_normalization()?;
+        Ok(indices
+            .into_iter()
+            .map(|index| (self.policy_logits[index] - maximum).exp() / denominator)
+            .collect())
+    }
+
+    pub fn raw_nll(&mut self, token_id: i64) -> SamplingResult<f64> {
+        let index = self.token_index(token_id)?;
+        Ok(self.log_z()? - self.raw_logits[index])
+    }
+
+    pub fn raw_rank(&self, token_id: i64) -> SamplingResult<usize> {
+        let index = self.token_index(token_id)?;
+        rank(&self.raw_logits, index as i64)
+    }
+
+    pub fn policy_rank(&self, token_id: i64) -> SamplingResult<usize> {
+        let index = self.token_index(token_id)?;
+        rank(&self.policy_logits, index as i64)
+    }
+
+    fn slice_len(length: usize, count: i64) -> usize {
+        if count >= 0 {
+            usize::try_from(count).unwrap_or(usize::MAX).min(length)
+        } else {
+            length.saturating_sub(usize::try_from(count.unsigned_abs()).unwrap_or(usize::MAX))
+        }
+    }
+
+    pub fn top_raw_ids(&mut self, count: i64) -> SamplingResult<Vec<i64>> {
+        if count > self.raw_ordered.len() as i64 {
+            self.raw_ordered = top_ids(&self.raw_logits, count)?;
+        }
+        let length = Self::slice_len(self.raw_ordered.len(), count);
+        Ok(self.raw_ordered[..length].to_vec())
+    }
+
+    pub fn top_policy_ids(&mut self, count: i64) -> SamplingResult<Vec<i64>> {
+        if self.policy_shares_raw {
+            return self.top_raw_ids(count);
+        }
+        if count > self.policy_ordered.len() as i64 {
+            self.policy_ordered = top_ids(&self.policy_logits, count)?;
+        }
+        let length = Self::slice_len(self.policy_ordered.len(), count);
+        Ok(self.policy_ordered[..length].to_vec())
+    }
+
+    fn ensure_logit_mean_std(&mut self) -> Option<(f64, f64)> {
+        if let Some(values) = self.logit_mean_std {
+            return values;
+        }
+        let count = self.raw_logits.len() as f64;
+        let mean = pairwise_sum(&self.raw_logits) / count;
+        let squared_deviations: Vec<f64> = self
+            .raw_logits
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .collect();
+        let std = (pairwise_sum(&squared_deviations) / count).sqrt();
+        let result = if mean.is_finite() && std.is_finite() && std >= 1e-12 {
+            Some((mean, std))
+        } else {
+            None
+        };
+        self.logit_mean_std = Some(result);
+        result
+    }
+
+    pub fn logit_z(&mut self, token_id: i64) -> SamplingResult<Option<f64>> {
+        let index = self.token_index(token_id)?;
+        Ok(self
+            .ensure_logit_mean_std()
+            .map(|(mean, std)| (self.raw_logits[index] - mean) / std))
+    }
+
+    pub fn logit_z_scores(&mut self, token_ids: &[i64]) -> SamplingResult<Vec<Option<f64>>> {
+        let indices = self.indices(token_ids)?;
+        if indices.is_empty() {
+            return Ok(Vec::new());
+        }
+        let stats = self.ensure_logit_mean_std();
+        Ok(indices
+            .into_iter()
+            .map(|index| stats.map(|(mean, std)| (self.raw_logits[index] - mean) / std))
+            .collect())
+    }
+
+    pub fn raw_logsumexp_ready(&self) -> bool {
+        self.raw_normalization.is_some()
+    }
+
+    pub fn logit_mean_std_ready(&self) -> bool {
+        self.logit_mean_std.is_some()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1216,6 +1809,82 @@ mod python {
 
     create_exception!(_native, NativeEditorError, PyValueError);
 
+    #[pyclass(name = "PolicyMetricsNative")]
+    struct PyPolicyMetrics {
+        inner: PolicyMetrics,
+    }
+
+    #[pymethods]
+    impl PyPolicyMetrics {
+        #[new]
+        fn new(raw_logits: Vec<f64>, policy_logits: Option<Vec<f64>>) -> PyResult<Self> {
+            Ok(Self {
+                inner: PolicyMetrics::new(&raw_logits, policy_logits.as_deref())
+                    .map_err(into_pyerr)?,
+            })
+        }
+
+        fn maximum(&mut self) -> f64 {
+            self.inner.maximum()
+        }
+
+        fn denominator(&mut self) -> PyResult<f64> {
+            self.inner.denominator().map_err(into_pyerr)
+        }
+
+        fn log_z(&mut self) -> PyResult<f64> {
+            self.inner.log_z().map_err(into_pyerr)
+        }
+
+        fn raw_probabilities(&mut self, token_ids: Vec<i64>) -> PyResult<Vec<f64>> {
+            self.inner.raw_probabilities(&token_ids).map_err(into_pyerr)
+        }
+
+        fn policy_probabilities(&mut self, token_ids: Vec<i64>) -> PyResult<Vec<f64>> {
+            self.inner
+                .policy_probabilities(&token_ids)
+                .map_err(into_pyerr)
+        }
+
+        fn raw_nll(&mut self, token_id: i64) -> PyResult<f64> {
+            self.inner.raw_nll(token_id).map_err(into_pyerr)
+        }
+
+        fn raw_rank(&self, token_id: i64) -> PyResult<usize> {
+            self.inner.raw_rank(token_id).map_err(into_pyerr)
+        }
+
+        fn policy_rank(&self, token_id: i64) -> PyResult<usize> {
+            self.inner.policy_rank(token_id).map_err(into_pyerr)
+        }
+
+        fn top_raw_ids(&mut self, count: i64) -> PyResult<Vec<i64>> {
+            self.inner.top_raw_ids(count).map_err(into_pyerr)
+        }
+
+        fn top_policy_ids(&mut self, count: i64) -> PyResult<Vec<i64>> {
+            self.inner.top_policy_ids(count).map_err(into_pyerr)
+        }
+
+        fn logit_z(&mut self, token_id: i64) -> PyResult<Option<f64>> {
+            self.inner.logit_z(token_id).map_err(into_pyerr)
+        }
+
+        fn logit_z_scores(&mut self, token_ids: Vec<i64>) -> PyResult<Vec<Option<f64>>> {
+            self.inner.logit_z_scores(&token_ids).map_err(into_pyerr)
+        }
+
+        #[getter]
+        fn raw_logsumexp_ready(&self) -> bool {
+            self.inner.raw_logsumexp_ready()
+        }
+
+        #[getter]
+        fn logit_mean_std_ready(&self) -> bool {
+            self.inner.logit_mean_std_ready()
+        }
+    }
+
     fn into_pyerr(error: SamplingError) -> PyErr {
         match error {
             SamplingError::Editor(message) => NativeEditorError::new_err(message),
@@ -1233,6 +1902,80 @@ mod python {
             probabilities,
             scores,
         }
+    }
+
+    type PyBiasRoute = (Vec<i64>, Vec<String>);
+    type PyBiasMember = (String, bool, Vec<PyBiasRoute>);
+    type PyBiasGroup = (String, f64, Vec<PyBiasMember>);
+    type PyBiasMemberRoute = (String, bool, Vec<i64>, Vec<String>, bool);
+    type PyBiasContribution = (
+        i64,
+        f64,
+        bool,
+        String,
+        Option<String>,
+        Vec<PyBiasMemberRoute>,
+    );
+
+    fn convert_bias_inputs(
+        groups: Vec<PyBiasGroup>,
+        token_biases: Vec<(i64, f64)>,
+    ) -> (Vec<BiasGroup>, Vec<BiasToken>) {
+        let groups = groups
+            .into_iter()
+            .map(|(name, bias, members)| BiasGroup {
+                name,
+                bias,
+                members: members
+                    .into_iter()
+                    .map(|(text, literal, routes)| BiasMember {
+                        text,
+                        literal,
+                        routes: routes
+                            .into_iter()
+                            .map(|(token_ids, surfaces)| BiasRoute {
+                                token_ids,
+                                surfaces,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        let token_biases = token_biases
+            .into_iter()
+            .map(|(token_id, bias)| BiasToken { token_id, bias })
+            .collect();
+        (groups, token_biases)
+    }
+
+    fn convert_bias_contributions(contributions: Vec<BiasContribution>) -> Vec<PyBiasContribution> {
+        contributions
+            .into_iter()
+            .map(|contribution| {
+                let member_routes = contribution
+                    .member_routes
+                    .into_iter()
+                    .map(|member_route| {
+                        (
+                            member_route.member_text,
+                            member_route.member_literal,
+                            member_route.route.token_ids,
+                            member_route.route.surfaces,
+                            member_route.active,
+                        )
+                    })
+                    .collect();
+                (
+                    contribution.token_id,
+                    contribution.amount,
+                    contribution.active,
+                    contribution.source,
+                    contribution.group_name,
+                    member_routes,
+                )
+            })
+            .collect()
     }
 
     #[pyfunction(name = "softmax")]
@@ -1268,6 +2011,72 @@ mod python {
             frequency_penalty,
         )
         .map_err(into_pyerr)
+    }
+
+    #[pyfunction(name = "apply_activation_adjustments")]
+    fn py_apply_activation_adjustments(
+        logits: Vec<f64>,
+        activation_adjustments: Vec<f64>,
+        strength: f64,
+    ) -> PyResult<Vec<f64>> {
+        apply_activation_adjustments(&logits, &activation_adjustments, strength).map_err(into_pyerr)
+    }
+
+    #[pyfunction(name = "apply_ephemeral_biases")]
+    fn py_apply_ephemeral_biases(
+        logits: Vec<f64>,
+        ephemeral_biases: Vec<(i64, f64)>,
+    ) -> PyResult<Vec<f64>> {
+        apply_ephemeral_biases(&logits, &ephemeral_biases).map_err(into_pyerr)
+    }
+
+    #[pyfunction(name = "cfg_combine_logits")]
+    fn py_cfg_combine_logits(
+        conditional_logits: Vec<f64>,
+        unconditional_logits: Vec<f64>,
+        scale: f64,
+    ) -> PyResult<Vec<f64>> {
+        cfg_combine_logits(&conditional_logits, &unconditional_logits, scale).map_err(into_pyerr)
+    }
+
+    #[pyfunction(name = "bias_contributions")]
+    #[allow(clippy::type_complexity)]
+    fn py_bias_contributions(
+        groups: Vec<PyBiasGroup>,
+        token_biases: Vec<(i64, f64)>,
+        history: Option<Vec<i64>>,
+        include_inactive: bool,
+    ) -> PyResult<Vec<PyBiasContribution>> {
+        let (groups, token_biases) = convert_bias_inputs(groups, token_biases);
+        let contributions =
+            bias_contributions(&groups, &token_biases, history.as_deref(), include_inactive)
+                .map_err(into_pyerr)?;
+        Ok(convert_bias_contributions(contributions))
+    }
+
+    #[pyfunction(name = "active_biases")]
+    #[allow(clippy::type_complexity)]
+    fn py_active_biases(
+        groups: Vec<PyBiasGroup>,
+        token_biases: Vec<(i64, f64)>,
+        history: Option<Vec<i64>>,
+    ) -> PyResult<Vec<(i64, f64)>> {
+        let (groups, token_biases) = convert_bias_inputs(groups, token_biases);
+        active_biases(&groups, &token_biases, history.as_deref())
+            .map(|totals| totals.into_iter().collect())
+            .map_err(into_pyerr)
+    }
+
+    #[pyfunction(name = "apply_biases")]
+    #[allow(clippy::type_complexity)]
+    fn py_apply_biases(
+        logits: Vec<f64>,
+        groups: Vec<PyBiasGroup>,
+        token_biases: Vec<(i64, f64)>,
+        history: Option<Vec<i64>>,
+    ) -> PyResult<Vec<f64>> {
+        let (groups, token_biases) = convert_bias_inputs(groups, token_biases);
+        apply_biases(&logits, &groups, &token_biases, history.as_deref()).map_err(into_pyerr)
     }
 
     #[pyfunction(name = "rank")]
@@ -1610,10 +2419,17 @@ mod python {
         module.add("MAX_SEED", MAX_SEED)?;
         module.add("DRAW_KERNELS", DRAW_KERNELS)?;
         module.add("PERTURB_MAX_KERNELS", PERTURB_MAX_KERNELS)?;
+        module.add_class::<PyPolicyMetrics>()?;
         module.add_function(wrap_pyfunction!(py_softmax, module)?)?;
         module.add_function(wrap_pyfunction!(py_top_ids, module)?)?;
         module.add_function(wrap_pyfunction!(py_validated_logits, module)?)?;
         module.add_function(wrap_pyfunction!(py_apply_history_penalties, module)?)?;
+        module.add_function(wrap_pyfunction!(py_apply_activation_adjustments, module)?)?;
+        module.add_function(wrap_pyfunction!(py_apply_ephemeral_biases, module)?)?;
+        module.add_function(wrap_pyfunction!(py_cfg_combine_logits, module)?)?;
+        module.add_function(wrap_pyfunction!(py_bias_contributions, module)?)?;
+        module.add_function(wrap_pyfunction!(py_active_biases, module)?)?;
+        module.add_function(wrap_pyfunction!(py_apply_biases, module)?)?;
         module.add_function(wrap_pyfunction!(py_rank, module)?)?;
         module.add_function(wrap_pyfunction!(py_apply_filter, module)?)?;
         module.add_function(wrap_pyfunction!(py_probability, module)?)?;

@@ -178,5 +178,5 @@ names, avoiding Cargo output collisions in the shared workspace while
 retaining the `rust_sampler` and `rust_episode_history` Python packages.
 
 No inference backend, released package, SQLite path, or production UI changed.
-No speed claim was measured. The work remains uncommitted and unpushed for
-maintainer review.
+No speed claim was measured. This slice is committed on the experiment branch
+and remains outside the released runtime.

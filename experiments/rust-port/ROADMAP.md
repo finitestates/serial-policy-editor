@@ -56,27 +56,39 @@ and compares the authored `choice.ready`, `choice.accepted`, and both
 `choice.resized` geometries. It also retains a negative control that removes
 the proposal row.
 
-### Completed real-model backend boundary probe
+### Real-model backend boundary probe — revalidated 2026-10-03
 
-The implementation and two-profile evidence are recorded in
-[`REAL_MODEL_CHOICE.md`](REAL_MODEL_CHOICE.md); [`NEXT_SLICE.md`](NEXT_SLICE.md)
-preserves the original scope and gates. The slice keeps fixture mode, adds an
-opt-in persistent Python backend worker, and exercises two real-model Choice
-decisions through the Rust process and PTY oracle. Stage 2 remains open for the
-other policy calculations listed below.
+Both local smoke profiles passed with generated-token boundaries 0 and 1.
+The fresh backend rebuilds the exact full prefix by prefilling the prompt and
+then evaluating generated tokens one at a time, matching the live operation
+boundaries. The reports and retained PTY/model evidence are in
+[`REAL_MODEL_CHOICE.md`](REAL_MODEL_CHOICE.md); the original probe scope is
+archived in [`REAL_MODEL_CHOICE_BRIEF.md`](REAL_MODEL_CHOICE_BRIEF.md).
 
-### 2. Move policy calculations
+### 2. Move policy calculations — implemented experiment
 
-Port the non-model-specific numeric policy surface around the sampler:
-history penalties, direct and grouped biases, filter stages, ranks, sparse
-probabilities, and evidence metrics. Treat backend-produced logits and
-model-specific controls as inputs. Preserve lazy calculations where the
-current runtime avoids computing full-vocabulary metrics until requested.
+The isolated sampler crate implements the numeric policy pipeline around
+backend-produced logits: history penalties, output-head activation adjustments,
+direct and grouped biases, ephemeral biases, candidate-filter stages, sparse
+draw probabilities, CFG logit blending, ranks, and lazy evidence metrics. Python
+continues to produce model-dependent output-head adjustments and owns model
+inference, CFG branch positioning, and backend caches.
 
-**Gate:** cover the sampler/action slots in
-[`tests/CORE_CONTRACTS.md`](../../tests/CORE_CONTRACTS.md), including CFG,
-history penalties, grouped biases, tie-breaking, and sampler serialization.
-Compare the production implementation and the independent reference kernel.
+**Gate passed for the numeric policy surface:** shared fixtures are generated
+from `PolicyCalculations` and compared against plain Rust and PyO3 adapter
+paths. Integer IDs, ranks, and filter stages compare exactly; finite numeric
+values use absolute tolerance `1e-14`. The sampler, CFG, and
+vector/backend core contract tests pass. Real-model checks pass for
+GPT-2/Transformers and Llama 3.2 1B/llama.cpp, including numeric CFG with two
+real backend branches and output-head projections. Detailed evidence is in
+[`POLICY_CALCULATIONS_SLICE.md`](POLICY_CALCULATIONS_SLICE.md).
+
+`SamplerConfig` validation/serialization and action/replay serialization remain
+Python-owned compatibility boundaries. The Stage 2 Rust surface consumes
+already-resolved configuration values; it does not introduce Rust config or
+action records. Backend CFG lifecycle remains part of the later episode-runtime
+port. Python production behavior, dependencies, CLI, and release packaging are
+unchanged.
 
 ### 3. Move episode execution and replay
 

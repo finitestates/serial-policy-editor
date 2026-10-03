@@ -1,64 +1,77 @@
-# Completed slice: two real-model Rust Choice turns
+# Real-model Rust Choice boundary probe
 
-**Status:** implemented and validated on 2026-10-02.
+**Status:** revalidated on 2026-10-03 with the corrected pre-0 prompt
+coordinates for both smoke profiles.
 
-## Result
+The fixed prompt remains in the backend prefix and supplies the production
+token-prefix fingerprint. It is outside generated visible history, so the two
+Choice boundaries are `0` and `1`.
 
-The standalone Rust terminal ran two consecutive Choice turns through one
-persistent Python worker for both smoke profiles. Rust calculated candidate
-views and proposals from framed full-vocabulary logits; the worker loaded the
-selected profile through the existing SPE profile loader and production
-backend factory. Both accepted actions used the same Rust submit and typed
-episode-history path as fixture mode.
+## Current result
 
-The live Rust decisions matched the independent Python sampler when both used
-the exact captured live logits. After the live process exited, a fresh backend
-replayed each full prefix. Every fresh proposal matched the Rust-selected
-token. The fresh logit changes below are diagnostic measurements; they did not
-change either sampled token or the top-ten token order.
+The standalone Rust terminal completed two consecutive Choice turns through
+one persistent Python worker for each profile. Rust calculated candidate
+views and proposals from framed full-vocabulary logits. The worker used the
+existing profile loader and production backend factory. Both accepted actions
+used the Rust submit and typed episode-history path from fixture mode.
 
-The saved captures below are historical: that run counted the eight prompt
-tokens as trajectory history and therefore recorded sampling boundaries `8`
-and `9`. The harness now treats the prompt as pre-0 context. Its token-prefix
-SHA-256 remains the 256-bit stream identity, while generated-token history and
-sampling boundaries start at `0` and advance to `1`. This coordinate correction
-was not rerun; the table below continues to describe the original captures.
+The exact live-logit Python oracle and a fresh-backend replay agreed with Rust
+at both boundaries. The fresh replay prefills the exact root prompt, then
+evaluates each captured generated token in its own incremental call. This
+matches the live operation boundaries while rebuilding the complete prefix in
+independent backend state.
 
-| Backend and model | Vocabulary | Sampling boundaries and selected tokens | Fresh-prefix maximum logit delta |
-| --- | ---: | --- | --- |
+| Profile | Vocabulary | Boundary 0 token | Boundary 1 token | Fresh replay max logit delta |
+| --- | ---: | ---: | ---: | ---: |
+| GPT-2 Transformers CPU | 50,257 | 198 | 198 | 0.0; 0.0 |
+| Llama 3.2 1B Q4_K_M CPU | 128,256 | 264 | 47218 | 0.0; 0.0 |
+
+The sampler used temperature 0.8, `top_k: 5`, `top_p: 1.0`, `min_p: 0.0`,
+`typical_p: 1.0`, `tail_free_z: 1.0`, categorical drawing, token-ID
+addressing, and seed 17. Both backends returned float32 logits; the worker
+converted them to f64le for Rust. Rust validated the vector shape, vocabulary
+count, payload length, and finiteness.
+
+The screen oracle checked six frames per profile at 100×30, 80×24, and
+restored 100×30. It derived expected model text and candidate rows from the
+Python backend and sampler, replayed raw PTY bytes with pyte, checked cursors
+and complete cell rows, and rejected the negative control with the proposal
+row removed.
+
+Timing and transfer are boundary diagnostics, not speed comparisons. Totals
+include worker startup and model loading.
+
+| Profile | Backend service wall time | Outside-backend wall time | Round-trip wall time | Total bytes | Logit payload |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| GPT-2 Transformers CPU | 10.162977 s | 0.235573 s | 10.398550 s | 815,623 | 804,112 |
+| Llama 1B Q4_K_M CPU | 1.850043 s | 0.230704 s | 2.080748 s | 2,063,409 | 2,052,096 |
+
+One diagnostic run initially replayed the Llama prefix as a single reset
+batch. The model returned the same candidate IDs but changed logits by up to
+0.323943 and selected 2363 instead of the live token 47218 at boundary 1.
+Replaying the same exact prefix with the root-prefill and one-token continuation
+boundaries removed that batch-shape difference; both fresh decisions then
+matched with zero logit delta. The failed diagnostic artifacts are retained in
+`/tmp/spe-rust-real-model-choice/20261003T133917Z-1826352e/`.
+
+The passing versioned reports retain per-operation timings, request/response
+bytes, source and wire dtypes, model and tokenizer identities, provenance,
+sampler settings, decision semantics, fresh-prefix diagnostics, and artifact
+paths:
+
+- [GPT-2 report](/tmp/spe-rust-real-model-choice/20261003T134408Z-5c03c44d/report.json)
+- [Llama report](/tmp/spe-rust-real-model-choice/20261003T134245Z-bade53c9/report.json)
+
+The saved October 2 captures below are historical: they counted the eight
+prompt tokens as trajectory history and used boundaries 8 and 9. They remain
+unchanged as historical evidence and do not replace the corrected runs above.
+
+| Backend and model | Vocabulary | Historical boundaries and selected tokens | Historical fresh-prefix maximum logit delta |
+| --- | ---: | --- | ---: |
 | Transformers, local GPT-2 | 50,257 | 8 → 198; 9 → 198 | 0.0; 0.000579833984375 |
 | llama.cpp, Llama 3.2 1B Q4_K_M | 128,256 | 8 → 362; 9 → 47218 | 0.0; 0.313051700592041 |
 
-The fixed sampler used temperature 0.8, top_k 5, top_p 1.0, min_p 0.0,
-typical_p 1.0, tail_free_z 1.0, categorical drawing, token-ID addressing,
-and seed 17. Its complete effective settings are in each decision record.
-Both backends returned float32 logits; the worker converted them to f64le for
-Rust. Rust validated the one-dimensional shape, vocabulary element count,
-declared byte count, and finiteness before sampling.
-
-The independent screen oracle passed six frames per profile at 100×30, 80×24,
-and restored 100×30. It derived expected model text and candidate rows from
-the Python backend transcript and sampler, replayed the raw PTY bytes with
-pyte, checked cursors and complete cell rows, and rejected its negative
-control with the proposal row removed. Model-provided control characters were
-rendered as visible <U+....> text.
-
-## Timing and transfer observations
-
-These are boundary diagnostics, not a speed comparison. They include worker
-startup and model loading in the backend and round-trip totals.
-
-| Profile | Backend service wall time | Outside-backend round-trip wall time | Total transferred bytes | Logit payload |
-| --- | ---: | ---: | ---: | ---: |
-| GPT-2 Transformers CPU | 10.095265 s | 0.238585 s | 817,713 | 804,112 |
-| Llama 1B Q4_K_M CPU | 1.847259 s | 0.241856 s | 2,065,487 | 2,052,096 |
-
-The versioned reports retain per-operation service and round-trip times,
-outside-backend time, request/response bytes, source and wire dtypes, model and
-tokenizer identities, provenance, sampler settings, decision semantics,
-fresh-prefix diagnostics, and artifact paths.
-
-## Validation
+## Historical validation before the prompt-coordinate correction
 
 Both optional inference extras were installed into core/.venv, the same
 interpreter used by the runner. From the repository root, the completed
@@ -89,7 +102,9 @@ f64le logit captures:
 - [GPT-2 report](/tmp/spe-rust-real-model-choice/20261002T194714Z-7e9489be/report.json)
 - [Llama report](/tmp/spe-rust-real-model-choice/20261002T194734Z-001c04ff/report.json)
 
-The original acceptance scope and gates are preserved in
-[NEXT_SLICE.md](NEXT_SLICE.md). This probe establishes the tested backend
-process boundary for these two profiles; it does not finish roadmap stage 2,
-select production packaging, or claim a performance gain.
+The original acceptance scope and gates are archived in
+[`REAL_MODEL_CHOICE_BRIEF.md`](REAL_MODEL_CHOICE_BRIEF.md). The direct/grouped
+bias implementation is in [`BIAS_SLICE.md`](BIAS_SLICE.md), and Stage 2 numeric
+policy evidence is in
+[`POLICY_CALCULATIONS_SLICE.md`](POLICY_CALCULATIONS_SLICE.md). This PTY probe
+does not select production packaging or claim a performance gain.

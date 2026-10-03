@@ -20,27 +20,30 @@ cargo clippy --manifest-path experiments/rust-port/Cargo.toml \
 
 | Path | Status | Scope |
 | --- | --- | --- |
-| [`sampler/`](sampler/README.md) | Implemented experiment | Numeric filtering, deterministic draws, and sampler helpers from `core/src/trajectory_editor/core/sampling.py`, plus the history-penalty transform from `core/src/trajectory_editor/core/policy_calculations.py`. |
+| [`sampler/`](sampler/README.md) | Stage 2 numeric policy calculations implemented and validated | Numeric filtering, deterministic draws, history/activation/bias transforms, CFG blending, lazy metrics, and parity adapters. |
 | [`episode-history/`](episode-history/README.md) | Implemented experiment | Typed actions, outcomes, evidence, in-memory history validation/truncation, and sampler updates. |
-| [`terminal-ui/`](terminal-ui/README.md) | PTY smoke, fixture Choice, and real-model boundary probe implemented | Exercise the sampler and history crates in one compiled Rust terminal process, with fixture logits or a persistent Python inference worker. No production Rust UI yet. |
+| [`terminal-ui/`](terminal-ui/README.md) | PTY smoke, fixture Choice, and corrected-boundary real-model probe validated | Exercise the sampler and history crates in one compiled Rust terminal process, with fixture logits or a persistent Python inference worker. No production Rust UI yet. |
 
 The completed deterministic fixture Choice turn is documented in
 [`PRIOR_SLICE.md`](PRIOR_SLICE.md). The sampler's completed history-penalty
 kernel and its evidence are recorded in [`PREVIOUS_AGENT.md`](PREVIOUS_AGENT.md).
-The completed real-model boundary probe is recorded in
-[`REAL_MODEL_CHOICE.md`](REAL_MODEL_CHOICE.md). Its original scope and gates
-remain in [`NEXT_SLICE.md`](NEXT_SLICE.md). The Python bindings remain
-available for parity checks; the terminal binary calls the sampler and
+The corrected real-model results and prior historical runs are in
+[`REAL_MODEL_CHOICE.md`](REAL_MODEL_CHOICE.md), and the original probe scope is
+archived in [`REAL_MODEL_CHOICE_BRIEF.md`](REAL_MODEL_CHOICE_BRIEF.md). The
+direct/grouped bias slice is recorded in [`BIAS_SLICE.md`](BIAS_SLICE.md).
+The completed Stage 2 policy surface is recorded in
+[`POLICY_CALCULATIONS_SLICE.md`](POLICY_CALCULATIONS_SLICE.md). Python bindings
+remain available for parity checks; the terminal binary calls the sampler and
 episode-history kernels as Rust libraries.
 
 ## Direction
 
 The intended destination is a Rust-owned episode runtime and terminal UI.
 Model-specific inference can remain behind Python adapters for Transformers
-and existing llama.cpp bindings while that provides value. The PTY smoke and
-fixture-backed Choice turn and two-profile real-model boundary probe are
-implemented. Stage 2 remains open for the other policy calculations, and this
-probe does not decide the eventual process packaging.
+and existing llama.cpp bindings while that provides value. The Stage 2
+numeric policy surface passes both local real-model profiles at boundaries 0
+and 1. Python remains the released runtime, and these experiments do not decide
+the eventual process packaging. Stage 3 moves episode execution and replay.
 
 See [`ROADMAP.md`](ROADMAP.md) for migration order, boundaries, and gates. The
 PTY smoke contract is in [`terminal-ui/README.md`](terminal-ui/README.md).

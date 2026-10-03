@@ -581,8 +581,8 @@ impl ChoiceState {
         });
         self.history = EpisodeHistory::new(attempts).map_err(invalid_data)?;
         if self.is_real_model {
-            let worker = worker
-                .ok_or_else(|| invalid_data("real-model Choice has no backend worker"))?;
+            let worker =
+                worker.ok_or_else(|| invalid_data("real-model Choice has no backend worker"))?;
             if !candidate.is_eog {
                 worker.eval(&[selected_token_id])?;
             }

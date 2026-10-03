@@ -99,4 +99,5 @@ PYTHONPATH=core/src core/.venv/bin/python -m pytest -q \
 
 `uv` was unavailable, so the built wheel was installed with the pip fallback
 documented in `experiments/rust-port/sampler/README.md`. No speed claim was
-measured. The changes remain uncommitted for maintainer review.
+measured. This slice is committed on the experiment branch and remains outside
+the released runtime.

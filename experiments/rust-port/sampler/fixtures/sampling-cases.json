@@ -1,4 +1,1120 @@
 {
+  "activation_kernel_cases": [
+    {
+      "adjustments": [
+        0.5,
+        -1.0,
+        2.0
+      ],
+      "expected": [
+        1.125,
+        -2.25,
+        3.5
+      ],
+      "logits": [
+        1.0,
+        -2.0,
+        3.0
+      ],
+      "name": "positive-strength",
+      "strength": 0.25
+    },
+    {
+      "adjustments": [
+        0.5,
+        -1.0,
+        2.0
+      ],
+      "expected": [
+        0.75,
+        -1.5,
+        2.0
+      ],
+      "logits": [
+        1.0,
+        -2.0,
+        3.0
+      ],
+      "name": "negative-strength",
+      "strength": -0.5
+    },
+    {
+      "adjustments": [
+        0.5,
+        -1.0,
+        2.0
+      ],
+      "expected": [
+        1.0,
+        -2.0,
+        3.0
+      ],
+      "logits": [
+        1.0,
+        -2.0,
+        3.0
+      ],
+      "name": "zero-strength",
+      "strength": 0.0
+    }
+  ],
+  "adjustment_cases": [
+    {
+      "activation_adjustments": [
+        0.0,
+        0.5,
+        -0.5,
+        1.0,
+        -1.0
+      ],
+      "config": {
+        "bias_groups": [
+          {
+            "bias": 0.75,
+            "members": [
+              {
+                "literal": false,
+                "routes": [
+                  {
+                    "surfaces": [
+                      "target"
+                    ],
+                    "token_ids": [
+                      0,
+                      1,
+                      2
+                    ]
+                  }
+                ],
+                "text": "target"
+              }
+            ],
+            "name": "phrase"
+          }
+        ],
+        "cfg_prefix_tokens": 0,
+        "cfg_scale": 1.0,
+        "cfg_unconditional_prompt": null,
+        "draw_kernel": "categorical",
+        "frequency_penalty": 0.25,
+        "gaussian_noise_std": 1.0,
+        "gumbel_noise_address": "token-id",
+        "gumbel_noise_scale": 1.0,
+        "gumbel_top_k": null,
+        "history_scope": "model-visible-prefix-tail-v1",
+        "min_p": 0.0,
+        "perturb_noise_std": 1.0,
+        "policy_scheme": "spe-history-aware-decoder-policy-v1",
+        "presence_penalty": 0.5,
+        "repeat_last_n": -1,
+        "repeat_penalty": 2.0,
+        "rng_scheme": "blake2b64-token-prefix-quantile-v2",
+        "seed": 12345,
+        "steering_digest": "",
+        "steering_kind": "output-head-steering-vector",
+        "steering_layer_end": null,
+        "steering_layer_start": null,
+        "steering_position": "current",
+        "steering_strength": 0.5,
+        "steering_vector": [
+          1.0
+        ],
+        "student_t_df": 3.0,
+        "tail_free_z": 1.0,
+        "temperature": 1.0,
+        "token_biases": [
+          {
+            "bias": 0.25,
+            "token_id": 3
+          }
+        ],
+        "top_k": null,
+        "top_p": 1.0,
+        "typical_p": 1.0
+      },
+      "ephemeral_biases": {
+        "2": -0.75,
+        "4": 0.5
+      },
+      "expected": {
+        "adjusted_logits": [
+          0.0,
+          0.0,
+          0.25,
+          -0.25,
+          3.0
+        ],
+        "policy_ranks": [
+          3,
+          4,
+          2,
+          5,
+          1
+        ],
+        "raw_ranks": [
+          2,
+          3,
+          4,
+          5,
+          1
+        ]
+      },
+      "history_token_ids": [
+        0,
+        0,
+        1
+      ],
+      "logits": [
+        2.0,
+        1.0,
+        0.5,
+        -1.0,
+        3.0
+      ],
+      "name": "ordered-history-activation-grouped-direct-ephemeral"
+    },
+    {
+      "activation_adjustments": null,
+      "config": {
+        "cfg_prefix_tokens": 0,
+        "cfg_scale": 1.0,
+        "cfg_unconditional_prompt": null,
+        "draw_kernel": "categorical",
+        "frequency_penalty": 0.0,
+        "gaussian_noise_std": 1.0,
+        "gumbel_noise_address": "token-id",
+        "gumbel_noise_scale": 1.0,
+        "gumbel_top_k": null,
+        "history_scope": "model-visible-prefix-tail-v1",
+        "min_p": 0.0,
+        "perturb_noise_std": 1.0,
+        "policy_scheme": "spe-history-aware-decoder-policy-v1",
+        "presence_penalty": 0.0,
+        "repeat_last_n": 64,
+        "repeat_penalty": 1.0,
+        "rng_scheme": "blake2b64-token-prefix-quantile-v2",
+        "seed": 12345,
+        "student_t_df": 3.0,
+        "tail_free_z": 1.0,
+        "temperature": 1.0,
+        "top_k": null,
+        "top_p": 1.0,
+        "typical_p": 1.0
+      },
+      "ephemeral_biases": {},
+      "expected": {
+        "adjusted_logits": [
+          1.0,
+          0.0,
+          -1.0
+        ],
+        "policy_ranks": [
+          1,
+          2,
+          3
+        ],
+        "raw_ranks": [
+          1,
+          2,
+          3
+        ]
+      },
+      "history_token_ids": [
+        1
+      ],
+      "logits": [
+        1.0,
+        0.0,
+        -1.0
+      ],
+      "name": "inactive-activation-and-empty-ephemeral"
+    }
+  ],
+  "bias_cases": [
+    {
+      "bias_groups": [
+        {
+          "bias": 2.5,
+          "members": [
+            {
+              "literal": false,
+              "routes": [
+                {
+                  "surfaces": [
+                    "steamship"
+                  ],
+                  "token_ids": [
+                    1,
+                    2,
+                    3
+                  ]
+                }
+              ],
+              "text": "steamship"
+            },
+            {
+              "literal": false,
+              "routes": [
+                {
+                  "surfaces": [
+                    "steamship suffix"
+                  ],
+                  "token_ids": [
+                    2,
+                    3
+                  ]
+                }
+              ],
+              "text": "steamship suffix"
+            },
+            {
+              "literal": false,
+              "routes": [
+                {
+                  "surfaces": [
+                    "inactive route"
+                  ],
+                  "token_ids": [
+                    9,
+                    3
+                  ]
+                }
+              ],
+              "text": "inactive route"
+            }
+          ],
+          "name": "nautical"
+        },
+        {
+          "bias": 2.25,
+          "members": [
+            {
+              "literal": false,
+              "routes": [
+                {
+                  "surfaces": [
+                    "steamship"
+                  ],
+                  "token_ids": [
+                    1,
+                    2,
+                    3
+                  ]
+                }
+              ],
+              "text": "steamship"
+            }
+          ],
+          "name": "ships"
+        },
+        {
+          "bias": 0.5,
+          "members": [
+            {
+              "literal": false,
+              "routes": [
+                {
+                  "surfaces": [
+                    "quiet phrase"
+                  ],
+                  "token_ids": [
+                    1,
+                    4
+                  ]
+                }
+              ],
+              "text": "quiet phrase"
+            },
+            {
+              "literal": false,
+              "routes": [
+                {
+                  "surfaces": [
+                    "single token"
+                  ],
+                  "token_ids": [
+                    5
+                  ]
+                }
+              ],
+              "text": "single token"
+            }
+          ],
+          "name": "spare"
+        }
+      ],
+      "expected": {
+        "active_biases": [
+          [
+            3,
+            6.0
+          ],
+          [
+            5,
+            0.5
+          ]
+        ],
+        "adjusted_logits": [
+          4.0,
+          3.0,
+          2.0,
+          6.0,
+          -1.0,
+          1.5,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "contributions": [
+          {
+            "active": true,
+            "amount": 2.5,
+            "group_name": "nautical",
+            "member_routes": [
+              {
+                "active": true,
+                "member_literal": false,
+                "member_text": "steamship",
+                "route": {
+                  "surfaces": [
+                    "steamship"
+                  ],
+                  "token_ids": [
+                    1,
+                    2,
+                    3
+                  ]
+                }
+              },
+              {
+                "active": true,
+                "member_literal": false,
+                "member_text": "steamship suffix",
+                "route": {
+                  "surfaces": [
+                    "steamship suffix"
+                  ],
+                  "token_ids": [
+                    2,
+                    3
+                  ]
+                }
+              },
+              {
+                "active": false,
+                "member_literal": false,
+                "member_text": "inactive route",
+                "route": {
+                  "surfaces": [
+                    "inactive route"
+                  ],
+                  "token_ids": [
+                    9,
+                    3
+                  ]
+                }
+              }
+            ],
+            "source": "group 'nautical'",
+            "token_id": 3
+          },
+          {
+            "active": true,
+            "amount": 2.25,
+            "group_name": "ships",
+            "member_routes": [
+              {
+                "active": true,
+                "member_literal": false,
+                "member_text": "steamship",
+                "route": {
+                  "surfaces": [
+                    "steamship"
+                  ],
+                  "token_ids": [
+                    1,
+                    2,
+                    3
+                  ]
+                }
+              }
+            ],
+            "source": "group 'ships'",
+            "token_id": 3
+          },
+          {
+            "active": true,
+            "amount": 1.25,
+            "group_name": null,
+            "member_routes": [],
+            "source": "token #3",
+            "token_id": 3
+          },
+          {
+            "active": false,
+            "amount": 0.5,
+            "group_name": "spare",
+            "member_routes": [
+              {
+                "active": false,
+                "member_literal": false,
+                "member_text": "quiet phrase",
+                "route": {
+                  "surfaces": [
+                    "quiet phrase"
+                  ],
+                  "token_ids": [
+                    1,
+                    4
+                  ]
+                }
+              }
+            ],
+            "source": "group 'spare'",
+            "token_id": 4
+          },
+          {
+            "active": true,
+            "amount": 0.5,
+            "group_name": "spare",
+            "member_routes": [
+              {
+                "active": true,
+                "member_literal": false,
+                "member_text": "single token",
+                "route": {
+                  "surfaces": [
+                    "single token"
+                  ],
+                  "token_ids": [
+                    5
+                  ]
+                }
+              }
+            ],
+            "source": "group 'spare'",
+            "token_id": 5
+          }
+        ],
+        "policy_ranks": [
+          2,
+          3,
+          4,
+          1,
+          10,
+          5,
+          6,
+          7,
+          8,
+          9
+        ],
+        "raw_ranks": [
+          1,
+          2,
+          3,
+          5,
+          10,
+          4,
+          6,
+          7,
+          8,
+          9
+        ]
+      },
+      "history_token_ids": [
+        1,
+        2
+      ],
+      "include_inactive": true,
+      "logits": [
+        4.0,
+        3.0,
+        2.0,
+        0.0,
+        -1.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "overlapping-direct-and-grouped-routes",
+      "token_biases": [
+        {
+          "bias": 1.25,
+          "token_id": 3
+        }
+      ]
+    },
+    {
+      "bias_groups": [
+        {
+          "bias": 0.75,
+          "members": [
+            {
+              "literal": false,
+              "routes": [
+                {
+                  "surfaces": [
+                    "full phrase"
+                  ],
+                  "token_ids": [
+                    1,
+                    2,
+                    4
+                  ]
+                }
+              ],
+              "text": "full phrase"
+            },
+            {
+              "literal": false,
+              "routes": [
+                {
+                  "surfaces": [
+                    "wrong final prefix"
+                  ],
+                  "token_ids": [
+                    2,
+                    5
+                  ]
+                }
+              ],
+              "text": "wrong final prefix"
+            },
+            {
+              "literal": false,
+              "routes": [
+                {
+                  "surfaces": [
+                    "one-token phrase"
+                  ],
+                  "token_ids": [
+                    1,
+                    6
+                  ]
+                }
+              ],
+              "text": "one-token phrase"
+            },
+            {
+              "literal": false,
+              "routes": [
+                {
+                  "surfaces": [
+                    "unconditional token"
+                  ],
+                  "token_ids": [
+                    7
+                  ]
+                }
+              ],
+              "text": "unconditional token"
+            }
+          ],
+          "name": "phrases"
+        }
+      ],
+      "expected": {
+        "active_biases": [
+          [
+            0,
+            0.25
+          ],
+          [
+            6,
+            0.75
+          ],
+          [
+            7,
+            0.75
+          ]
+        ],
+        "adjusted_logits": [
+          0.25,
+          1.0,
+          2.0,
+          3.0,
+          4.0,
+          5.0,
+          6.75,
+          7.75
+        ],
+        "contributions": [
+          {
+            "active": true,
+            "amount": 0.25,
+            "group_name": null,
+            "member_routes": [],
+            "source": "token #0",
+            "token_id": 0
+          },
+          {
+            "active": false,
+            "amount": 0.75,
+            "group_name": "phrases",
+            "member_routes": [
+              {
+                "active": false,
+                "member_literal": false,
+                "member_text": "full phrase",
+                "route": {
+                  "surfaces": [
+                    "full phrase"
+                  ],
+                  "token_ids": [
+                    1,
+                    2,
+                    4
+                  ]
+                }
+              }
+            ],
+            "source": "group 'phrases'",
+            "token_id": 4
+          },
+          {
+            "active": false,
+            "amount": 0.75,
+            "group_name": "phrases",
+            "member_routes": [
+              {
+                "active": false,
+                "member_literal": false,
+                "member_text": "wrong final prefix",
+                "route": {
+                  "surfaces": [
+                    "wrong final prefix"
+                  ],
+                  "token_ids": [
+                    2,
+                    5
+                  ]
+                }
+              }
+            ],
+            "source": "group 'phrases'",
+            "token_id": 5
+          },
+          {
+            "active": true,
+            "amount": 0.75,
+            "group_name": "phrases",
+            "member_routes": [
+              {
+                "active": true,
+                "member_literal": false,
+                "member_text": "one-token phrase",
+                "route": {
+                  "surfaces": [
+                    "one-token phrase"
+                  ],
+                  "token_ids": [
+                    1,
+                    6
+                  ]
+                }
+              }
+            ],
+            "source": "group 'phrases'",
+            "token_id": 6
+          },
+          {
+            "active": true,
+            "amount": 0.75,
+            "group_name": "phrases",
+            "member_routes": [
+              {
+                "active": true,
+                "member_literal": false,
+                "member_text": "unconditional token",
+                "route": {
+                  "surfaces": [
+                    "unconditional token"
+                  ],
+                  "token_ids": [
+                    7
+                  ]
+                }
+              }
+            ],
+            "source": "group 'phrases'",
+            "token_id": 7
+          }
+        ],
+        "policy_ranks": [
+          8,
+          7,
+          6,
+          5,
+          4,
+          3,
+          2,
+          1
+        ],
+        "raw_ranks": [
+          8,
+          7,
+          6,
+          5,
+          4,
+          3,
+          2,
+          1
+        ]
+      },
+      "history_token_ids": [
+        1
+      ],
+      "include_inactive": true,
+      "logits": [
+        0.0,
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+        5.0,
+        6.0,
+        7.0
+      ],
+      "name": "exact-phrase-prefix-and-inactive-routes",
+      "token_biases": [
+        {
+          "bias": 0.25,
+          "token_id": 0
+        }
+      ]
+    },
+    {
+      "bias_groups": [
+        {
+          "bias": 0.75,
+          "members": [
+            {
+              "literal": false,
+              "routes": [
+                {
+                  "surfaces": [
+                    "item"
+                  ],
+                  "token_ids": [
+                    1,
+                    10
+                  ]
+                },
+                {
+                  "surfaces": [
+                    " item"
+                  ],
+                  "token_ids": [
+                    2,
+                    10
+                  ]
+                },
+                {
+                  "surfaces": [
+                    "Item"
+                  ],
+                  "token_ids": [
+                    3,
+                    11
+                  ]
+                },
+                {
+                  "surfaces": [
+                    " Item"
+                  ],
+                  "token_ids": [
+                    4,
+                    11
+                  ]
+                },
+                {
+                  "surfaces": [
+                    "ITEM"
+                  ],
+                  "token_ids": [
+                    5,
+                    12
+                  ]
+                },
+                {
+                  "surfaces": [
+                    " ITEM"
+                  ],
+                  "token_ids": [
+                    6,
+                    12
+                  ]
+                }
+              ],
+              "text": "item"
+            }
+          ],
+          "name": "surface-forms"
+        }
+      ],
+      "expected": {
+        "active_biases": [
+          [
+            10,
+            0.75
+          ]
+        ],
+        "adjusted_logits": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.75,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "contributions": [
+          {
+            "active": true,
+            "amount": 0.75,
+            "group_name": "surface-forms",
+            "member_routes": [
+              {
+                "active": false,
+                "member_literal": false,
+                "member_text": "item",
+                "route": {
+                  "surfaces": [
+                    "item"
+                  ],
+                  "token_ids": [
+                    1,
+                    10
+                  ]
+                }
+              },
+              {
+                "active": true,
+                "member_literal": false,
+                "member_text": "item",
+                "route": {
+                  "surfaces": [
+                    " item"
+                  ],
+                  "token_ids": [
+                    2,
+                    10
+                  ]
+                }
+              }
+            ],
+            "source": "group 'surface-forms'",
+            "token_id": 10
+          },
+          {
+            "active": false,
+            "amount": 0.75,
+            "group_name": "surface-forms",
+            "member_routes": [
+              {
+                "active": false,
+                "member_literal": false,
+                "member_text": "item",
+                "route": {
+                  "surfaces": [
+                    "Item"
+                  ],
+                  "token_ids": [
+                    3,
+                    11
+                  ]
+                }
+              },
+              {
+                "active": false,
+                "member_literal": false,
+                "member_text": "item",
+                "route": {
+                  "surfaces": [
+                    " Item"
+                  ],
+                  "token_ids": [
+                    4,
+                    11
+                  ]
+                }
+              }
+            ],
+            "source": "group 'surface-forms'",
+            "token_id": 11
+          },
+          {
+            "active": false,
+            "amount": 0.75,
+            "group_name": "surface-forms",
+            "member_routes": [
+              {
+                "active": false,
+                "member_literal": false,
+                "member_text": "item",
+                "route": {
+                  "surfaces": [
+                    "ITEM"
+                  ],
+                  "token_ids": [
+                    5,
+                    12
+                  ]
+                }
+              },
+              {
+                "active": false,
+                "member_literal": false,
+                "member_text": "item",
+                "route": {
+                  "surfaces": [
+                    " ITEM"
+                  ],
+                  "token_ids": [
+                    6,
+                    12
+                  ]
+                }
+              }
+            ],
+            "source": "group 'surface-forms'",
+            "token_id": 12
+          }
+        ],
+        "policy_ranks": [
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          1,
+          12,
+          13,
+          14,
+          15,
+          16
+        ],
+        "raw_ranks": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16
+        ]
+      },
+      "history_token_ids": [
+        2
+      ],
+      "include_inactive": true,
+      "logits": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "python-compiled-case-and-spacing-variants",
+      "token_biases": []
+    }
+  ],
+  "cfg_cases": [
+    {
+      "conditional_logits": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "expected": [
+        4.0,
+        5.0,
+        6.0
+      ],
+      "name": "cfg-scale-zero",
+      "scale": 0.0,
+      "unconditional_logits": [
+        4.0,
+        5.0,
+        6.0
+      ]
+    },
+    {
+      "conditional_logits": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "expected": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "name": "cfg-scale-one",
+      "scale": 1.0,
+      "unconditional_logits": [
+        4.0,
+        5.0,
+        6.0
+      ]
+    },
+    {
+      "conditional_logits": [
+        1.0,
+        2.0,
+        3.0
+      ],
+      "expected": [
+        -2.0,
+        -1.0,
+        0.0
+      ],
+      "name": "cfg-amplifies-conditional",
+      "scale": 2.0,
+      "unconditional_logits": [
+        4.0,
+        5.0,
+        6.0
+      ]
+    }
+  ],
   "conditional_case": {
     "boundary": "1208925819614629174706176",
     "count": 4,
@@ -1168,6 +2284,271 @@
         -2.0
       ],
       "name": "repeat-off-presence-and-frequency-on"
+    }
+  ],
+  "metric_cases": [
+    {
+      "config": {
+        "cfg_prefix_tokens": 0,
+        "cfg_scale": 1.0,
+        "cfg_unconditional_prompt": null,
+        "draw_kernel": "categorical",
+        "frequency_penalty": 0.0,
+        "gaussian_noise_std": 1.0,
+        "gumbel_noise_address": "token-id",
+        "gumbel_noise_scale": 1.0,
+        "gumbel_top_k": null,
+        "history_scope": "model-visible-prefix-tail-v1",
+        "min_p": 0.0,
+        "perturb_noise_std": 1.0,
+        "policy_scheme": "spe-history-aware-decoder-policy-v1",
+        "presence_penalty": 0.0,
+        "repeat_last_n": 64,
+        "repeat_penalty": 1.0,
+        "rng_scheme": "blake2b64-token-prefix-quantile-v2",
+        "seed": 12345,
+        "student_t_df": 3.0,
+        "tail_free_z": 1.0,
+        "temperature": 1.0,
+        "top_k": null,
+        "top_p": 1.0,
+        "typical_p": 1.0
+      },
+      "expected": {
+        "denominator": 1.553001792775919,
+        "log_z": 2.4401896985611953,
+        "logit_z_scores": [
+          1.3416407864998738,
+          -0.4472135954999579
+        ],
+        "maximum": 2.0,
+        "policy_probabilities": [
+          0.6439142598879724,
+          0.08714431874203257
+        ],
+        "policy_ranks": [
+          1,
+          2,
+          3,
+          4
+        ],
+        "raw_nll": [
+          0.4401896985611953,
+          1.4401896985611953,
+          2.4401896985611953,
+          3.4401896985611953
+        ],
+        "raw_probabilities": [
+          0.6439142598879724,
+          0.08714431874203257
+        ],
+        "raw_ranks": [
+          1,
+          2,
+          3,
+          4
+        ],
+        "top_policy_ids": [
+          0,
+          1,
+          2
+        ],
+        "top_raw_ids": [
+          0,
+          1,
+          2
+        ]
+      },
+      "history_token_ids": [],
+      "logits": [
+        2.0,
+        1.0,
+        0.0,
+        -1.0
+      ],
+      "name": "identity-lazy-metrics",
+      "policy_logits": null,
+      "selected_ids": [
+        0,
+        2
+      ]
+    },
+    {
+      "config": {
+        "cfg_prefix_tokens": 0,
+        "cfg_scale": 1.0,
+        "cfg_unconditional_prompt": null,
+        "draw_kernel": "categorical",
+        "frequency_penalty": 0.25,
+        "gaussian_noise_std": 1.0,
+        "gumbel_noise_address": "token-id",
+        "gumbel_noise_scale": 1.0,
+        "gumbel_top_k": null,
+        "history_scope": "model-visible-prefix-tail-v1",
+        "min_p": 0.0,
+        "perturb_noise_std": 1.0,
+        "policy_scheme": "spe-history-aware-decoder-policy-v1",
+        "presence_penalty": 0.5,
+        "repeat_last_n": -1,
+        "repeat_penalty": 2.0,
+        "rng_scheme": "blake2b64-token-prefix-quantile-v2",
+        "seed": 12345,
+        "student_t_df": 3.0,
+        "tail_free_z": 1.0,
+        "temperature": 1.0,
+        "top_k": null,
+        "top_p": 1.0,
+        "typical_p": 1.0
+      },
+      "expected": {
+        "denominator": 1.553001792775919,
+        "log_z": 2.4401896985611953,
+        "logit_z_scores": [
+          1.3416407864998738,
+          -0.4472135954999579
+        ],
+        "maximum": 2.0,
+        "policy_probabilities": [
+          0.3177952409322493,
+          0.3177952409322493
+        ],
+        "policy_ranks": [
+          1,
+          3,
+          2,
+          4
+        ],
+        "raw_nll": [
+          0.4401896985611953,
+          1.4401896985611953,
+          2.4401896985611953,
+          3.4401896985611953
+        ],
+        "raw_probabilities": [
+          0.6439142598879724,
+          0.08714431874203257
+        ],
+        "raw_ranks": [
+          1,
+          2,
+          3,
+          4
+        ],
+        "top_policy_ids": [
+          0,
+          2,
+          1
+        ],
+        "top_raw_ids": [
+          0,
+          1,
+          2
+        ]
+      },
+      "history_token_ids": [
+        0,
+        0,
+        1
+      ],
+      "logits": [
+        2.0,
+        1.0,
+        0.0,
+        -1.0
+      ],
+      "name": "history-adjusted-policy-metrics",
+      "policy_logits": [
+        0.0,
+        -0.25,
+        0.0,
+        -1.0
+      ],
+      "selected_ids": [
+        0,
+        2
+      ]
+    },
+    {
+      "config": {
+        "cfg_prefix_tokens": 0,
+        "cfg_scale": 1.0,
+        "cfg_unconditional_prompt": null,
+        "draw_kernel": "categorical",
+        "frequency_penalty": 0.0,
+        "gaussian_noise_std": 1.0,
+        "gumbel_noise_address": "token-id",
+        "gumbel_noise_scale": 1.0,
+        "gumbel_top_k": null,
+        "history_scope": "model-visible-prefix-tail-v1",
+        "min_p": 0.0,
+        "perturb_noise_std": 1.0,
+        "policy_scheme": "spe-history-aware-decoder-policy-v1",
+        "presence_penalty": 0.0,
+        "repeat_last_n": 64,
+        "repeat_penalty": 1.0,
+        "rng_scheme": "blake2b64-token-prefix-quantile-v2",
+        "seed": 12345,
+        "student_t_df": 3.0,
+        "tail_free_z": 1.0,
+        "temperature": 1.0,
+        "top_k": null,
+        "top_p": 1.0,
+        "typical_p": 1.0
+      },
+      "expected": {
+        "denominator": 3.0,
+        "log_z": 6.09861228866811,
+        "logit_z_scores": [
+          null,
+          null
+        ],
+        "maximum": 5.0,
+        "policy_probabilities": [
+          0.3333333333333333,
+          0.3333333333333333
+        ],
+        "policy_ranks": [
+          1,
+          2,
+          3
+        ],
+        "raw_nll": [
+          1.09861228866811,
+          1.09861228866811,
+          1.09861228866811
+        ],
+        "raw_probabilities": [
+          0.3333333333333333,
+          0.3333333333333333
+        ],
+        "raw_ranks": [
+          1,
+          2,
+          3
+        ],
+        "top_policy_ids": [
+          0,
+          1,
+          2
+        ],
+        "top_raw_ids": [
+          0,
+          1,
+          2
+        ]
+      },
+      "history_token_ids": [],
+      "logits": [
+        5.0,
+        5.0,
+        5.0
+      ],
+      "name": "flat-logits-undefined-z",
+      "policy_logits": null,
+      "selected_ids": [
+        0,
+        2
+      ]
     }
   ],
   "rank_case": {

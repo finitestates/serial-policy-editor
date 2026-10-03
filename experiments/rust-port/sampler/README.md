@@ -1,8 +1,8 @@
 # Rust sampler experiment
 
 This directory contains an experimental Rust implementation of the numeric
-sampler in `core/src/trajectory_editor/core/sampling.py` and the history
-penalty transform from `core/src/trajectory_editor/core/policy_calculations.py`.
+sampler in `core/src/trajectory_editor/core/sampling.py` and the numeric policy
+surface around `core/src/trajectory_editor/core/policy_calculations.py`.
 
 The Python package remains the released implementation and behavior oracle.
 This crate is not a production dependency. Repository-wide experiment rules
@@ -20,13 +20,15 @@ completed fixture integration in
 [`../PRIOR_SLICE.md`](../PRIOR_SLICE.md). The history-penalty transform is
 another implemented kernel in this crate; its completed-slice record and
 validation evidence are in [`../PREVIOUS_AGENT.md`](../PREVIOUS_AGENT.md).
-The completed real-model backend probe is recorded in
-[`../REAL_MODEL_CHOICE.md`](../REAL_MODEL_CHOICE.md); its original scope and
-gates remain in [`../NEXT_SLICE.md`](../NEXT_SLICE.md).
+Direct and grouped token biases are recorded in
+[`../BIAS_SLICE.md`](../BIAS_SLICE.md). The full Stage 2 policy surface,
+validation, and real-model evidence are recorded in
+[`../POLICY_CALCULATIONS_SLICE.md`](../POLICY_CALCULATIONS_SLICE.md). Corrected
+real-model Choice results are in [`../REAL_MODEL_CHOICE.md`](../REAL_MODEL_CHOICE.md).
 
 Use `sampling.py` as the specification for sampler algorithms and
-`policy_calculations.py` for the history transform. The implemented sampler
-surface includes:
+`policy_calculations.py` for policy transforms and evidence metrics. The
+implemented sampler surface includes:
 
 - candidate filtering: temperature, top-k, typical-p, tail-free, top-p, and
   min-p, with the same ordering and diagnostics;
@@ -70,10 +72,73 @@ one-dimensional array of integer IDs. Python permits arbitrarily large positive
 window integers; the adapter clamps those to signed-64-bit max, which selects
 the same tail for any realizable history.
 
-The transform changes policy logits and policy rank only. Raw logits and raw
-ranks remain available unchanged. Direct/grouped biases, activation and
-ephemeral adjustments, filtering, normalization, and sampling remain outside
-this function.
+This transform changes policy logits and policy rank only. Raw logits and raw
+ranks remain available unchanged.
+
+## Direct and grouped token biases
+
+The adapter exposes `active_biases(history, config)`,
+`bias_contributions(history, config, include_inactive=False)`, and
+`apply_biases(logits, history, config)`. The first returns Rust-summed source
+totals by token ID. The second returns the production `BiasContribution` and
+`BiasMemberRoute` dataclasses, including route token IDs, surfaces, source
+names, and per-route match state. The third returns an owned NumPy `float64`
+policy-logit vector without changing its input.
+
+Grouped routes match when all route tokens before the final target token equal
+the end of visible token history. A one-token route has an empty prefix and is
+always active. The kernel counts a group's amount once per target token, sums
+overlapping groups and direct-token sources, and orders contributions with the
+same stable source and route identity order as Python. `include_inactive`
+retains unmatched grouped routes for explanation. Python compiles case and
+spacing surfaces with `BiasMember.compile`; Rust receives those token-ID
+routes and never loads a tokenizer.
+
+The Rust `active_biases`, `bias_contributions`, and `apply_biases` functions
+also work as a plain library without initializing Python. Applying biases
+checks finite logits and results, history and route vocabulary IDs, and returns
+a copy. Raw logits and raw ranks stay unchanged; adjusted logits and policy
+ranks reflect the bias.
+
+## Activation, ephemeral biases, and CFG
+
+`apply_activation_adjustments(logits, adjustments, strength)` applies a full
+vocabulary output-head adjustment vector already computed by the Python model
+backend. It validates the vector shape and finite values, returns an owned
+array, supports signed finite strengths, and rejects non-finite results. Vector
+extraction and output-head projection remain model operations owned by Python.
+
+`apply_ephemeral_biases(logits, mapping)` applies sparse token adjustments for
+one decision. It validates token IDs, values, and the resulting logits, then
+returns an owned array. `cfg_combine_logits(conditional, unconditional, scale)`
+implements the production CFG formula
+`unconditional + scale * (conditional - unconditional)`. The two backend
+branches, tokenization, cache positioning, and lifecycle remain outside this
+numeric kernel.
+
+The composed policy order matches production:
+
+1. History penalties.
+2. Output-head activation adjustments when active.
+3. Direct and grouped token biases.
+4. Ephemeral per-decision biases.
+5. Candidate filtering and sparse draw probabilities.
+
+## Lazy policy metrics
+
+The Rust `PolicyMetrics` type keeps raw and adjusted policy logits and computes
+metrics only when requested. It provides the raw maximum, raw and policy
+probabilities for selected IDs, raw NLL and log-sum-exp, raw and policy ranks,
+top IDs, and full-vocabulary raw-logit z-scores. Ranking and z-scores do not
+trigger dense soft-max normalization. The adapter exposes the same behavior as
+`rust_sampler.PolicyMetrics`; passing `policy_logits=None` means the policy
+shares the raw metric surface, while an explicit vector keeps an independent
+policy normalization cache.
+
+`SamplerConfig` validation/serialization, action serialization, backend model
+operations, and the released runtime remain Python-owned boundaries. This
+experiment does not wire Rust into the released runtime or change package
+dependencies, CLI behavior, or release configuration.
 
 ## Keep the boundary understandable
 
@@ -115,12 +180,16 @@ experiments/rust-port/sampler/
 ├── fixtures/
 │   └── sampling-cases.json
 └── scripts/
+    ├── real_model_policy.py
     ├── compare_with_python.py
     └── generate_fixtures.py
 ```
 
-The fixture file is shared by Rust tests and the Python comparison script; the
-generator derives expected values from the production Python implementation.
+The shared fixture file includes numeric sampler, history-penalty, direct and
+grouped bias, ordered policy-adjustment, CFG, and lazy-metric cases. Rust tests
+and the Python comparison script consume it; its generator derives expectations
+from production `BiasGroup`, `BiasMember.compile`, `BiasRoute`, `BiasToken`, and
+`PolicyCalculations` behavior.
 
 ## Useful starting points
 
@@ -163,10 +232,10 @@ core/.venv/bin/python -m pip install --force-reinstall --no-deps \
 The force option also refreshes the extension when rebuilding version `0.1.0`.
 
 The import package is named `rust_sampler`. Its sampler surface mirrors
-`trajectory_editor.core.sampling`; it also exposes the history transform
-described above. The adapter represents IDs and probability/score arrays with
-NumPy arrays and maps Rust input-validation errors to `EditorError` or
-`ValueError` as appropriate. For example:
+`trajectory_editor.core.sampling`; it also exposes the policy kernels described
+above. The adapter represents IDs and probability/score arrays with NumPy
+arrays and maps Rust input-validation errors to `EditorError` or `ValueError` as
+appropriate. For example:
 
 ```python
 import numpy as np
@@ -193,12 +262,11 @@ endpoints, boundaries larger than 64 bits, token-ID and model-rank addresses,
 candidate-order changes, duplicate IDs, every draw kernel, Student-t df
 values 3/1/0.5, conditional Gumbel top-k, and lazy seed search. Adapter tests
 also cover exact ties, invalid dimensions and settings, and model-rank
-validation. History expectations come from production `PolicyCalculations`
-and include empty/all/zero/positive tails, repeated IDs, both signs of
-presence/frequency penalties, overflow rejection, raw and policy ranks, and
-unchanged inputs. The Rust tests consume the same cases; the comparison script
-and Python adapter test exercise the extension against the production Python
-implementations.
+validation. Policy expectations come from production `PolicyCalculations` and
+include activation scaling, ordered history/activation/group/direct/ephemeral
+steps, CFG blend scales, lazy raw/policy probabilities and NLL, population
+z-scores, flat-logit undefined scores, raw-rank preservation, and immutable
+inputs. Rust tests and the adapter comparison consume the shared cases.
 
 Use the workspace format/test/Clippy commands in
 [`../README.md`](../README.md). After installing the wheel, run the Python
@@ -211,16 +279,27 @@ PYTHONPATH=core/src core/.venv/bin/python -m pytest -q \
   experiments/rust-port/sampler/tests/test_python_adapter.py
 ```
 
-The comparison uses exact equality for integer IDs, ranks, and draws and an
-absolute `1e-14` tolerance for floating-point values, including adjusted
-history logits. That tolerance covers the checked cases; Rust and Python may
-differ by a few low bits for transcendental functions on other inputs. The
-replay-affecting draw and winner results match exactly for the checked fixtures.
+The comparison uses exact equality for integer IDs, ranks, filter stages, and
+draws and an absolute `1e-14` tolerance for finite floating-point values,
+including adjusted logits, probabilities, NLL, and z-scores. Replay-affecting
+draw and winner results match exactly for the checked fixtures.
 Regenerate expected data only after reviewing the Python reference results:
 
 ```sh
 PYTHONPATH=core/src core/.venv/bin/python \
   experiments/rust-port/sampler/scripts/generate_fixtures.py
+```
+
+Run the live numeric policy probe against local Transformers and llama.cpp
+profiles with:
+
+```sh
+PYTHONPATH=core/src core/.venv/bin/python \
+  experiments/rust-port/sampler/scripts/real_model_policy.py \
+  --model-root "$HOME/Downloads/models" \
+  --profile benchmarks/profiles/gpt2_cpu_cfg.yaml \
+  --profile benchmarks/profiles/llama_1b_cfg.yaml \
+  --output /tmp/spe-rust-policy-real-model.json
 ```
 
 `find_seed_for_token` accepts a caller-provided Python seed generator, so the

@@ -43,6 +43,39 @@ def rank_options(case):
     return None if value is None else np.asarray(value, dtype=np.int64)
 
 
+def bias_config(case):
+    return SamplerConfig(
+        temperature=1.0,
+        top_k=None,
+        top_p=1.0,
+        min_p=0.0,
+        typical_p=1.0,
+        tail_free_z=1.0,
+        repeat_last_n=0,
+        bias_groups=case["bias_groups"],
+        token_biases=case["token_biases"],
+    )
+
+
+def bias_contribution_record(item):
+    return {
+        "token_id": item.token_id,
+        "amount": item.amount,
+        "active": item.active,
+        "source": item.source,
+        "group_name": item.group_name,
+        "member_routes": [
+            {
+                "member_text": route.member_text,
+                "member_literal": route.member_literal,
+                "route": route.route.to_dict(),
+                "active": route.active,
+            }
+            for route in item.member_routes
+        ],
+    }
+
+
 def reference_draw(case, value):
     options = dict(case["options"])
     options["candidate_model_ranks"] = rank_options(case)
@@ -149,6 +182,154 @@ def main() -> int:
             assert py_policy.policy_rank(token_id) == rust.raw_rank(rs_adjusted, token_id) == policy_rank
             checks += 2
         checks += 2
+
+    for case in fixture["bias_cases"]:
+        config = bias_config(case)
+        logits = np.asarray(case["logits"], dtype=np.float64)
+        original_logits = logits.copy()
+        history = case["history_token_ids"]
+        py_policy = PolicyCalculations(logits, config, history)
+        py_contributions = config.bias_contributions(
+            history, include_inactive=case["include_inactive"]
+        )
+        rs_contributions = rust.bias_contributions(
+            history, config, include_inactive=case["include_inactive"]
+        )
+        assert rs_contributions == py_contributions, case["name"]
+        assert [bias_contribution_record(item) for item in rs_contributions] == case[
+            "expected"
+        ]["contributions"], case["name"]
+        checks += len(rs_contributions)
+
+        py_active = config.active_biases(history)
+        rs_active = rust.active_biases(history, config)
+        assert rs_active == py_active
+        assert sorted(rs_active.items()) == [
+            (item[0], item[1]) for item in case["expected"]["active_biases"]
+        ]
+        checks += len(rs_active)
+
+        rs_adjusted = rust.apply_biases(logits, history, config)
+        close(rs_adjusted, py_policy.adjusted, tolerance, case["name"])
+        close(
+            rs_adjusted,
+            case["expected"]["adjusted_logits"],
+            tolerance,
+            f"{case['name']} fixture",
+        )
+        np.testing.assert_array_equal(logits, original_logits)
+        for token_id in range(len(logits)):
+            raw_rank = case["expected"]["raw_ranks"][token_id]
+            policy_rank = case["expected"]["policy_ranks"][token_id]
+            assert py_policy.raw_rank(token_id) == rust.raw_rank(logits, token_id) == raw_rank
+            assert py_policy.policy_rank(token_id) == rust.raw_rank(rs_adjusted, token_id) == policy_rank
+            checks += 2
+        checks += 2
+
+    for case in fixture["adjustment_cases"]:
+        logits = np.asarray(case["logits"], dtype=np.float64)
+        original_logits = logits.copy()
+        history = case["history_token_ids"]
+        config = SamplerConfig.from_record(case["config"])
+        activation = case["activation_adjustments"]
+        ephemeral = {int(token): amount for token, amount in case["ephemeral_biases"].items()}
+        py_policy = PolicyCalculations(
+            logits,
+            config,
+            history,
+            activation_logit_adjustments=activation,
+            ephemeral_logit_biases=ephemeral,
+        )
+        rs_adjusted = rust.apply_history_penalties(logits, history, config)
+        if activation is not None:
+            rs_adjusted = rust.apply_activation_adjustments(
+                rs_adjusted,
+                np.asarray(activation, dtype=np.float64),
+                config.activation_vector_strength,
+            )
+        rs_adjusted = rust.apply_biases(rs_adjusted, history, config)
+        rs_adjusted = rust.apply_ephemeral_biases(rs_adjusted, ephemeral)
+        close(rs_adjusted, py_policy.adjusted, tolerance, case["name"])
+        close(rs_adjusted, case["expected"]["adjusted_logits"], tolerance, case["name"])
+        np.testing.assert_array_equal(logits, original_logits)
+        for token_id in range(len(logits)):
+            assert py_policy.raw_rank(token_id) == case["expected"]["raw_ranks"][token_id]
+            assert py_policy.raw_rank(token_id) == rust.raw_rank(logits, token_id)
+            assert py_policy.policy_rank(token_id) == case["expected"]["policy_ranks"][token_id]
+            assert py_policy.policy_rank(token_id) == rust.raw_rank(rs_adjusted, token_id)
+            checks += 4
+        checks += 2
+
+    for case in fixture["activation_kernel_cases"]:
+        logits = np.asarray(case["logits"], dtype=np.float64)
+        original_logits = logits.copy()
+        actual = rust.apply_activation_adjustments(
+            logits,
+            np.asarray(case["adjustments"], dtype=np.float64),
+            case["strength"],
+        )
+        close(actual, case["expected"], tolerance, case["name"])
+        np.testing.assert_array_equal(logits, original_logits)
+        checks += len(logits) + 1
+
+    for case in fixture["cfg_cases"]:
+        conditional = np.asarray(case["conditional_logits"], dtype=np.float64)
+        unconditional = np.asarray(case["unconditional_logits"], dtype=np.float64)
+        expected = unconditional + case["scale"] * (conditional - unconditional)
+        assert expected.tolist() == case["expected"]
+        actual = rust.cfg_combine_logits(conditional, unconditional, case["scale"])
+        close(actual, expected, tolerance, case["name"])
+        checks += len(actual)
+
+    for case in fixture["metric_cases"]:
+        logits = np.asarray(case["logits"], dtype=np.float64)
+        config = SamplerConfig.from_record(case["config"])
+        py_policy = PolicyCalculations(logits, config, case["history_token_ids"])
+        policy_logits = None if py_policy._policy_shares_raw else py_policy.adjusted
+        rs_policy = rust.PolicyMetrics(logits, policy_logits)
+        assert not rs_policy.raw_logsumexp_ready
+        assert not rs_policy.logit_mean_std_ready
+        close(rs_policy.maximum, case["expected"]["maximum"], tolerance, case["name"])
+        assert rs_policy.top_raw_ids(len(case["expected"]["top_raw_ids"])) == case["expected"]["top_raw_ids"]
+        assert rs_policy.top_policy_ids(len(case["expected"]["top_policy_ids"])) == case["expected"]["top_policy_ids"]
+        assert not rs_policy.raw_logsumexp_ready
+        assert not rs_policy.logit_mean_std_ready
+        token_ids = list(range(len(logits)))
+        assert [rs_policy.raw_rank(token_id) for token_id in token_ids] == case["expected"]["raw_ranks"]
+        assert [rs_policy.policy_rank(token_id) for token_id in token_ids] == case["expected"]["policy_ranks"]
+        selected = case["selected_ids"]
+        rs_z = rs_policy.logit_z_scores(selected)
+        py_z = py_policy.logit_z_scores(selected)
+        for index, (actual, expected) in enumerate(zip(rs_z, py_z)):
+            if expected is None:
+                assert actual is None
+            else:
+                close(actual, expected, tolerance, f"{case['name']} z-score {index}")
+        assert not rs_policy.raw_logsumexp_ready
+        assert rs_policy.logit_mean_std_ready
+        for index, (actual, expected) in enumerate(
+            zip(rs_z, case["expected"]["logit_z_scores"])
+        ):
+            if expected is None:
+                assert actual is None
+            else:
+                close(actual, expected, tolerance, f"{case['name']} golden z-score {index}")
+        close(rs_policy.raw_probabilities(selected), py_policy.raw_probabilities(selected), tolerance, case["name"])
+        close(rs_policy.raw_probabilities(selected), case["expected"]["raw_probabilities"], tolerance, case["name"])
+        close(rs_policy.policy_probabilities_at(selected), py_policy.policy_probabilities_at(selected), tolerance, case["name"])
+        close(rs_policy.policy_probabilities_at(selected), case["expected"]["policy_probabilities"], tolerance, case["name"])
+        close([rs_policy.raw_nll(token_id) for token_id in token_ids], [py_policy.raw_nll(token_id) for token_id in token_ids], tolerance, case["name"])
+        close(rs_policy.log_z, py_policy.log_z, tolerance, case["name"])
+        close(rs_policy.log_z, case["expected"]["log_z"], tolerance, case["name"])
+        close(rs_policy.denominator, py_policy.denominator, tolerance, case["name"])
+        close(rs_policy.denominator, case["expected"]["denominator"], tolerance, case["name"])
+        assert rs_policy.raw_logsumexp_ready
+        checks += (
+            4 * len(token_ids)
+            + 2 * len(case["expected"]["top_raw_ids"])
+            + 4 * len(selected)
+            + 5
+        )
 
     for case in fixture["filter_cases"]:
         config = type("Config", (), case["config"])()
@@ -290,7 +471,12 @@ def main() -> int:
     print(
         f"Rust/Python parity passed: {checks} value checks across "
         f"{len(fixture['draw_cases'])} draw cases and "
-        f"{len(fixture['history_penalty_cases'])} history-penalty cases"
+        f"{len(fixture['history_penalty_cases'])} history-penalty cases and "
+        f"{len(fixture['bias_cases'])} bias cases, "
+        f"{len(fixture['adjustment_cases'])} ordered policy-adjustment cases, "
+        f"{len(fixture['activation_kernel_cases'])} activation-kernel cases, "
+        f"{len(fixture['cfg_cases'])} CFG cases, and "
+        f"{len(fixture['metric_cases'])} lazy-metric cases"
     )
     return 0
 

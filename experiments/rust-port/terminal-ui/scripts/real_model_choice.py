@@ -233,8 +233,24 @@ def _python_sampler():
     return SamplerConfig(**SAMPLER)
 
 
+def _replay_full_prefix(backend, root_prefix: list[int], prefix: list[int]) -> None:
+    """Build a fresh backend state using the live prefill/incremental split.
+
+    Some quantized llama.cpp kernels produce slightly different logits when a
+    generated token is evaluated in a one-token incremental batch versus being
+    folded into the original prompt batch. Replaying the exact root prefix and
+    each generated token separately checks the same backend path on a fresh
+    context while retaining the exact complete prefix.
+    """
+    if not root_prefix or prefix[:len(root_prefix)] != root_prefix:
+        raise AssertionError("fresh-prefix replay does not begin with the exact root prefix")
+    backend.reset(root_prefix)
+    for token_id in prefix[len(root_prefix):]:
+        backend.eval([token_id])
+
+
 def _oracle_decision(backend, prefix: list[int], boundary: int, fingerprint: str,
-                     logits=None) -> dict:
+                     logits=None, replay_root: list[int] | None = None) -> dict:
     import numpy as np
 
     from trajectory_editor.core.sampling import (
@@ -247,7 +263,10 @@ def _oracle_decision(backend, prefix: list[int], boundary: int, fingerprint: str
 
     sampler = _python_sampler()
     if logits is None:
-        backend.reset(prefix)
+        if replay_root is None:
+            backend.reset(prefix)
+        else:
+            _replay_full_prefix(backend, replay_root, prefix)
         logits = backend.last_logits()
     logits = np.asarray(logits, dtype=np.float64)
     if logits.ndim != 1 or len(logits) != backend.vocabulary_size() or not np.all(np.isfinite(logits)):
@@ -367,7 +386,9 @@ def compare_decisions(backend, semantic: list[dict], metadata: dict,
         if record.get("selected_token_id") != live_reference["proposal_token_id"]:
             raise AssertionError(f"Rust decision {index} accepted a token other than the proposal")
 
-        fresh_reference = _oracle_decision(backend, prefix, boundary, fingerprint)
+        fresh_reference = _oracle_decision(
+            backend, prefix, boundary, fingerprint, replay_root=root
+        )
         fresh_logits = fresh_reference.pop("fresh_logits")
         if fresh_reference["proposal_token_id"] != record.get("selected_token_id"):
             raise AssertionError(

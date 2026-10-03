@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+from trajectory_editor.bias_groups import BiasGroup, BiasMember, BiasRoute, BiasToken
 from trajectory_editor.core import sampling
 from trajectory_editor.core.policy_calculations import PolicyCalculations
 from trajectory_editor.core.sampler_config import SamplerConfig
@@ -157,6 +158,170 @@ def history_penalty_case(name, logits, history_token_ids, **penalties):
     }
 
 
+def bias_contribution_record(item):
+    return {
+        "token_id": item.token_id,
+        "amount": item.amount,
+        "active": item.active,
+        "source": item.source,
+        "group_name": item.group_name,
+        "member_routes": [
+            {
+                "member_text": member_route.member_text,
+                "member_literal": member_route.member_literal,
+                "route": member_route.route.to_dict(),
+                "active": member_route.active,
+            }
+            for member_route in item.member_routes
+        ],
+    }
+
+
+def bias_case(name, logits, history_token_ids, bias_groups, token_biases,
+              *, include_inactive=True):
+    config = SamplerConfig(
+        temperature=1.0,
+        top_k=None,
+        top_p=1.0,
+        min_p=0.0,
+        typical_p=1.0,
+        tail_free_z=1.0,
+        repeat_last_n=0,
+        bias_groups=bias_groups,
+        token_biases=token_biases,
+    )
+    values = np.asarray(logits, dtype=np.float64)
+    history = list(history_token_ids)
+    policy = PolicyCalculations(values, config, history)
+    return {
+        "name": name,
+        "logits": logits,
+        "history_token_ids": history,
+        "include_inactive": include_inactive,
+        "bias_groups": [group.to_dict() for group in config.bias_groups],
+        "token_biases": [token.to_dict() for token in config.token_biases],
+        "expected": {
+            "active_biases": [
+                [int(token_id), float(amount)]
+                for token_id, amount in sorted(config.active_biases(history).items())
+            ],
+            "contributions": [
+                bias_contribution_record(item)
+                for item in config.bias_contributions(
+                    history, include_inactive=include_inactive
+                )
+            ],
+            "adjusted_logits": as_list(policy.adjusted),
+            "raw_ranks": [policy.raw_rank(token_id) for token_id in range(len(values))],
+            "policy_ranks": [
+                policy.policy_rank(token_id) for token_id in range(len(values))
+            ],
+        },
+    }
+
+
+def adjustment_case(name, logits, history_token_ids, config, activation_adjustments,
+                    ephemeral_biases):
+    values = np.asarray(logits, dtype=np.float64)
+    history = list(history_token_ids)
+    policy = PolicyCalculations(
+        values,
+        config,
+        history,
+        activation_logit_adjustments=activation_adjustments,
+        ephemeral_logit_biases=ephemeral_biases,
+    )
+    return {
+        "name": name,
+        "logits": logits,
+        "history_token_ids": history,
+        "activation_adjustments": activation_adjustments,
+        "ephemeral_biases": {str(token): amount for token, amount in ephemeral_biases.items()},
+        "config": config.to_dict(),
+        "expected": {
+            "adjusted_logits": as_list(policy.adjusted),
+            "raw_ranks": [policy.raw_rank(token_id) for token_id in range(len(values))],
+            "policy_ranks": [
+                policy.policy_rank(token_id) for token_id in range(len(values))
+            ],
+        },
+    }
+
+
+def metrics_case(name, logits, config=None, history_token_ids=None):
+    values = np.asarray(logits, dtype=np.float64)
+    config = config or SamplerConfig(
+        temperature=1.0, top_k=None, top_p=1.0, min_p=0.0
+    )
+    history = [] if history_token_ids is None else list(history_token_ids)
+    policy = PolicyCalculations(
+        values,
+        config,
+        history,
+    )
+    policy_values = None if policy._policy_shares_raw else as_list(policy.adjusted)
+    token_ids = list(range(len(values)))
+    selected = token_ids[::2]
+    result = {
+        "name": name,
+        "logits": logits,
+        "policy_logits": policy_values,
+        "history_token_ids": history,
+        "config": config.to_dict(),
+        "selected_ids": selected,
+        "expected": {
+            "maximum": policy.maximum,
+            "raw_probabilities": as_list(policy.raw_probabilities(selected)),
+            "raw_nll": [policy.raw_nll(token_id) for token_id in token_ids],
+            "denominator": policy.denominator,
+            "raw_ranks": [policy.raw_rank(token_id) for token_id in token_ids],
+            "policy_ranks": [policy.policy_rank(token_id) for token_id in token_ids],
+            "top_raw_ids": policy.top_raw_ids(min(3, len(values))),
+            "top_policy_ids": policy.top_policy_ids(min(3, len(values))),
+            "policy_probabilities": as_list(policy.policy_probabilities_at(selected)),
+            "logit_z_scores": policy.logit_z_scores(selected),
+            "log_z": policy.log_z,
+        },
+    }
+    return result
+
+
+def cfg_case(name, conditional_logits, unconditional_logits, scale):
+    conditional = np.asarray(conditional_logits, dtype=np.float64)
+    unconditional = np.asarray(unconditional_logits, dtype=np.float64)
+    expected = unconditional + scale * (conditional - unconditional)
+    return {
+        "name": name,
+        "conditional_logits": conditional_logits,
+        "unconditional_logits": unconditional_logits,
+        "scale": scale,
+        "expected": as_list(expected),
+    }
+
+
+class BiasFixtureBackend:
+    """Small tokenizer stand-in used only while Python compiles test routes."""
+
+    _surfaces = {
+        "item": (1, 10),
+        " item": (2, 10),
+        "Item": (3, 11),
+        " Item": (4, 11),
+        "ITEM": (5, 12),
+        " ITEM": (6, 12),
+    }
+
+    def tokenize(self, text, *, add_bos, special):
+        assert add_bos is False and special is False
+        return list(self._surfaces[text])
+
+    def vocabulary_size(self):
+        return 32
+
+    def is_eog(self, token_id):
+        return False
+
+
 def main():
     rng_cases = [
         {"seed": sampling.MIN_SEED, "fingerprint": FINGERPRINT_A, "boundary": "0"},
@@ -270,6 +435,173 @@ def main():
         ),
     ]
 
+    bias_fixture_backend = BiasFixtureBackend()
+    compiled_surface_member = BiasMember.compile("item", bias_fixture_backend)
+    bias_cases = [
+        bias_case(
+            "overlapping-direct-and-grouped-routes",
+            [4.0, 3.0, 2.0, 0.0, -1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            [1, 2],
+            [
+                BiasGroup(
+                    "nautical",
+                    (
+                        BiasMember(
+                            "steamship",
+                            (BiasRoute((1, 2, 3), ("steamship",)),),
+                        ),
+                        BiasMember(
+                            "steamship suffix",
+                            (BiasRoute((2, 3), ("steamship suffix",)),),
+                        ),
+                        BiasMember(
+                            "inactive route",
+                            (BiasRoute((9, 3), ("inactive route",)),),
+                        ),
+                    ),
+                    2.5,
+                ),
+                BiasGroup(
+                    "ships",
+                    (BiasMember("steamship", (BiasRoute((1, 2, 3), ("steamship",)),)),),
+                    2.25,
+                ),
+                BiasGroup(
+                    "spare",
+                    (
+                        BiasMember("quiet phrase", (BiasRoute((1, 4), ("quiet phrase",)),)),
+                        BiasMember("single token", (BiasRoute((5,), ("single token",)),)),
+                    ),
+                    0.5,
+                ),
+            ],
+            [BiasToken(3, 1.25)],
+        ),
+        bias_case(
+            "exact-phrase-prefix-and-inactive-routes",
+            [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+            [1],
+            [
+                BiasGroup(
+                    "phrases",
+                    (
+                        BiasMember("full phrase", (BiasRoute((1, 2, 4), ("full phrase",)),)),
+                        BiasMember("wrong final prefix", (BiasRoute((2, 5), ("wrong final prefix",)),)),
+                        BiasMember("one-token phrase", (BiasRoute((1, 6), ("one-token phrase",)),)),
+                        BiasMember("unconditional token", (BiasRoute((7,), ("unconditional token",)),)),
+                    ),
+                    0.75,
+                ),
+            ],
+            [BiasToken(0, 0.25)],
+        ),
+        bias_case(
+            "python-compiled-case-and-spacing-variants",
+            [0.0] * 16,
+            [2],
+            [BiasGroup("surface-forms", (compiled_surface_member,), 0.75)],
+            [],
+        ),
+    ]
+
+    adjustment_config = SamplerConfig(
+        temperature=1.0,
+        top_k=None,
+        top_p=1.0,
+        min_p=0.0,
+        repeat_penalty=2.0,
+        repeat_last_n=-1,
+        presence_penalty=0.5,
+        frequency_penalty=0.25,
+        activation_vector=(1.0,),
+        activation_vector_strength=0.5,
+        bias_groups=(
+            BiasGroup(
+                "phrase",
+                (BiasMember("target", (BiasRoute((0, 1, 2), ("target",)),)),),
+                0.75,
+            ),
+        ),
+        token_biases=(BiasToken(3, 0.25),),
+    )
+    adjustment_cases = [
+        adjustment_case(
+            "ordered-history-activation-grouped-direct-ephemeral",
+            [2.0, 1.0, 0.5, -1.0, 3.0],
+            [0, 0, 1],
+            adjustment_config,
+            [0.0, 0.5, -0.5, 1.0, -1.0],
+            {2: -0.75, 4: 0.5},
+        ),
+        adjustment_case(
+            "inactive-activation-and-empty-ephemeral",
+            [1.0, 0.0, -1.0],
+            [1],
+            SamplerConfig(
+                temperature=1.0,
+                top_k=None,
+                top_p=1.0,
+                min_p=0.0,
+                activation_vector=(),
+                activation_vector_strength=0.0,
+            ),
+            None,
+            {},
+        ),
+    ]
+    activation_kernel_cases = [
+        {
+            "name": "positive-strength",
+            "logits": [1.0, -2.0, 3.0],
+            "adjustments": [0.5, -1.0, 2.0],
+            "strength": 0.25,
+        },
+        {
+            "name": "negative-strength",
+            "logits": [1.0, -2.0, 3.0],
+            "adjustments": [0.5, -1.0, 2.0],
+            "strength": -0.5,
+        },
+        {
+            "name": "zero-strength",
+            "logits": [1.0, -2.0, 3.0],
+            "adjustments": [0.5, -1.0, 2.0],
+            "strength": 0.0,
+        },
+    ]
+    for case in activation_kernel_cases:
+        case["expected"] = as_list(
+            np.asarray(case["logits"], dtype=np.float64)
+            + case["strength"]
+            * np.asarray(case["adjustments"], dtype=np.float64)
+        )
+
+    cfg_cases = [
+        cfg_case("cfg-scale-zero", [1.0, 2.0, 3.0], [4.0, 5.0, 6.0], 0.0),
+        cfg_case("cfg-scale-one", [1.0, 2.0, 3.0], [4.0, 5.0, 6.0], 1.0),
+        cfg_case("cfg-amplifies-conditional", [1.0, 2.0, 3.0], [4.0, 5.0, 6.0], 2.0),
+    ]
+
+    metric_cases = [
+        metrics_case("identity-lazy-metrics", [2.0, 1.0, 0.0, -1.0]),
+        metrics_case(
+            "history-adjusted-policy-metrics",
+            [2.0, 1.0, 0.0, -1.0],
+            SamplerConfig(
+                temperature=1.0,
+                top_k=None,
+                top_p=1.0,
+                min_p=0.0,
+                repeat_penalty=2.0,
+                repeat_last_n=-1,
+                presence_penalty=0.5,
+                frequency_penalty=0.25,
+            ),
+            [0, 0, 1],
+        ),
+        metrics_case("flat-logits-undefined-z", [5.0, 5.0, 5.0]),
+    ]
+
     conditional = {
         "log_probabilities": [-0.1, -0.5, -1.3, -2.2],
         "count": 4,
@@ -332,6 +664,11 @@ def main():
         "filter_cases": filters,
         "draw_cases": draws,
         "history_penalty_cases": history_penalty_cases,
+        "bias_cases": bias_cases,
+        "adjustment_cases": adjustment_cases,
+        "activation_kernel_cases": activation_kernel_cases,
+        "cfg_cases": cfg_cases,
+        "metric_cases": metric_cases,
         "conditional_case": conditional,
         "seed_search_case": seed_search,
         "float_tolerance": 1e-14,

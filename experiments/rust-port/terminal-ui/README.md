@@ -1,12 +1,14 @@
 # Rust terminal PTY experiment
 
-**Status:** the standalone process has a passing PTY smoke path, one
-fixture-backed Choice turn, and a two-profile real-model Choice boundary
-probe. This is an integration experiment, not the production terminal UI.
+**Status:** the standalone process has a passing PTY smoke path and
+fixture-backed Choice turn. The real-model worker path passed both corrected
+smoke profiles on 2026-10-03 at generated-token boundaries 0 and 1. The
+sampler's Stage 2 policy work is complete as an isolated experiment; its
+evidence is in [`../POLICY_CALCULATIONS_SLICE.md`](../POLICY_CALCULATIONS_SLICE.md).
 
-The completed real-model results and artifact locations are in
-[`../REAL_MODEL_CHOICE.md`](../REAL_MODEL_CHOICE.md). The original scope and
-validation gates are preserved in [`../NEXT_SLICE.md`](../NEXT_SLICE.md).
+The historical real-model results and artifact locations are in
+[`../REAL_MODEL_CHOICE.md`](../REAL_MODEL_CHOICE.md). The original probe scope
+is archived in [`../REAL_MODEL_CHOICE_BRIEF.md`](../REAL_MODEL_CHOICE_BRIEF.md).
 
 ## Process modes
 
@@ -94,9 +96,12 @@ or screen comparison fails. It writes a versioned `report.json`, per-turn
 semantic JSONL, worker metadata and timings, raw PTY bytes, frame offsets, and
 the two transferred logit arrays under `/tmp/spe-rust-real-model-choice` by
 default. The report compares Rust with the Python sampler using the exact
-captured live logits, then resets a fresh backend to each full prefix and
-requires the fresh Python proposal to match the Rust-selected token. Logit
-deltas and top-token changes remain diagnostic values. The screen oracle
-builds expected cells from the Python decision and backend transcript, replays
-each frame with `pyte`, checks resize in both directions, and retains a
-negative control that removes the proposal row.
+captured live logits. A fresh backend rebuilds each exact full prefix by
+prefilling the root prompt and evaluating generated tokens one at a time,
+matching the live operation boundaries. This matters for quantized llama.cpp
+CPU inference: folding a generated token into one larger reset batch changed
+its logits and could change the sampled token. The passing replays match both
+decisions; logit deltas and top-token changes remain diagnostic values. The
+screen oracle builds expected cells from the Python decision and backend
+transcript, replays each frame with `pyte`, checks resize in both directions,
+and retains a negative control that removes the proposal row.

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -152,6 +152,11 @@ class HistoryPenaltyConfig(Protocol):
     frequency_penalty: float
 
 
+class BiasConfig(Protocol):
+    bias_groups: Sequence
+    token_biases: Sequence
+
+
 @dataclass(frozen=True)
 class SparseDistribution:
     ids: np.ndarray
@@ -173,6 +178,99 @@ class CandidateFilterResult:
     scaled_logits: np.ndarray
     stages: dict[str, np.ndarray | None]
     diagnostics: dict[str, object] = field(default_factory=dict)
+
+
+def _metric_ids(values) -> list[int]:
+    array = _vector(values, "token IDs")
+    if not np.issubdtype(array.dtype, np.integer):
+        raise ValueError("token IDs must be a one-dimensional integer array")
+    if array.dtype.kind == "u" and len(array) and int(np.max(array)) > MAX_SEED:
+        raise ValueError("token id is outside the decoder vocabulary")
+    try:
+        return np.asarray(array, dtype=np.int64).tolist()
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("token id is outside the decoder vocabulary") from exc
+
+
+def _metric_token_id(value) -> int:
+    try:
+        token_id = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("token id is outside the decoder vocabulary") from exc
+    if not MIN_SEED <= token_id <= MAX_SEED:
+        raise ValueError("token id is outside the decoder vocabulary")
+    return token_id
+
+
+class PolicyMetrics:
+    """Rust-backed lazy probability, rank, and raw-logit evidence metrics."""
+
+    def __init__(self, raw_logits, policy_logits=None) -> None:
+        raw = _validated_logits(raw_logits)
+        policy = None if policy_logits is None else _validated_logits(policy_logits)
+        if policy is not None and len(policy) != len(raw):
+            raise ValueError("adjusted logits must match the decoder vocabulary")
+        self._native = _call(
+            _native.PolicyMetricsNative,
+            raw.tolist(),
+            None if policy is None else policy.tolist(),
+        )
+
+    @property
+    def raw_logsumexp_ready(self) -> bool:
+        return self._native.raw_logsumexp_ready
+
+    @property
+    def logit_mean_std_ready(self) -> bool:
+        return self._native.logit_mean_std_ready
+
+    @property
+    def maximum(self) -> float:
+        return float(self._native.maximum())
+
+    @property
+    def denominator(self) -> float:
+        return float(_call(self._native.denominator))
+
+    @property
+    def log_z(self) -> float:
+        return float(_call(self._native.log_z))
+
+    def raw_probabilities(self, token_ids):
+        ids = _metric_ids(token_ids)
+        values = _call(self._native.raw_probabilities, ids)
+        return np.asarray(values, dtype=np.float64)
+
+    def policy_probabilities_at(self, token_ids):
+        ids = _metric_ids(token_ids)
+        values = _call(self._native.policy_probabilities, ids)
+        return np.asarray(values, dtype=np.float64)
+
+    def raw_nll(self, token_id: int) -> float:
+        return float(_call(self._native.raw_nll, _metric_token_id(token_id)))
+
+    def raw_rank(self, token_id: int) -> int:
+        return int(_call(self._native.raw_rank, _metric_token_id(token_id)))
+
+    def policy_rank(self, token_id: int) -> int:
+        return int(_call(self._native.policy_rank, _metric_token_id(token_id)))
+
+    def top_raw_ids(self, count: int) -> list[int]:
+        count = int(count)
+        count = max(-(1 << 63), min((1 << 63) - 1, count))
+        return [int(value) for value in _call(self._native.top_raw_ids, count)]
+
+    def top_policy_ids(self, count: int) -> list[int]:
+        count = int(count)
+        count = max(-(1 << 63), min((1 << 63) - 1, count))
+        return [int(value) for value in _call(self._native.top_policy_ids, count)]
+
+    def logit_z(self, token_id: int) -> float | None:
+        return _call(self._native.logit_z, _metric_token_id(token_id))
+
+    def logit_z_scores(self, token_ids) -> list[float | None]:
+        ids = _metric_ids(token_ids)
+        return _call(self._native.logit_z_scores, ids)
 
 
 class StandardCandidateFilter:
@@ -285,6 +383,174 @@ def apply_history_penalties(
         native_repeat_last_n,
         presence_penalty,
         frequency_penalty,
+    )
+    return np.asarray(adjusted, dtype=np.float64)
+
+
+def apply_activation_adjustments(
+    logits: np.ndarray,
+    activation_adjustments: np.ndarray,
+    strength: float,
+) -> np.ndarray:
+    """Scale full-vocabulary output-head adjustments and add them to logits."""
+    vector = _validated_logits(logits)
+    adjustments = _float_vector(activation_adjustments, "activation adjustments")
+    if type(strength) not in {int, float}:
+        raise EditorError("output-head steering strength must be finite")
+    try:
+        strength = float(strength)
+    except OverflowError as exc:
+        raise EditorError("output-head steering strength must be finite") from exc
+    if not math.isfinite(strength):
+        raise EditorError("output-head steering strength must be finite")
+    values = _call(
+        _native.apply_activation_adjustments,
+        vector.tolist(),
+        adjustments.tolist(),
+        strength,
+    )
+    return np.asarray(values, dtype=np.float64)
+
+
+def apply_ephemeral_biases(
+    logits: np.ndarray,
+    ephemeral_biases: Mapping[int, float] | None,
+) -> np.ndarray:
+    """Add one decision's sparse token adjustments to policy logits."""
+    vector = _validated_logits(logits)
+    try:
+        items = (ephemeral_biases or {}).items()
+        normalized = {int(token): float(amount) for token, amount in items}
+    except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("ephemeral logit biases are invalid") from exc
+    values = _call(
+        _native.apply_ephemeral_biases,
+        vector.tolist(),
+        list(normalized.items()),
+    )
+    return np.asarray(values, dtype=np.float64)
+
+
+def cfg_combine_logits(
+    conditional_logits: np.ndarray,
+    unconditional_logits: np.ndarray,
+    scale: float,
+) -> np.ndarray:
+    """Apply `U + scale * (C - U)` to a full-vocabulary logits pair."""
+    conditional = _validated_logits(conditional_logits)
+    unconditional = _validated_logits(unconditional_logits)
+    scale = _finite_parameter(scale, "cfg_scale")
+    values = _call(
+        _native.cfg_combine_logits,
+        conditional.tolist(),
+        unconditional.tolist(),
+        scale,
+    )
+    return np.asarray(values, dtype=np.float64)
+
+
+def _bias_arguments(config: BiasConfig):
+    groups = [
+        (
+            group.name,
+            float(group.bias),
+            [
+                (
+                    member.text,
+                    member.literal,
+                    [
+                        (list(route.token_ids), list(route.surfaces))
+                        for route in member.routes
+                    ],
+                )
+                for member in group.members
+            ],
+        )
+        for group in config.bias_groups
+    ]
+    token_biases = [
+        (int(token.token_id), float(token.bias)) for token in config.token_biases
+    ]
+    return groups, token_biases
+
+
+def _bias_history(value):
+    return None if value is None else _history_ids(value).tolist()
+
+
+def active_biases(history_token_ids, config: BiasConfig) -> dict[int, float]:
+    """Return Rust-summed active biases from compiled token-ID routes."""
+    groups, token_biases = _bias_arguments(config)
+    values = _call(
+        _native.active_biases,
+        groups,
+        token_biases,
+        _bias_history(history_token_ids),
+    )
+    return {int(token_id): float(amount) for token_id, amount in values}
+
+
+def bias_contributions(
+    history_token_ids,
+    config: BiasConfig,
+    *,
+    include_inactive: bool = False,
+):
+    """Return source-aware Rust bias records as production Python dataclasses."""
+    from trajectory_editor.bias_groups import (
+        BiasContribution,
+        BiasMemberRoute,
+        BiasRoute,
+    )
+
+    groups, token_biases = _bias_arguments(config)
+    values = _call(
+        _native.bias_contributions,
+        groups,
+        token_biases,
+        _bias_history(history_token_ids),
+        include_inactive,
+    )
+    return tuple(
+        BiasContribution(
+            token_id=int(token_id),
+            amount=float(amount),
+            active=bool(active),
+            source=source,
+            group_name=group_name,
+            member_routes=tuple(
+                BiasMemberRoute(
+                    member_text=member_text,
+                    member_literal=bool(member_literal),
+                    route=BiasRoute(
+                        token_ids=tuple(route_token_ids),
+                        surfaces=tuple(route_surfaces),
+                    ),
+                    active=bool(route_active),
+                )
+                for (
+                    member_text,
+                    member_literal,
+                    route_token_ids,
+                    route_surfaces,
+                    route_active,
+                ) in member_routes
+            ),
+        )
+        for token_id, amount, active, source, group_name, member_routes in values
+    )
+
+
+def apply_biases(logits: np.ndarray, history_token_ids, config: BiasConfig) -> np.ndarray:
+    """Return a new policy-logit vector with active direct/group biases."""
+    vector = _validated_logits(logits)
+    groups, token_biases = _bias_arguments(config)
+    adjusted = _call(
+        _native.apply_biases,
+        vector.tolist(),
+        groups,
+        token_biases,
+        _bias_history(history_token_ids),
     )
     return np.asarray(adjusted, dtype=np.float64)
 
@@ -781,6 +1047,7 @@ __all__ = [
     "MAX_SEED",
     "MIN_SEED",
     "PERTURB_MAX_KERNELS",
+    "PolicyMetrics",
     "RNG_SCHEME",
     "SparseDistribution",
     "StandardCandidateFilter",
@@ -788,7 +1055,14 @@ __all__ = [
     "_softmax",
     "_top_ids",
     "_validated_logits",
+    "active_biases",
+    "apply_activation_adjustments",
+    "apply_biases",
     "apply_candidate_filter",
+    "apply_ephemeral_biases",
+    "apply_history_penalties",
+    "bias_contributions",
+    "cfg_combine_logits",
     "conditional_gumbel_top_k",
     "draw_token",
     "gaussian_ranking_scores",
