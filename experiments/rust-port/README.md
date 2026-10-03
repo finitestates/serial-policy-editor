@@ -22,23 +22,25 @@ cargo clippy --manifest-path experiments/rust-port/Cargo.toml \
 | --- | --- | --- |
 | [`sampler/`](sampler/README.md) | Implemented experiment | Numeric filtering, deterministic draws, and sampler helpers from `core/src/trajectory_editor/core/sampling.py`, plus the history-penalty transform from `core/src/trajectory_editor/core/policy_calculations.py`. |
 | [`episode-history/`](episode-history/README.md) | Implemented experiment | Typed actions, outcomes, evidence, in-memory history validation/truncation, and sampler updates. |
-| [`terminal-ui/`](terminal-ui/README.md) | PTY smoke and fixture Choice turn implemented | Exercise the sampler and history crates through one compiled Rust terminal process and the existing PTY/pyte oracle. No production Rust UI yet. |
+| [`terminal-ui/`](terminal-ui/README.md) | PTY smoke, fixture Choice, and real-model boundary probe implemented | Exercise the sampler and history crates in one compiled Rust terminal process, with fixture logits or a persistent Python inference worker. No production Rust UI yet. |
 
-The completed integration slice is a deterministic candidate-choice turn
-joining these pieces. Its fixture, semantic result, visual contract, validation
-commands, and evidence are in [`NEXT_SLICE.md`](NEXT_SLICE.md). The Python
-bindings remain available for parity checks; the terminal binary calls the
-sampler and episode-history kernels as Rust libraries. The sampler's completed
-history-penalty kernel and its evidence are recorded in
-[`NEXT_AGENT.md`](NEXT_AGENT.md).
+The completed deterministic fixture Choice turn is documented in
+[`PRIOR_SLICE.md`](PRIOR_SLICE.md). The sampler's completed history-penalty
+kernel and its evidence are recorded in [`PREVIOUS_AGENT.md`](PREVIOUS_AGENT.md).
+The completed real-model boundary probe is recorded in
+[`REAL_MODEL_CHOICE.md`](REAL_MODEL_CHOICE.md). Its original scope and gates
+remain in [`NEXT_SLICE.md`](NEXT_SLICE.md). The Python bindings remain
+available for parity checks; the terminal binary calls the sampler and
+episode-history kernels as Rust libraries.
 
 ## Direction
 
 The intended destination is a Rust-owned episode runtime and terminal UI.
 Model-specific inference can remain behind Python adapters for Transformers
 and existing llama.cpp bindings while that provides value. The PTY smoke and
-fixture-backed Choice turn are implemented. Current kernel work continues
-roadmap stage 2 by moving additional policy calculations into Rust.
+fixture-backed Choice turn and two-profile real-model boundary probe are
+implemented. Stage 2 remains open for the other policy calculations, and this
+probe does not decide the eventual process packaging.
 
 See [`ROADMAP.md`](ROADMAP.md) for migration order, boundaries, and gates. The
 PTY smoke contract is in [`terminal-ui/README.md`](terminal-ui/README.md).

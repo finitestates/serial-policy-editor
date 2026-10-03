@@ -16,10 +16,13 @@ through a small binding. Rust owns the sampling calculations. The Python side
 converts NumPy arrays and Python values at the boundary, calls Rust, and
 converts results back to the existing Python-facing types. The Rust terminal
 process now also calls this library without initializing Python; see the
-completed integration slice in [`../NEXT_SLICE.md`](../NEXT_SLICE.md). The
-history-penalty transform is another implemented kernel in this crate; its
-completed-slice record and validation evidence are in
-[`../NEXT_AGENT.md`](../NEXT_AGENT.md).
+completed fixture integration in
+[`../PRIOR_SLICE.md`](../PRIOR_SLICE.md). The history-penalty transform is
+another implemented kernel in this crate; its completed-slice record and
+validation evidence are in [`../PREVIOUS_AGENT.md`](../PREVIOUS_AGENT.md).
+The completed real-model backend probe is recorded in
+[`../REAL_MODEL_CHOICE.md`](../REAL_MODEL_CHOICE.md); its original scope and
+gates remain in [`../NEXT_SLICE.md`](../NEXT_SLICE.md).
 
 Use `sampling.py` as the specification for sampler algorithms and
 `policy_calculations.py` for the history transform. The implemented sampler

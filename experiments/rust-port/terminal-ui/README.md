@@ -1,8 +1,12 @@
 # Rust terminal PTY experiment
 
-**Status:** the standalone process has a passing PTY smoke path and one
-fixture-backed Choice turn. This is an integration experiment, not the
-production terminal UI.
+**Status:** the standalone process has a passing PTY smoke path, one
+fixture-backed Choice turn, and a two-profile real-model Choice boundary
+probe. This is an integration experiment, not the production terminal UI.
+
+The completed real-model results and artifact locations are in
+[`../REAL_MODEL_CHOICE.md`](../REAL_MODEL_CHOICE.md). The original scope and
+validation gates are preserved in [`../NEXT_SLICE.md`](../NEXT_SLICE.md).
 
 ## Process modes
 
@@ -52,3 +56,47 @@ in [`../README.md`](../README.md).
 
 The test contract checks terminal cells and cursor state through `pyte`; it
 does not compare styles.
+
+## Real-model mode
+
+`--real-model` starts one persistent Python worker using the selected profile
+through `benchmarks.real_model.load_profile` and the production backend
+factory. Worker stdout is a dedicated framed RPC pipe; diagnostics go to the
+artifact stderr log. JSON request and response headers use a four-byte
+little-endian length. Full-vocabulary logits follow as an explicitly sized
+`f64le` binary payload. The worker records the backend's source dtype and
+converts logits to little-endian float64 for the Rust sampler.
+
+The fixed sampler for both smoke profiles uses temperature `0.8`, `top_k: 5`,
+`top_p: 1.0`, `min_p: 0.0`, `typical_p: 1.0`, `tail_free_z: 1.0`, categorical
+drawing, token-ID addressing, and seed `17`. The profile still supplies model
+loading and backend launch settings. The runner accepts each proposal through
+the same Choice submit path as fixture mode, advances the live backend
+incrementally, and captures decisions at visible-history boundaries `0` and
+`1` before doing fresh-prefix replays. The fixed prompt is pre-0 context: its
+token-prefix SHA-256 supplies the sampler's 256-bit stream identity, while the
+prompt tokens remain in the model prefix and outside generated-token history.
+
+From the repository root, build the standalone process, install the optional
+extras in the same interpreter used by the runner, and run each profile in a
+separate invocation:
+
+```sh
+cargo build --manifest-path experiments/rust-port/terminal-ui/Cargo.toml --locked
+core/.venv/bin/python -m pip install -e './core[transformers-accelerate]'
+core/.venv/bin/python -m pip install -e './core[llama]'
+core/.venv/bin/python experiments/rust-port/terminal-ui/scripts/real_model_choice.py --model-root /path/to/models --profile benchmarks/profiles/gpt2_cpu_smoke.yaml
+core/.venv/bin/python experiments/rust-port/terminal-ui/scripts/real_model_choice.py --model-root /path/to/models --profile benchmarks/profiles/llama_1b_smoke.yaml
+```
+
+The runner fails when a model, optional dependency, worker operation, decision,
+or screen comparison fails. It writes a versioned `report.json`, per-turn
+semantic JSONL, worker metadata and timings, raw PTY bytes, frame offsets, and
+the two transferred logit arrays under `/tmp/spe-rust-real-model-choice` by
+default. The report compares Rust with the Python sampler using the exact
+captured live logits, then resets a fresh backend to each full prefix and
+requires the fresh Python proposal to match the Rust-selected token. Logit
+deltas and top-token changes remain diagnostic values. The screen oracle
+builds expected cells from the Python decision and backend transcript, replays
+each frame with `pyte`, checks resize in both directions, and retains a
+negative control that removes the proposal row.

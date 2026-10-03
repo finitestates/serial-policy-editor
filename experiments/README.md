@@ -12,6 +12,11 @@ commands. Component READMEs describe their own APIs and validation. Slice
 handoffs record implementation details and evidence when they add context that
 does not belong in a component guide.
 
+The completed Rust real-model Choice boundary probe is recorded in
+[REAL_MODEL_CHOICE.md](rust-port/REAL_MODEL_CHOICE.md); its scope and gates are
+preserved in [NEXT_SLICE.md](rust-port/NEXT_SLICE.md). Completed slices are
+kept as past-tense records in their workspace.
+
 ## Inventory
 
 | Path | Purpose |

@@ -40,7 +40,7 @@ The first integration is one deterministic candidate-choice turn in the
 compiled Rust terminal process. It uses fixture logits, the existing Rust
 sampler and episode-history kernels, and the current PTY/pyte harness. The
 fixture, semantic record, screen contract, and validation evidence are in
-[`NEXT_SLICE.md`](NEXT_SLICE.md).
+[`PRIOR_SLICE.md`](PRIOR_SLICE.md).
 
 Keep Python facades around the kernels for parity checks. Avoid converting
 full-vocabulary NumPy arrays to Python lists at every decision; keep this slice
@@ -55,6 +55,15 @@ absolute tolerance of `1e-14`. The PTY test replays every frame from raw bytes
 and compares the authored `choice.ready`, `choice.accepted`, and both
 `choice.resized` geometries. It also retains a negative control that removes
 the proposal row.
+
+### Completed real-model backend boundary probe
+
+The implementation and two-profile evidence are recorded in
+[`REAL_MODEL_CHOICE.md`](REAL_MODEL_CHOICE.md); [`NEXT_SLICE.md`](NEXT_SLICE.md)
+preserves the original scope and gates. The slice keeps fixture mode, adds an
+opt-in persistent Python backend worker, and exercises two real-model Choice
+decisions through the Rust process and PTY oracle. Stage 2 remains open for the
+other policy calculations listed below.
 
 ### 2. Move policy calculations
 

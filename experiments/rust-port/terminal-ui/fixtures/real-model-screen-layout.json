@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "description": "Authored fixed-row layout for real-model Choice frames. Dynamic text comes from the independent Python backend transcript and decision oracle.",
+  "size": [100, 30],
+  "candidate_count": 5,
+  "ready_rows": {
+    "title": 0,
+    "profile": 1,
+    "boundary": 2,
+    "context": 3,
+    "candidate_header": 5,
+    "candidate_start": 6,
+    "proposal": 11,
+    "input": 13,
+    "help": 14
+  },
+  "accepted_rows": {
+    "title": 0,
+    "profile": 1,
+    "boundary": 2,
+    "context": 3,
+    "action": 4,
+    "accepted_token": 5,
+    "evidence": 6,
+    "visible_ids": 7,
+    "committed": 9,
+    "help": 10
+  },
+  "cursor": {
+    "ready": [9, 13],
+    "accepted": null
+  }
+}

@@ -11,6 +11,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod worker;
+use worker::BackendWorker;
+
 use episode_history_native::{
     ActionOutcome, EpisodeHistory, PolicyAction, RecordedAttempt, TokenEvidence,
 };
@@ -19,12 +22,18 @@ use rust_sampler_native::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use unicode_width::UnicodeWidthChar;
 
 const STARTUP: &[u8] = b"\x1b[?1049h\x1b[2J\x1b[?25h";
 const FRAME_START: &[u8] = b"\x1b[?2026h";
 const FRAME_END: &[u8] = b"\x1b[?2026l";
 const INPUT_PREFIX: &str = "Input > ";
 const CHOICE_PREFIX: &str = "Choice > ";
+// The root prompt is the pre-0 model context; its token-prefix fingerprint
+// identifies the stream while generated-token history starts at boundary 0.
+const REAL_PROMPT: &str = "A short list of everyday objects:";
+const REAL_TOP_K: i64 = 5;
+const REAL_SEED: i64 = 17;
 
 static RESIZE_PENDING: AtomicBool = AtomicBool::new(false);
 
@@ -41,6 +50,8 @@ struct Size {
 #[derive(Serialize)]
 struct FrameRecord {
     sequence: u64,
+    checkpoint: String,
+    decision_index: Option<usize>,
     size: [usize; 2],
     lines: Vec<String>,
     cursor: Option<[usize; 2]>,
@@ -48,6 +59,8 @@ struct FrameRecord {
 }
 
 struct FrameContent {
+    checkpoint: String,
+    decision_index: Option<usize>,
     lines: Vec<String>,
     cursor: Option<[usize; 2]>,
 }
@@ -180,6 +193,7 @@ struct ChoiceCandidate {
     token_id: i64,
     text: String,
     probability: f64,
+    is_eog: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -192,6 +206,12 @@ struct AcceptedTurn {
 
 struct ChoiceState {
     fixture_id: String,
+    profile_name: String,
+    is_real_model: bool,
+    turn_index: usize,
+    root_token_ids: Vec<i64>,
+    stream_fingerprint: String,
+    tokenizer_id: String,
     context_text: String,
     context_boundary: u64,
     sampler: FixtureSampler,
@@ -216,6 +236,7 @@ enum AppState {
 enum SubmitResult {
     Exit,
     Redraw(Option<Value>),
+    Advance(Option<Value>),
 }
 
 impl ChoiceState {
@@ -304,14 +325,23 @@ impl ChoiceState {
                     token_id: *token_id,
                     text,
                     probability,
+                    is_eog: false,
                 })
             })
             .collect::<io::Result<Vec<_>>>()?;
 
         let context_text = input.context.token_text.concat();
         let history = context_history(&input.context, &context_text)?;
+        let root_token_ids = input.context.token_ids.clone();
+        let stream_fingerprint = input.sampler.stream_fingerprint.clone();
         Ok(Self {
             fixture_id,
+            profile_name: "fixture".to_owned(),
+            is_real_model: false,
+            turn_index: 0,
+            root_token_ids,
+            stream_fingerprint,
+            tokenizer_id: "fixture".to_owned(),
             context_text,
             context_boundary: input.context.boundary,
             sampler: input.sampler,
@@ -322,6 +352,117 @@ impl ChoiceState {
             input: String::new(),
             status: None,
         })
+    }
+
+    fn load_real(worker: &mut BackendWorker) -> io::Result<Self> {
+        let profile = worker
+            .hello()
+            .get("profile")
+            .ok_or_else(|| invalid_data("worker startup omitted profile metadata"))?;
+        let profile_name = profile
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid_data("worker profile omitted its name"))?
+            .to_owned();
+        let tokenizer_id = worker
+            .hello()
+            .get("tokenizer_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid_data("worker startup omitted tokenizer identity"))?
+            .to_owned();
+        let tokenized = worker.tokenize(REAL_PROMPT)?;
+        let root_token_ids = tokenized
+            .get("token_ids")
+            .and_then(Value::as_array)
+            .ok_or_else(|| invalid_data("worker tokenize response omitted token IDs"))?
+            .iter()
+            .map(|value| {
+                value
+                    .as_i64()
+                    .ok_or_else(|| invalid_data("worker returned an invalid token ID"))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        if root_token_ids.is_empty() {
+            return Err(invalid_data(
+                "backend tokenizer returned an empty root prefix",
+            ));
+        }
+        let response_tokenizer = tokenized
+            .get("tokenizer_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid_data("worker tokenize response omitted tokenizer identity"))?;
+        let fingerprint = tokenized
+            .get("stream_fingerprint")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid_data("worker tokenize response omitted stream fingerprint"))?
+            .to_owned();
+        if response_tokenizer != tokenizer_id {
+            return Err(invalid_data(
+                "tokenizer identity changed during tokenization",
+            ));
+        }
+        let sampler = real_sampler(0, fingerprint.clone());
+        worker.reset(&root_token_ids)?;
+        let logits = worker.logits(0)?;
+        let context_text = worker.render(&root_token_ids)?;
+        let history = EpisodeHistory::default();
+        let (candidates, proposal_token_id) = real_candidates(worker, &logits, &sampler)?;
+        Ok(Self {
+            fixture_id: "real-model-choice-v1".to_owned(),
+            profile_name,
+            is_real_model: true,
+            turn_index: 0,
+            root_token_ids,
+            stream_fingerprint: fingerprint,
+            tokenizer_id,
+            context_text,
+            context_boundary: 0,
+            sampler,
+            candidates,
+            proposal_token_id,
+            history,
+            accepted: None,
+            input: String::new(),
+            status: None,
+        })
+    }
+
+    fn advance_real(&mut self, worker: &mut BackendWorker) -> io::Result<()> {
+        let accepted = self
+            .accepted
+            .as_ref()
+            .ok_or_else(|| invalid_data("cannot advance before accepting a Choice"))?;
+        if self.turn_index != 0 || accepted.evidence.is_eog {
+            return Err(invalid_data(
+                "real-model Choice cannot advance after this outcome",
+            ));
+        }
+        let prefix = self.model_prefix_token_ids();
+        let boundary = self.history.current_boundary();
+        let next_sampling_boundary =
+            i64::try_from(boundary).map_err(|_| invalid_data("visible boundary is too large"))?;
+        let logits = worker.logits(boundary)?;
+        self.context_text = worker.render(&prefix)?;
+        self.context_boundary = boundary;
+        self.sampler.boundary = next_sampling_boundary;
+        let (candidates, proposal_token_id) = real_candidates(worker, &logits, &self.sampler)?;
+        self.candidates = candidates;
+        self.proposal_token_id = proposal_token_id;
+        self.turn_index = 1;
+        self.accepted = None;
+        self.input.clear();
+        self.status = None;
+        Ok(())
+    }
+
+    fn model_prefix_token_ids(&self) -> Vec<i64> {
+        if self.is_real_model {
+            let mut prefix = self.root_token_ids.clone();
+            prefix.extend(self.history.visible_token_ids());
+            prefix
+        } else {
+            self.history.visible_token_ids()
+        }
     }
 
     fn handle_character(&mut self, byte: u8) -> bool {
@@ -345,7 +486,7 @@ impl ChoiceState {
         }
     }
 
-    fn submit(&mut self) -> io::Result<SubmitResult> {
+    fn submit(&mut self, worker: Option<&mut BackendWorker>) -> io::Result<SubmitResult> {
         let command = self.input.trim().to_owned();
         if self.accepted.is_some() {
             return if matches!(command.as_str(), "q" | "quit" | "exit") {
@@ -386,6 +527,8 @@ impl ChoiceState {
             .iter()
             .find(|candidate| candidate.token_id == selected_token_id)
             .ok_or_else(|| invalid_data("selected token is outside the candidate view"))?;
+        let prefix_token_ids = self.model_prefix_token_ids();
+        let decision_context_text = self.context_text.clone();
         let before = self.history.current_boundary();
         let after = before
             .checked_add(1)
@@ -401,7 +544,7 @@ impl ChoiceState {
             policy_rank: None,
             decoder_probability: candidate.probability,
             proposal_agreement: selected_token_id == self.proposal_token_id,
-            is_eog: false,
+            is_eog: candidate.is_eog,
             realized_visible: true,
         };
         let outcome = ActionOutcome {
@@ -411,10 +554,18 @@ impl ChoiceState {
             resolved_text: candidate.text.clone(),
             resolved_token_ids: vec![selected_token_id],
             visible_token_ids: vec![selected_token_id],
-            terminal_token_id: None,
-            stop_reason: "completed".to_owned(),
+            terminal_token_id: candidate.is_eog.then_some(selected_token_id),
+            stop_reason: if candidate.is_eog {
+                "eog".to_owned()
+            } else {
+                "completed".to_owned()
+            },
             evidence: vec![evidence.clone()],
-            status: "completed".to_owned(),
+            status: if candidate.is_eog {
+                "eog".to_owned()
+            } else {
+                "completed".to_owned()
+            },
             divergence: None,
             replay_eog_token_id: None,
             diagnostics: None,
@@ -429,6 +580,14 @@ impl ChoiceState {
             expectation: None,
         });
         self.history = EpisodeHistory::new(attempts).map_err(invalid_data)?;
+        if self.is_real_model {
+            let worker = worker
+                .ok_or_else(|| invalid_data("real-model Choice has no backend worker"))?;
+            if !candidate.is_eog {
+                worker.eval(&[selected_token_id])?;
+            }
+            self.context_text = worker.render(&self.model_prefix_token_ids())?;
+        }
         self.accepted = Some(AcceptedTurn {
             action: action.clone(),
             token_id: selected_token_id,
@@ -439,7 +598,7 @@ impl ChoiceState {
         self.status = None;
 
         let history_record = serde_json::to_value(&self.history).map_err(invalid_data)?;
-        let semantic_record = json!({
+        let mut semantic_record = json!({
             "schema_version": 1,
             "fixture_id": self.fixture_id,
             "checkpoint": "choice.accepted",
@@ -454,10 +613,73 @@ impl ChoiceState {
             "visible_text": self.history.visible_text(),
             "history": history_record,
         });
+        if self.is_real_model {
+            semantic_record["checkpoint"] = json!("choice.real.accepted");
+            semantic_record["profile_name"] = json!(self.profile_name);
+            semantic_record["decision_index"] = json!(self.turn_index);
+            semantic_record["root_token_ids"] = json!(self.root_token_ids);
+            semantic_record["prefix_token_ids"] = json!(prefix_token_ids);
+            semantic_record["stream_fingerprint"] = json!(self.stream_fingerprint);
+            semantic_record["tokenizer_id"] = json!(self.tokenizer_id);
+            semantic_record["sampling_boundary"] = json!(self.sampler.boundary);
+            semantic_record["candidate_token_ids"] = json!(
+                self.candidates
+                    .iter()
+                    .map(|item| item.token_id)
+                    .collect::<Vec<_>>()
+            );
+            semantic_record["candidate_raw_ranks"] = json!(
+                self.candidates
+                    .iter()
+                    .map(|item| item.rank)
+                    .collect::<Vec<_>>()
+            );
+            semantic_record["candidate_texts"] = json!(
+                self.candidates
+                    .iter()
+                    .map(|item| item.text.clone())
+                    .collect::<Vec<_>>()
+            );
+            semantic_record["candidate_probabilities"] = json!(
+                self.candidates
+                    .iter()
+                    .map(|item| item.probability)
+                    .collect::<Vec<_>>()
+            );
+            semantic_record["candidate_is_eog"] = json!(
+                self.candidates
+                    .iter()
+                    .map(|item| item.is_eog)
+                    .collect::<Vec<_>>()
+            );
+            semantic_record["context_text"] = json!(self.context_text);
+            semantic_record["decision_context_text"] = json!(decision_context_text);
+            semantic_record["sampler"] = json!({
+                "temperature": self.sampler.temperature,
+                "top_k": self.sampler.top_k,
+                "top_p": self.sampler.top_p,
+                "min_p": self.sampler.min_p,
+                "typical_p": self.sampler.typical_p,
+                "tail_free_z": self.sampler.tail_free_z,
+                "draw_kernel": self.sampler.draw_kernel,
+                "gaussian_noise_std": self.sampler.gaussian_noise_std,
+                "perturb_noise_std": self.sampler.perturb_noise_std,
+                "student_t_df": self.sampler.student_t_df,
+                "seed": self.sampler.seed,
+                "gumbel_noise_address": self.sampler.gumbel_noise_address,
+                "gumbel_noise_scale": self.sampler.gumbel_noise_scale,
+            });
+            if self.turn_index == 0 && !candidate.is_eog {
+                return Ok(SubmitResult::Advance(Some(semantic_record)));
+            }
+        }
         Ok(SubmitResult::Redraw(Some(semantic_record)))
     }
 
     fn render(&self, size: Size) -> FrameContent {
+        if self.is_real_model {
+            return self.render_real_model(size);
+        }
         let mut lines = if let Some(accepted) = &self.accepted {
             vec![
                 "Rust Choice / fixture turn".to_owned(),
@@ -543,7 +765,117 @@ impl ChoiceState {
             ])
         };
         normalize_lines(&mut lines, size);
-        FrameContent { lines, cursor }
+        FrameContent {
+            checkpoint: if self.accepted.is_some() {
+                "choice.accepted".to_owned()
+            } else {
+                "choice.ready".to_owned()
+            },
+            decision_index: None,
+            lines,
+            cursor,
+        }
+    }
+
+    fn render_real_model(&self, size: Size) -> FrameContent {
+        let turn_label = format!("Rust Choice / real model / turn {}/2", self.turn_index + 1);
+        let mut lines = if let Some(accepted) = &self.accepted {
+            vec![
+                turn_label,
+                format!("Profile: {}", safe_terminal_text(&self.profile_name)),
+                format!("Context @ boundary {}", accepted.boundary_after),
+                format!("Context: {}", safe_terminal_text(&self.context_text)),
+                format!("Action: {}", action_name(&accepted.action)),
+                format!(
+                    "Accepted token: {} / \"{}\"",
+                    accepted.token_id,
+                    safe_terminal_text(&accepted.evidence.text),
+                ),
+                format!(
+                    "Evidence: boundary {} / sampling {} / agreement {}",
+                    accepted.evidence.boundary,
+                    accepted.evidence.sampling_boundary,
+                    if accepted.evidence.proposal_agreement {
+                        "yes"
+                    } else {
+                        "no"
+                    },
+                ),
+                format!(
+                    "Visible token IDs: {}",
+                    self.history
+                        .visible_token_ids()
+                        .iter()
+                        .map(i64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+                String::new(),
+                "Choice committed".to_owned(),
+                "Press q to exit".to_owned(),
+            ]
+        } else {
+            let mut rows = vec![
+                turn_label,
+                format!("Profile: {}", safe_terminal_text(&self.profile_name)),
+                format!("Context @ boundary {}", self.context_boundary),
+                format!("Context: {}", safe_terminal_text(&self.context_text)),
+                String::new(),
+                "Rank  Token  Text".to_owned(),
+            ];
+            for candidate in &self.candidates {
+                let marker = if candidate.token_id == self.proposal_token_id {
+                    '>'
+                } else {
+                    ' '
+                };
+                let suffix = if candidate.is_eog { " [EOG]" } else { "" };
+                rows.push(format!(
+                    "{marker} {:>5} {:>6}  \"{}\"{suffix}",
+                    candidate.rank,
+                    candidate.token_id,
+                    safe_terminal_text(candidate.text.trim_start()),
+                ));
+            }
+            if let Some(candidate) = self
+                .candidates
+                .iter()
+                .find(|candidate| candidate.token_id == self.proposal_token_id)
+            {
+                rows.push(format!(
+                    "Proposal: rank {} / token {} / \"{}\"",
+                    candidate.rank,
+                    candidate.token_id,
+                    safe_terminal_text(&candidate.text),
+                ));
+            } else {
+                rows.push("Proposal: unavailable".to_owned());
+            }
+            rows.push(String::new());
+            rows.push(format!("{CHOICE_PREFIX}{}", self.input));
+            rows.push("Enter accepts · q exits".to_owned());
+            rows
+        };
+        let cursor = if self.accepted.is_some() {
+            None
+        } else {
+            Some([
+                (CHOICE_PREFIX.chars().count() + self.input.chars().count())
+                    .min(size.columns.saturating_sub(1)),
+                13.min(size.rows.saturating_sub(1)),
+            ])
+        };
+        normalize_lines(&mut lines, size);
+        FrameContent {
+            checkpoint: if self.accepted.is_some() {
+                "choice.real.accepted".to_owned()
+            } else {
+                "choice.real.ready".to_owned()
+            },
+            decision_index: Some(self.turn_index),
+            lines,
+            cursor,
+        }
     }
 }
 
@@ -588,9 +920,10 @@ fn main() -> ExitCode {
 }
 
 fn run() -> io::Result<()> {
-    let choice_mode = match env::args().nth(1).as_deref() {
-        None => false,
-        Some("--choice") => true,
+    let mode = match env::args().nth(1).as_deref() {
+        None => "smoke",
+        Some("--choice") => "fixture-choice",
+        Some("--real-model") => "real-model-choice",
         Some(other) => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -598,6 +931,8 @@ fn run() -> io::Result<()> {
             ));
         }
     };
+    let choice_mode = mode != "smoke";
+    let real_model_mode = mode == "real-model-choice";
     let frame_log_path = env::var_os("SPE_TERMINAL_FRAME_LOG")
         .map(PathBuf::from)
         .ok_or_else(|| {
@@ -631,8 +966,19 @@ fn run() -> io::Result<()> {
         None
     };
 
-    let mut app = if choice_mode {
+    let mut worker = if real_model_mode {
+        Some(BackendWorker::spawn_from_env()?)
+    } else {
+        None
+    };
+    let mut app = if mode == "fixture-choice" {
         AppState::Choice(Box::new(ChoiceState::load()?))
+    } else if real_model_mode {
+        AppState::Choice(Box::new(ChoiceState::load_real(
+            worker
+                .as_mut()
+                .ok_or_else(|| invalid_data("real-model worker did not start"))?,
+        )?))
     } else {
         AppState::Smoke(SmokeState {
             input: String::new(),
@@ -699,6 +1045,7 @@ fn run() -> io::Result<()> {
         match byte[0] {
             0x03 | 0x04 => break,
             b'\r' | b'\n' => {
+                let mut advance_real_choice = false;
                 let submit = match &mut app {
                     AppState::Smoke(state) => {
                         if matches!(state.input.as_str(), "quit" | "exit") {
@@ -713,7 +1060,7 @@ fn run() -> io::Result<()> {
                             SubmitResult::Redraw(None)
                         }
                     }
-                    AppState::Choice(state) => state.submit()?,
+                    AppState::Choice(state) => state.submit(worker.as_mut())?,
                 };
                 match submit {
                     SubmitResult::Exit => break,
@@ -724,7 +1071,40 @@ fn run() -> io::Result<()> {
                             log.flush()?;
                         }
                     }
+                    SubmitResult::Advance(semantic) => {
+                        if let (Some(log), Some(record)) = (&mut semantic_log, semantic) {
+                            serde_json::to_writer(&mut *log, &record).map_err(invalid_data)?;
+                            log.write_all(b"\n")?;
+                            log.flush()?;
+                        }
+                        advance_real_choice = true;
+                    }
                 }
+                present(
+                    &mut frame_log,
+                    &mut output_offset,
+                    &mut sequence,
+                    size,
+                    app.render(size),
+                )?;
+                if advance_real_choice {
+                    let AppState::Choice(state) = &mut app else {
+                        return Err(invalid_data("real-model advance lost Choice state"));
+                    };
+                    state.advance_real(
+                        worker
+                            .as_mut()
+                            .ok_or_else(|| invalid_data("real-model worker was lost"))?,
+                    )?;
+                    present(
+                        &mut frame_log,
+                        &mut output_offset,
+                        &mut sequence,
+                        size,
+                        app.render(size),
+                    )?;
+                }
+                continue;
             }
             0x08 | 0x7f => app.backspace(),
             byte @ 0x20..=0x7e => {
@@ -741,6 +1121,10 @@ fn run() -> io::Result<()> {
             size,
             app.render(size),
         )?;
+    }
+
+    if let Some(worker) = worker.as_mut() {
+        worker.shutdown()?;
     }
 
     Ok(())
@@ -797,6 +1181,8 @@ fn present(
 
     let record = FrameRecord {
         sequence: *sequence,
+        checkpoint: content.checkpoint,
+        decision_index: content.decision_index,
         size: [size.columns, size.rows],
         lines: content.lines,
         cursor: content.cursor,
@@ -831,9 +1217,131 @@ fn render_smoke(state: &SmokeState, size: Size) -> FrameContent {
         input_row,
     ];
     FrameContent {
+        checkpoint: "smoke".to_owned(),
+        decision_index: None,
         lines,
         cursor: Some(cursor),
     }
+}
+
+fn real_sampler(boundary: i64, stream_fingerprint: String) -> FixtureSampler {
+    FixtureSampler {
+        temperature: 0.8,
+        top_k: Some(REAL_TOP_K),
+        top_p: 1.0,
+        min_p: 0.0,
+        typical_p: 1.0,
+        tail_free_z: 1.0,
+        draw_kernel: "categorical".to_owned(),
+        gaussian_noise_std: 1.0,
+        perturb_noise_std: 1.0,
+        student_t_df: 3.0,
+        seed: REAL_SEED,
+        stream_fingerprint,
+        boundary,
+        gumbel_noise_address: "token-id".to_owned(),
+        gumbel_noise_scale: 1.0,
+    }
+}
+
+fn real_candidates(
+    worker: &mut BackendWorker,
+    logits: &[f64],
+    sampler: &FixtureSampler,
+) -> io::Result<(Vec<ChoiceCandidate>, i64)> {
+    if logits.len() != worker.vocabulary_size() || logits.iter().any(|value| !value.is_finite()) {
+        return Err(invalid_data(
+            "backend logits do not match the finite vocabulary vector",
+        ));
+    }
+    let filtered = apply_filter(
+        logits,
+        sampler.temperature,
+        sampler.top_k,
+        sampler.top_p,
+        sampler.min_p,
+        sampler.typical_p,
+        sampler.tail_free_z,
+    )
+    .map_err(invalid_data)?;
+    let candidate_ids = filtered.stages[5]
+        .as_ref()
+        .ok_or_else(|| invalid_data("candidate filter did not return a final set"))?;
+    if candidate_ids.len() != REAL_TOP_K as usize {
+        return Err(invalid_data(
+            "top-k filter returned an unexpected candidate count",
+        ));
+    }
+    let candidate_scores = candidate_ids
+        .iter()
+        .map(|token_id| {
+            let index = usize::try_from(*token_id)
+                .map_err(|_| invalid_data("candidate token ID must be nonnegative"))?;
+            filtered
+                .scaled_logits
+                .get(index)
+                .copied()
+                .ok_or_else(|| invalid_data("candidate token ID is outside logits"))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let probabilities = softmax(&candidate_scores).map_err(invalid_data)?;
+    let distribution = SparseDistribution {
+        ids: candidate_ids.clone(),
+        probabilities: probabilities.clone(),
+        scores: Some(candidate_scores),
+    };
+    let boundary = sampler.boundary.to_string();
+    let proposal = draw_token(
+        &distribution,
+        DrawOptions {
+            seed: sampler.seed,
+            fingerprint: &sampler.stream_fingerprint,
+            boundary: &boundary,
+            kernel: &sampler.draw_kernel,
+            gaussian_noise_std: sampler.gaussian_noise_std,
+            perturb_noise_std: sampler.perturb_noise_std,
+            student_t_df: sampler.student_t_df,
+            gumbel_noise_address: &sampler.gumbel_noise_address,
+            candidate_model_ranks: None,
+            gumbel_noise_scale: sampler.gumbel_noise_scale,
+        },
+    )
+    .map_err(invalid_data)?;
+    let eog_token_ids = worker.eog_token_ids()?;
+    let candidates = candidate_ids
+        .iter()
+        .zip(probabilities)
+        .map(|(token_id, probability)| {
+            let is_eog = worker.is_eog(*token_id)?;
+            let reported_eog = eog_token_ids.contains(token_id);
+            if is_eog != reported_eog {
+                return Err(invalid_data(
+                    "backend EOG query disagrees with its EOG token set",
+                ));
+            }
+            Ok(ChoiceCandidate {
+                rank: rank(logits, *token_id).map_err(invalid_data)?,
+                token_id: *token_id,
+                text: worker.token_text(*token_id)?,
+                probability,
+                is_eog,
+            })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    Ok((candidates, proposal))
+}
+
+fn safe_terminal_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                format!("<U+{:04X}>", u32::from(character))
+            } else {
+                character.to_string()
+            }
+        })
+        .collect()
 }
 
 fn context_history(context: &FixtureContext, context_text: &str) -> io::Result<EpisodeHistory> {
@@ -907,8 +1415,16 @@ fn normalize_lines(lines: &mut Vec<String>, size: Size) {
 }
 
 fn fit_line(line: &mut String, width: usize) {
-    let fitted: String = line.chars().take(width).collect();
-    let used = fitted.chars().count();
+    let mut fitted = String::new();
+    let mut used = 0_usize;
+    for character in line.chars() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if used.saturating_add(character_width) > width {
+            break;
+        }
+        fitted.push(character);
+        used += character_width;
+    }
     line.clear();
     line.push_str(&fitted);
     line.push_str(&" ".repeat(width.saturating_sub(used)));

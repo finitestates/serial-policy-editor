@@ -1,4 +1,4 @@
-# Agent brief: one deterministic Rust Choice turn
+# Completed slice: deterministic Rust Choice turn
 
 **Status:** implemented and validated on 2026-10-02.
 
