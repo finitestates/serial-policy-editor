@@ -71,10 +71,17 @@ class _Candidate:
 
 
 @dataclass(frozen=True)
+class _Expansion:
+    parents: tuple[tuple[BeamPath, EpisodeObservation | None], ...]
+    finished: tuple[BeamPath, ...]
+
+
+@dataclass(frozen=True)
 class _Checkpoint:
     active: tuple[BeamPath, ...]
     finished: tuple[BeamPath, ...]
     protected_prefixes: tuple[tuple[int, ...], ...]
+    expansion: _Expansion | None = None
 
 
 class BeamSearch:
@@ -123,6 +130,7 @@ class BeamSearch:
         self.active: list[BeamPath] = []
         self.finished: list[BeamPath] = []
         self._history: list[_Checkpoint] = []
+        self._expansion: _Expansion | None = None
         self._killed_paths: set[tuple[int, ...]] = set()
         self._protected_prefixes: set[tuple[int, ...]] = set()
         self.show_family_metadata = False
@@ -279,10 +287,24 @@ class BeamSearch:
             node = node.parent
         return tuple(reversed(tokens))
 
-    def _candidates(self) -> list[_Candidate]:
+    def _uncached_expansion(self) -> _Expansion | None:
+        """Keep rewind origins without retaining vocabulary arrays at every depth."""
+        if self._expansion is None:
+            return None
+        return _Expansion(
+            tuple((path, None) for path, _ in self._expansion.parents),
+            self._expansion.finished,
+        )
+
+    def _candidates(
+        self, observations: dict[int, EpisodeObservation] | None = None,
+    ) -> list[_Candidate]:
         candidates: list[_Candidate] = []
         for parent_order, path in enumerate(self.active):
-            observation = path.engine.observe()
+            observation = (
+                observations[id(path)] if observations is not None
+                else path.engine.observe()
+            )
             adjusted = np.asarray(
                 observation.policy_calculations.adjusted, dtype=np.float64
             )
@@ -387,7 +409,7 @@ class BeamSearch:
             return False
         self._history.append(_Checkpoint(
             tuple(self.active), tuple(self.finished),
-            tuple(sorted(self._protected_prefixes)),
+            tuple(sorted(self._protected_prefixes)), self._uncached_expansion(),
         ))
         return self._expand_one()
 
@@ -401,18 +423,26 @@ class BeamSearch:
             return False
         self._history.append(_Checkpoint(
             tuple(self.active), tuple(self.finished),
-            tuple(sorted(self._protected_prefixes)),
+            tuple(sorted(self._protected_prefixes)), self._uncached_expansion(),
         ))
         for _ in range(steps):
             if not self._expand_one():
                 break
         return bool(self.active)
 
-    def _expand_one(self) -> bool:
+    def _expand_one(
+        self, observations: dict[int, EpisodeObservation] | None = None,
+    ) -> bool:
         if not self.active:
             return False
         previous_active = tuple(self.active)
-        candidates = self._candidates()
+        if observations is None:
+            observations = {id(path): path.engine.observe() for path in self.active}
+        self._expansion = _Expansion(
+            tuple((path, observations[id(path)]) for path in self.active),
+            tuple(self.finished),
+        )
+        candidates = self._candidates(observations)
         ordered_live_candidates = sorted(
             (candidate for candidate in candidates if not candidate.is_eog),
             key=lambda candidate: candidate.ordering,
@@ -610,6 +640,7 @@ class BeamSearch:
         if not self._history:
             return False
         checkpoint = self._history.pop()
+        self._expansion = checkpoint.expansion
         self.active = [
             path for path in checkpoint.active
             if self._path_token_ids(path) not in self._killed_paths
@@ -861,11 +892,53 @@ class BeamSearch:
             self.finished.remove(path)
             if path.node is not None:
                 self._killed_paths.add(self._path_token_ids(path))
+        self._backfill()
         self._retain_selection()
         if not self.active and not self.finished:
             self.discard()
             return False
         return True
+
+    def _backfill(self) -> None:
+        """Re-select this depth from cached parents, excluding killed paths.
+
+        Scores reuse the preceding expansion's observations. Backend state is
+        rebuilt before materializing the replacement frontier; this does not
+        advance search depth or add a rewind checkpoint.
+        """
+        expansion = self._expansion
+        if expansion is None:
+            return
+        selected_label = self.selected_label
+        labels = {
+            self._path_token_ids(path): path.label
+            for path in (*self.active, *self.finished)
+        }
+        self.active = [path for path, _ in expansion.parents]
+        self.finished = [
+            path for path in expansion.finished
+            if self._path_token_ids(path) not in self._killed_paths
+        ]
+        if self._primary_batch is not None:
+            self._rebuild_batches()
+        observations: dict[int, EpisodeObservation] = {}
+        for path, observation in expansion.parents:
+            if observation is None:
+                # Rewind checkpoints keep origin paths, not dense score arrays.
+                if self._primary_batch is None:
+                    self._position_path(path)
+                observation = path.engine.observe()
+            observations[id(path)] = observation
+        for path in self.active:
+            path.engine._observation = observations[id(path)]
+            path.engine._observation_key = path.engine._decision_key()
+        self._expand_one(observations)
+        for path in (*self.active, *self.finished):
+            existing_label = labels.get(self._path_token_ids(path))
+            if existing_label is not None:
+                path.label = existing_label
+        self.selected_label = selected_label
+        self._retain_selection()
 
     def toggle_protection(self, label: str | None) -> str:
         """Toggle a one-slot reservation for the selected live lineage."""
@@ -957,6 +1030,7 @@ class BeamSearch:
         self.original.adopt_preview_state(commit_engine)
         self.selected_outcomes = tuple(item.outcome for item in committed_nodes)
         self.closed = True
+        self._expansion = None
         return tuple(item.action for item in committed_nodes)
 
     def select(self, label: str, *, promote: bool = False) -> tuple[PolicyAction, ...]:
@@ -983,6 +1057,7 @@ class BeamSearch:
         if self.closed:
             return
         self.closed = True
+        self._expansion = None
         if self._primary_batch is None:
             _position(self.original.backend, self.base_prefix, [])
             if self.original._cfg_active() and self.original.guidance_backend is not None:

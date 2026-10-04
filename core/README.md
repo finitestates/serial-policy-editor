@@ -200,3 +200,8 @@ is recorded but cannot change a plain argmax winner.
 The [contract matrix](../tests/CORE_CONTRACTS.md) specifies the new target.
 Existing harnesses and the [legacy oracle](../reference-kernel/README.md) are
 not yet current validation evidence.
+
+Beam pruning with Backspace/`kill` backfills at the same depth from the previous
+expansion’s alternatives. Surviving branch IDs remain stable. Width is retained
+while candidates remain; killed paths stay excluded. Cached parent observations
+reuse scores, but replacement backend state may require rebuilding.

@@ -376,3 +376,8 @@ The terminal rendering guide remains the procedure for future terminal evidence.
 - [Reference kernel](reference-kernel/) — legacy formulas awaiting an independent argmax port.
 
 The version currently represented by the active package manifests is `1.0.0`.
+
+Beam pruning with Backspace/`kill` backfills at the same depth from the previous
+expansion’s alternatives. Surviving branch IDs remain stable. Width is retained
+while candidates remain; killed paths stay excluded. Cached parent observations
+reuse scores, but replacement backend state may require rebuilding.
