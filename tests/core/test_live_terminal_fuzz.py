@@ -27,7 +27,7 @@ KEYS = [
     "enter", "tab", "shift+tab", "backspace", "up", "down", "left", "right", "pageup",
     "pagedown", "home", "end", "delete", "f1", "f2", "escape", "alt+enter", "ctrl+e", "ctrl+k",
     "ctrl+l", "ctrl+g", "ctrl+w", "ctrl+u", "a", "t", " ", "1", "2", "f", "p", "q", "[", "]",
-    "?", "x", "é", "漢",
+    "?", "x", "é", "漢", "l", "L", "~", "%", "C",
 ]
 
 SIZES = [(40, 12), (80, 24), (120, 40), (160, 50), (30, 8), (100, 15)]
@@ -36,7 +36,7 @@ SIZES = [(40, 12), (80, 24), (120, 40), (160, 50), (30, 8), (100, 15)]
 def _choice_many():
     state = choice_state(feedback=ChoiceFeedback("info", "NOTE", ("one", "two"), completion_commands=("t a",)))
     candidates = tuple(
-        Candidate(rank, rank + 1, f" token-{rank}" * (1 + rank % 3), 1 / rank, False, 1 / rank)
+        Candidate(rank, rank + 1, f" token-{rank}" * (1 + rank % 3), None, False, eligible=True)
         for rank in range(1, 30)
     )
     tail = "\n".join(f"context line {index} " * 3 for index in range(60))

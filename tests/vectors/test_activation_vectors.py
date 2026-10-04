@@ -99,7 +99,7 @@ def test_layerwise_cvector_is_installed_before_runtime_logits():
         layer_end=2,
     )
     sampling = cvector.apply_to_sampling(
-        SamplerConfig(temperature=0.0, top_k=8, top_p=1.0, min_p=0.0)
+        SamplerConfig(temperature=0.0, top_k=8, min_p=0.0)
     )
 
     runtime = EpisodeEngine(backend, initial_token_ids=[7], sampling=sampling)

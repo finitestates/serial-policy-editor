@@ -6,7 +6,7 @@ is fixed even though each successive prefix has a different distribution.
 There is no advancing random generator, cache, or backend evaluation state here.
 
 Numerically equivalent logits and a deterministic backend evaluation path are
-assumed. Tiny changes near truncation thresholds, ties, or CDF boundaries can
+assumed. Tiny changes near truncation thresholds, ties, or noise winner boundaries can
 change a deterministic trajectory; this is sensitivity to numerical inputs,
 not consumption of randomness. Python floats are IEEE float64 on supported
 platforms; this module does not promise bitwise cross-platform model parity.
@@ -23,7 +23,7 @@ from typing import Protocol, Sequence, TypeAlias
 
 
 RNG_SCHEME = "blake2b64-token-prefix-quantile-v2"
-DRAW_KERNELS = ("categorical", "gumbel-max", "gaussian-max", "logistic-max", "laplace-max", "uniform-max", "student-t-max")
+DRAW_KERNELS = ("argmax", "gumbel-max", "gaussian-max", "logistic-max", "laplace-max", "uniform-max", "student-t-max")
 MIN_SEED, MAX_SEED = -(1 << 63), (1 << 63) - 1
 
 
@@ -96,11 +96,9 @@ class Policy:
     top_k: int | None = None
     excluded_token_ids: tuple[int, ...] = ()
     biases: tuple[tuple[int, float], ...] = ()
-    draw_kernel: str = "categorical"
-    top_p: float = 1.0
+    draw_kernel: str = "argmax"
     min_p: float = 0.0
-    typical_p: float = 1.0
-    tail_free_z: float = 1.0
+    selective_noise_k: int | None = None
     gaussian_noise_std: float = 1.0
     perturb_noise_std: float = 1.0
     student_t_df: float = 3.0
@@ -116,12 +114,13 @@ class Policy:
             raise ValueError("temperature must be finite and nonnegative")
         if self.top_k is not None and (type(self.top_k) is not int or self.top_k < 1):
             raise ValueError("top_k must be a positive integer or None")
+        if self.selective_noise_k is not None:
+            if type(self.selective_noise_k) is not int or self.selective_noise_k < 1:
+                raise ValueError("selective_noise_k must be positive or None")
+            if self.draw_kernel == "argmax":
+                raise ValueError("selective noise requires a noisy kernel")
         if self.draw_kernel not in DRAW_KERNELS:
             raise ValueError("unsupported draw kernel")
-        for name in ("top_p", "typical_p", "tail_free_z"):
-            value = getattr(self, name)
-            if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value <= 1:
-                raise ValueError(f"{name} must be in (0, 1]")
         for name in ("min_p", "gaussian_noise_std", "perturb_noise_std", "gumbel_noise_scale", "student_t_df", "repeat_penalty", "presence_penalty", "frequency_penalty"):
             value = getattr(self, name)
             if type(value) not in (int, float) or not math.isfinite(value):
@@ -145,7 +144,7 @@ class Policy:
         """Score and filter candidates in float64 with production ordering.
 
         Apply history penalties, fixed biases and production-order filters.
-        The entirely unfiltered path retains token-ID order for CDF parity.
+        Softmax is optional evidence; eligibility requires only scores.
         """
         values = tuple(float(v) for v in logits)
         if not values or any(not math.isfinite(v) for v in values):
@@ -164,86 +163,51 @@ class Policy:
             raise ValueError("policy excluded every candidate")
         if self.temperature == 0:
             winner = min(eligible, key=lambda i: (-(values[i] + bias.get(i, 0.0)), i))
-            return Distribution((winner,), (1.0,), (values[winner] + bias.get(winner, 0.0),))
+            return Distribution((winner,), (values[winner] + bias.get(winner, 0.0),))
         scores = {i: (values[i] + bias.get(i, 0.0)) / float(self.temperature) for i in eligible}
         if any(not math.isfinite(v) for v in scores.values()):
             raise ValueError("policy produced non-finite scores")
         ids = sorted(eligible, key=lambda i: (-scores[i], i))[:self.top_k] if self.top_k is not None else eligible.copy()
-        def probabilities(candidates):
-            maximum = max(scores[j] for j in candidates)
-            weights = [math.exp(scores[i] - maximum) for i in candidates]
-            total = sum(weights)
-            return [w / total for w in weights]
-        def cutoff(masses, threshold):
-            cumulative = 0.0
-            for index, mass in enumerate(masses):
-                cumulative += mass
-                if cumulative >= threshold:
-                    return index + 1
-            return len(masses)
-        if self.typical_p < 1 and len(ids) > 1:
-            ids.sort(key=lambda i: (-scores[i], i))
-            probs = probabilities(ids)
-            tiny = float.fromhex("0x1p-1022")
-            entropy = -sum(p * math.log(max(p, tiny)) for p in probs)
-            order = sorted(range(len(ids)), key=lambda j: (abs(-math.log(max(probs[j], tiny)) - entropy), ids[j]))
-            ids = [ids[j] for j in order[:cutoff([probs[j] for j in order], self.typical_p)]]
-        if self.typical_p < 1 or self.tail_free_z < 1:
-            ids.sort(key=lambda i: (-scores[i], i))
-        if self.tail_free_z < 1 and len(ids) >= 3:
-            probs = probabilities(ids)
-            first = [abs(a-b) for a,b in zip(probs, probs[1:])]
-            second = [abs(a-b) for a,b in zip(first, first[1:])]
-            total = sum(second)
-            if total > 0:
-                ids = ids[:cutoff([v/total for v in second], self.tail_free_z)+1]
-        # Production preserves token-ID order for its entirely unfiltered path.
-        if self.top_k is None and self.typical_p == self.tail_free_z == self.top_p == 1 and self.min_p == 0:
-            ids.sort()
-        if self.top_p < 1:
-            ids = ids[:cutoff(probabilities(ids), self.top_p)]
         if self.min_p > 0:
-            probs = probabilities(ids)
-            ids = [i for i,p in zip(ids, probs) if p >= self.min_p * max(probs)]
-        return Distribution(tuple(ids), tuple(probabilities(ids)), tuple(scores[i] for i in ids))
+            cutoff = max(scores[i] for i in ids) + math.log(self.min_p)
+            ids = [i for i in ids if scores[i] >= cutoff]
+        return Distribution(tuple(ids), tuple(scores[i] for i in ids))
 
 
 @dataclass(frozen=True)
 class Distribution:
     ids: tuple[int, ...]
-    probabilities: tuple[float, ...]
     scores: tuple[float, ...]
 
     def __post_init__(self) -> None:
-        if not self.ids or len(self.ids) != len(self.probabilities) or len(self.ids) != len(self.scores):
+        if not self.ids or len(self.ids) != len(self.scores):
             raise ValueError("candidate arrays must have equal nonzero length")
         if len(set(self.ids)) != len(self.ids) or any(type(i) is not int or i < 0 for i in self.ids):
             raise ValueError("candidate IDs must be unique nonnegative integers")
-        if any(not math.isfinite(p) or p < 0 for p in self.probabilities):
-            raise ValueError("probabilities must be finite and nonnegative")
-        if not math.isclose(sum(self.probabilities), 1.0, rel_tol=1e-12, abs_tol=1e-12):
-            raise ValueError("probabilities must sum to one")
         if any(not math.isfinite(s) for s in self.scores):
             raise ValueError("scores must be finite")
 
+    @property
+    def probabilities(self) -> tuple[float, ...]:
+        maximum = max(self.scores)
+        weights = tuple(math.exp(score - maximum) for score in self.scores)
+        total = sum(weights)
+        return tuple(weight / total for weight in weights)
+
 
 def draw(distribution: Distribution, world: World, boundary: int, kernel: str, *, policy: Policy | None = None, model_ranks: dict[int, int] | None = None) -> int:
-    quantile = position_uniform(world, boundary)
-    if kernel == "categorical":
-        u = quantile
-        cumulative = 0.0
-        for token_id, p in zip(distribution.ids, distribution.probabilities):
-            cumulative += p
-            if u < cumulative:  # production searchsorted(..., side="right")
-                return token_id
-        return distribution.ids[-1]
     policy = policy or Policy(draw_kernel=kernel)
     if kernel not in DRAW_KERNELS:
         raise ValueError("unsupported draw kernel")
+    noisy_ids = set(distribution.ids)
+    if policy.selective_noise_k is not None:
+        indices = sorted(range(len(distribution.ids)),
+                         key=lambda j: (-distribution.scores[j], distribution.ids[j]))
+        noisy_ids = {distribution.ids[j] for j in indices[:policy.selective_noise_k]}
     def rank(index):
         token_id = distribution.ids[index]
         scale = policy.gumbel_noise_scale if kernel == "gumbel-max" else policy.gaussian_noise_std if kernel == "gaussian-max" else policy.perturb_noise_std
-        if scale == 0:
+        if kernel == "argmax" or token_id not in noisy_ids or scale == 0:
             return distribution.scores[index], -token_id
         def uniform(lane=0):
             if kernel == "gumbel-max":

@@ -15,7 +15,7 @@ from trajectory_editor.core.errors import EditorError
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.core.sampling import (
     DRAW_KERNELS,
-    SparseDistribution,
+    EligibleScores,
     draw_token,
     find_seed_for_token,
     gaussian_ranking_scores,
@@ -24,11 +24,9 @@ from trajectory_editor.core.sampling import (
 )
 
 
-@pytest.mark.parametrize('kernel', [k for k in DRAW_KERNELS if k != 'categorical'])
+@pytest.mark.parametrize('kernel', [k for k in DRAW_KERNELS if k != 'argmax'])
 def test_selective_noise_preserves_addresses_ties_and_untouched_scores(kernel):
-    distribution = SparseDistribution(
-        np.array([8, 3, 9]), np.array([0.4, 0.4, 0.2]), np.array([2., 2., 1.]),
-    )
+    distribution = EligibleScores(np.array([8, 3, 9]), np.array([2.0, 2.0, 1.0]))
     kwargs = dict(seed=19, stream_fingerprint='a' * 64, aligned_step=4)
     if kernel == 'gaussian-max':
         rank = gaussian_ranking_scores
@@ -46,9 +44,7 @@ def test_selective_noise_preserves_addresses_ties_and_untouched_scores(kernel):
 
 
 def test_untouched_challenger_can_win_but_lower_untouched_token_cannot():
-    distribution = SparseDistribution(
-        np.array([0, 1, 2]), np.array([0.34, 0.33, 0.33]), np.array([0.01, 0., -1.]),
-    )
+    distribution = EligibleScores(np.array([0, 1, 2]), np.array([0.01, 0.0, -1.0]))
     kwargs = dict(stream_fingerprint='a' * 64, aligned_step=0,
                   kernel='gaussian-max', selective_noise_k=1)
     winners = {draw_token(distribution, seed=seed, **kwargs) for seed in range(40)}
@@ -82,9 +78,7 @@ def test_engine_competes_with_untouched_eligible_scores_and_keeps_raw_logits(ker
     from tests.fakes import ConformingFakeBackend
     from trajectory_editor.episode_engine import EpisodeEngine
 
-    sampling = SamplerConfig(
-        draw_kernel=kernel, selective_noise_k=1, top_k=5, top_p=1., min_p=0.,
-    )
+    sampling = SamplerConfig(draw_kernel=kernel, selective_noise_k=1, top_k=5, min_p=0.0)
     engine = EpisodeEngine(ConformingFakeBackend(), sampling=sampling, initial_token_ids=[7])
     observation = engine.observe()
     assert len(observation.distribution.ids) == 5

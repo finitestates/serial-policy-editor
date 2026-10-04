@@ -185,16 +185,16 @@ def test_m03_invalid_fork_addresses_remain_errors(raw):
         parse(raw)
 
 
-def test_m04_logit_views_are_sticky_and_cycle_raw_model_gap_modes():
+def test_m04_direct_logit_and_diff_overlays_are_sticky():
     episode = runtime()
     candidates = episode.candidates(episode.observe(), count=3)
 
     io = ScriptedIO([])
-    display_candidates(io, candidates, heading=True, logit_view="none")
+    display_candidates(io, candidates, heading=True, overlays=frozenset())
     assert "model-logit" not in io.output[0]
 
     io = ScriptedIO([])
-    display_candidates(io, candidates, heading=True, logit_view="raw")
+    display_candidates(io, candidates, heading=True, overlays=frozenset({"logit"}))
     assert "model-logit" in io.output[0]
     assert "model-gap" not in io.output[0]
 
@@ -203,21 +203,22 @@ def test_m04_logit_views_are_sticky_and_cycle_raw_model_gap_modes():
     action = policy.choose(episode, episode.observe())
     episode.apply(action)
     policy.choose(episode, episode.observe())
-    assert policy.view_preferences.logit_view == "raw"
+    assert policy.view_preferences.overlays == frozenset({"logit"})
     assert sum("model-logit" in line for line in io.output) >= 2
 
     io = ScriptedIO(["L", "1"])
     episode = runtime()
     InteractivePolicy(io=io).choose(episode, episode.observe())
-    assert any("model-logit" in line and "model-gap" in line for line in io.output)
+    assert any("model-gap" in line for line in io.output)
+    assert not any("model-logit" in line for line in io.output)
 
     io = ScriptedIO(["L", "L", "1"])
     policy = InteractivePolicy(io=io)
     episode = runtime()
     policy.choose(episode, episode.observe())
     headers = [line for line in io.output if line.startswith("\n  rank")]
-    assert "model-logit" in headers[1]
-    assert "model-logit" not in headers[-1]
+    assert "model-gap" in headers[1]
+    assert "model-gap" not in headers[-1]
 
 
 def test_m05_core_help_exposes_only_core_flags():

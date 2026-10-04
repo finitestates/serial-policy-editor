@@ -25,7 +25,7 @@ def evidence(boundary: int, token_id: int, text: str) -> TokenEvidence:
         raw_model_nll=0.0,
         raw_rank=1,
         policy_rank=1,
-        decoder_probability=1.0,
+        eligible_softmax=1.0,
         proposal_agreement=True,
         is_eog=False,
         realized_visible=True,

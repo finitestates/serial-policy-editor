@@ -1,16 +1,38 @@
-# Reference kernel status on the argmax branch
+# Independent argmax reference kernel
 
-The independent kernel and its tests still implement the previous engine:
-categorical CDF draws, retired probability filters and old production APIs.
-They have not been ported or executed for `policy-editor-argmax`, and are not an
-oracle for its contracts. Shared perturbation formulas alone do not establish
-pipeline or replay parity.
+`reference_kernel.py` independently implements policy adjustments, temperature,
+top-k/logit-gap eligibility, plain argmax and replay-addressed noise. Selective
+noise chooses candidates by pre-noise score with token-ID ties; unchanged
+eligible candidates still compete. Default selection is full-vocabulary argmax.
+There is no categorical token CDF or retired probability-filter pipeline.
 
-[Historical usage](LEGACY_USAGE.md) preserves the old instructions and scope.
-Its production-importing wrappers may no longer run on this branch.
+The kernel imports standard-library modules only. Its expected scores, membership
+and winners do not call production sampling helpers. Optional `probabilities`
+on its Distribution record normalize eligible pre-noise scores; these are
+eligible-softmax diagnostics, not general winner probabilities.
 
-The [testing harness plan](../docs/ARGMAX_TEST_HARNESS_PLAN.md) calls for an
-independent score/membership/noise/winner implementation before parity claims
-resume. Production helpers must not be used to calculate its expected winners.
-Model parity also needs matching tokenizer IDs, model settings and evaluation
-boundaries; synthetic parity alone does not certify backend behavior.
+From the repository root:
+
+```sh
+PYTHONPATH=core/src python -m pytest -q reference-kernel
+python reference-kernel/draw_coordinates_demo.py
+python reference-kernel/reference_kernel_oracle.py atomic \
+  --backend llama --model /path/model.gguf --prefix 'A story' \
+  --draw-kernel gumbel-max --top-k none --selective-noise-k 5 --detail tokens
+```
+
+The coordinate demonstration holds scores fixed and changes the boundary under
+Gumbel noise. `--detail tokens` avoids probability diagnostics. `probabilities`
+and `full` request eligible-softmax explicitly. Display limits do not change
+eligibility, noise application or selection.
+
+`reference_kernel_oracle.py` supports atomic and pattern full-prefix model
+observations. Match token IDs, root fingerprint, boundary, model settings,
+precision and tokenizer representation when comparing with production. Synthetic
+parity does not certify prefill/incremental model parity. CFG, grouped phrase
+biases, vectors and beam remain outside this minimal model CLI's scope.
+
+The [validation record](../docs/ARGMAX_HARNESS_UPDATE.md) reports local parity
+and skipped real-model checks. [Historical usage](LEGACY_USAGE.md) preserves the
+previous engine's instructions; its removed flags and CDF expectations are
+historical, not current guidance.

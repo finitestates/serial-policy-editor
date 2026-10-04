@@ -30,9 +30,8 @@ def _session(*, guidance: bool = False) -> LiveSession:
     sampling = SamplerConfig(
         temperature=0.25,
         top_k=8,
-        top_p=1.0,
         min_p=0.0,
-        cfg_unconditional_prompt="guide" if guidance else None,
+        cfg_unconditional_prompt='guide' if guidance else None,
         cfg_prefix_tokens=4 if guidance else 0,
     )
     engine = EpisodeEngine(

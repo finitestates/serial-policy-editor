@@ -1,7 +1,8 @@
 # Argmax testing harness migration plan
 
-Status: planned after the documentation update. No test code has been changed
-or executed for this checkpoint. Static inspection found retired API/filter
+Status: implemented for the retained Python harnesses after the documentation
+checkpoint. See [results](ARGMAX_HARNESS_UPDATE.md). The following text preserves
+the planned scope; real-model checks remain outside the local evidence. Static inspection found retired API/filter
 references in the files below; this is a migration inventory, not an exhaustive
 prediction of failures. Preserve the contract IDs in `tests/CORE_CONTRACTS.md`.
 

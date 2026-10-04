@@ -16,7 +16,8 @@ globally optimal sequence.
 
 This is an incompatible experiment, not a validated 1.0 release. Package
 manifests still say 1.0.0; the public records and workspace format have changed.
-The inherited test harnesses and reference oracle await an explicit update.
+The retained harnesses and independent reference kernel now cover the argmax
+contract; see the [validation record](docs/ARGMAX_HARNESS_UPDATE.md).
 See the [written contracts](tests/CORE_CONTRACTS.md) and
 [documentation/testing checkpoint](docs/ARGMAX_DOCUMENTATION_PLAN.md).
 
@@ -357,14 +358,14 @@ contract.
 
 ## Validation status
 
-The [contract matrix](tests/CORE_CONTRACTS.md) describes the intended current
-behavior. Existing core/vector tests and the legacy reference suite contain
-stale APIs and assertions. They have not been updated or run for this cut.
-The reference kernel is not yet an oracle for the argmax experiment.
+The [contract matrix](tests/CORE_CONTRACTS.md) describes the current contract.
+The retained core/vector/reference suite passed locally: **904 passed, 2 skipped**.
+The skips require a local GGUF or Torch for real-model oracle checks. Terminal
+PTY tests ran with pyte, including direct overlays and same-depth beam backfill.
+See [commands and evidence limits](docs/ARGMAX_HARNESS_UPDATE.md).
 
-Source syntax parsing and diff review establish neither runtime correctness nor
-model/terminal parity. Harness migration must precede new validation claims.
-The terminal rendering guide remains the procedure for future terminal evidence.
+This is local synthetic/headless/PTY evidence, not a release certification,
+real-model parity result, physical-display assessment or performance claim.
 
 ## Project documents
 
@@ -373,7 +374,7 @@ The terminal rendering guide remains the procedure for future terminal evidence.
 - [Core package](core/README.md) — standalone core installation;
 - [Vector package](vector/README.md) — optional steering-vector tooling;
 - [Core contract matrix](tests/CORE_CONTRACTS.md) — the reduced core suite;
-- [Reference kernel](reference-kernel/) — legacy formulas awaiting an independent argmax port.
+- [Reference kernel](reference-kernel/) — independent argmax formulas and model-oracle harness.
 
 The version currently represented by the active package manifests is `1.0.0`.
 

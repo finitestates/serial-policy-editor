@@ -34,9 +34,9 @@ def test_candidate_view_computes_only_visible_metrics_and_reuses_normalizer(monk
 
     sparse = engine.candidates(
         observation, count=3,
-        metrics=CandidateColumns(overlays=frozenset({"decode_pct"})).plan.metrics,
+        metrics=frozenset({"eligible_softmax"}),
     )
-    assert sparse[0].decoder_probability == observation.distribution.probability(sparse[0].token_id)
+    assert sparse[0].eligible_softmax == observation.distribution.softmax_at(sparse[0].token_id)
     assert not calculations._raw_logsumexp_ready
 
     original_exp = np.exp
@@ -49,14 +49,14 @@ def test_candidate_view_computes_only_visible_metrics_and_reuses_normalizer(monk
         return original_exp(values, *args, **kwargs)
 
     monkeypatch.setattr(np, "exp", counted_exp)
-    pct = CandidateColumns(show_model_probabilities=True).plan
+    pct = CandidateColumns(overlays=frozenset({"probability"})).plan
     first = engine.candidates(observation, count=3, metrics=pct.metrics)
     second = engine.candidates(observation, start_rank=2, count=2, metrics=pct.metrics)
     assert dense_calls == 1
     assert first[1].raw_probability == second[0].raw_probability
     assert [row.token_id for row in first] == [row.token_id for row in plain]
     assert not calculations._policy_logsumexp_ready
-    with_policy = CandidateColumns(policy=True, show_model_probabilities=True).plan
+    with_policy = CandidateColumns(policy=True, overlays=frozenset({"probability"})).plan
     policy_rows = engine.candidates(observation, count=3, metrics=with_policy.metrics)
     assert all(row.policy_probability is not None for row in policy_rows)
     assert calculations._policy_logsumexp_ready
@@ -70,14 +70,14 @@ def test_named_overlays_combine_and_default_table_is_identity_only():
         initial_token_ids=[7],
     )
     observation = engine.observe()
-    io = ScriptedIO(["overlay z", "overlay decode_pct", "1"])
+    io = ScriptedIO(["overlay noise", "overlay diff", "1"])
     policy = InteractivePolicy(io=io, menu_size=2)
     policy.choose(engine, observation)
-    assert policy.view_preferences.overlays == frozenset({"z", "decode_pct"})
+    assert policy.view_preferences.overlays == frozenset({"noise", "diff"})
     output = "".join(io.output)
     assert "rank  token-id  text" in output
     assert "Δrank" not in output
-    assert "decode-p" in output and "z" in output
+    assert "noise" in output and "model-gap" in output
     assert not observation.policy_calculations._raw_logsumexp_ready
 
 

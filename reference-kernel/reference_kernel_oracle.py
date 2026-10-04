@@ -101,7 +101,7 @@ def records(backend, prefix, policy, *, seed=12345, mode='atomic', count=1,
         raw_order = sorted(range(len(logits)), key=lambda i: (-logits[i], i))
         ranks = {i: rank for rank, i in enumerate(raw_order, 1)}
         proposal = draw(distribution, branch.world, boundary+step, policy.draw_kernel, policy=policy, model_ranks=ranks)
-        ordered = sorted(range(len(distribution.ids)), key=lambda j: (-distribution.probabilities[j], distribution.ids[j]))
+        ordered = sorted(range(len(distribution.ids)), key=lambda j: (-distribution.scores[j], distribution.ids[j]))
         selected = ordered if menu_size == 0 else ordered[:menu_size]
         proposal_index = distribution.ids.index(proposal)
         if proposal_index not in selected:
@@ -111,7 +111,7 @@ def records(backend, prefix, policy, *, seed=12345, mode='atomic', count=1,
             token = distribution.ids[j]
             row = {'token_id': token, 'text': backend.render([token]), 'proposal': token == proposal}
             if detail != 'tokens':
-                row['probability'] = distribution.probabilities[j]
+                row['eligible_softmax'] = distribution.probabilities[j]
             if detail == 'full':
                 row.update(score=distribution.scores[j], model_rank=ranks[token], logit=logits[token], eog=backend.is_eog(token))
             candidates.append(row)
@@ -162,7 +162,7 @@ def parser():
             p.add_argument(option, choices=DRAW_KERNELS, default=f.default)
         elif f.name == 'gumbel_noise_address':
             p.add_argument(option, choices=('token-id', 'model-rank'), default=f.default)
-        elif f.name == 'top_k':
+        elif f.name in ('top_k', 'selective_noise_k'):
             p.add_argument(option, type=lambda v: None if v == 'none' else int(v), default=f.default)
         else:
             p.add_argument(option, type=type(f.default), default=f.default)

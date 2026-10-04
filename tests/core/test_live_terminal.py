@@ -556,7 +556,6 @@ def test_beam_empty_enter_resumes_at_the_edge(harness):
     [
         ("backspace", beam_state(), BeamInput("kill b1", "b1"), False),
         ("p", beam_state(), BeamInput("protect", "b1"), False),
-        ("p", beam_state(stochastic=True), BeamInput("p", "b1"), True),
         ("p", beam_state(at_edge=True), BeamInput("p", "b1"), True),
         ("f", beam_state(at_edge=True), BeamInput("f", "b1"), True),
         ("f", beam_state(), BeamInput("families", "b1"), False),
@@ -584,9 +583,10 @@ def test_beam_shortcut_letters_are_text_when_the_command_is_not_empty(harness):
     assert ui.result() == BeamInput("xpf", "b1")
 
 
-def test_beam_stochastic_score_and_notice(harness):
-    ui = harness(beam_state(stochastic=True))
-    assert "G −0.45 · log-p -0.800" in ui.text
+def test_beam_policy_score_and_notice(harness):
+    ui = harness(beam_state())
+    assert "POLICY LOG-P: −0.45" in ui.text
+    assert "log-p -0.800" not in ui.text
     assert "beam notice" in ui.text
 
 

@@ -12,6 +12,7 @@ from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.edge_help import edge_help
 from trajectory_editor.episode_engine import EpisodeEngine
 from trajectory_editor.episode_ui import InteractivePolicy
+from trajectory_editor.episode_ui import PolicyViewPreferences
 from trajectory_editor.plain_tui import read_edge
 from trajectory_editor.terminal_contracts import EdgeViewState
 from trajectory_editor.teacher_commands import HELP_TEXT
@@ -119,13 +120,13 @@ def test_choice_requests_preserve_actions_feedback_and_lazy_statistics():
         assert plain.display_candidates == live.display_candidates
         assert plain.feedback == live.feedback
         assert plain.target_token_id == live.target_token_id
-        assert plain.logit_view == live.logit_view
+        assert plain.overlays == live.overlays
         assert plain.default_hold_tokens == live.default_hold_tokens
         assert plain.menu_page_rows == live.menu_page_rows
     assert requests[0][1].feedback.category == "search"
     assert requests[0][1].search_lens_active
     assert requests[0][2].feedback.category == "error"
-    assert requests[0][3].logit_view == "raw"
+    assert requests[0][3].overlays == frozenset({"logit"})
 
 
 def test_candidate_column_plan_includes_requested_probability_diagnostics():
@@ -134,10 +135,10 @@ def test_candidate_column_plan_includes_requested_probability_diagnostics():
         sampling=SamplerConfig(temperature=0.0),
     )
     plan = InteractivePolicy(
-        io=ScriptedIO([]), menu_size=1, show_model_probabilities=True,
+        io=ScriptedIO([]), menu_size=1, view_preferences=PolicyViewPreferences(overlays=frozenset({"probability"})),
     )._view_plan(engine)
     assert {label for label, _ in plan.columns} == {
-        "raw-p", "decode-p", "token-id",
+        "model-softmax", "eligible-softmax", "token-id",
     }
 
 

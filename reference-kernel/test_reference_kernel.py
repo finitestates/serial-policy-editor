@@ -37,7 +37,7 @@ def start(seed=12345, *, policy=None):
     )
 
 
-@pytest.mark.parametrize("kernel", ["categorical", "gumbel-max"])
+@pytest.mark.parametrize("kernel", ["argmax", "gumbel-max"])
 def test_observe_is_pure_and_directly_addressed(kernel):
     backend = ScriptedBackend()
     branch = start(policy=Policy(draw_kernel=kernel))
@@ -53,7 +53,7 @@ def test_observe_is_pure_and_directly_addressed(kernel):
     assert observe(backend, advanced).sampling_boundary == 1
 
 
-@pytest.mark.parametrize("kernel", ["categorical", "gumbel-max"])
+@pytest.mark.parametrize("kernel", ["argmax", "gumbel-max"])
 @pytest.mark.parametrize("seed", [-11, 1, 12345, 67890])
 def test_immutable_continuation_rewind_and_fork(seed, kernel):
     backend = ScriptedBackend()
@@ -92,7 +92,7 @@ def test_interventions_and_conditional_hold_keep_the_same_world():
     assert apply(backend, rewind(conditional, 0), Hold(12, (stop,))) == (conditional, stopped)
 
 
-def test_policy_truncation_remaps_one_fixed_categorical_quantile():
+def test_policy_top_k_changes_membership_without_changing_argmax():
     class Flat:
         def logits(self, prefix):
             return (0.0, 0.0, 0.0)
@@ -102,21 +102,19 @@ def test_policy_truncation_remaps_one_fixed_categorical_quantile():
 
     backend = Flat()
     branch = start(policy=Policy(top_k=2))
-    u = position_uniform(branch.world, 0)
-    assert 1 / 3 < u < 1 / 2
     a = observe(backend, branch)
     branch, _ = apply(backend, branch, SetPolicy(Policy(top_k=3)))
     b = observe(backend, branch)
     branch, _ = apply(backend, branch, SetPolicy(Policy(top_k=2)))
-    assert (a.proposal_token_id, b.proposal_token_id, observe(backend, branch).proposal_token_id) == (0, 1, 0)
+    assert (a.proposal_token_id, b.proposal_token_id, observe(backend, branch).proposal_token_id) == (0, 0, 0)
     assert a.sampling_boundary == b.sampling_boundary == 0
     assert a.distribution.ids != b.distribution.ids
 
 
 def test_gumbel_candidate_order_and_exclusions_preserve_noise():
     world = start().world
-    original = Distribution((5, 3, 8), (0.4, 0.3, 0.3), (1.0, 0.5, 0.0))
-    reordered = Distribution((8, 5, 3), (0.3, 0.4, 0.3), (0.0, 1.0, 0.5))
+    original = Distribution((5, 3, 8), (1.0, 0.5, 0.0))
+    reordered = Distribution((8, 5, 3), (0.0, 1.0, 0.5))
     for boundary in range(40):
         assert draw(original, world, boundary, "gumbel-max") == draw(reordered, world, boundary, "gumbel-max")
 
@@ -146,7 +144,7 @@ def test_gumbel_candidate_order_and_exclusions_preserve_noise():
 
 def test_reroll_round_trip_and_seed_is_replay_data(monkeypatch):
     backend = ScriptedBackend()
-    original = start()
+    original = start(policy=Policy(draw_kernel="gumbel-max"))
     before, first = apply(backend, original, Hold(10))
     another_world = reroll(original, 67890)
     another, second = apply(backend, another_world, Hold(10))
@@ -209,14 +207,14 @@ def test_small_counterfactual_example():
     backend = ScriptedBackend()
     root = start()
     original, held = apply(backend, root, Hold(5))
-    assert held.visible_token_ids == (5, 3, 5, 6, 8)
+    assert held.visible_token_ids == (5, 3, 5, 5, 6)
     assert apply(backend, rewind(original, 0), Hold(5)) == (original, held)
     altered, _ = apply(backend, fork(root), SelectToken(7))
     altered, branch_hold = apply(backend, altered, Hold(4))
     assert altered.world == root.world
     assert (7,) + branch_hold.visible_token_ids != held.visible_token_ids
     rerolled, _ = apply(backend, reroll(root, 67890), Hold(5))
-    assert rerolled.state.visible_token_ids != held.visible_token_ids
+    assert rerolled.state.visible_token_ids == held.visible_token_ids
     assert apply(backend, reroll(root, 12345), Hold(5)) == (original, held)
     # A third independent branch uses a different policy in the same world.
     third, _ = apply(backend, fork(root), SetPolicy(Policy(top_k=1)))

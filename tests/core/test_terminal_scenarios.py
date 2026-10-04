@@ -151,3 +151,44 @@ def test_shared_command_scenario_through_live_and_plain_adapters(tmp_path, works
         records.append((actions, terminal.choice_requests[0].choice.proposal_token_id))
 
     assert records[0] == records[1]
+
+
+def test_beam_kill_backfills_same_depth_and_preserves_survivor_ids():
+    runtime = EpisodeEngine(ConformingFakeBackend(), initial_token_ids=[7], sampling=SamplerConfig())
+    beam = BeamSearch(runtime, width=2)
+    survivors = {beam._path_token_ids(path): path.label for path in beam.active}
+    victim = beam.active[0]
+    killed = beam._path_token_ids(victim)
+    survivor = beam.active[1]
+    assert beam.kill(victim.label)
+    assert len(beam.active) == 2
+    assert all(len(beam._path_token_ids(path)) == 1 for path in beam.active)
+    assert killed not in {beam._path_token_ids(path) for path in beam.active}
+    assert next(path.label for path in beam.active if beam._path_token_ids(path) == beam._path_token_ids(survivor)) == survivors[beam._path_token_ids(survivor)]
+    assert len(beam._history) == 1
+    # Repeated pruning must reach candidates beyond the original per-parent pool.
+    seen = {killed}
+    for _ in range(4):
+        victim = beam.active[0]
+        seen.add(beam._path_token_ids(victim))
+        assert beam.kill(victim.label)
+        assert seen.isdisjoint({beam._path_token_ids(path) for path in beam.active})
+    beam.discard()
+
+
+def test_beam_refill_survives_advance_rewind_and_protection():
+    runtime = EpisodeEngine(ConformingFakeBackend(), initial_token_ids=[7], sampling=SamplerConfig())
+    beam = BeamSearch(runtime, width=3)
+    protected = beam.active[-1]
+    protected_tokens = beam._path_token_ids(protected)
+    beam.toggle_protection(protected.label)
+    assert beam.kill(beam.active[0].label)
+    assert protected_tokens in {beam._path_token_ids(path) for path in beam.active}
+    assert beam.advance(2)
+    assert all(len(beam._path_token_ids(path)) == 3 for path in beam.active)
+    assert beam.rewind()
+    assert all(len(beam._path_token_ids(path)) == 1 for path in beam.active)
+    assert beam.kill(beam.active[0].label)
+    assert len(beam.active) == 3
+    assert all(len(beam._path_token_ids(path)) == 1 for path in beam.active)
+    beam.discard()

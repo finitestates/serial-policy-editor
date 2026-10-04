@@ -81,9 +81,14 @@ def reference(prefix):
 
 
 def config(**kwargs):
-    return replace(SamplerConfig(temperature=.8, top_k=12, top_p=1, min_p=0,
-                                cfg_unconditional_prompt='U', cfg_scale=1.7,
-                                cfg_prefix_tokens=5), **kwargs)
+    return replace(SamplerConfig(
+        temperature=0.8,
+        top_k=12,
+        min_p=0,
+        cfg_unconditional_prompt='U',
+        cfg_scale=1.7,
+        cfg_prefix_tokens=5,
+    ), **kwargs)
 
 
 def engine(**kwargs):
@@ -113,7 +118,7 @@ def assert_context(runtime, unconditional=(1, 5)):
     probabilities = np.exp((expected - expected.max()) / runtime.sampling.temperature)
     probabilities /= probabilities.sum()
     np.testing.assert_allclose(
-        [observation.distribution.probability(i) for i in range(12)], probabilities,
+        [observation.distribution.softmax_at(i) for i in range(12)], probabilities,
         rtol=1e-12, atol=1e-14,
     )
     return observation

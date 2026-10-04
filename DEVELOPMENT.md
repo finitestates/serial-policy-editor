@@ -2,8 +2,9 @@
 
 This tree is the `policy-editor-argmax` experiment. Package metadata retains
 `v1.0.0`, but this is not a validated release of that contract. Documentation
-and contracts describe the new selector; inherited tests and the reference
-kernel still require migration. See [the harness plan](docs/ARGMAX_TEST_HARNESS_PLAN.md).
+and contracts describe the new selector. The retained harnesses and reference
+kernel have been migrated; see [validation evidence](docs/ARGMAX_HARNESS_UPDATE.md)
+and the [migration scope](docs/ARGMAX_TEST_HARNESS_PLAN.md).
 No tests were run during the implementation/documentation cut.
 
 The preceding release used the following runtime architecture. Interactive and

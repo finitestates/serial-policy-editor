@@ -76,7 +76,7 @@ def _contrast_ratio(foreground: str, background: str) -> float:
     "groups", "groups ships", 'b ships -> {steamship, "my favorite couch"}',
     'b ships remove {steamship}', "b ships +0.5", "b {ships, sky} +",
     "b token #4", "b token #4 +0.5", "b A +", "1+", "1-", "1=0.5",
-    "v", "V", "l", "L", "%", "c", "C",
+    "v", "V", "l", "L", "%", "columns", "C",
     "overlay pct", "n note", "p note", "q", "e", "e!", "?",
     "chord 1 2", "chord\t1 2",
 ])
@@ -220,7 +220,7 @@ def test_draw_command_returns_a_seed_recordable_as_a_normal_reroll(monkeypatch):
         ConformingFakeBackend(),
         initial_text="P",
         initial_token_ids=[7],
-        sampling=SamplerConfig(temperature=0.7, top_k=3, seed=12345),
+        sampling=SamplerConfig(temperature=0.7, top_k=3, seed=12345, draw_kernel="gumbel-max"),
     )
     observation = engine.observe()
     active_ids = set(int(token_id) for token_id in observation.distribution.ids)
@@ -271,7 +271,7 @@ def test_draw_command_cancellation_records_no_reroll(monkeypatch):
         ConformingFakeBackend(),
         initial_text="P",
         initial_token_ids=[7],
-        sampling=SamplerConfig(temperature=0.7, top_k=3, seed=12345),
+        sampling=SamplerConfig(temperature=0.7, top_k=3, seed=12345, draw_kernel="gumbel-max"),
     )
     observation = engine.observe()
     active_ids = set(int(token_id) for token_id in observation.distribution.ids)

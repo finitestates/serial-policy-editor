@@ -47,8 +47,6 @@ CHILD = textwrap.dedent(
                 f"b{(step + index) % 9}",
                 f"step {step} branch {index} " + "continuation " * (index + step % 3),
                 f"-{0.3 * index + step / 10:.2f}", "LIVE", (f"step {step}",),
-                model_rank=index + 1, step_log_probability=-0.1 * index,
-                model_log_probability=-0.5 - index / 10,
             )
             for index in range(6)
         )
@@ -785,8 +783,34 @@ def test_real_runtime_journey_through_choice_beam_and_edge(tmp_path):
             ui.wait_for(lambda f, s=step: f["lines"][0].startswith(f"Step {s} ") and f["cursor"], what=f"step {step}")
             ui.send("\r")
         ui.wait_for(lambda f: f["lines"][0].startswith("Step 2 ") and f["cursor"], what="step 2")
+        # Optional diagnostic overlays can be enabled directly, then cleared.
+        for command, label in (("l", "model-logit"), ("L", "model-gap"),
+                               ("~", "noise"), ("%", "model-softmax")):
+            ui.send(command + "\r")
+            ui.wait_for(lambda f, label=label: label in text(f) and f["cursor"],
+                        what=f"overlay {command}")
+        ui.send("C\r")
+        ui.wait_for(lambda f: "model-softmax" not in text(f)
+                    and "model-logit" not in text(f) and f["cursor"], what="clear overlays")
         ui.send("beam\r")
-        ui.wait_for(lambda f: "depth 1" in f["lines"][0] and f["cursor"], what="beam")
+        before = ui.wait_for(lambda f: "depth 1" in f["lines"][0] and f["cursor"], what="beam")
+        def labels(frame):
+            return set(re.findall(r"^\s*[>◆ ]*\d+\s+(b\d+)\s", text(frame), re.M))
+        marked = next(line for line in before["lines"] if line.startswith(">"))
+        if "LIVE" not in marked:
+            first_live_rank = next(int(match.group(1)) for line in before["lines"]
+                                   if (match := re.search(r"^\s*[>◆ ]*(\d+)\s+b\d+\s+LIVE", line)))
+            ui.send("\x1b[B" * (first_live_rank - 1))
+            before = ui.wait_for(lambda f: any(line.startswith(">") and "LIVE" in line
+                                              for line in f["lines"]), what="select live branch")
+            marked = next(line for line in before["lines"] if line.startswith(">"))
+        killed = marked.split()[2]
+        previous_labels = labels(before)
+        ui.send("\x7f")
+        after = ui.wait_for(lambda f: "depth 1" in f["lines"][0]
+                           and killed not in labels(f) and f["cursor"], what="same-depth backfill")
+        assert len(labels(after)) == len(previous_labels)
+        assert previous_labels - {killed} <= labels(after)
         ui.resize(130, 40)
         ui.send("\x1b[C")
         ui.wait_for(lambda f: "depth 2" in f["lines"][0] and f["cursor"], what="beam advance")

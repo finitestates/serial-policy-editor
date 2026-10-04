@@ -261,7 +261,12 @@ def _validate_values(
             parsed_value = getattr(parsed, dest)
             values[option_name] = parsed_value
             semantic_values[dest] = parsed_value
-        if values[option_name] is None and raw_value is not None:
+        explicit_none_limit = (
+            dest in {"top_k", "selective_noise_k", "gumbel_top_k"}
+            and isinstance(raw_value, str)
+            and raw_value.strip().lower() == "none"
+        )
+        if values[option_name] is None and raw_value is not None and not explicit_none_limit:
             raise EditorError(
                 f"controller profile option {option_name!r} could not be parsed"
             )

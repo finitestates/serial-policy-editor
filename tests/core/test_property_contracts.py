@@ -18,14 +18,16 @@ pytestmark = pytest.mark.invariant
 def test_q01_generated_core_sampler_records_round_trip_exactly():
     randomizer = random.Random(20260918)
     for _ in range(50):
+        kernel = randomizer.choice((
+            'argmax', 'gumbel-max', 'gaussian-max', 'logistic-max',
+            'laplace-max', 'uniform-max', 'student-t-max',
+        ))
         config = SamplerConfig(
             temperature=randomizer.choice((0.0, 0.25, 0.8, 1.0, 1.7)),
-            top_k=randomizer.randint(1, 16),
-            top_p=randomizer.choice((0.1, 0.5, 0.95, 1.0)),
+            top_k=randomizer.choice((None, 1, 4, 16)),
             min_p=randomizer.choice((0.0, 0.01, 0.2)),
-            typical_p=randomizer.choice((0.35, 0.8, 1.0)),
-            tail_free_z=randomizer.choice((0.35, 0.8, 1.0)),
-            draw_kernel=randomizer.choice(("categorical", "gumbel-max")),
+            draw_kernel=kernel,
+            selective_noise_k=None if kernel == 'argmax' else randomizer.choice((None, 1, 5)),
             repeat_penalty=randomizer.choice((1.0, 1.1, 1.5)),
             repeat_last_n=randomizer.choice((0, 4, 16, -1)),
             presence_penalty=randomizer.choice((0.0, 0.2)),

@@ -76,7 +76,11 @@ def test_real_llama_full_prefix_matches_editor_hold():
         prefix = oracle.tokenize(args.prefix, True, False)
         expected = list(records(oracle, prefix, Policy(top_k=20), mode='pattern', count=3))[-1]
         production = LlamaCppDecoder(Path(model), LlamaCppSettings(n_ctx=128, n_batch=512, n_threads=2, n_gpu_layers=0))
-        engine = EpisodeEngine(production, initial_token_ids=list(prefix), sampling=SamplerConfig(seed=12345, top_k=20, top_p=1., min_p=0.))
+        engine = EpisodeEngine(production, initial_token_ids=list(prefix), sampling=SamplerConfig(
+            seed=12345,
+            top_k=20,
+            min_p=0.0,
+        ))
         actual = engine.apply(Hold(3))
         assert list(actual.visible_token_ids) == expected['token_ids']
         assert actual.stop_reason == expected['stop_reason']

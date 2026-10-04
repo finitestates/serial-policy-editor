@@ -1,7 +1,8 @@
 # Documentation overhaul plan
 
-Status: documentation implemented. Runtime validation and harness/oracle
-migration remain deferred to the next cut. This file records the approved scope.
+Status: documentation implemented. The subsequent harness/oracle
+migration and local validation are recorded in ARGMAX_HARNESS_UPDATE.md.
+This file preserves the approved documentation scope.
 
 ## Implementation boundary at this pause
 

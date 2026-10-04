@@ -56,7 +56,7 @@ def engine(backend=None):
         backend or ConformingFakeBackend(),
         initial_text="P",
         initial_token_ids=[7],
-        sampling=SamplerConfig(temperature=0.0, top_k=8, top_p=1.0, min_p=0.0),
+        sampling=SamplerConfig(temperature=0.0, top_k=8, min_p=0.0),
     )
 
 
@@ -331,7 +331,7 @@ def test_e12_write_batch_evidence_has_one_record_per_token_with_exact_boundaries
     assert not any(item.is_eog for item in outcome.evidence)
     # Inserts deliberately record no per-token model probabilities; the
     # history adapter already treats these as the "unknown" defaults.
-    assert all(item.decoder_probability == 0.0 for item in outcome.evidence)
+    assert all(item.eligible_softmax is None for item in outcome.evidence)
     assert all(not item.proposal_agreement for item in outcome.evidence)
     assert all(item.raw_rank is None for item in outcome.evidence)
 

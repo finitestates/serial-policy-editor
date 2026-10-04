@@ -98,7 +98,7 @@ prompt: Prompt
 environment:
   sampler:
     temperature: 0.25
-    top_p: 0.8
+    selective_noise_k: null
     seed: 42
 steps: []
 """,
@@ -129,7 +129,7 @@ steps: []
         assert main(arguments) == 0
 
     assert captured["sampling"].temperature == 0.9
-    assert captured["sampling"].top_p == 0.8
+    assert captured["sampling"].selective_noise_k is None
     assert captured["sampling"].seed == 42
 
 

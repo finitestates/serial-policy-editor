@@ -1,8 +1,9 @@
 # Core contract matrix
 
-This specifies required behavior for the argmax experiment. Existing harnesses
-have not yet been migrated or run for this cut; filenames below are migration
-targets, not current verification. This is the source of truth for the reduced
+This specifies required behavior for the argmax experiment. Retained harnesses
+have been migrated and run locally; see
+[the validation record](../docs/ARGMAX_HARNESS_UPDATE.md) for commands, skips and
+evidence limits. Filenames below map contracts to harnesses. This is the source of truth for the reduced
 core test suite. The
 numbers below are contract slots. Every retained core test must map to one of these slots. Additional slots may be added on an as-needed basis, but only after consultation with the code owner.
 
@@ -10,7 +11,7 @@ Core tests assert observable state, persisted records, replay results, and may a
 
 ## Terminal contracts
 
-| ID | Terminal contract | Harness targets |
+| ID | Terminal contract | Harness files |
 | --- | --- | --- |
 | T01 | Choice, review, EDGE, Beam, prompt, page, single-key, multiline, and isolated chord requests submit their contract values through the real key parser; the production PTY session submits the same values for typed, pasted, clicked, and multiline input | `test_live_terminal.py`, `test_chord.py`, `test_live_terminal_pty.py` |
 | T02 | engine-owned insertion previews run on the request owner; search warming runs on a worker and delivers generation-tagged results on the UI thread | `test_search_warm_terminal.py`, `test_live_terminal.py` |
@@ -25,7 +26,7 @@ Core tests assert observable state, persisted records, replay results, and may a
 
 ## Sampler and action contracts — 8
 
-| ID | Contract | Harness targets to migrate |
+| ID | Contract | Harness files |
 | --- | --- | --- |
 | S01 | `SamplerConfig` defaults to argmax/full-vocabulary eligibility, round-trips retained fields and rejects retired settings | `test_sampler_contracts.py` |
 | S02 | plain/perturbed argmax obey exact score, lowest-token-ID tie and replay-address rules; selective noise affects only the leading eligible scores | `test_sampler_contracts.py` |
@@ -38,7 +39,7 @@ Core tests assert observable state, persisted records, replay results, and may a
 
 ## Engine action contracts — 9
 
-| ID | Contract | Harness targets to migrate |
+| ID | Contract | Harness files |
 | --- | --- | --- |
 | E01 | accept/select commits exactly the selected token without requesting softmax diagnostics | `test_engine_contracts.py` |
 | E02 | raw-rank selection addresses the full vocabulary; eligibility is set membership independent of optional softmax and underflow | `test_rank_neighborhood.py`, `test_unexposed_ranks.py` |
@@ -52,7 +53,7 @@ Core tests assert observable state, persisted records, replay results, and may a
 
 ## Replay contracts — 10
 
-| ID | Contract | Harness targets to migrate |
+| ID | Contract | Harness files |
 | --- | --- | --- |
 | R01 | exact replay reproduces the recorded visible prefix | `test_replay_contracts.py` |
 | R02 | replay consumes `{step-N, teacher_action, optional handoff result}` | `test_replay_contracts.py` |
@@ -67,7 +68,7 @@ Core tests assert observable state, persisted records, replay results, and may a
 
 ## Persistence and lifecycle contracts — 7
 
-| ID | Contract | Harness targets to migrate |
+| ID | Contract | Harness files |
 | --- | --- | --- |
 | L01 | resume reconstructs an open episode and continues it | `test_lifecycle_contracts.py` |
 | L02 | rewind can stop at any retained token boundary | `test_lifecycle_contracts.py` |
@@ -79,7 +80,7 @@ Core tests assert observable state, persisted records, replay results, and may a
 
 ## Vocabulary and menu contracts — 5
 
-| ID | Contract | Harness targets to migrate |
+| ID | Contract | Harness files |
 | --- | --- | --- |
 | M01 | full-vocabulary search is non-mutating | `test_menu_contracts.py` |
 | M02 | absolute/relative rank navigation resolves the requested candidate | `test_menu_contracts.py` |
@@ -89,7 +90,7 @@ Core tests assert observable state, persisted records, replay results, and may a
 
 ## Vector and backend contracts — 5
 
-| ID | Contract | Harness targets to migrate |
+| ID | Contract | Harness files |
 | --- | --- | --- |
 | V01 | core loads an external JSON vector without model metadata requirements | `test_vector_contracts.py` |
 | V02 | core loads a cvector with the exact canonical layer ordering | `test_vector_contracts.py` |
@@ -99,7 +100,7 @@ Core tests assert observable state, persisted records, replay results, and may a
 
 ## SQLite and export contracts — 4
 
-| ID | Contract | Harness targets to migrate |
+| ID | Contract | Harness files |
 | --- | --- | --- |
 | P01 | schema 3 persists/reloads nullable eligible_softmax; old schemas are rejected before mutation | `test_persistence_contracts.py` |
 | P02 | the persisted tape contains only replayable actions and optional results | `test_persistence_contracts.py` |
@@ -108,7 +109,7 @@ Core tests assert observable state, persisted records, replay results, and may a
 
 ## Property and fuzz contracts — 5
 
-| ID | Contract | Harness targets to migrate or generate |
+| ID | Contract | Harness files |
 | --- | --- | --- |
 | Q01 | generated retained sampler records round-trip exactly; retired fields are rejected | `test_property_contracts.py` |
 | Q02 | replay never changes the recorded prefix | `test_property_contracts.py` |
@@ -128,4 +129,4 @@ E01/M04/P04 must distinguish unrequested diagnostics (`None`) from calculated
 zero. Normal observation, accept, write and rendering must not materialize
 softmax. Explicit diagnostics may do so. Beam retains cumulative normalized
 policy log-probability and bounded search, not stochastic without-replacement
-semantics. Existing slots remain stable; the next cut migrates their harnesses.
+semantics. Existing slots remain stable; the migration preserves these slots.

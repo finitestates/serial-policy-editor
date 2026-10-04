@@ -21,7 +21,7 @@ ACTION_TEXT = (
     "[ / ] review | f [N|-N] | m [N] | /TERM | "
     "ms [+|- [N]] | l logits / L diff / ~ noise / % probability / C clear | columns NAMES | context [N|all] | "
     "v order (model / policy / Gumbel) | "
-    "V policy columns | l logits / L both | % probs | n [note-before] | "
+    "V policy columns | l logits / L diff | ~ noise / % softmax | n [note-before] | "
     "p [note-after] | e | e! | q | ?"
 )
 

@@ -54,7 +54,7 @@ class PhraseBackend(ConformingFakeBackend):
 def engine(backend=None) -> EpisodeEngine:
     return EpisodeEngine(
         backend or ConformingFakeBackend(),
-        sampling=SamplerConfig(temperature=0.0, top_k=8, top_p=1.0, min_p=0.0),
+        sampling=SamplerConfig(temperature=0.0, top_k=8, min_p=0.0),
         initial_text="P",
         initial_token_ids=[7],
     )

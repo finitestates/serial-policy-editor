@@ -13,7 +13,7 @@ from trajectory_editor.core.actions import action_from_dict
 from trajectory_editor.core.errors import EditorError
 from trajectory_editor.core.sampler_config import SamplerConfig
 from trajectory_editor.core.sampling import (
-    SparseDistribution, draw_token, position_uniform as production_uniform,
+    EligibleScores, draw_token,
     position_uniform_token as production_uniform_token,
 )
 from trajectory_editor.episode_engine import EpisodeEngine
@@ -74,17 +74,15 @@ def test_random_access_uniforms_match_production(seed):
     world = World.for_prefix(seed, (1, 2, 3))
     for boundary in (0, 1, 29, 500, 1000000):
         args = (seed, world.stream_fingerprint, boundary)
-        assert position_uniform(world, boundary) == production_uniform(*args)
         for token_id in (0, 4, 999):
             assert position_uniform_token(world, boundary, token_id) == production_uniform_token(*args, token_id)
 
 
-@pytest.mark.parametrize("kernel", ["categorical", "gumbel-max"])
+@pytest.mark.parametrize("kernel", ["argmax", "gumbel-max"])
 def test_fixed_distribution_draws_match_production(kernel):
-    reference = Distribution((4, 1, 7), (0.2, 0.5, 0.3), (0.1, 0.9, 0.4))
-    production = SparseDistribution(
+    reference = Distribution((4, 1, 7), (0.1, 0.9, 0.4))
+    production = EligibleScores(
         np.asarray(reference.ids, dtype=np.int64),
-        np.asarray(reference.probabilities, dtype=np.float64),
         np.asarray(reference.scores, dtype=np.float64),
     )
     for seed in (-3, 17, 12345):
@@ -95,15 +93,14 @@ def test_fixed_distribution_draws_match_production(kernel):
             assert draw(reference, world, boundary, kernel) == expected
 
 
-@pytest.mark.parametrize("kernel", ["categorical", "gumbel-max"])
+@pytest.mark.parametrize("kernel", ["argmax", "gumbel-max"])
 @pytest.mark.parametrize("seed", [12345, 67890])
 def test_production_sampling_boundaries_observations_holds_and_rewind(seed, kernel):
     reference_backend = ScriptedBackend()
     reference = start(seed, policy=Policy(top_k=6, draw_kernel=kernel))
     production = EpisodeEngine(
         ProductionScriptedBackend(), initial_token_ids=[1, 2, 3],
-        sampling=SamplerConfig(seed=seed, temperature=1.0, top_k=6, top_p=1.0,
-                               min_p=0.0, draw_kernel=kernel),
+        sampling=SamplerConfig(seed=seed, temperature=1.0, top_k=6, min_p=0.0, draw_kernel=kernel),
     )
     assert production.stream_fingerprint == reference.world.stream_fingerprint
 
@@ -114,7 +111,7 @@ def test_production_sampling_boundaries_observations_holds_and_rewind(seed, kern
         assert expected.prefix_token_ids == tuple(actual.prefix_token_ids)
         assert expected.proposal_token_id == actual.proposal_token_id
         assert expected.distribution.ids == tuple(actual.distribution.ids)
-        assert expected.distribution.probabilities == pytest.approx(actual.distribution.probabilities)
+        assert expected.distribution.probabilities == pytest.approx(actual.distribution.softmax)
         reference, _ = apply(reference_backend, reference, Accept())
         production.apply(ProductionAccept())
 
@@ -134,7 +131,7 @@ def test_production_sampling_boundaries_observations_holds_and_rewind(seed, kern
     assert tuple(production.token_ids) == reference.state.token_ids
 
 
-def test_top_k_policy_remaps_same_quantile_in_production():
+def test_top_k_membership_preserves_plain_argmax_in_production():
     class Flat(ProductionScriptedBackend):
         def logits(self, prefix):
             return (0.0, 0.0, 0.0)
@@ -157,7 +154,7 @@ def test_top_k_policy_remaps_same_quantile_in_production():
         backend,
         initial_token_ids=[1, 2],
         stream_fingerprint=stream_fingerprint,
-        sampling=SamplerConfig(seed=5, top_k=2, top_p=1.0, min_p=0.0),
+        sampling=SamplerConfig(seed=5, top_k=2, min_p=0.0),
     )
     a = observe(reference_backend, branch).proposal_token_id
     assert a == production.observe().proposal_token_id
@@ -165,21 +162,20 @@ def test_top_k_policy_remaps_same_quantile_in_production():
     production.sampling = replace(production.sampling, top_k=3)
     b = observe(reference_backend, branch).proposal_token_id
     assert b == production.observe().proposal_token_id
-    assert a != b
+    assert a == b == 0
     branch = replace(branch, policy=Policy(top_k=2))
     production.sampling = replace(production.sampling, top_k=2)
     assert observe(reference_backend, branch).proposal_token_id == production.observe().proposal_token_id == a
 
 
-@pytest.mark.parametrize("kernel", ["categorical", "gumbel-max"])
+@pytest.mark.parametrize("kernel", ["argmax", "gumbel-max"])
 @pytest.mark.parametrize("seed,new_seed", [(12345, 999), (67890, -42)])
 def test_reroll_matches_reference_kernel(kernel, seed, new_seed):
     reference_backend = ScriptedBackend()
     reference = start(seed, policy=Policy(top_k=6, draw_kernel=kernel))
     production = EpisodeEngine(
         ProductionScriptedBackend(), initial_token_ids=[1, 2, 3],
-        sampling=SamplerConfig(seed=seed, temperature=1.0, top_k=6, top_p=1.0,
-                               min_p=0.0, draw_kernel=kernel),
+        sampling=SamplerConfig(seed=seed, temperature=1.0, top_k=6, min_p=0.0, draw_kernel=kernel),
     )
     # Draw once under the original seed so a stale proposal exists to discard.
     before = observe(reference_backend, reference).proposal_token_id
@@ -198,7 +194,7 @@ def test_reroll_matches_reference_kernel(kernel, seed, new_seed):
     actual = production.observe()
     assert expected.proposal_token_id == actual.proposal_token_id
     assert expected.distribution.ids == tuple(actual.distribution.ids)
-    assert expected.distribution.probabilities == pytest.approx(actual.distribution.probabilities)
+    assert expected.distribution.probabilities == pytest.approx(actual.distribution.softmax)
 
 
 def test_reroll_round_trips_through_action_dict():
@@ -215,16 +211,22 @@ def test_reroll_rejects_bad_seeds(seed):
         action_from_dict({"kind": "reroll", "seed": seed})
 
 
-@pytest.mark.parametrize('kernel', ['categorical', 'gumbel-max', 'gaussian-max', 'logistic-max', 'laplace-max', 'uniform-max', 'student-t-max'])
+@pytest.mark.parametrize('kernel', ['gumbel-max', 'gumbel-max', 'gaussian-max', 'logistic-max', 'laplace-max', 'uniform-max', 'student-t-max'])
 @pytest.mark.parametrize('df', [0.5, 3.0, 7.0])
 def test_all_draw_kernels_and_scales(kernel, df):
     from reference_kernel import DRAW_KERNELS
     from trajectory_editor.core.sampling import DRAW_KERNELS as production_kernels
     assert set(DRAW_KERNELS) == set(production_kernels)
-    reference = Distribution((4, 1, 7), (.2, .5, .3), (.1, .9, .4))
-    production = SparseDistribution(np.array(reference.ids), np.array(reference.probabilities), np.array(reference.scores))
+    reference = Distribution((4, 1, 7), (0.1, 0.9, 0.4))
+    production = EligibleScores(np.array(reference.ids), np.array(reference.scores))
     for scale in (0., .7, 1., 2.):
-        policy = Policy(draw_kernel=kernel, gaussian_noise_std=scale, perturb_noise_std=scale, student_t_df=df, gumbel_noise_scale=scale)
+        policy = Policy(
+            draw_kernel=kernel,
+            gaussian_noise_std=scale,
+            perturb_noise_std=scale,
+            student_t_df=df,
+            gumbel_noise_scale=scale,
+        )
         for seed in (-3, 17, 12345):
             world = World.for_prefix(seed, (1, 2, 3))
             for boundary in (0, 1, 29):
@@ -232,28 +234,45 @@ def test_all_draw_kernels_and_scales(kernel, df):
                 assert draw(reference, world, boundary, kernel, policy=policy) == expected
 
 
-@pytest.mark.parametrize('settings', [
-    {}, {'top_p': .7}, {'min_p': .4}, {'typical_p': .8}, {'tail_free_z': .6},
-    {'top_k': 6, 'top_p': .8, 'min_p': .1, 'typical_p': .9, 'tail_free_z': .8},
-    {'temperature': 0}, {'temperature': .7, 'repeat_penalty': 1.2, 'presence_penalty': .3, 'frequency_penalty': .4, 'repeat_last_n': -1},
+@pytest.mark.parametrize("settings", [
+    {}, {'min_p': .4}, {'top_k': 6, 'min_p': .1},
+    {'repeat_penalty': 1.2, 'presence_penalty': .2, 'frequency_penalty': .3},
 ])
 def test_filter_and_history_parity(settings):
     from trajectory_editor.core.policy_calculations import PolicyCalculations
     logits = np.array([.2, -.5, 3., 1.7, .4, 1., -.8, .5])
     history = (1, 2, 1, 4)
-    config = SamplerConfig(**({'top_k': None, 'top_p': 1., 'min_p': 0.} | settings))
+    config = SamplerConfig(**({'top_k': None, 'min_p': 0.} | settings))
     actual = PolicyCalculations(logits, config, history).distribution
     expected = Policy(**settings).distribution(logits, history)
     assert expected.ids == tuple(actual.ids)
-    assert expected.probabilities == pytest.approx(actual.probabilities)
+    assert expected.probabilities == pytest.approx(actual.softmax)
     assert expected.scores == pytest.approx(actual.scores)
 
 
 def test_model_rank_gumbel_matches_production():
-    dist = Distribution((4, 1, 7), (.2, .5, .3), (.1, .9, .4))
-    production = SparseDistribution(np.array(dist.ids), np.array(dist.probabilities), np.array(dist.scores))
+    dist = Distribution((4, 1, 7), (0.1, 0.9, 0.4))
+    production = EligibleScores(np.array(dist.ids), np.array(dist.scores))
     ranks = {4: 2, 1: 5, 7: 1}
     world = World.for_prefix(17, (1, 2))
     policy = Policy(draw_kernel='gumbel-max', gumbel_noise_address='model-rank')
     for step in range(20):
         assert draw(dist, world, step, 'gumbel-max', policy=policy, model_ranks=ranks) == draw_token(production, seed=17, stream_fingerprint=world.stream_fingerprint, aligned_step=step, kernel='gumbel-max', gumbel_noise_address='model-rank', candidate_model_ranks=np.array([ranks[i] for i in dist.ids]))
+
+
+@pytest.mark.parametrize('kernel', ['gumbel-max', 'gaussian-max', 'logistic-max', 'laplace-max', 'uniform-max', 'student-t-max'])
+@pytest.mark.parametrize('eligible_k,noise_k', [(None, None), (None, 1), (4, 2), (2, 10)])
+def test_independent_eligibility_selective_noise_and_winner_parity(kernel, eligible_k, noise_k):
+    from trajectory_editor.core.policy_calculations import PolicyCalculations
+    logits = np.asarray([2., 2., 1.9, -1., -2.])
+    settings = dict(draw_kernel=kernel, top_k=eligible_k, selective_noise_k=noise_k,
+                    min_p=.01, temperature=.8)
+    reference = Policy(**settings).distribution(logits, ())
+    actual = PolicyCalculations(logits, SamplerConfig(**settings), []).distribution
+    assert tuple(actual.ids) == reference.ids
+    assert actual.scores == pytest.approx(reference.scores)
+    for seed in (-7, 0, 17, 999):
+        world = World(seed, 'a' * 64)
+        assert draw(reference, world, 3, kernel, policy=Policy(**settings)) == draw_token(
+            actual, seed=seed, stream_fingerprint=world.stream_fingerprint,
+            aligned_step=3, kernel=kernel, selective_noise_k=noise_k)
