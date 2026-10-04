@@ -333,11 +333,6 @@ class BeamSearch:
                     log_probability,
                     False,
                     parent_order,
-                    search_step_log_probability=float(
-                        search_log_probabilities[
-                            int(np.searchsorted(allowed_ids, token_id))
-                        ]
-                    ),
                 ))
                 live_candidate_ids.add(token_id)
                 live_count += 1
@@ -355,11 +350,6 @@ class BeamSearch:
                         float(model_log_probabilities[token_id]),
                         False,
                         parent_order,
-                        search_step_log_probability=float(
-                            search_log_probabilities[
-                                int(np.searchsorted(allowed_ids, token_id))
-                            ]
-                        ),
                     ))
 
             # Keep terminal candidates available even when their log-probability
@@ -376,11 +366,6 @@ class BeamSearch:
                     log_probability,
                     True,
                     parent_order,
-                    search_step_log_probability=float(
-                        search_log_probabilities[
-                            int(np.searchsorted(allowed_ids, token_id))
-                        ]
-                    ),
                 ))
         return candidates
 
