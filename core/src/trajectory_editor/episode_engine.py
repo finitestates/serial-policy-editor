@@ -37,13 +37,7 @@ from .episode_hash import (
     validate_token_ids,
 )
 from .core.policy_calculations import PolicyCalculations
-from .core.sampling import (
-    gaussian_ranking_scores,
-    perturbation_ranking_scores,
-    PERTURB_MAX_KERNELS,
-    gumbel_ranking_scores,
-    gumbel_winner,
-)
+from .core.sampling import argmax_winner, unified_ranking_scores
 
 
 class InstructionRejected(EditorError):
@@ -641,49 +635,31 @@ class EpisodeEngine:
         )
         distribution = policy_calculations.distribution
         sampling_boundary = self.boundary
-        gumbel_scores: np.ndarray | None = None
-        if self.sampling.draw_kernel == "gumbel-max":
-            candidate_model_ranks = (
-                policy_calculations.raw_ranks_for(distribution.ids)
-                if (
-                    self.sampling.gumbel_noise_address == "model-rank"
-                    and self.sampling.gumbel_noise_scale > 0.0
-                )
-                else None
+        candidate_model_ranks = (
+            policy_calculations.raw_ranks_for(distribution.ids)
+            if (
+                self.sampling.draw_kernel == "gumbel-max"
+                and self.sampling.gumbel_noise_address == "model-rank"
+                and self.sampling.gumbel_noise_scale > 0.0
             )
-            ranking = gumbel_ranking_scores(
-                distribution,
-                seed=self.sampling.seed,
-                stream_fingerprint=self.stream_fingerprint,
-                aligned_step=sampling_boundary,
-                noise_address=self.sampling.gumbel_noise_address,
-                candidate_model_ranks=candidate_model_ranks,
-                gumbel_noise_scale=self.sampling.gumbel_noise_scale,
-                selective_noise_k=self.sampling.selective_noise_k,
-            )
-            ranking.setflags(write=False)
-            gumbel_scores = ranking
-            proposal = gumbel_winner(distribution, ranking)
-        elif self.sampling.draw_kernel == "gaussian-max":
-            ranking = gaussian_ranking_scores(
-                distribution, seed=self.sampling.seed,
-                stream_fingerprint=self.stream_fingerprint, aligned_step=sampling_boundary,
-                noise_std=self.sampling.gaussian_noise_std,
-                selective_noise_k=self.sampling.selective_noise_k,
-            )
-            proposal = gumbel_winner(distribution, ranking)
-        elif self.sampling.draw_kernel in PERTURB_MAX_KERNELS:
-            ranking = perturbation_ranking_scores(
-                distribution, seed=self.sampling.seed,
-                stream_fingerprint=self.stream_fingerprint, aligned_step=sampling_boundary,
-                kernel=self.sampling.draw_kernel, noise_std=self.sampling.perturb_noise_std,
-                student_t_df=self.sampling.student_t_df,
-                selective_noise_k=self.sampling.selective_noise_k,
-            )
-            proposal = gumbel_winner(distribution, ranking)
-        else:
-            ranking = distribution.scores
-            proposal = gumbel_winner(distribution, ranking)
+            else None
+        )
+        ranking = unified_ranking_scores(
+            distribution,
+            seed=self.sampling.seed,
+            stream_fingerprint=self.stream_fingerprint,
+            aligned_step=sampling_boundary,
+            kernel=self.sampling.draw_kernel,
+            gaussian_noise_std=self.sampling.gaussian_noise_std,
+            perturb_noise_std=self.sampling.perturb_noise_std,
+            student_t_df=self.sampling.student_t_df,
+            gumbel_noise_address=self.sampling.gumbel_noise_address,
+            candidate_model_ranks=candidate_model_ranks,
+            gumbel_noise_scale=self.sampling.gumbel_noise_scale,
+            selective_noise_k=self.sampling.selective_noise_k,
+        )
+        proposal = argmax_winner(distribution, ranking)
+        gumbel_scores = ranking if self.sampling.draw_kernel == "gumbel-max" else None
         ranking.setflags(write=False)
         observation = EpisodeObservation(
             boundary=self.boundary,

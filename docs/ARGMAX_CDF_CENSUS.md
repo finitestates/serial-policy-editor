@@ -22,9 +22,9 @@ still uses deterministic uniform quantiles and transformations into named noise
 families. That is noise generation, not a CDF over token probabilities.
 
 Defaults are plain argmax, temperature 1, top-k none, selective-noise-k none,
-and min-p 0.05. Unlimited top-k therefore does **not** mean unrestricted
-eligibility: min-p still limits the score gap to approximately 2.996. Use
-min-p 0 or `--unfiltered` to remove that cutoff.
+and min-p 0.0. The full vocabulary is eligible by default. An explicit
+positive min-p limits the score gap to `-log(min_p)`; min-p 0 or
+`--unfiltered` removes that cutoff.
 
 Unit Gumbel perturbation over every eligible candidate remains the categorical
 control over that eligible set. Selective Gumbel perturbation leaves some scores

@@ -534,6 +534,64 @@ def perturbation_ranking_scores(
     return ranking
 
 
+def unified_ranking_scores(
+    distribution: EligibleScores,
+    *,
+    seed: int,
+    stream_fingerprint: str,
+    aligned_step: int,
+    kernel: str = "argmax",
+    gaussian_noise_std: float = 1.0,
+    perturb_noise_std: float = 1.0,
+    student_t_df: float = 3.0,
+    gumbel_noise_address: str = "token-id",
+    candidate_model_ranks: np.ndarray | None = None,
+    gumbel_noise_scale: float = 1.0,
+    selective_noise_k: int | None = None,
+) -> np.ndarray:
+    """Return eligible scores with the selected replay-stable noise applied."""
+
+    if kernel not in DRAW_KERNELS:
+        raise EditorError("unsupported draw kernel")
+    if kernel == "gumbel-max":
+        scores = gumbel_ranking_scores(
+            distribution,
+            seed=seed,
+            stream_fingerprint=stream_fingerprint,
+            aligned_step=aligned_step,
+            selective_noise_k=selective_noise_k,
+            noise_address=gumbel_noise_address,
+            candidate_model_ranks=candidate_model_ranks,
+            gumbel_noise_scale=gumbel_noise_scale,
+        )
+        return scores
+    if kernel == "gaussian-max":
+        scores = gaussian_ranking_scores(
+            distribution,
+            seed=seed,
+            stream_fingerprint=stream_fingerprint,
+            aligned_step=aligned_step,
+            selective_noise_k=selective_noise_k,
+            noise_std=gaussian_noise_std,
+        )
+        return scores
+    if kernel in PERTURB_MAX_KERNELS:
+        scores = perturbation_ranking_scores(
+            distribution,
+            seed=seed,
+            stream_fingerprint=stream_fingerprint,
+            aligned_step=aligned_step,
+            selective_noise_k=selective_noise_k,
+            kernel=kernel,
+            noise_std=perturb_noise_std,
+            student_t_df=student_t_df,
+        )
+        return scores
+    if distribution.scores is None:
+        raise ValueError("argmax requires candidate scores")
+    return distribution.scores
+
+
 def draw_token(
     distribution: EligibleScores,
     *,
@@ -549,47 +607,23 @@ def draw_token(
     gumbel_noise_scale: float = 1.0,
     selective_noise_k: int | None = None,
 ) -> int:
-    """Select the argmax of eligible scores with optional replay-stable noise."""
+    """Select the argmax of the unified ranking scores."""
 
-    if kernel not in DRAW_KERNELS:
-        raise EditorError("unsupported draw kernel")
-    if kernel == "gumbel-max":
-        scores = gumbel_ranking_scores(
-            distribution,
-            seed=seed,
-            stream_fingerprint=stream_fingerprint,
-            aligned_step=aligned_step,
-            selective_noise_k=selective_noise_k,
-            noise_address=gumbel_noise_address,
-            candidate_model_ranks=candidate_model_ranks,
-            gumbel_noise_scale=gumbel_noise_scale,
-        )
-        return gumbel_winner(distribution, scores)
-    if kernel == "gaussian-max":
-        scores = gaussian_ranking_scores(
-            distribution,
-            seed=seed,
-            stream_fingerprint=stream_fingerprint,
-            aligned_step=aligned_step,
-            selective_noise_k=selective_noise_k,
-            noise_std=gaussian_noise_std,
-        )
-        return gaussian_winner(distribution, scores)
-    if kernel in PERTURB_MAX_KERNELS:
-        scores = perturbation_ranking_scores(
-            distribution,
-            seed=seed,
-            stream_fingerprint=stream_fingerprint,
-            aligned_step=aligned_step,
-            selective_noise_k=selective_noise_k,
-            kernel=kernel,
-            noise_std=perturb_noise_std,
-            student_t_df=student_t_df,
-        )
-        return perturbation_winner(distribution, scores)
-    if distribution.scores is None:
-        raise ValueError("argmax requires candidate scores")
-    return perturbation_winner(distribution, distribution.scores)
+    scores = unified_ranking_scores(
+        distribution,
+        seed=seed,
+        stream_fingerprint=stream_fingerprint,
+        aligned_step=aligned_step,
+        kernel=kernel,
+        gaussian_noise_std=gaussian_noise_std,
+        perturb_noise_std=perturb_noise_std,
+        student_t_df=student_t_df,
+        gumbel_noise_address=gumbel_noise_address,
+        candidate_model_ranks=candidate_model_ranks,
+        gumbel_noise_scale=gumbel_noise_scale,
+        selective_noise_k=selective_noise_k,
+    )
+    return argmax_winner(distribution, scores)
 
 
 def gumbel_ranking_scores(
@@ -672,47 +706,17 @@ def gumbel_ranking_scores(
     return ranking
 
 
-def gumbel_winner(
+def argmax_winner(
     distribution: EligibleScores, ranking_scores: np.ndarray
 ) -> int:
-    """Return the maximum Gumbel score, breaking exact ties by token ID."""
+    """Return the maximum ranking score, breaking exact ties by token ID."""
 
     ids = np.asarray(distribution.ids, dtype=np.int64)
     scores = np.asarray(ranking_scores, dtype=np.float64)
     if scores.shape != ids.shape:
-        raise ValueError("Gumbel scores do not match candidate IDs")
+        raise ValueError("ranking scores do not match candidate IDs")
     if not len(ids):
-        raise ValueError("gumbel-max requires at least one candidate")
-    best = np.flatnonzero(scores == np.max(scores))
-    return int(ids[best[np.argmin(ids[best])]])
-
-
-def gaussian_winner(
-    distribution: EligibleScores, ranking_scores: np.ndarray
-) -> int:
-    """Return the maximum Gaussian-perturbed score, breaking ties by token ID."""
-
-    ids = np.asarray(distribution.ids, dtype=np.int64)
-    scores = np.asarray(ranking_scores, dtype=np.float64)
-    if scores.shape != ids.shape:
-        raise ValueError("Gaussian scores do not match candidate IDs")
-    if not len(ids):
-        raise ValueError("gaussian-max requires at least one candidate")
-    best = np.flatnonzero(scores == np.max(scores))
-    return int(ids[best[np.argmin(ids[best])]])
-
-
-def perturbation_winner(
-    distribution: EligibleScores, ranking_scores: np.ndarray
-) -> int:
-    """Return the highest perturbation score, breaking exact ties by token ID."""
-
-    ids = np.asarray(distribution.ids, dtype=np.int64)
-    scores = np.asarray(ranking_scores, dtype=np.float64)
-    if scores.shape != ids.shape:
-        raise ValueError("perturbation scores do not match candidate IDs")
-    if not len(ids):
-        raise ValueError("perturb-and-argmax requires at least one candidate")
+        raise ValueError("argmax requires at least one candidate")
     best = np.flatnonzero(scores == np.max(scores))
     return int(ids[best[np.argmin(ids[best])]])
 
@@ -902,17 +906,16 @@ __all__ = [
     "_top_ids",
     "_validated_logits",
     "apply_candidate_filter",
+    "argmax_winner",
+    "unified_ranking_scores",
     "draw_token",
     "gaussian_ranking_scores",
-    "gaussian_winner",
     "find_seed_for_token",
     "gumbel_ranking_scores",
     "gumbel_ranked_ids",
-    "gumbel_winner",
     "position_uniform_model_rank",
     "position_uniform_token",
     "perturbation_ranking_scores",
-    "perturbation_winner",
     "raw_rank",
     "top_raw_ids",
 ]
