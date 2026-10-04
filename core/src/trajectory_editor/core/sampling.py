@@ -1,7 +1,7 @@
 """Dependency-light sampling kernels used by the episode editor.
 
 This module contains the numeric sampling kernels: candidate filtering, rank
-calculations, stable quantiles derived from draw coordinates, and the final token draw.
+calculations, stable quantiles derived from draw coordinates, and final argmax selection. Noise quantiles are not token CDF draws.
 ``policy_calculations.py`` combines these kernels with the active policy adjustments.
 """
 
@@ -41,32 +41,31 @@ class SamplingFilterConfig(Protocol):
     min_p: float
 
 
-@dataclass(frozen=True, init=False)
-class SparseDistribution:
-    """Eligible scores with lazy softmax diagnostics, never a draw CDF."""
+@dataclass(frozen=True)
+class EligibleScores:
+    """Eligible IDs and required pre-noise scores; softmax is diagnostic only."""
 
     ids: np.ndarray
-    scores: np.ndarray | None
-    _probabilities: np.ndarray | None = field(repr=False, compare=False)
-
-    def __init__(self, ids, probabilities=None, scores=None):
-        object.__setattr__(self, "ids", ids)
-        object.__setattr__(self, "scores", scores)
-        object.__setattr__(self, "_probabilities", probabilities)
+    scores: np.ndarray
 
     @cached_property
-    def probabilities(self) -> np.ndarray:
-        values = self._probabilities
-        if values is None:
-            if self.scores is None:
-                raise ValueError("probability diagnostics require candidate scores")
-            values = _softmax(self.scores)
+    def softmax(self) -> np.ndarray:
+        values = _softmax(self.scores)
         values.setflags(write=False)
         return values
 
-    def probability(self, token_id: int) -> float:
-        matches = np.flatnonzero(self.ids == int(token_id))
-        return float(self.probabilities[matches[0]]) if len(matches) else 0.0
+    @cached_property
+    def eligible_ids(self) -> frozenset[int]:
+        return frozenset(int(token_id) for token_id in self.ids)
+
+    def is_eligible(self, token_id: int) -> bool:
+        return int(token_id) in self.eligible_ids
+
+    def softmax_at(self, token_id: int) -> float:
+        if not self.is_eligible(token_id):
+            return 0.0
+        index = int(np.flatnonzero(self.ids == int(token_id))[0])
+        return float(self.softmax[index])
 
 
 @dataclass(frozen=True)
@@ -229,7 +228,7 @@ def position_uniform_model_rank(
     return (value + 0.5) / float(1 << 64)
 
 
-def _noise_indices(distribution: SparseDistribution, count: int | None) -> np.ndarray:
+def _noise_indices(distribution: EligibleScores, count: int | None) -> np.ndarray:
     """Select top eligible pre-noise scores, with token-ID tie breaking."""
     if count is not None and (type(count) is not int or count < 1):
         raise EditorError("selective_noise_k must be a positive integer or null")
@@ -244,15 +243,14 @@ def _noise_indices(distribution: SparseDistribution, count: int | None) -> np.nd
     return np.lexsort((ids, -scores))[:count]
 
 
-def _noise_subset(distribution: SparseDistribution, indices: np.ndarray) -> SparseDistribution:
-    return SparseDistribution(
-        distribution.ids[indices], None,
-        distribution.scores[indices],
+def _noise_subset(distribution: EligibleScores, indices: np.ndarray) -> EligibleScores:
+    return EligibleScores(
+        distribution.ids[indices], distribution.scores[indices],
     )
 
 
 def gaussian_ranking_scores(
-    distribution: SparseDistribution,
+    distribution: EligibleScores,
     *,
     seed: int,
     stream_fingerprint: str,
@@ -448,7 +446,7 @@ def _validated_student_t_df(value: float) -> float:
 
 
 def perturbation_ranking_scores(
-    distribution: SparseDistribution,
+    distribution: EligibleScores,
     *,
     seed: int,
     stream_fingerprint: str,
@@ -537,7 +535,7 @@ def perturbation_ranking_scores(
 
 
 def draw_token(
-    distribution: SparseDistribution,
+    distribution: EligibleScores,
     *,
     seed: int,
     stream_fingerprint: str,
@@ -595,7 +593,7 @@ def draw_token(
 
 
 def gumbel_ranking_scores(
-    distribution: SparseDistribution,
+    distribution: EligibleScores,
     *,
     seed: int,
     stream_fingerprint: str,
@@ -675,7 +673,7 @@ def gumbel_ranking_scores(
 
 
 def gumbel_winner(
-    distribution: SparseDistribution, ranking_scores: np.ndarray
+    distribution: EligibleScores, ranking_scores: np.ndarray
 ) -> int:
     """Return the maximum Gumbel score, breaking exact ties by token ID."""
 
@@ -690,7 +688,7 @@ def gumbel_winner(
 
 
 def gaussian_winner(
-    distribution: SparseDistribution, ranking_scores: np.ndarray
+    distribution: EligibleScores, ranking_scores: np.ndarray
 ) -> int:
     """Return the maximum Gaussian-perturbed score, breaking ties by token ID."""
 
@@ -705,7 +703,7 @@ def gaussian_winner(
 
 
 def perturbation_winner(
-    distribution: SparseDistribution, ranking_scores: np.ndarray
+    distribution: EligibleScores, ranking_scores: np.ndarray
 ) -> int:
     """Return the highest perturbation score, breaking exact ties by token ID."""
 
@@ -720,7 +718,7 @@ def perturbation_winner(
 
 
 def gumbel_ranked_ids(
-    distribution: SparseDistribution,
+    distribution: EligibleScores,
     *,
     seed: int,
     stream_fingerprint: str,
@@ -748,7 +746,7 @@ def gumbel_ranked_ids(
 
 
 def find_seed_for_token(
-    distribution: SparseDistribution,
+    distribution: EligibleScores,
     token_id: int,
     *,
     current_seed: int,
@@ -773,7 +771,7 @@ def find_seed_for_token(
 
     if type(token_id) is not int or token_id < 0:
         raise EditorError("draw token id must be a nonnegative integer")
-    if not np.any(distribution.ids == token_id):
+    if not distribution.is_eligible(token_id):
         raise EditorError(
             f"token {token_id} is outside the active truncated candidate set"
         )
@@ -897,7 +895,7 @@ __all__ = [
     "MIN_SEED",
     "PERTURB_MAX_KERNELS",
     "RNG_SCHEME",
-    "SparseDistribution",
+    "EligibleScores",
     "StandardCandidateFilter",
     "_rank",
     "_softmax",

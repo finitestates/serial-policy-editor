@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -39,7 +38,6 @@ class BeamNode:
     outcome: ActionOutcome
     token_id: int
     model_rank: int
-    step_log_probability: float
     is_eog: bool = False
 
 
@@ -49,10 +47,6 @@ class BeamPath:
     engine: EpisodeEngine
     node: BeamNode | None
     score: float
-    model_log_probability: float
-    search_log_probability: float
-    model_rank: int | None
-    step_log_probability: float | None
     lane_id: int | None
     pre_terminal_engine: EpisodeEngine | None = None
 
@@ -67,9 +61,6 @@ class _Candidate:
     observation: EpisodeObservation
     token_id: int
     model_rank: int
-    log_probability: float
-    model_log_probability: float
-    search_log_probability: float
     score: float
     is_eog: bool
     parent_order: int
@@ -87,7 +78,7 @@ class _Checkpoint:
 
 
 class BeamSearch:
-    """Maintain a temporary deterministic or Gumbel-Top-k frontier."""
+    """Maintain a temporary deterministic frontier ranked by policy log-probability."""
 
     def __init__(
         self,
@@ -235,7 +226,7 @@ class BeamSearch:
                 observation=shared_observation,
             )
             self.active = [BeamPath(
-                "root", root_engine, None, 0.0, 0.0, 0.0, None, None,
+                "root", root_engine, None, 0.0,
                 0 if self._primary_batch else None,
             )]
             self.expand()
@@ -377,29 +368,13 @@ class BeamSearch:
         log_probability: float,
         is_eog: bool,
         parent_order: int,
-        *,
-        search_step_log_probability: float | None = None,
-        score: float | None = None,
     ) -> _Candidate:
-        model_rank = observation.policy_calculations.raw_rank(token_id)
-        model_log_probability = parent.model_log_probability + log_probability
-        search_step_log_probability = (
-            log_probability
-            if search_step_log_probability is None
-            else search_step_log_probability
-        )
-        cumulative_search_log_probability = (
-            parent.search_log_probability + search_step_log_probability
-        )
         return _Candidate(
             parent=parent,
             observation=observation,
             token_id=token_id,
-            model_rank=model_rank,
-            log_probability=log_probability,
-            model_log_probability=model_log_probability,
-            search_log_probability=cumulative_search_log_probability,
-            score=(parent.score + log_probability if score is None else score),
+            model_rank=observation.policy_calculations.raw_rank(token_id),
+            score=parent.score + log_probability,
             is_eog=is_eog,
             parent_order=parent_order,
         )
@@ -540,9 +515,7 @@ class BeamSearch:
             node = self._new_node(candidate, action, outcome)
             self._new_finished.append(BeamPath(
                 self._new_label(), engine, node, candidate.score,
-                candidate.model_log_probability,
-                candidate.search_log_probability,
-                candidate.model_rank, candidate.log_probability, None,
+                None,
                 pre_terminal_engine,
             ))
 
@@ -593,9 +566,6 @@ class BeamSearch:
             node = self._new_node(candidate, action, outcome)
             next_active.append(BeamPath(
                 self._new_label(), engine, node, candidate.score,
-                candidate.model_log_probability,
-                candidate.search_log_probability,
-                candidate.model_rank, candidate.log_probability,
                 lane_id if self._primary_batch is not None else None,
             ))
 
@@ -622,7 +592,6 @@ class BeamSearch:
             outcome,
             candidate.token_id,
             candidate.model_rank,
-            candidate.log_probability,
             candidate.is_eog,
         )
         return node
@@ -813,10 +782,8 @@ class BeamSearch:
                     "EOG" if node.is_eog else
                     self._safe_text(path.engine.backend.render([node.token_id]))
                 )
-                probability = math.exp(node.step_log_probability)
                 recent.append(
-                    f"“{token}” · model rank {node.model_rank} · "
-                    f"model-p {probability:.2f}"
+                    f"“{token}” · model rank {node.model_rank}"
                 )
             rows.append(BeamViewRow(
                 label=path.label,
@@ -824,9 +791,6 @@ class BeamSearch:
                 score=f"{path.score:.6f}",
                 state="EOS" if path.state == "finished" else "LIVE",
                 recent_steps=tuple(recent),
-                model_rank=path.model_rank,
-                step_log_probability=path.step_log_probability,
-                model_log_probability=path.model_log_probability,
                 protected=(
                     not path.engine.ended
                     and any(
@@ -839,7 +803,7 @@ class BeamSearch:
 
         title = (
             f"BEAM   width {self.width} · depth {depth} · "
-            "score: cumulative model log-p"
+            "score: cumulative policy log-p"
         )
         if self.skip_root_rank_ranges:
             skipped = " ".join(

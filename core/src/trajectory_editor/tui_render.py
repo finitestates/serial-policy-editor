@@ -56,7 +56,7 @@ class ActionPreview:
     candidate_rank: int | None = None
     token_id: int | None = None
     raw_probability: float | None = None
-    decoder_probability: float | None = None
+    eligible_softmax: float | None = None
     policy_rank: int | None = None
     policy_probability: float | None = None
     is_eog: bool = False
@@ -74,7 +74,7 @@ def _candidate_preview(candidate: Candidate, *, label: str) -> ActionPreview:
         candidate_rank=candidate.rank,
         token_id=candidate.token_id,
         raw_probability=candidate.raw_probability,
-        decoder_probability=candidate.decoder_probability,
+        eligible_softmax=candidate.eligible_softmax,
         policy_rank=candidate.policy_rank,
         policy_probability=candidate.policy_probability,
         is_eog=candidate.is_eog,
@@ -118,7 +118,7 @@ def action_preview(
     command = interpretation.command
     assert command is not None
     by_rank = {candidate.rank: candidate for candidate in candidates}
-    sampled_candidate = next(
+    argmax_candidate = next(
         (candidate for candidate in candidates
          if candidate.token_id == choice.proposal_token_id),
         None,
@@ -169,16 +169,16 @@ def action_preview(
             rank = (choice.proposal_raw_rank if action.kind.value == "accept"
                     else int(action.selected_rank))
             if rank == choice.proposal_raw_rank:
-                if sampled_candidate is not None:
-                    preview = _candidate_preview(sampled_candidate, label="sampled proposal")
+                if argmax_candidate is not None:
+                    preview = _candidate_preview(argmax_candidate, label="Argmax")
                     return replace(preview, command=command)
                 return ActionPreview(
-                    kind="candidate", label="sampled proposal", detail="",
+                    kind="candidate", label="Argmax", detail="",
                     appended_text=choice.proposal_text,
                     candidate_rank=choice.proposal_raw_rank,
                     token_id=choice.proposal_token_id,
                     raw_probability=choice.proposal_raw_probability,
-                    decoder_probability=choice.proposal_decoder_probability,
+                    eligible_softmax=choice.proposal_eligible_softmax,
                     policy_rank=choice.proposal_policy_rank,
                     policy_probability=choice.proposal_policy_probability,
                     is_eog=choice.proposal_is_eog,
@@ -348,7 +348,7 @@ def _safe_rendered_text(value: str) -> str:
 
 
 def _probability(value: float | None) -> str:
-    if value is None or value <= 0.0:
+    if value is None:
         return "--"
     return f"{value:.2%}"
 
@@ -490,15 +490,15 @@ def _preview_fragment_parts(
                 ("class:muted", f" · token {preview.token_id}"),
                 (
                     "class:muted",
-                    f" · raw {_probability(preview.raw_probability)}"
+                    f" · model-softmax {_probability(preview.raw_probability)}"
                     if preview.raw_probability is not None else "",
                 ),
                 (
                     "class:muted",
                     (
-                        " · decoder "
-                        f"{_probability(preview.decoder_probability)}"
-                        if preview.decoder_probability is not None else ""
+                        " · eligible-softmax "
+                        f"{_probability(preview.eligible_softmax)}"
+                        if preview.eligible_softmax is not None else ""
                     ) + terminal,
                 ),
                 (
@@ -533,8 +533,6 @@ def _choice_render_fragment_parts(
     show_policy_rank: bool = False,
     sort_by_policy: bool = False,
     sort_by_gumbel: bool = False,
-    logit_view: str = "none",
-    show_model_probabilities: bool = False,
     overlays: frozenset[str] = frozenset(),
     display_candidates: tuple[Candidate, ...] | None = None,
     search_lens_active: bool = False,
@@ -582,8 +580,6 @@ def _choice_render_fragment_parts(
 
     columns = CandidateColumns(
         policy=show_policy_rank,
-        logit_view=logit_view,
-        show_model_probabilities=show_model_probabilities,
         overlays=overlays,
         raw_k1_logit=choice.raw_k1_logit,
     )
@@ -763,8 +759,6 @@ def _choice_render_data(
     show_policy_rank: bool = False,
     sort_by_policy: bool = False,
     sort_by_gumbel: bool = False,
-    logit_view: str = "none",
-    show_model_probabilities: bool = False,
     overlays: frozenset[str] = frozenset(),
     display_candidates: tuple[Candidate, ...] | None = None,
     search_lens_active: bool = False,
@@ -786,8 +780,6 @@ def _choice_render_data(
         show_policy_rank,
         sort_by_policy,
         sort_by_gumbel,
-        logit_view,
-        show_model_probabilities,
         overlays,
         display_candidates,
         search_lens_active,
@@ -810,8 +802,6 @@ def _render_choice(
     show_policy_rank: bool = False,
     sort_by_policy: bool = False,
     sort_by_gumbel: bool = False,
-    logit_view: str = "none",
-    show_model_probabilities: bool = False,
     overlays: frozenset[str] = frozenset(),
     display_candidates: tuple[Candidate, ...] | None = None,
     search_lens_active: bool = False,
@@ -832,8 +822,6 @@ def _render_choice(
         show_policy_rank,
         sort_by_policy,
         sort_by_gumbel,
-        logit_view,
-        show_model_probabilities,
         overlays,
         display_candidates,
         search_lens_active,
@@ -877,8 +865,6 @@ def candidate_table_plan(
     show_policy_rank: bool = False,
     sort_by_policy: bool = False,
     sort_by_gumbel: bool = False,
-    logit_view: str = "none",
-    show_model_probabilities: bool = False,
     overlays: frozenset[str] = frozenset(),
     display_candidates: tuple[Candidate, ...] | None = None,
     search_lens_active: bool = False,
@@ -904,8 +890,6 @@ def candidate_table_plan(
     )
     columns = CandidateColumns(
         policy=show_policy_rank,
-        logit_view=logit_view,
-        show_model_probabilities=show_model_probabilities,
         overlays=overlays,
         raw_k1_logit=choice.raw_k1_logit,
     )

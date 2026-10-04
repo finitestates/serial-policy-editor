@@ -9,7 +9,7 @@ from functools import cached_property
 import numpy as np
 
 from .policy_calculations import PolicyCalculations
-from .sampling import SparseDistribution
+from .sampling import EligibleScores
 
 
 @dataclass(frozen=True)
@@ -29,13 +29,13 @@ class EpisodeObservation:
         return self.policy_calculations.logits
 
     @property
-    def distribution(self) -> SparseDistribution:
+    def distribution(self) -> EligibleScores:
         return self.policy_calculations.distribution
 
     @cached_property
-    def proposal_decoder_probability(self) -> float:
+    def proposal_eligible_softmax(self) -> float:
         """Eligible-score softmax diagnostic; never used to choose a winner."""
-        return self.distribution.probability(self.proposal_token_id)
+        return self.distribution.softmax_at(self.proposal_token_id)
 
     @cached_property
     def noise_by_token(self) -> dict[int, float]:

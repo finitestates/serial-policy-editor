@@ -15,7 +15,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, replace
 from typing import Any
 
-from .candidate_columns import CandidateColumns, CandidateViewPlan, overlays_from_preferences
+from .candidate_columns import CandidateColumns, CandidateViewPlan
 from .chord import ChordRequested
 from .beam import BeamRequested
 from .core.candidates import Candidate
@@ -279,7 +279,8 @@ def _choice_from_observation(
         proposal_raw_probability=(
             observation.proposal_raw_probability if view and view.needs("raw_probability") else None
         ),
-        proposal_decoder_probability=observation.proposal_decoder_probability,
+        proposal_eligible_softmax=(observation.proposal_eligible_softmax
+                                  if view and view.needs("eligible_softmax") else None),
         proposal_is_eog=engine.backend.is_eog(observation.proposal_token_id),
         candidates=candidates,
         vocabulary_size=len(observation.logits),
@@ -302,21 +303,13 @@ class PolicyViewPreferences:
     sort_by_policy: bool = False
     # None follows the Gumbel Top-K default; bool records an explicit v choice.
     sort_by_gumbel: bool | None = None
-    logit_view: str = "none"
-    show_model_probabilities: bool = False
     overlays: frozenset[str] = frozenset()
 
     def active_overlays(self) -> frozenset[str]:
-        return overlays_from_preferences(
-            logit_view=self.logit_view, show_model_probabilities=self.show_model_probabilities,
-            overlays=self.overlays,
-        )
+        return self.overlays
 
     def set_overlays(self, overlays: frozenset[str]) -> None:
         self.overlays = overlays
-        self.logit_view = "none"
-        self.show_model_probabilities = False
-
 
 
 class InteractivePolicy:
@@ -331,8 +324,7 @@ class InteractivePolicy:
         context_characters: int = 0,
         manual_acceptance: bool = False,
         show_policy_rank: bool | None = None,
-        logit_view: str = "none",
-        show_model_probabilities: bool = False,
+        overlays: frozenset[str] = frozenset(),
         view_preferences: PolicyViewPreferences | None = None,
         session: Any | None = None,
         seamless: bool = False,
@@ -356,8 +348,7 @@ class InteractivePolicy:
             view_preferences if view_preferences is not None
             else PolicyViewPreferences(
                 show=show_policy_rank,
-                logit_view=logit_view,
-                show_model_probabilities=show_model_probabilities,
+                overlays=overlays,
             )
         )
         self.session = session
@@ -474,8 +465,6 @@ class InteractivePolicy:
         """Resolve the visible columns once for lookup and rendering."""
         plan = CandidateColumns(
             policy=self._show_policy_diagnostics(engine),
-            logit_view=self.view_preferences.logit_view,
-            show_model_probabilities=self.view_preferences.show_model_probabilities,
             overlays=self.view_preferences.overlays,
         ).plan
         return plan.with_policy_rank() if self.view_preferences.sort_by_policy else plan
@@ -741,6 +730,10 @@ class InteractivePolicy:
                         if view.needs("raw_probability")
                         else None
                     ),
+                    proposal_eligible_softmax=(
+                        observation.proposal_eligible_softmax
+                        if view.needs("eligible_softmax") else None
+                    ),
                     proposal_policy_rank=(
                         observation.proposal_policy_rank if view.needs("policy_rank") else None
                     ),
@@ -828,8 +821,6 @@ class InteractivePolicy:
                 show_policy_rank=policy_columns,
                 sort_by_policy=policy_sort and not search_lens_active,
                 sort_by_gumbel=gumbel_sort and not search_lens_active,
-                logit_view=self.view_preferences.logit_view,
-                show_model_probabilities=self.view_preferences.show_model_probabilities,
                 overlays=self.view_preferences.overlays,
                 default_hold_tokens=self.default_hold_tokens,
                 menu_page_rows=self.menu_size,
@@ -1060,7 +1051,7 @@ class InteractivePolicy:
                             command.draw_raw_rank
                         )[-1]
                     )
-                    if not any(observation.distribution.ids == target_token_id):
+                    if not observation.distribution.is_eligible(target_token_id):
                         raise EditorError(
                             f"raw rank {command.draw_raw_rank} selects token "
                             f"{target_token_id}, outside the active truncated candidate set"

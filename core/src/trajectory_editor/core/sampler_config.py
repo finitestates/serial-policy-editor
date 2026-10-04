@@ -37,7 +37,7 @@ class SamplerConfig:
     temperature: float = 1.0
     top_k: int | None = None
     selective_noise_k: int | None = None
-    min_p: float = 0.05
+    min_p: float = 0.0
     draw_kernel: str = "argmax"
     gaussian_noise_std: float = 1.0
     perturb_noise_std: float = 1.0

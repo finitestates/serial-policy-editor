@@ -74,7 +74,7 @@ def _overlay(ui: Harness, name: str) -> None:
         ui.press("ctrl+k")
         ui.type("bia")
     elif name == "output":
-        ui.app.write_output("loaded model in 2.3s\nsampler: temperature=0.7 top_k=20\n")
+        ui.app.write_output("loaded model in 2.3s\nselector: argmax temperature=1 eligible-k=none min-p=0\n")
         ui.press("ctrl+l")
 
 

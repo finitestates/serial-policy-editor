@@ -831,20 +831,6 @@ class EpisodeEngine:
             if "policy_probability" in metrics else [None] * len(ordered)
         )
         logits = [float(policy_calculations.logits[token_id]) for token_id in ordered]
-        if "neighbor_margin" in metrics and ordered:
-            # Uniform consecutive margin over the ordered menu list:
-            # logit[i] - logit[i+1] (advantage over next-worse). Last row: None.
-            margins: list[float | None] = [
-                logits[i] - logits[i + 1] for i in range(len(logits) - 1)
-            ] + [None]
-        else:
-            margins = [None] * len(ordered)
-        if "logit_z" in metrics and ordered:
-            # Full-vocab logit z-score: (logit - mean) / std (population ddof=0).
-            # O(V) mean/std once; does not wake soft-max / logsumexp.
-            zs = policy_calculations.logit_z_scores(ordered)
-        else:
-            zs = [None] * len(ordered)
         return tuple(
             Candidate(
                 rank=policy_calculations.raw_rank(int(token_id)),
@@ -853,9 +839,9 @@ class EpisodeEngine:
                 raw_probability=(
                     None if probability is None else float(probability)
                 ),
-                decoder_probability=(
-                    observation.distribution.probability(int(token_id))
-                    if "decoder_probability" in metrics else None
+                eligible_softmax=(
+                    observation.distribution.softmax_at(int(token_id))
+                    if "eligible_softmax" in metrics else None
                 ),
                 is_eog=self.backend.is_eog(int(token_id)),
                 bias=policy_calculations.active_biases.get(int(token_id), 0.0),
@@ -869,15 +855,14 @@ class EpisodeEngine:
                 raw_logit=(logit if metrics.intersection({"raw_logit", "top_raw_logit"}) else None),
                 noise=(observation.noise_by_token.get(int(token_id))
                        if "noise" in metrics else None),
-                neighbor_margin=margin,
-                logit_z=z_val,
+                eligible=observation.distribution.is_eligible(int(token_id)),
                 gumbel_rank=(
                     observation.gumbel_ranks.get(int(token_id))
                     if "gumbel_rank" in metrics else None
                 ),
             )
-            for token_id, probability, policy_probability, logit, margin, z_val in zip(
-                ordered, probabilities, policy_probabilities, logits, margins, zs
+            for token_id, probability, policy_probability, logit in zip(
+                ordered, probabilities, policy_probabilities, logits
             )
         )
 
@@ -951,7 +936,7 @@ class EpisodeEngine:
             raw_model_nll=None,
             raw_rank=None,
             policy_rank=None,
-            decoder_probability=observation.distribution.probability(token_id),
+            eligible_softmax=None,
             proposal_agreement=token_id == observation.proposal_token_id,
             is_eog=is_eog,
             realized_visible=not is_eog,
@@ -1041,7 +1026,7 @@ class EpisodeEngine:
                     raw_model_nll=None,
                     raw_rank=None,
                     policy_rank=None,
-                    decoder_probability=0.0,
+                    eligible_softmax=None,
                     proposal_agreement=False,
                     is_eog=is_eog,
                     realized_visible=not is_eog,
@@ -1071,8 +1056,7 @@ class EpisodeEngine:
             "text": self.backend.token_text(token_id),
             "model_rank": int(policy_calculations.raw_rank(token_id)),
             "policy_rank": int(policy_calculations.policy_rank(token_id)),
-            "sampler_eligible": bool(np.any(observation.distribution.ids == int(token_id))),
-            "sampler_probability": float(observation.distribution.probability(token_id)),
+            "sampler_eligible": observation.distribution.is_eligible(token_id),
             "required_policy_shift": float(required_shift),
             "applied_policy_shift": float(applied_shift),
             "within_bound": bool(required_shift <= 0.0),

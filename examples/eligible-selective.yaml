@@ -1,0 +1,5 @@
+draw-kernel: gumbel-max
+temperature: 1.0
+top-k: 20
+min-p: 0.0
+selective-noise-k: 5

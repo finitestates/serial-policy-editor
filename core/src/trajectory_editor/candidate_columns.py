@@ -20,8 +20,6 @@ class OverlaySpec:
     name: str
     labels: tuple[str, ...]
     label_metrics: tuple[frozenset[str], ...] = ()
-    # Declared stubs may set wired=False until rendering exists.
-    wired: bool = True
 
     @property
     def metrics(self) -> frozenset[str]:
@@ -35,10 +33,10 @@ OVERLAYS: Mapping[str, OverlaySpec] = {
     ),
     "probability": OverlaySpec(
         name="probability",
-        labels=("raw-p", "pol-p", "decode-p"),
+        labels=("model-softmax", "policy-softmax", "eligible-softmax"),
         label_metrics=(frozenset({"raw_probability"}),
                        frozenset({"policy_probability"}),
-                       frozenset({"decoder_probability"})),
+                       frozenset({"eligible_softmax"})),
     ),
     "logit": OverlaySpec(
         name="logit",
@@ -66,36 +64,11 @@ _COLUMN_WIDTHS: Mapping[str, int] = {
     "model-gap": 10,
     "Δrank": 6,
     "pol-rank": 8,
-    "raw-p": 8,
-    "pol-p": 8,
-    "decode-p": 8,
+    "model-softmax": 14,
+    "policy-softmax": 14,
+    "eligible-softmax": 16,
     "token-id": 8,
 }
-
-# Keep the internal column key stable while naming its user-facing meaning.
-_COLUMN_DISPLAY_LABELS: Mapping[str, str] = {"raw-p": "model-p"}
-
-
-def overlays_from_preferences(
-    *,
-    logit_view: str = "none",
-    show_model_probabilities: bool = False,
-    overlays: frozenset[str] = frozenset(),
-) -> frozenset[str]:
-    """Derive the enabled overlay set from session presentation prefs.
-
-    Shortcut and explicit overlays are additive.
-    """
-    enabled = {OVERLAY_ALIASES.get(name, name) for name in overlays}
-    enabled.intersection_update(OVERLAYS)
-    if logit_view in {"raw", "both"}:
-        enabled.add("logit")
-    if logit_view in {"gap", "both"}:
-        enabled.add("diff")
-    if show_model_probabilities:
-        enabled.add("probability")
-    return frozenset(enabled)
-
 
 @dataclass(frozen=True)
 class CandidateViewPlan:
@@ -114,17 +87,14 @@ class CandidateViewPlan:
 @dataclass(frozen=True)
 class CandidateColumns:
     policy: bool = False
-    logit_view: str = "none"
     raw_k1_logit: float | None = None
-    show_model_probabilities: bool = False
     overlays: frozenset[str] | None = None
 
     @property
     def enabled_overlays(self) -> frozenset[str]:
-        return overlays_from_preferences(
-            logit_view=self.logit_view,
-            show_model_probabilities=self.show_model_probabilities,
-            overlays=self.overlays or frozenset(),
+        return frozenset(
+            OVERLAY_ALIASES.get(name, name) for name in (self.overlays or frozenset())
+            if OVERLAY_ALIASES.get(name, name) in OVERLAYS
         )
 
     @property
@@ -133,7 +103,7 @@ class CandidateColumns:
         metrics: set[str] = set()
         for overlay in self.enabled_overlays:
             spec = OVERLAYS.get(overlay)
-            if spec is None or not spec.wired:
+            if spec is None:
                 continue
             for label, needs in zip(spec.labels, spec.label_metrics):
                 if label in labels:
@@ -147,7 +117,7 @@ class CandidateColumns:
         enabled = self.enabled_overlays
         requested: list[str] = []
 
-        if "logit" in enabled and OVERLAYS["logit"].wired:
+        if "logit" in enabled:
             requested.append("model-logit")
         if "diff" in enabled:
             requested.append("model-gap")
@@ -159,10 +129,10 @@ class CandidateColumns:
             requested.extend(("Δrank", "pol-rank"))
 
         if "probability" in enabled:
-            requested.append("raw-p")
+            requested.append("model-softmax")
             if self.policy:
-                requested.append("pol-p")
-            requested.append("decode-p")
+                requested.append("policy-softmax")
+            requested.append("eligible-softmax")
 
         # Column visibility follows user preferences, never terminal geometry.
         columns = [(label, _COLUMN_WIDTHS[label]) for label in requested]
@@ -172,7 +142,7 @@ class CandidateColumns:
     @property
     def heading(self) -> str:
         return "".join(
-            f"  {_COLUMN_DISPLAY_LABELS.get(label, label):>{width}}"
+            f"  {label:>{width}}"
             for label, width in self.columns
         )
 
@@ -207,13 +177,13 @@ class CandidateColumns:
             if label == "token-id":
                 return str(candidate.token_id)
             probability = {
-                "raw-p": candidate.model_probability,
-                "pol-p": candidate.policy_probability,
-                "decode-p": candidate.decoder_probability,
+                "model-softmax": candidate.model_probability,
+                "policy-softmax": candidate.policy_probability,
+                "eligible-softmax": candidate.eligible_softmax,
             }[label]
             return (
                 f"{probability:.2%}"
-                if probability is not None and probability > 0
+                if probability is not None
                 else "--"
             )
 

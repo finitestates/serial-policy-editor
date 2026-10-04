@@ -264,8 +264,6 @@ class ChoiceView(RequestView):
             show_policy_rank=state.show_policy_rank,
             sort_by_policy=state.sort_by_policy,
             sort_by_gumbel=state.sort_by_gumbel,
-            logit_view=state.logit_view,
-            show_model_probabilities=state.show_model_probabilities,
             overlays=state.overlays,
             display_candidates=state.display_candidates,
             search_lens_active=state.search_lens_active,
@@ -1014,15 +1012,7 @@ class BeamView(RequestView):
         if row is None:
             rendered.append("(no retained branch)")
             return rendered
-        rendered.append(f"STATE: {row.state} · SCORE: {row.score.replace('-', '−')}\n")
-        model_rank = "—" if row.model_rank is None else str(row.model_rank)
-        step_logp = (
-            "—" if row.step_log_probability is None
-            else f"{row.step_log_probability:.3f}".replace("-", "−")
-        )
-        rendered.append(f"Model rank: {model_rank} · Step log-p: {step_logp}\n")
-        if row.model_log_probability is not None:
-            rendered.append(f"Model log-p: {row.model_log_probability:.3f}".replace("-", "−") + "\n")
+        rendered.append(f"STATE: {row.state} · POLICY LOG-P: {row.score.replace('-', '−')}\n")
         if row.family_metadata:
             rendered.append(row.family_metadata + "\n", style=ctx.styles("beam-family"))
         rendered.append(row.continuation + "\n\n")

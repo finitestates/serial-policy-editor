@@ -11,12 +11,15 @@ from .episode_ui import InteractivePolicy, PolicyViewPreferences
 def _preferences(args: argparse.Namespace) -> PolicyViewPreferences:
     preferences = getattr(args, "_policy_view_preferences", None)
     if preferences is None:
+        overlays: set[str] = set()
+        if args.logit_view in {"raw", "both"}:
+            overlays.add("logit")
+        if args.logit_view in {"gap", "both"}:
+            overlays.add("diff")
+        if getattr(args, "show_model_probabilities", False):
+            overlays.add("probability")
         preferences = PolicyViewPreferences(
-            show=args.show_policy_rank,
-            logit_view=args.logit_view,
-            show_model_probabilities=bool(
-                getattr(args, "show_model_probabilities", False)
-            ),
+            show=args.show_policy_rank, overlays=frozenset(overlays),
         )
         args._policy_view_preferences = preferences
     return preferences

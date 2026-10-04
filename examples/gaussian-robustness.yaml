@@ -1,0 +1,5 @@
+draw-kernel: gaussian-max
+temperature: 1.0
+top-k: none
+min-p: 0.0
+selective-noise-k: 5

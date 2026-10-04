@@ -121,6 +121,8 @@ def _recompute_missing_metrics(
             fields = required_by_boundary[observation.boundary]
             if "raw_model_nll" in fields and token.get("raw_model_nll") is None:
                 token["raw_model_nll"] = policy_calculations.raw_nll(token_id)
+            if "eligible_softmax" in fields and token.get("eligible_softmax") is None:
+                token["eligible_softmax"] = observation.distribution.softmax_at(token_id)
             if "raw_rank" in fields and token.get("raw_rank") is None:
                 token["raw_rank"] = policy_calculations.raw_rank(token_id)
             if "policy_rank" in fields and token.get("policy_rank") is None:
@@ -186,11 +188,11 @@ def _token_evidence_footnote(
         )
     if with_model_probs:
         raw_probability = math.exp(-float(token["raw_model_nll"]))
-        decoder_probability = float(token["decoder_probability"])
+        eligible_softmax = float(token["eligible_softmax"])
         parts.append(
             "MODEL["
-            f"raw-p={_probability(raw_probability)}, "
-            f"decoder-p={_probability(decoder_probability)}"
+            f"model-softmax={_probability(raw_probability)}, "
+            f"eligible-softmax={_probability(eligible_softmax)}"
             "]"
         )
     return " · ".join(parts)
@@ -440,6 +442,8 @@ def project_episode(
         )
         if (with_loss and not full_evidence) or (teacher and (full_evidence or with_model_probs)):
             fields.add("raw_model_nll")
+        if teacher and with_model_probs:
+            fields.add("eligible_softmax")
         if (with_rank and not full_evidence) or (teacher and full_evidence):
             fields.add("raw_rank")
         if (with_policy_rank and not full_evidence) or (teacher and full_evidence):

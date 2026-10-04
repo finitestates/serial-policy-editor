@@ -118,10 +118,10 @@ HELP_TEXT = """Commands:
   READY means command syntax is understood; episode checks still happen on Enter.
   Tab / Shift-Tab   move down/up through the current table's visual order;
                     a search lens cycles only within its neighborhood
-                    the first Tab selects the sampled proposal's backend rank
+                    the first Tab selects the Argmax's backend rank
                     Enter remains the only commit action
                     --manual-acceptance leaves the command blank instead
-  accept             commit the sampled proposal
+  accept             commit the Argmax
   groups               list groups; groups NAME shows members and token routes
   b NAME -> {terms}    create or add members to a named group
   b NAME remove {terms} remove members from a group
@@ -149,7 +149,7 @@ HELP_TEXT = """Commands:
   s perturb_noise_std=1 scales those post-filter perturbations
   s student_t_df=1 sets Student-t degrees of freedom (any finite value > 0)
   s {JSON}        replace all sampler settings from a complete SamplerConfig record
-  reroll [SEED]   change the draw seed as a replayable action
+  reroll [SEED]   change the noise seed as a replayable action; argmax is unchanged
   draw RAW_RANK   find a seed that draws the token at this raw rank
   1..N              commit a candidate; the proposal rank records acceptance
   chord RANK RANK... preview temporary continuations; choose a letter or starting rank
@@ -190,7 +190,7 @@ HELP_TEXT = """Commands:
   l                  toggle raw model logits
   L                  toggle logit diff from the raw argmax
   ~                  toggle additive noise (zero for untouched eligible scores)
-  %                  toggle probability diagnostics
+  %                  toggle optional softmax diagnostics
   C                  reset to rank | token-id | text
   columns            show active overlays and available direct shortcuts
   columns NAMES      set exactly those overlays (logit diff noise probability)
@@ -205,7 +205,8 @@ HELP_TEXT = """Commands:
                      Δrank = backend rank - policy rank; positive means promoted.
                      model-gap = model logit minus the raw rank-1 model logit;
                      raw rank 1 is therefore always +0.000.
-                     pol-p is before temperature/filtering; decode-p is final.
+                     model-softmax uses raw logits; policy-softmax uses adjusted logits;
+                     eligible-softmax uses eligible pre-noise scores, not winner probabilities.
                      numeric selections accept any backend rank in the vocabulary
   [ / ]              review the previous/next durable token boundary
                       bare f forks the reviewed boundary; Esc returns live
@@ -1012,7 +1013,7 @@ def interpret_command(
 ) -> CommandInterpretation:
     """Classify a draft and carry the exact command to the submit path.
 
-    Blank input selects the sampled proposal only in an active choice. Other
+    Blank input selects the Argmax only in an active choice. Other
     prefixes are incomplete only when more input can make them valid.
     """
     if not raw.strip() and implicit_accept:

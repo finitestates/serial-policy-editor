@@ -300,7 +300,7 @@ def build_parser(
     parser.add_argument(
         "--manual-acceptance",
         action="store_true",
-        help="leave each teacher command blank instead of prefilling the sampled proposal",
+        help="leave each teacher command blank instead of prefilling the Argmax",
     )
     policy_view = parser.add_mutually_exclusive_group()
     policy_view.add_argument(
@@ -317,7 +317,7 @@ def build_parser(
         default="none",
         help=(
             "show model logits, model gap from raw rank 1, or both "
-            "(default: none; l cycles, L toggles both)"
+            "(default: none; l toggles raw, L toggles diff)"
         ),
     )
     parser.add_argument(

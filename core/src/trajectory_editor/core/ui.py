@@ -112,7 +112,7 @@ class ChoiceSet:
     proposal_token_id: int
     proposal_text: str
     proposal_raw_probability: float | None
-    proposal_decoder_probability: float
+    proposal_eligible_softmax: float | None
     proposal_is_eog: bool
     candidates: tuple[Candidate, ...]
     vocabulary_size: int | None = None

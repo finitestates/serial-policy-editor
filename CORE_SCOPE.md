@@ -3,11 +3,18 @@
 This project is an interactive episode runtime: a menu-driven environment
 for selecting tokens sequentially. This environment also has the capacity for rewinding, forking, speculative decoding, as well as replaying episodes.
 
-The engine's complete semantic state is the token ledger, sampler configuration, and sampler stream identity. At each decision, the observing engine's visible-token boundary is the sampling boundary: boundary 0 uses step 0, boundary 1 uses step 1, and so on. The seed, root-prefix fingerprint, and aligned step together form the draw coordinates. Gumbel-Max adds the candidate token ID as another coordinate.
+The engine's semantic state includes the token ledger, selection configuration,
+model identity, and replay stream identity. Selection starts with model/guidance
+logits, applies policy adjustments and temperature, establishes eligibility,
+adds optional noise, and chooses the highest score (ties use lowest token ID).
+There is no token CDF. The default is plain argmax over the full vocabulary.
 
-The deterministic sampler state makes forking, chording, rewinding, and replaying comparatively easy to do. Assuming you know the step, seed number, and prefix, you can calculate the draw coordinates at a given step exactly.
-
-Even though the sampler state is deterministic, it doesn't feel that way unless you do a lot of episodes with the exact same prefix, model, and teacher decisions. The editor gives the user the freedom to intervene basically whenever, so no trajectory is "set in stone," unless the user wants it to be.
+Noise coordinates retain the seed, root-prefix fingerprint, visible-token
+boundary, and token-ID or model-rank address. The scheme literal remains
+`blake2b64-token-prefix-quantile-v2`; changing it would change replay. Replaying
+also requires matching model evaluation, logits and settings. A seed alone is
+not sufficient. Editorial intervention, rewind and fork retain their existing
+history and stream-identity semantics.
 
 **The core test of program correctness is that replay must always terminate at a live edge:**
 - *What this means*: a sequence of teacher actions represented as a replay tape can be executed automatically by the program itself without program failure, leaving the running program at an operational runtime menu (called `the EDGE menu`) within an active episode.
@@ -30,13 +37,12 @@ currently supports:
   fork, and fork maps;
 - llama.cpp and Transformers inference backends, with backend dependencies
   installed as optional extras;
-- sampler filters and deterministic or perturb-and-argmax draws, including
+- logit-gap/top-k eligibility and deterministic or perturb-and-argmax selection, including
   classifier-free guidance and Gumbel-Max;
 - grouped phrase biases and direct token biases, with bounded surface variants
   and exact-prefix matching for multi-token terms;
 - repeat, presence, and frequency penalties over recent token history;
-- checked and forced text actions, chord previews, and deterministic or
-  stochastic beam exploration;
+- checked and forced text actions, chord previews, and deterministic beam exploration;
 - candidate-order and logit diagnostics, including the raw-rank-1 model-gap
   view;
 - externally produced steering-vector artifacts and episode projection or
@@ -59,7 +65,7 @@ numeric address used to select that candidate, including with `draw N`.
 
 Menu views can change the order in which candidates appear. Policy sorting uses
 the policy-adjusted scores, which can include vectors and other adjustments;
-Gumbel sorting uses the Gumbel scores over the active draw set. These views
+Gumbel sorting uses the Gumbel scores over the eligible set. These views
 change row order but keep each candidate's model-rank address unchanged. The
 policy and Gumbel positions are separate ranks, not replacements for the model
 rank.
@@ -119,3 +125,19 @@ able to import the package, run `policy-editor -h`, create and replay a minimal
 episode with a supported backend, and export that episode through `projector`.
 Optional entry points may be unavailable without their extensions; their
 absence must not prevent the core command or core package from starting.
+
+## Argmax experiment compatibility
+
+This branch is an unvalidated experiment, not the previously released 1.0.0
+contract. `EligibleScores` replaces `SparseDistribution`; eligibility is set
+membership, independent of optional softmax values. `Candidate.eligible_softmax`
+replaces `decoder_probability`; neighbor-margin and vocabulary-z-score fields
+are removed. Normal token evidence leaves eligible softmax unset. Explicit
+projector probability requests reconstruct missing diagnostics through replay.
+
+Workspace schema 3 stores nullable `eligible_softmax`. Earlier schemas are
+rejected before schema creation; use a fresh workspace and leave old files
+untouched. Removed categorical/filter/stochastic-beam settings are rejected.
+See [core API notes](core/README.md) and the revised
+[contracts](tests/CORE_CONTRACTS.md). Those contracts specify required behavior;
+the inherited harnesses have not yet been migrated or run against this cut.

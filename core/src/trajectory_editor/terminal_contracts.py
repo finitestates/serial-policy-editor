@@ -60,8 +60,6 @@ class ChoiceViewState:
     policy_active: bool = False
     show_policy_rank: bool = False
     sort_by_policy: bool = False
-    logit_view: str = "none"
-    show_model_probabilities: bool = False
     overlays: frozenset[str] = frozenset()
     default_hold_tokens: int = 100
     # Configured menu depth; the search lens uses this same row capacity.
@@ -93,9 +91,6 @@ class BeamViewRow:
     score: str
     state: str
     recent_steps: tuple[str, ...]
-    model_rank: int | None = None
-    step_log_probability: float | None = None
-    model_log_probability: float | None = None
     protected: bool = False
     family_metadata: str = ""
 

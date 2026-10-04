@@ -1,6 +1,12 @@
 # Development branches
 
-The active release represented by this tree is `v1.0.0`. Interactive and
+This tree is the `policy-editor-argmax` experiment. Package metadata retains
+`v1.0.0`, but this is not a validated release of that contract. Documentation
+and contracts describe the new selector; inherited tests and the reference
+kernel still require migration. See [the harness plan](docs/ARGMAX_TEST_HARNESS_PLAN.md).
+No tests were run during the implementation/documentation cut.
+
+The preceding release used the following runtime architecture. Interactive and
 replayed execution run through the in-memory runtime; SQLite workspaces are
 used for explicit restoration and saving. Sampler changes and rerolls are
 ordered actions, and episodes no longer have a global token budget.
@@ -15,7 +21,7 @@ changed lines in a single synchronized, erase-free transaction. The synchronous
 engine thread keeps backend and storage ownership. See `TERMINAL_API.md` for the
 design and thread bridge.
 
-## Verify user-visible behavior before hand-back
+## Validation procedures for the next harness cut
 
 Follow [Terminal rendering validation and handoff](tests/TERMINAL_RENDERING_GUIDE.md)
 for terminal/UI changes. The PTY journeys in

@@ -41,8 +41,6 @@ def display_choice(
     show_policy_rank: bool = False,
     sort_by_policy: bool = False,
     sort_by_gumbel: bool = False,
-    logit_view: str = "none",
-    show_model_probabilities: bool = False,
     overlays: frozenset[str] = frozenset(),
     display_rows: tuple[Candidate, ...] | None = None,
     target_token_id: int | None = None,
@@ -58,9 +56,11 @@ def display_choice(
         else "--"
     )
     io.write(
-        f"Sampled proposal: {choice.proposal_text!r} "
-        f"(id={choice.proposal_token_id}, backend={backend}, "
-        f"decoder={choice.proposal_decoder_probability:.2%}"
+        f"Argmax: {choice.proposal_text!r} "
+        f"(id={choice.proposal_token_id}"
+        + (f", model-softmax={backend}" if choice.proposal_raw_probability is not None else "")
+        + (f", eligible-softmax={choice.proposal_eligible_softmax:.2%}"
+         if choice.proposal_eligible_softmax is not None else "")
         + (
             f", policy-rank={choice.proposal_policy_rank}"
             if policy_active and choice.proposal_policy_rank is not None
@@ -76,8 +76,6 @@ def display_choice(
         show_policy_rank=show_policy_rank,
         sort_by_policy=sort_by_policy,
         sort_by_gumbel=sort_by_gumbel,
-        logit_view=logit_view,
-        show_model_probabilities=show_model_probabilities,
         overlays=overlays,
         raw_k1_logit=choice.raw_k1_logit,
     )
@@ -93,8 +91,6 @@ def display_candidates(
     show_policy_rank: bool = False,
     sort_by_policy: bool = False,
     sort_by_gumbel: bool = False,
-    logit_view: str = "none",
-    show_model_probabilities: bool = False,
     overlays: frozenset[str] = frozenset(),
     raw_k1_logit: float | None = None,
 ) -> None:
@@ -129,8 +125,6 @@ def display_candidates(
         )
     columns = CandidateColumns(
         policy=show_policy_rank,
-        logit_view=logit_view,
-        show_model_probabilities=show_model_probabilities,
         overlays=overlays,
         raw_k1_logit=raw_k1_logit,
     )
@@ -180,8 +174,6 @@ def read_choice(io: IO, state: ChoiceViewState) -> str | None:
             show_policy_rank=state.show_policy_rank,
             sort_by_policy=state.sort_by_policy,
             sort_by_gumbel=state.sort_by_gumbel,
-            logit_view=state.logit_view,
-            show_model_probabilities=state.show_model_probabilities,
             overlays=state.overlays,
             display_rows=state.display_candidates,
             target_token_id=state.target_token_id if state.search_lens_active else None,
@@ -221,15 +213,9 @@ def read_beam(io: IO, state: BeamViewState) -> BeamInput | None:
     for rank, row in enumerate(state.rows, 1):
         marker = ">" if row.label == state.selected_label else " "
         protected = " protected" if row.protected else ""
-        model_rank = "—" if row.model_rank is None else str(row.model_rank)
-        step_logp = (
-            "—" if row.step_log_probability is None
-            else f"{row.step_log_probability:.6f}"
-        )
         rows.append(
             f"{marker}{rank:>2} {row.label:<3} {row.state:<4} "
-            f"model-rank {model_rank:<7} step-logp {step_logp:<10}{protected} "
-            f"beam-logp {row.score}"
+            f"policy-logp {row.score}{protected}"
         )
         rows.extend(f"   {line}" for line in row.continuation.split("\n"))
         if row.family_metadata:

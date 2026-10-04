@@ -58,8 +58,10 @@ prompt: |-
   Tell a short story.
 environment:
   sampler:
-    temperature: 0.7
-    top_k: 40
+    draw_kernel: argmax
+    temperature: 1.0
+    top_k: null
+    min_p: 0.0
 steps:
   - step: 0
     action:
@@ -86,9 +88,9 @@ episode; without a workspace argument it uses the `--workspace` selection or
 defaults to `episodes.sqlite3`. `save-family [WORKSPACE [ROOT_ID]]` materializes
 all retained branches and their lineage using the same workspace selection.
 `quit` and process exit discard unsaved in-memory history. The live terminal
-interface is the same whether or not a workspace is open. Version 1.0.0
-requires a fresh workspace; previous-format workspace data is left untouched
-and is not migrated.
+interface is the same whether or not a workspace is open. This experimental branch requires workspace schema 3. Previous-format
+workspace data is rejected, left untouched and not migrated. Package metadata
+still carries the previous release version; it does not certify this branch.
 
 ### Eligibility and selective perturbation
 
@@ -152,3 +154,49 @@ additive change to the eligible score. Probability is an optional diagnostic.
 Neighbor margin, vocabulary z-score, and column cycling have been removed.
 `c N` and `c all` remain context commands. `V` still toggles policy diagnostics;
 `C` clears those columns too, without changing candidate ordering or search.
+
+## Numeric and public API contract
+
+`EligibleScores(ids, scores)` holds the required eligible token IDs and their
+pre-noise scores. Use `is_eligible(token_id)` or `eligible_ids` for membership.
+The cached `softmax` and `softmax_at(token_id)` are optional diagnostics;
+selection must not require them. This replaces the public `SparseDistribution`
+API. An excluded token has no eligible score; underflow of an eligible token's
+softmax does not make it ineligible.
+
+The probability overlay labels the actual calculations:
+
+- **model-softmax**: normalized raw model logits over the vocabulary;
+- **policy-softmax**: normalized adjusted policy logits over the vocabulary;
+- **eligible-softmax**: normalized eligible scores after temperature and filters,
+  before noise.
+
+These are not general winner probabilities. Full independent unit-scale Gumbel
+noise has categorical winner probabilities equal to eligible softmax; selective
+noise and other families do not have that guarantee. Noise scales and the full
+selection order are documented in the [root guide](../README.md).
+
+`Candidate.eligible` is explicit membership. `Candidate.eligible_softmax`
+replaces `decoder_probability` and may be `None`. Removed candidate fields are
+`neighbor_margin` and `logit_z`. `EpisodeObservation.proposal_eligible_softmax`
+is lazy; `ChoiceSet.proposal_eligible_softmax` is optional. `TokenEvidence` uses
+nullable `eligible_softmax`; normal generation and writes do not request it.
+An explicitly requested projector diagnostic replays the recorded model and
+settings through existing identity/parity checks to reconstruct missing values.
+Missing values render as `--`; calculated zero renders as zero.
+
+Schema 3 renames the mandatory SQLite probability field to nullable
+`eligible_softmax`. Old schemas are rejected rather than silently reinterpreted.
+Old sampler records containing removed settings also fail validation. Portable
+plans must use current settings; illustrative observation IDs in the example
+above must be replaced with IDs from the chosen tokenizer.
+
+Beam is deterministic, width-bounded sequence search. Its one cumulative score
+is normalized policy log-probability, independent of proposal temperature,
+eligibility and noise. It does not promise a globally optimal sequence.
+`draw RAW_RANK` searches noise seeds; plain argmax rejects that search. `reroll`
+is recorded but cannot change a plain argmax winner.
+
+The [contract matrix](../tests/CORE_CONTRACTS.md) specifies the new target.
+Existing harnesses and the [legacy oracle](../reference-kernel/README.md) are
+not yet current validation evidence.

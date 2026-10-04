@@ -8,10 +8,10 @@ It is not intended to preserve any historical obligations.
 - The interactive decision UI, including full-vocabulary `/TERM` search.
 - Plain fallback and live terminal interface.
 - llama.cpp and Hugging Face Transformers backends.
-- The sampler pipeline: temperature, top-k/top-p/min-p, repetition, presence,
+- The sampler pipeline: temperature, top-k eligibility, min-p logit gap, repetition, presence,
   and frequency penalties, deterministic seed/boundary behavior.
 - Per-token editorial evidence including proposal token, proposal agreement,
-  raw-model NLL, raw rank, policy rank, and decoder probability.
+  raw rank and policy rank; raw-model NLL and eligible softmax are optional diagnostics.
 - A compact episode workspace used for persistence, resumption, evidence,
   and Serial Policy Replay.
 - Serial Policy Replay over current-format stored episodes, with `handoff` and
@@ -37,6 +37,10 @@ A behavioral divergence is not treated as replay failure.
 
 ## Intentionally removed
 
+- categorical CDF draws, top-p, typical-p and tail-free filtering;
+- Gumbel beam search without replacement and stochastic beam controls;
+- neighbor-margin/z-score overlays and column cycling;
+- mandatory probability evidence and duplicate beam score/probability rows;
 - legacy verifier and schema-compatibility machinery;
 - execution replay and cold rebuild;
 - legacy prefix-reconstruction planning;
@@ -65,3 +69,8 @@ New code should serve one of these purposes directly:
 
 Historical auditing or implementation-path identity alone is not a reason to
 reintroduce a subsystem.
+
+Defaults are plain argmax, temperature 1, unrestricted eligibility and min-p 0.
+Selective noise limits perturbation, not eligibility. Search retains full model
+logits. Schema 3 requires a fresh workspace. Documentation describes this
+experiment; inherited tests and the independent oracle still need migration.

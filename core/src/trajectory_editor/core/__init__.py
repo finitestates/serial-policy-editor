@@ -42,7 +42,7 @@ from .results import ActionOutcome, Divergence, ReplayExpectation, TokenEvidence
 from .sampling import (
     CandidateFilterResult,
     GUMBEL_NOISE_ADDRESSES,
-    SparseDistribution,
+    EligibleScores,
     StandardCandidateFilter,
     apply_candidate_filter,
     draw_token,
@@ -95,7 +95,7 @@ __all__ = [
     "Phrase",
     "PolicyAction",
     "ReplayExpectation",
-    "SparseDistribution",
+    "EligibleScores",
     "SAMPLING_POLICY_SCHEME",
     "SamplerConfig",
     "StandardCandidateFilter",

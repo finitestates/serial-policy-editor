@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased — policy-editor-argmax experiment
+
+- Replace categorical token selection with plain or perturbed argmax; default
+  eligibility is the full vocabulary. Add independent eligible-k/selective-noise-k.
+- Retain Gumbel as a control; remove stochastic beam and CDF-oriented filters.
+- Make softmax diagnostics optional, name their actual normalization surfaces,
+  and expose direct raw/diff/noise/probability overlay controls.
+- Replace SparseDistribution with EligibleScores and mandatory decoder evidence
+  with nullable eligible_softmax; workspace schema 3 rejects older schemas.
+- Simplify deterministic beam presentation and document current contracts.
+- Harness/oracle migration remains pending; no validation claim accompanies this cut.
+
+
 ## v1.0.0 — 2026-10-02
 
 - Replace the live terminal UI with an immediate-mode interface for choices and

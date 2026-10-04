@@ -76,7 +76,7 @@ class TokenEvidence:
     raw_model_nll: float | None
     raw_rank: int | None
     policy_rank: int | None
-    decoder_probability: float
+    eligible_softmax: float | None
     proposal_agreement: bool
     is_eog: bool
     realized_visible: bool

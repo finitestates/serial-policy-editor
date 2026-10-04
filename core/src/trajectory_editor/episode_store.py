@@ -22,7 +22,7 @@ from .core.sampler_config import SamplerConfig
 from .episode_history import StoredHistoryPrefix, materialize_stored_prefix
 from .episode_hash import token_prefix_sha256, validate_boundary, validate_fingerprint
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _core_sampling_record(sampling: SamplerConfig) -> dict[str, Any]:
@@ -140,7 +140,7 @@ class EpisodeStore:
                     raw_model_nll REAL,
                     raw_rank INTEGER,
                     policy_rank INTEGER,
-                    decoder_probability REAL NOT NULL,
+                    eligible_softmax REAL,
                     proposal_agreement INTEGER NOT NULL,
                     PRIMARY KEY (episode_id, action_ordinal, action_token_index),
                     FOREIGN KEY (episode_id, action_ordinal)
@@ -185,7 +185,7 @@ class EpisodeStore:
                 )
 
     def _reject_previous_schema(self) -> None:
-        """Require a fresh workspace after the sampler and budget format break."""
+        """Require a fresh workspace after incompatible evidence/schema changes."""
         tables = {
             str(row["name"])
             for row in self.connection.execute(
@@ -548,7 +548,7 @@ class EpisodeStore:
                         boundary, token_id, text, realized_visible, is_eog,
                         sampling_boundary, proposal_token_id,
                         raw_model_nll, raw_rank, policy_rank,
-                        decoder_probability, proposal_agreement
+                        eligible_softmax, proposal_agreement
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
@@ -565,7 +565,7 @@ class EpisodeStore:
                         float(token["raw_model_nll"]) if token.get("raw_model_nll") is not None else None,
                         int(token["raw_rank"]) if token.get("raw_rank") is not None else None,
                         int(token["policy_rank"]) if token.get("policy_rank") is not None else None,
-                        float(token["decoder_probability"]),
+                        float(token["eligible_softmax"]) if token.get("eligible_softmax") is not None else None,
                         int(token["proposal_agreement"]),
                     ),
                 )
@@ -610,7 +610,7 @@ class EpisodeStore:
                         episode_id, action_ordinal, action_token_index, boundary,
                         token_id, text, realized_visible, is_eog,
                         sampling_boundary, proposal_token_id, raw_model_nll,
-                        raw_rank, policy_rank, decoder_probability,
+                        raw_rank, policy_rank, eligible_softmax,
                         proposal_agreement
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
@@ -628,7 +628,7 @@ class EpisodeStore:
                         evidence.raw_model_nll,
                         evidence.raw_rank,
                         evidence.policy_rank,
-                        evidence.decoder_probability,
+                        evidence.eligible_softmax,
                         int(evidence.proposal_agreement),
                     ),
                 )

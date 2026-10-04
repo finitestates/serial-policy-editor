@@ -454,7 +454,8 @@ def _evidence_from_record(record: Mapping[str, Any]) -> TokenEvidence:
         raw_model_nll=(float(record["raw_model_nll"]) if record.get("raw_model_nll") is not None else None),
         raw_rank=(int(record["raw_rank"]) if record.get("raw_rank") is not None else None),
         policy_rank=(int(record["policy_rank"]) if record.get("policy_rank") is not None else None),
-        decoder_probability=float(record.get("decoder_probability", 0.0)),
+        eligible_softmax=(float(record["eligible_softmax"])
+                          if record.get("eligible_softmax") is not None else None),
         proposal_agreement=bool(record.get("proposal_agreement", False)),
         is_eog=bool(record.get("is_eog", False)),
         realized_visible=bool(record.get("realized_visible", False)),
