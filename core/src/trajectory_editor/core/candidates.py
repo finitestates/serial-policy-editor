@@ -26,6 +26,7 @@ class Candidate:
     logit_z: float | None = None
     # One-based order within the active filtered candidate set.
     gumbel_rank: int | None = None
+    noise: float | None = None
 
     @property
     def model_probability(self) -> float | None:
@@ -55,6 +56,7 @@ class Candidate:
             "neighbor_margin": self.neighbor_margin,
             "logit_z": self.logit_z,
             "gumbel_rank": self.gumbel_rank,
+            "noise": self.noise,
         }
 
 

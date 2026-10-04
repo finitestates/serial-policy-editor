@@ -89,3 +89,66 @@ all retained branches and their lineage using the same workspace selection.
 interface is the same whether or not a workspace is open. Version 1.0.0
 requires a fresh workspace; previous-format workspace data is left untouched
 and is not migrated.
+
+### Eligibility and selective perturbation
+
+`--eligible-k N` (also `--top-k N`) restricts proposal eligibility to the top
+N adjusted logits before the min-p logit-gap cutoff. It does not discard
+model logits used by search. `--eligible-k none` disables that restriction.
+
+`--selective-noise-k N` adds noise only to the top N scores in the final eligible
+set, ranked before noise with token ID breaking ties. Other eligible candidates
+retain their scores and can still win. `none` (the default) perturbs every
+eligible candidate. This setting requires a perturb-and-argmax draw kernel.
+Temperature zero still restricts the candidate set to its single greedy winner.
+
+For a full-vocabulary robustness probe, use:
+
+```sh
+policy-editor --unfiltered --draw-kernel gaussian-max --selective-noise-k 5
+```
+
+For competition restricted to 20 logits, with only the leading 5 perturbed:
+
+```sh
+policy-editor --eligible-k 20 --min-p 0 --draw-kernel gumbel-max --selective-noise-k 5
+```
+
+In the editor, use `s eligible_k=20 selective_noise_k=5 draw_kernel=gumbel-max`.
+The eligibility setting keeps its existing `top_k` name in saved records;
+`selective_noise_k` is saved independently and defaults to `none` when omitted.
+Eligibility defaults to unrestricted. Plain argmax is the default kernel.
+Min-p is implemented entirely as a logit gap: eligible scores must be within
+`-log(min_p)` of the best score; `min_p=0` disables that cutoff.
+Top-p, typical-p, tail-free filtering, categorical draws, and stochastic Gumbel
+beam search have been removed. Records containing those settings are rejected.
+
+Use `~` or `overlay noise` to show each candidate's additive perturbation. Untouched eligible candidates show zero; excluded candidates
+show `--`. Noise stays hidden in the default rank / token ID / text view.
+
+`gumbel_top_k` is a separate menu limit: it displays the leading candidates
+ranked by logit plus Gumbel perturbation, with the proposal first. It does not
+restrict eligibility or select which candidates receive noise. With selective
+noise enabled, that ranking includes the unchanged eligible competitors.
+
+### Direct overlay controls
+
+| Command | Effect |
+| --- | --- |
+| `l` | Toggle raw model logits |
+| `L` | Toggle logit diff from the raw argmax |
+| `~` | Toggle additive noise |
+| `%` | Toggle probability diagnostics |
+| `C` | Reset to rank / token ID / text |
+| `columns` | Show active overlays and shortcut guidance |
+| `columns logit diff noise` | Set exactly those overlays |
+| `overlay noise on` / `overlay noise off` | Explicitly enable / disable an overlay |
+
+Shortcuts and named commands edit the same selection. All overlays are hidden
+by default. The diff is `token logit - raw argmax logit`, so the raw argmax has
+zero diff and lower model scores have negative diff. Noise is a separate
+additive change to the eligible score. Probability is an optional diagnostic.
+
+Neighbor margin, vocabulary z-score, and column cycling have been removed.
+`c N` and `c all` remain context commands. `V` still toggles policy diagnostics;
+`C` clears those columns too, without changing candidate ordering or search.

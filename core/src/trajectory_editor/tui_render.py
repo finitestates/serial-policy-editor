@@ -104,7 +104,7 @@ def action_preview(
         is_invalid = interpretation.state == CommandState.INVALID
         if is_invalid and first_word == "chord":
             label = "invalid chord"
-        elif is_invalid and first_word in {"beam", "gbeam"}:
+        elif is_invalid and first_word == "beam":
             label = "invalid beam"
         else:
             label = "command"
@@ -140,11 +140,7 @@ def action_preview(
     if command.kind == CommandKind.BEAM:
         width = command.beam_width
         assert width is not None
-        mode = (
-            "stochastic Gumbel-Top-k"
-            if command.beam_stochastic else
-            "cumulative log-p"
-        )
+        mode = "cumulative log-p"
         root_skip = (
             f" Skip first-step model ranks {format_beam_rank_ranges(command.beam_skip_rank_ranges)}; "
             "they remain available later."
@@ -158,7 +154,7 @@ def action_preview(
         )
         return ActionPreview(
             kind="effect",
-            label=("stochastic beam preview" if command.beam_stochastic else "beam search preview"),
+            label="beam search preview",
             detail=(
                 f"Open a width-{width} {mode} beam.{root_skip}{root_add} "
                 "Select a branch to commit."
@@ -308,10 +304,15 @@ def action_preview(
         CommandKind.CONTEXT: ("context", "The requested context view opens on Enter."),
         CommandKind.POLICY_VIEW: ("candidate order", "The table advances to the next model, policy, or Gumbel order on Enter."),
         CommandKind.POLICY_COLUMN: ("policy columns", "Policy diagnostics toggle on Enter without reordering."),
-        CommandKind.LOGIT_VIEW: ("logit view", "Logit view changes on Enter."),
-        CommandKind.PROBABILITY_VIEW: ("probability view", "Model probability overlays toggle on Enter."),
-        CommandKind.COLUMN_FOCUS: ("column focus", "Middle-column focus changes on Enter."),
-        CommandKind.OVERLAY_TOGGLE: ("overlay", f"Toggle the {command.overlay} overlay on Enter."),
+        CommandKind.COLUMN_CLEAR: ("reset columns", "Restore rank | token-id | text on Enter."),
+        CommandKind.COLUMNS_SET: ("columns", (
+            "Show active columns on Enter." if command.column_overlays is None else
+            "Set columns to " + ", ".join(command.column_overlays) + " on Enter."
+        )),
+        CommandKind.OVERLAY_TOGGLE: ("overlay", (
+            f"Toggle {command.overlay} on Enter." if command.overlay_enabled is None else
+            f"Turn {command.overlay} {'on' if command.overlay_enabled else 'off'} on Enter."
+        )),
         CommandKind.REVIEW_BACK: ("review back", "Review the previous durable token boundary on Enter."),
         CommandKind.REVIEW_FORWARD: ("review forward", "Review the next durable token boundary on Enter."),
         CommandKind.NOTE_BEFORE: ("note before", "The note-before action begins on Enter."),
@@ -534,7 +535,6 @@ def _choice_render_fragment_parts(
     sort_by_gumbel: bool = False,
     logit_view: str = "none",
     show_model_probabilities: bool = False,
-    column_focus: str | None = None,
     overlays: frozenset[str] = frozenset(),
     display_candidates: tuple[Candidate, ...] | None = None,
     search_lens_active: bool = False,
@@ -584,7 +584,6 @@ def _choice_render_fragment_parts(
         policy=show_policy_rank,
         logit_view=logit_view,
         show_model_probabilities=show_model_probabilities,
-        column_focus=column_focus,
         overlays=overlays,
         raw_k1_logit=choice.raw_k1_logit,
     )
@@ -766,7 +765,6 @@ def _choice_render_data(
     sort_by_gumbel: bool = False,
     logit_view: str = "none",
     show_model_probabilities: bool = False,
-    column_focus: str | None = None,
     overlays: frozenset[str] = frozenset(),
     display_candidates: tuple[Candidate, ...] | None = None,
     search_lens_active: bool = False,
@@ -790,7 +788,6 @@ def _choice_render_data(
         sort_by_gumbel,
         logit_view,
         show_model_probabilities,
-        column_focus,
         overlays,
         display_candidates,
         search_lens_active,
@@ -815,7 +812,6 @@ def _render_choice(
     sort_by_gumbel: bool = False,
     logit_view: str = "none",
     show_model_probabilities: bool = False,
-    column_focus: str | None = None,
     overlays: frozenset[str] = frozenset(),
     display_candidates: tuple[Candidate, ...] | None = None,
     search_lens_active: bool = False,
@@ -838,7 +834,6 @@ def _render_choice(
         sort_by_gumbel,
         logit_view,
         show_model_probabilities,
-        column_focus,
         overlays,
         display_candidates,
         search_lens_active,
@@ -884,7 +879,6 @@ def candidate_table_plan(
     sort_by_gumbel: bool = False,
     logit_view: str = "none",
     show_model_probabilities: bool = False,
-    column_focus: str | None = None,
     overlays: frozenset[str] = frozenset(),
     display_candidates: tuple[Candidate, ...] | None = None,
     search_lens_active: bool = False,
@@ -912,7 +906,6 @@ def candidate_table_plan(
         policy=show_policy_rank,
         logit_view=logit_view,
         show_model_probabilities=show_model_probabilities,
-        column_focus=column_focus,
         overlays=overlays,
         raw_k1_logit=choice.raw_k1_logit,
     )

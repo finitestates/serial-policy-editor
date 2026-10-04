@@ -30,58 +30,40 @@ class OverlaySpec:
 
 # Registry of named overlays. Width / policy gating stays in CandidateColumns.
 OVERLAYS: Mapping[str, OverlaySpec] = {
-    "pct": OverlaySpec(
-        name="pct",
-        labels=("raw-p", "pol-p"),
-        label_metrics=(frozenset({"raw_probability"}), frozenset({"policy_probability"})),
+    "noise": OverlaySpec(
+        name="noise", labels=("noise",), label_metrics=(frozenset({"noise"}),),
     ),
-    "decode_pct": OverlaySpec(
-        name="decode_pct",
-        labels=("decode-p",),
-        label_metrics=(frozenset({"decoder_probability"}),),
+    "probability": OverlaySpec(
+        name="probability",
+        labels=("raw-p", "pol-p", "decode-p"),
+        label_metrics=(frozenset({"raw_probability"}),
+                       frozenset({"policy_probability"}),
+                       frozenset({"decoder_probability"})),
     ),
     "logit": OverlaySpec(
         name="logit",
         labels=("model-logit",),
         label_metrics=(frozenset({"raw_logit"}),),
     ),
-    "gap_k1": OverlaySpec(
-        name="gap_k1",
+    "diff": OverlaySpec(
+        name="diff",
         labels=("model-gap",),
         label_metrics=(frozenset({"raw_logit", "top_raw_logit"}),),
     ),
-    "margin_neighbor": OverlaySpec(
-        name="margin_neighbor",
-        labels=("margin",),
-        label_metrics=(frozenset({"neighbor_margin"}),),
-        wired=True,
-    ),
-    "z": OverlaySpec(
-        name="z",
-        labels=("z",),
-        label_metrics=(frozenset({"logit_z"}),),
-        wired=True,
-    ),
 }
 
-# Single middle-column focus cycle (wired overlays only; stubs excluded).
-COLUMN_FOCUS_CYCLE: tuple[str, ...] = ("logit", "gap_k1", "margin_neighbor", "z", "pct", "decode_pct")
-
-
-def next_column_focus(current: str | None) -> str:
-    """Advance one step through COLUMN_FOCUS_CYCLE (wraps; None → first)."""
-    if current is None or current not in COLUMN_FOCUS_CYCLE:
-        return COLUMN_FOCUS_CYCLE[0]
-    return COLUMN_FOCUS_CYCLE[
-        (COLUMN_FOCUS_CYCLE.index(current) + 1) % len(COLUMN_FOCUS_CYCLE)
-    ]
+# Shared names for shortcuts, explicit toggles, and exact column selection.
+OVERLAY_ALIASES: Mapping[str, str] = {
+    "raw": "logit", "logits": "logit", "gap": "diff", "gap_k1": "diff",
+    "pct": "probability", "probs": "probability", "%": "probability",
+    "~": "noise",
+}
 
 
 _COLUMN_WIDTHS: Mapping[str, int] = {
+    "noise": 11,
     "model-logit": 11,
     "model-gap": 10,
-    "margin": 10,
-    "z": 10,
     "Δrank": 6,
     "pol-rank": 8,
     "raw-p": 8,
@@ -98,23 +80,20 @@ def overlays_from_preferences(
     *,
     logit_view: str = "none",
     show_model_probabilities: bool = False,
-    column_focus: str | None = None,
     overlays: frozenset[str] = frozenset(),
 ) -> frozenset[str]:
     """Derive the enabled overlay set from session presentation prefs.
 
     Shortcut and explicit overlays are additive.
     """
-    enabled: set[str] = set(overlays)
-    if column_focus in OVERLAYS:
-        enabled.add(column_focus)
+    enabled = {OVERLAY_ALIASES.get(name, name) for name in overlays}
+    enabled.intersection_update(OVERLAYS)
     if logit_view in {"raw", "both"}:
         enabled.add("logit")
     if logit_view in {"gap", "both"}:
-        enabled.add("gap_k1")
+        enabled.add("diff")
     if show_model_probabilities:
-        enabled.add("pct")
-        enabled.add("decode_pct")
+        enabled.add("probability")
     return frozenset(enabled)
 
 
@@ -138,7 +117,6 @@ class CandidateColumns:
     logit_view: str = "none"
     raw_k1_logit: float | None = None
     show_model_probabilities: bool = False
-    column_focus: str | None = None
     overlays: frozenset[str] | None = None
 
     @property
@@ -146,7 +124,6 @@ class CandidateColumns:
         return overlays_from_preferences(
             logit_view=self.logit_view,
             show_model_probabilities=self.show_model_probabilities,
-            column_focus=self.column_focus,
             overlays=self.overlays or frozenset(),
         )
 
@@ -172,22 +149,19 @@ class CandidateColumns:
 
         if "logit" in enabled and OVERLAYS["logit"].wired:
             requested.append("model-logit")
-        if "gap_k1" in enabled and OVERLAYS["gap_k1"].wired:
+        if "diff" in enabled:
             requested.append("model-gap")
-        if "margin_neighbor" in enabled and OVERLAYS["margin_neighbor"].wired:
-            requested.append("margin")
-        if "z" in enabled and OVERLAYS["z"].wired:
-            requested.append("z")
+
+        if "noise" in enabled:
+            requested.append("noise")
 
         if self.policy:
             requested.extend(("Δrank", "pol-rank"))
 
-        if "pct" in enabled and OVERLAYS["pct"].wired:
+        if "probability" in enabled:
             requested.append("raw-p")
             if self.policy:
                 requested.append("pol-p")
-
-        if "decode_pct" in enabled and OVERLAYS["decode_pct"].wired:
             requested.append("decode-p")
 
         # Column visibility follows user preferences, never terminal geometry.
@@ -204,6 +178,8 @@ class CandidateColumns:
 
     def values(self, candidate: Candidate) -> str:
         def value(label: str) -> str:
+            if label == "noise":
+                return f"{candidate.noise:+.3f}" if candidate.noise is not None else "--"
             if label == "model-logit":
                 return (
                     f"{candidate.raw_logit:+.3f}"
@@ -214,18 +190,6 @@ class CandidateColumns:
                 return (
                     f"{candidate.raw_logit - self.raw_k1_logit:+.3f}"
                     if candidate.raw_logit is not None and self.raw_k1_logit is not None
-                    else "--"
-                )
-            if label == "margin":
-                return (
-                    f"{candidate.neighbor_margin:+.3f}"
-                    if candidate.neighbor_margin is not None
-                    else "--"
-                )
-            if label == "z":
-                return (
-                    f"{candidate.logit_z:+.2f}"
-                    if candidate.logit_z is not None
                     else "--"
                 )
             if label == "Δrank":

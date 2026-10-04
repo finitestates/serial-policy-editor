@@ -35,12 +35,10 @@ class SamplerConfig:
     """
 
     temperature: float = 1.0
-    top_k: int | None = 40
-    top_p: float = 0.95
+    top_k: int | None = None
+    selective_noise_k: int | None = None
     min_p: float = 0.05
-    typical_p: float = 1.0
-    tail_free_z: float = 1.0
-    draw_kernel: str = "categorical"
+    draw_kernel: str = "argmax"
     gaussian_noise_std: float = 1.0
     perturb_noise_std: float = 1.0
     student_t_df: float = 3.0
@@ -139,24 +137,19 @@ class SamplerConfig:
             raise EditorError("temperature must be a finite number")
         if self.temperature < 0.0:
             raise EditorError("temperature cannot be negative")
+        if self.selective_noise_k is not None:
+            if type(self.selective_noise_k) is not int or self.selective_noise_k < 1:
+                raise EditorError("selective_noise_k must be a positive integer or null")
+            if self.draw_kernel == "argmax":
+                raise EditorError("selective_noise_k requires a perturb-and-argmax kernel")
         if self.top_k is not None and type(self.top_k) is not int:
             raise EditorError("top_k must be a positive integer or null")
         if self.top_k is not None and self.top_k < 1:
             raise EditorError("top_k must be at least 1")
-        if type(self.top_p) not in {int, float} or not math.isfinite(float(self.top_p)):
-            raise EditorError("top_p must be a finite number")
-        if not 0.0 < self.top_p <= 1.0:
-            raise EditorError("top_p must be in (0, 1]")
         if type(self.min_p) not in {int, float} or not math.isfinite(float(self.min_p)):
             raise EditorError("min_p must be a finite number")
         if not 0.0 <= self.min_p <= 1.0:
             raise EditorError("min_p must be in [0, 1]")
-        for name in ("typical_p", "tail_free_z"):
-            value = getattr(self, name)
-            if type(value) not in {int, float} or not math.isfinite(float(value)):
-                raise EditorError(f"{name} must be a finite number")
-            if not 0.0 < float(value) <= 1.0:
-                raise EditorError(f"{name} must be in (0, 1]")
         if self.draw_kernel not in DRAW_KERNELS:
             choices = ", ".join(DRAW_KERNELS)
             raise EditorError(f"draw_kernel must be one of: {choices}")
@@ -230,6 +223,11 @@ class SamplerConfig:
             raise EditorError(f"seed must be between {MIN_SEED} and {MAX_SEED} inclusive")
 
     @property
+    def eligible_k(self) -> int | None:
+        """Eligibility limit, stored as top_k for existing replay records."""
+        return self.top_k
+
+    @property
     def policy_active(self) -> bool:
         return (
             self.history_penalties_active
@@ -271,15 +269,15 @@ class SamplerConfig:
         if not isinstance(value, Mapping):
             raise EditorError("saved sampler settings must be an object")
         required = {
-            "temperature", "top_k", "top_p", "min_p", "typical_p",
-            "tail_free_z", "draw_kernel", "cfg_unconditional_prompt",
+            "temperature", "top_k", "min_p",
+            "draw_kernel", "cfg_unconditional_prompt",
             "cfg_scale", "cfg_prefix_tokens", "repeat_penalty", "repeat_last_n",
             "presence_penalty", "frequency_penalty", "history_scope",
             "policy_scheme", "seed", "rng_scheme",
         }
         optional = {
             "token_biases", "bias_groups", "gaussian_noise_std", "perturb_noise_std",
-            "student_t_df",
+            "student_t_df", "selective_noise_k",
             "gumbel_top_k",
             "gumbel_noise_address", "gumbel_noise_scale",
         }
@@ -321,10 +319,8 @@ class SamplerConfig:
         return cls(
             temperature=value["temperature"],
             top_k=value["top_k"],
-            top_p=value["top_p"],
+            selective_noise_k=value.get("selective_noise_k"),
             min_p=value["min_p"],
-            typical_p=value["typical_p"],
-            tail_free_z=value["tail_free_z"],
             draw_kernel=value["draw_kernel"],
             gaussian_noise_std=value.get("gaussian_noise_std", 1.0),
             perturb_noise_std=value.get("perturb_noise_std", 1.0),
@@ -355,10 +351,8 @@ class SamplerConfig:
         result: dict[str, Any] = {
             "temperature": self.temperature,
             "top_k": self.top_k,
-            "top_p": self.top_p,
+            "selective_noise_k": self.selective_noise_k,
             "min_p": self.min_p,
-            "typical_p": self.typical_p,
-            "tail_free_z": self.tail_free_z,
             "draw_kernel": self.draw_kernel,
             "gaussian_noise_std": self.gaussian_noise_std,
             "perturb_noise_std": self.perturb_noise_std,

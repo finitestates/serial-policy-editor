@@ -38,7 +38,9 @@ from .episode_hash import (
 )
 from .core.policy_calculations import PolicyCalculations
 from .core.sampling import (
-    draw_token,
+    gaussian_ranking_scores,
+    perturbation_ranking_scores,
+    PERTURB_MAX_KERNELS,
     gumbel_ranking_scores,
     gumbel_winner,
 )
@@ -657,21 +659,32 @@ class EpisodeEngine:
                 noise_address=self.sampling.gumbel_noise_address,
                 candidate_model_ranks=candidate_model_ranks,
                 gumbel_noise_scale=self.sampling.gumbel_noise_scale,
+                selective_noise_k=self.sampling.selective_noise_k,
             )
             ranking.setflags(write=False)
             gumbel_scores = ranking
             proposal = gumbel_winner(distribution, ranking)
-        else:
-            proposal = draw_token(
-                distribution,
-                seed=self.sampling.seed,
-                stream_fingerprint=self.stream_fingerprint,
-                aligned_step=sampling_boundary,
-                kernel=self.sampling.draw_kernel,
-                gaussian_noise_std=self.sampling.gaussian_noise_std,
-                perturb_noise_std=self.sampling.perturb_noise_std,
-                student_t_df=self.sampling.student_t_df,
+        elif self.sampling.draw_kernel == "gaussian-max":
+            ranking = gaussian_ranking_scores(
+                distribution, seed=self.sampling.seed,
+                stream_fingerprint=self.stream_fingerprint, aligned_step=sampling_boundary,
+                noise_std=self.sampling.gaussian_noise_std,
+                selective_noise_k=self.sampling.selective_noise_k,
             )
+            proposal = gumbel_winner(distribution, ranking)
+        elif self.sampling.draw_kernel in PERTURB_MAX_KERNELS:
+            ranking = perturbation_ranking_scores(
+                distribution, seed=self.sampling.seed,
+                stream_fingerprint=self.stream_fingerprint, aligned_step=sampling_boundary,
+                kernel=self.sampling.draw_kernel, noise_std=self.sampling.perturb_noise_std,
+                student_t_df=self.sampling.student_t_df,
+                selective_noise_k=self.sampling.selective_noise_k,
+            )
+            proposal = gumbel_winner(distribution, ranking)
+        else:
+            ranking = distribution.scores
+            proposal = gumbel_winner(distribution, ranking)
+        ranking.setflags(write=False)
         observation = EpisodeObservation(
             boundary=self.boundary,
             sampling_boundary=sampling_boundary,
@@ -679,9 +692,9 @@ class EpisodeEngine:
             proposal_token_id=proposal,
             proposal_text=self.backend.token_text(proposal),
             proposal_raw_rank=policy_calculations.raw_rank(proposal),
-            proposal_decoder_probability=distribution.probability(proposal),
             policy_calculations=policy_calculations,
             gumbel_scores=gumbel_scores,
+            ranking_scores=ranking,
         )
         self._observation = observation
         self._observation_key = key
@@ -854,6 +867,8 @@ class EpisodeEngine:
                     else float(policy_probability)
                 ),
                 raw_logit=(logit if metrics.intersection({"raw_logit", "top_raw_logit"}) else None),
+                noise=(observation.noise_by_token.get(int(token_id))
+                       if "noise" in metrics else None),
                 neighbor_margin=margin,
                 logit_z=z_val,
                 gumbel_rank=(

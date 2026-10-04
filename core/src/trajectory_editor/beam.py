@@ -1,4 +1,4 @@
-"""Interactive deterministic and stochastic beams over policy scores."""
+"""Interactive deterministic beams over policy scores."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ from .core.backend import BatchedInferenceSession
 from .core.episode_observation import EpisodeObservation
 from .core.errors import EditorError
 from .core.results import ActionOutcome
-from .core.sampling import conditional_gumbel_top_k
 from .episode_engine import EpisodeEngine
 from .terminal_contracts import BeamViewRow, BeamViewState
 
@@ -24,13 +23,11 @@ class BeamRequested(Exception):
         self,
         width: int,
         *,
-        stochastic: bool = False,
         skip_root_rank_ranges: tuple[tuple[int, int], ...] = (),
         add_root_model_ranks: tuple[int, ...] = (),
     ) -> None:
-        super().__init__(width, stochastic, skip_root_rank_ranges, add_root_model_ranks)
+        super().__init__(width, skip_root_rank_ranges, add_root_model_ranks)
         self.width = width
-        self.stochastic = stochastic
         self.skip_root_rank_ranges = skip_root_rank_ranges
         self.add_root_model_ranks = add_root_model_ranks
 
@@ -97,7 +94,6 @@ class BeamSearch:
         engine: EpisodeEngine,
         width: int = 5,
         *,
-        stochastic: bool = False,
         skip_root_rank_ranges: tuple[tuple[int, int], ...] = (),
         add_root_model_ranks: tuple[int, ...] = (),
     ) -> None:
@@ -110,11 +106,8 @@ class BeamSearch:
             engine._ensure_backend_positioned()
         self.original = engine
         self.width = width
-        self.stochastic = bool(stochastic)
         self.skip_root_rank_ranges = tuple(skip_root_rank_ranges)
         self.add_root_model_ranks = tuple(add_root_model_ranks)
-        if self.stochastic and self.add_root_model_ranks:
-            raise EditorError("beam add is available only in deterministic beam mode")
         if len(self.add_root_model_ranks) > self.width:
             raise EditorError("beam add cannot reserve more roots than the beam width")
         if (
@@ -315,45 +308,9 @@ class BeamSearch:
                 allowed_ids = ids[~self._root_skip_token_mask]
                 if not len(allowed_ids):
                     raise EditorError("beam root skip ranks leave no first-token candidates")
-            search_log_probabilities = model_log_probabilities[allowed_ids].copy()
-            if is_root and self.skip_root_rank_ranges:
-                # Renormalize the allowed root support. Descendant Gumbel splits
-                # then use probability mass from the same constrained sequence
-                # distribution while model log-p remains the unmasked value.
-                allowed_log_mass = float(np.logaddexp.reduce(search_log_probabilities))
-                search_log_probabilities -= allowed_log_mass
             eog_ids = set(path.engine.backend.eog_token_ids())
             path_tokens = self._path_token_ids(path)
             is_eog = np.isin(ids, tuple(eog_ids)) if eog_ids else np.zeros(ids.shape, dtype=bool)
-
-            if self.stochastic:
-                for candidate_index, score in conditional_gumbel_top_k(
-                    search_log_probabilities,
-                    count=self.width,
-                    parent_score=path.score,
-                    parent_log_probability=path.search_log_probability,
-                    seed=path.engine.sampling.seed,
-                    stream_fingerprint=path.engine.stream_fingerprint,
-                    aligned_step=observation.sampling_boundary,
-                    prefix_token_ids=path_tokens,
-                ):
-                    token_id = int(allowed_ids[candidate_index])
-                    if (*path_tokens, token_id) in self._killed_paths:
-                        continue
-                    log_probability = float(model_log_probabilities[token_id])
-                    candidates.append(self._candidate(
-                        path,
-                        observation,
-                        token_id,
-                        log_probability,
-                        bool(is_eog[token_id]),
-                        parent_order,
-                        search_step_log_probability=float(
-                            search_log_probabilities[candidate_index]
-                        ),
-                        score=score,
-                    ))
-                continue
 
             order = allowed_ids[np.lexsort((
                 allowed_ids, -model_log_probabilities[allowed_ids]
@@ -492,8 +449,6 @@ class BeamSearch:
         return bool(self.active)
 
     def _expand_one(self) -> bool:
-        if self.stochastic:
-            return self._expand_stochastic_one()
         if not self.active:
             return False
         previous_active = tuple(self.active)
@@ -569,44 +524,6 @@ class BeamSearch:
 
     def _candidate_token_ids(self, candidate: _Candidate) -> tuple[int, ...]:
         return (*self._path_token_ids(candidate.parent), candidate.token_id)
-
-    def _expand_stochastic_one(self) -> bool:
-        """Keep one Gumbel-ranked frontier of live prefixes and finished leaves."""
-        if not self.active:
-            return False
-        previous_active = tuple(self.active)
-        candidates = self._candidates()
-        frontier: list[tuple[tuple, BeamPath | _Candidate]] = [
-            ((-path.score, 0, path.label), path)
-            for path in self.finished
-        ]
-        frontier.extend(
-            (
-                (-candidate.score, 1, *candidate.ordering[1:]),
-                candidate,
-            )
-            for candidate in candidates
-        )
-        frontier.sort(key=lambda entry: entry[0])
-        kept = [entry[1] for entry in frontier[:self.width]]
-
-        selected_candidates = [
-            item for item in kept if isinstance(item, _Candidate)
-        ]
-        self._expand_finished([
-            candidate for candidate in selected_candidates if candidate.is_eog
-        ])
-        self._expand_live([
-            candidate for candidate in selected_candidates if not candidate.is_eog
-        ])
-        kept_finished = [item for item in kept if isinstance(item, BeamPath)]
-        self.finished = [*kept_finished, *self._new_finished]
-        self.finished.sort(key=lambda path: (-path.score, path.label))
-
-        for path in previous_active:
-            path.engine._invalidate_observation()
-        self._retain_selection()
-        return bool(self.active)
 
     def _expand_finished(self, candidates: list[_Candidate]) -> None:
         self._new_finished: list[BeamPath] = []
@@ -935,16 +852,10 @@ class BeamSearch:
                 family_metadata=family_metadata.get(path.label, ""),
             ))
 
-        if self.stochastic:
-            title = (
-                f"BEAM   STOCHASTIC · width {self.width} · depth {depth} · "
-                "sequence Gumbel-Top-k"
-            )
-        else:
-            title = (
-                f"BEAM   width {self.width} · depth {depth} · "
-                "score: cumulative model log-p"
-            )
+        title = (
+            f"BEAM   width {self.width} · depth {depth} · "
+            "score: cumulative model log-p"
+        )
         if self.skip_root_rank_ranges:
             skipped = " ".join(
                 str(first) if first == last else f"{first}-{last}"
@@ -963,7 +874,6 @@ class BeamSearch:
             selected_label=self.selected_label,
             notice=notice,
             at_edge=at_edge,
-            stochastic=self.stochastic,
             show_family_metadata=self.show_family_metadata,
         )
 
@@ -1010,8 +920,6 @@ class BeamSearch:
 
     def toggle_protection(self, label: str | None) -> str:
         """Toggle a one-slot reservation for the selected live lineage."""
-        if self.stochastic:
-            raise EditorError("branch protection is available only in deterministic beam mode")
         if label is None:
             raise EditorError("select a live branch before protecting it")
         path = self._find_path(label)
@@ -1262,24 +1170,17 @@ def beam_menu(
                     notice = str(exc)
                 continue
             if command in {"?", "help"}:
-                if beam.stochastic:
-                    ranking = (
-                        "Gumbel-Top-k samples without replacement; live and EOS share width. "
-                        "Uses policy softmax; sampler temperature, filters, and draw settings are ignored. "
-                    )
-                else:
-                    ranking = (
-                        "Ranks by cumulative policy log-p; sampler temperature, "
-                        "filters, and draw noise are ignored. "
-                    )
+                ranking = (
+                    "Ranks by cumulative policy log-p; sampler temperature, "
+                    "filters, and draw noise are ignored. "
+                )
                 notice = (
                     "Enter/ ] expands one token; " + ranking
                     + "`advance N` steps and `rewind` undo them. `kill ID` removes a branch; "
                     "`k` kills the selected branch. Select a branch to commit; EOS commits text "
                     "before the EOG token; q opens options."
                 )
-                if not beam.stochastic:
-                    notice += " `p` toggles a reserved slot for the selected lineage."
+                notice += " `p` toggles a reserved slot for the selected lineage."
                 notice += " `f` toggles root and visible-text family details."
                 continue
             target = command[7:].strip() if command.startswith("select ") else command

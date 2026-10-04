@@ -54,9 +54,9 @@ def _teacher_palette_entries() -> tuple[PaletteEntry, ...]:
             continue
         if head not in {
             "accept", "groups", "b", "RANK+", "RANK=VALUE", "s", "reroll",
-            "draw", "1..N", "chord", "beam", "gbeam", "t", "x", "check",
+            "draw", "1..N", "chord", "beam", "t", "x", "check",
             "checkx", "force", "forcex", "h", "m", "/TERM", "ms", "c", "C",
-            "overlay", "context", "v", "V", "l", "L", "%", "[", "f", "n",
+            "overlay", "columns", "~", "context", "v", "V", "l", "L", "%", "[", "f", "n",
             "p", "e", "e!", "q",
         }:
             continue
@@ -66,11 +66,11 @@ def _teacher_palette_entries() -> tuple[PaletteEntry, ...]:
         insert, help_text = replacements.get(title, (title, description.strip()))
         if title.startswith(("b NAME", "b {", "b token")):
             insert = "b "
-        elif title.startswith(("beam", "gbeam")):
+        elif title.startswith(("beam",)):
             insert = title.split()[0]
         elif title.startswith(("chord",)):
             insert = "chord "
-        elif title.startswith(("reroll", "draw", "overlay", "context", "ms")):
+        elif title.startswith(("reroll", "draw", "overlay", "columns", "~", "context", "ms")):
             insert = title.split()[0] + " "
         elif title.startswith(("m N", "m ")):
             insert = "m "

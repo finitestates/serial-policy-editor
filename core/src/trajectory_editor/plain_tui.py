@@ -19,7 +19,7 @@ ACTION_TEXT = (
     "\nActions: accept | rank | chord RANK RANK... | t TEXT | x TEXT | "
     "h [N] | h . [N] | h | [N] | "
     "[ / ] review | f [N|-N] | m [N] | /TERM | "
-    "ms [+|- [N]] | c focus / C clear | overlay NAME | context [N|all] | "
+    "ms [+|- [N]] | l logits / L diff / ~ noise / % probability / C clear | columns NAMES | context [N|all] | "
     "v order (model / policy / Gumbel) | "
     "V policy columns | l logits / L both | % probs | n [note-before] | "
     "p [note-after] | e | e! | q | ?"
@@ -43,7 +43,6 @@ def display_choice(
     sort_by_gumbel: bool = False,
     logit_view: str = "none",
     show_model_probabilities: bool = False,
-    column_focus: str | None = None,
     overlays: frozenset[str] = frozenset(),
     display_rows: tuple[Candidate, ...] | None = None,
     target_token_id: int | None = None,
@@ -79,7 +78,6 @@ def display_choice(
         sort_by_gumbel=sort_by_gumbel,
         logit_view=logit_view,
         show_model_probabilities=show_model_probabilities,
-        column_focus=column_focus,
         overlays=overlays,
         raw_k1_logit=choice.raw_k1_logit,
     )
@@ -97,7 +95,6 @@ def display_candidates(
     sort_by_gumbel: bool = False,
     logit_view: str = "none",
     show_model_probabilities: bool = False,
-    column_focus: str | None = None,
     overlays: frozenset[str] = frozenset(),
     raw_k1_logit: float | None = None,
 ) -> None:
@@ -134,7 +131,6 @@ def display_candidates(
         policy=show_policy_rank,
         logit_view=logit_view,
         show_model_probabilities=show_model_probabilities,
-        column_focus=column_focus,
         overlays=overlays,
         raw_k1_logit=raw_k1_logit,
     )
@@ -186,7 +182,6 @@ def read_choice(io: IO, state: ChoiceViewState) -> str | None:
             sort_by_gumbel=state.sort_by_gumbel,
             logit_view=state.logit_view,
             show_model_probabilities=state.show_model_probabilities,
-            column_focus=state.column_focus,
             overlays=state.overlays,
             display_rows=state.display_candidates,
             target_token_id=state.target_token_id if state.search_lens_active else None,
@@ -210,16 +205,10 @@ def read_edge(io: IO, state: EdgeViewState) -> str | None:
 
 def read_beam(io: IO, state: BeamViewState) -> BeamInput | None:
     rows = [state.title]
-    if state.stochastic:
-        rows.extend([
-            "Gumbel-Top-k samples without replacement; live and EOS share the beam width.",
-            "Uses policy-adjusted full softmax; sampler temperature, filters, and draw settings are ignored.",
-        ])
-    else:
-        rows.extend([
-            "Cumulative log-p uses full-vocabulary softmax after policy adjustments.",
-            "Sampler temperature, filters, and draw noise do not affect the beam.",
-        ])
+    rows.extend([
+        "Cumulative log-p uses full-vocabulary softmax after policy adjustments.",
+        "Sampler temperature, filters, and draw noise do not affect the beam.",
+    ])
     rows.extend([
         "",
         "Shared context (last 4 lines):",
@@ -237,22 +226,11 @@ def read_beam(io: IO, state: BeamViewState) -> BeamInput | None:
             "—" if row.step_log_probability is None
             else f"{row.step_log_probability:.6f}"
         )
-        if state.stochastic:
-            model_logp = (
-                "—" if row.model_log_probability is None
-                else f"{row.model_log_probability:.6f}"
-            )
-            rows.append(
-                f"{marker}{rank:>2} {row.label:<3} {row.state:<4} "
-                f"model-rank {model_rank:<7} step-logp {step_logp:<10}{protected} "
-                f"gumbel-score {row.score} model-logp {model_logp}"
-            )
-        else:
-            rows.append(
-                f"{marker}{rank:>2} {row.label:<3} {row.state:<4} "
-                f"model-rank {model_rank:<7} step-logp {step_logp:<10}{protected} "
-                f"beam-logp {row.score}"
-            )
+        rows.append(
+            f"{marker}{rank:>2} {row.label:<3} {row.state:<4} "
+            f"model-rank {model_rank:<7} step-logp {step_logp:<10}{protected} "
+            f"beam-logp {row.score}"
+        )
         rows.extend(f"   {line}" for line in row.continuation.split("\n"))
         if row.family_metadata:
             rows.append(f"   {row.family_metadata}")
@@ -273,7 +251,7 @@ def read_beam(io: IO, state: BeamViewState) -> BeamInput | None:
         "Beam EDGE: c resume | discard restore episode | q quit editor > "
         if state.at_edge else
         "Beam: Enter expand | k kill selected | "
-        + ("p protect | " if not state.stochastic else "")
+        + ("p protect | ")
         + "f family | advance N | rewind | kill ID | "
         "ID/select ID commit | q options | ? help > "
     )

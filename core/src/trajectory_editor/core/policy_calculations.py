@@ -10,7 +10,6 @@ from .sampler_config import SamplerConfig
 from .sampling import (
     SparseDistribution,
     _rank,
-    _softmax,
     _top_ids,
     _validated_logits,
     apply_candidate_filter,
@@ -173,14 +172,13 @@ class PolicyCalculations:
         assert ids is not None
         self.distribution = SparseDistribution(
             ids,
-            _softmax(scaled[ids]),
+            None,
             np.asarray(scaled[ids], dtype=np.float64),
         )
         for array in (
             self.logits,
             self.adjusted,
             self.distribution.ids,
-            self.distribution.probabilities,
         ):
             array.setflags(write=False)
         if self.distribution.scores is not None:

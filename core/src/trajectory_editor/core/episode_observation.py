@@ -20,9 +20,9 @@ class EpisodeObservation:
     proposal_token_id: int
     proposal_text: str
     proposal_raw_rank: int
-    proposal_decoder_probability: float
     policy_calculations: PolicyCalculations = field(repr=False, compare=False)
     gumbel_scores: np.ndarray | None = field(default=None, repr=False, compare=False)
+    ranking_scores: np.ndarray | None = field(default=None, repr=False, compare=False)
 
     @property
     def logits(self) -> np.ndarray:
@@ -31,6 +31,22 @@ class EpisodeObservation:
     @property
     def distribution(self) -> SparseDistribution:
         return self.policy_calculations.distribution
+
+    @cached_property
+    def proposal_decoder_probability(self) -> float:
+        """Eligible-score softmax diagnostic; never used to choose a winner."""
+        return self.distribution.probability(self.proposal_token_id)
+
+    @cached_property
+    def noise_by_token(self) -> dict[int, float]:
+        if self.ranking_scores is None or self.distribution.scores is None:
+            return {}
+        return {
+            int(token_id): float(final - initial)
+            for token_id, final, initial in zip(
+                self.distribution.ids, self.ranking_scores, self.distribution.scores
+            )
+        }
 
     @cached_property
     def proposal_raw_probability(self) -> float:

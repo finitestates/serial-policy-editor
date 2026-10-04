@@ -62,7 +62,6 @@ class ChoiceViewState:
     sort_by_policy: bool = False
     logit_view: str = "none"
     show_model_probabilities: bool = False
-    column_focus: str | None = None
     overlays: frozenset[str] = frozenset()
     default_hold_tokens: int = 100
     # Configured menu depth; the search lens uses this same row capacity.
@@ -109,7 +108,6 @@ class BeamViewState:
     selected_label: str | None
     notice: str = ""
     at_edge: bool = False
-    stochastic: bool = False
     show_family_metadata: bool = False
 
 

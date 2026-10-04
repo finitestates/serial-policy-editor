@@ -15,7 +15,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, replace
 from typing import Any
 
-from .candidate_columns import CandidateColumns, CandidateViewPlan, next_column_focus
+from .candidate_columns import CandidateColumns, CandidateViewPlan, overlays_from_preferences
 from .chord import ChordRequested
 from .beam import BeamRequested
 from .core.candidates import Candidate
@@ -304,9 +304,19 @@ class PolicyViewPreferences:
     sort_by_gumbel: bool | None = None
     logit_view: str = "none"
     show_model_probabilities: bool = False
-    # Single middle-column overlay focus; None = identity (or fall back to l/%).
-    column_focus: str | None = None
     overlays: frozenset[str] = frozenset()
+
+    def active_overlays(self) -> frozenset[str]:
+        return overlays_from_preferences(
+            logit_view=self.logit_view, show_model_probabilities=self.show_model_probabilities,
+            overlays=self.overlays,
+        )
+
+    def set_overlays(self, overlays: frozenset[str]) -> None:
+        self.overlays = overlays
+        self.logit_view = "none"
+        self.show_model_probabilities = False
+
 
 
 class InteractivePolicy:
@@ -466,7 +476,6 @@ class InteractivePolicy:
             policy=self._show_policy_diagnostics(engine),
             logit_view=self.view_preferences.logit_view,
             show_model_probabilities=self.view_preferences.show_model_probabilities,
-            column_focus=self.view_preferences.column_focus,
             overlays=self.view_preferences.overlays,
         ).plan
         return plan.with_policy_rank() if self.view_preferences.sort_by_policy else plan
@@ -821,7 +830,6 @@ class InteractivePolicy:
                 sort_by_gumbel=gumbel_sort and not search_lens_active,
                 logit_view=self.view_preferences.logit_view,
                 show_model_probabilities=self.view_preferences.show_model_probabilities,
-                column_focus=self.view_preferences.column_focus,
                 overlays=self.view_preferences.overlays,
                 default_hold_tokens=self.default_hold_tokens,
                 menu_page_rows=self.menu_size,
@@ -913,7 +921,6 @@ class InteractivePolicy:
                         continue
                 raise BeamRequested(
                     command.beam_width,
-                    stochastic=command.beam_stochastic,
                     skip_root_rank_ranges=command.beam_skip_rank_ranges,
                     add_root_model_ranks=command.beam_add_model_ranks,
                 )
@@ -1066,6 +1073,7 @@ class InteractivePolicy:
                         aligned_step=observation.sampling_boundary,
                         kernel=engine.sampling.draw_kernel,
                         gaussian_noise_std=engine.sampling.gaussian_noise_std,
+                        selective_noise_k=engine.sampling.selective_noise_k,
                         perturb_noise_std=engine.sampling.perturb_noise_std,
                         student_t_df=engine.sampling.student_t_df,
                         gumbel_noise_address=engine.sampling.gumbel_noise_address,
@@ -1266,73 +1274,35 @@ class InteractivePolicy:
             if command.kind == CommandKind.POLICY_COLUMN:
                 self.view_preferences.show = not policy_columns
                 continue
-            if command.kind == CommandKind.LOGIT_VIEW:
-                if command.invoked_as == "L":
-                    next_view = (
-                        "none"
-                        if self.view_preferences.logit_view == "both"
-                        else "both"
-                    )
-                else:
-                    views = ("none", "raw", "gap")
-                    current = self.view_preferences.logit_view
-                    try:
-                        next_view = views[(views.index(current) + 1) % len(views)]
-                    except ValueError:
-                        next_view = views[0]
-                self.view_preferences.logit_view = next_view
-                feedback = ChoiceFeedback(
-                    "status",
-                    "LOGIT VIEW",
-                    (f"columns: {next_view}",),
-                )
+            if command.kind == CommandKind.COLUMN_CLEAR:
+                self.view_preferences.set_overlays(frozenset())
+                self.view_preferences.show = False
+                feedback = ChoiceFeedback("status", "COLUMNS", ("rank | token-id | text",))
                 continue
-            if command.kind == CommandKind.PROBABILITY_VIEW:
-                self.view_preferences.show_model_probabilities = (
-                    not self.view_preferences.show_model_probabilities
-                )
-                state = (
-                    "on"
-                    if self.view_preferences.show_model_probabilities
-                    else "off"
-                )
-                feedback = ChoiceFeedback(
-                    "status",
-                    "PROBABILITY VIEW",
-                    (f"model % overlays: {state}",),
-                )
-                continue
-            if command.kind == CommandKind.COLUMN_FOCUS:
-                if command.invoked_as == "C":
-                    self.view_preferences.column_focus = None
-                    self.view_preferences.logit_view = "none"
-                    self.view_preferences.show_model_probabilities = False
-                    self.view_preferences.overlays = frozenset()
-                    feedback = ChoiceFeedback(
-                        "status",
-                        "COLUMN FOCUS",
-                        ("cleared → identity (rank | token-id | text)",),
-                    )
-                else:
-                    self.view_preferences.column_focus = next_column_focus(
-                        self.view_preferences.column_focus
-                    )
-                    focus = self.view_preferences.column_focus
-                    feedback = ChoiceFeedback(
-                        "status",
-                        "COLUMN FOCUS",
-                        (f"middle column: {focus}",),
-                    )
+            if command.kind == CommandKind.COLUMNS_SET:
+                if command.column_overlays is not None:
+                    self.view_preferences.set_overlays(frozenset(command.column_overlays))
+                    self.view_preferences.show = False
+                enabled = self.view_preferences.active_overlays()
+                feedback = ChoiceFeedback("status", "COLUMNS", (
+                    "active: " + (", ".join(sorted(enabled)) or "none"),
+                    "l logits · L diff · ~ noise · % probability · C reset",
+                    "columns logit diff noise selects those overlays together",
+                ))
                 continue
             if command.kind == CommandKind.OVERLAY_TOGGLE:
                 assert command.overlay is not None
-                enabled = set(self.view_preferences.overlays)
-                if command.overlay in enabled:
-                    enabled.remove(command.overlay)
-                else:
+                enabled = set(self.view_preferences.active_overlays())
+                turn_on = (command.overlay not in enabled
+                           if command.overlay_enabled is None else command.overlay_enabled)
+                if turn_on:
                     enabled.add(command.overlay)
-                self.view_preferences.overlays = frozenset(enabled)
-                feedback = ChoiceFeedback("status", "OVERLAYS", (", ".join(sorted(enabled)) or "identity",))
+                else:
+                    enabled.discard(command.overlay)
+                self.view_preferences.set_overlays(frozenset(enabled))
+                feedback = ChoiceFeedback("status", "COLUMNS", (
+                    f"{command.overlay}: {'on' if turn_on else 'off'}",
+                ))
                 continue
             if command.kind == CommandKind.REVIEW_BACK:
                 if self.seamless:

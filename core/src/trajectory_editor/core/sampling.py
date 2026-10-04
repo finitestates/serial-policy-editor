@@ -10,8 +10,9 @@ from __future__ import annotations
 import hashlib
 import math
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Protocol
 
 import numpy as np
@@ -27,7 +28,7 @@ PERTURB_MAX_KERNELS = (
     "laplace-max",
     "uniform-max",
 )
-DRAW_KERNELS = ("categorical", "gumbel-max", "gaussian-max", *PERTURB_MAX_KERNELS)
+DRAW_KERNELS = ("argmax", "gumbel-max", "gaussian-max", *PERTURB_MAX_KERNELS)
 MIN_SEED = -(1 << 63)
 MAX_SEED = (1 << 63) - 1
 
@@ -37,17 +38,31 @@ class SamplingFilterConfig(Protocol):
 
     temperature: float
     top_k: int | None
-    top_p: float
     min_p: float
-    typical_p: float
-    tail_free_z: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class SparseDistribution:
+    """Eligible scores with lazy softmax diagnostics, never a draw CDF."""
+
     ids: np.ndarray
-    probabilities: np.ndarray
-    scores: np.ndarray | None = None
+    scores: np.ndarray | None
+    _probabilities: np.ndarray | None = field(repr=False, compare=False)
+
+    def __init__(self, ids, probabilities=None, scores=None):
+        object.__setattr__(self, "ids", ids)
+        object.__setattr__(self, "scores", scores)
+        object.__setattr__(self, "_probabilities", probabilities)
+
+    @cached_property
+    def probabilities(self) -> np.ndarray:
+        values = self._probabilities
+        if values is None:
+            if self.scores is None:
+                raise ValueError("probability diagnostics require candidate scores")
+            values = _softmax(self.scores)
+        values.setflags(write=False)
+        return values
 
     def probability(self, token_id: int) -> float:
         matches = np.flatnonzero(self.ids == int(token_id))
@@ -64,151 +79,31 @@ class CandidateFilterResult:
 
 
 class StandardCandidateFilter:
-    """Deterministic top-k/typical/tail-free/top-p/min-p filtering."""
+    """Logit-only eligibility: temperature, top-k, and min-p logit gap."""
 
     name = "standard"
 
-    @staticmethod
-    def _sorted(ids: np.ndarray, scaled: np.ndarray) -> np.ndarray:
-        if len(ids) < 2:
-            return np.asarray(ids, dtype=np.int64)
-        order = np.lexsort((ids, -scaled[ids]))
-        return np.asarray(ids[order], dtype=np.int64)
-
     @classmethod
-    def _typical(
-        cls,
-        ids: np.ndarray,
-        scaled: np.ndarray,
-        typical_p: float,
-    ) -> np.ndarray:
-        ids = cls._sorted(ids, scaled)
-        if typical_p >= 1.0 or len(ids) <= 1:
-            return ids
-        probabilities = _softmax(scaled[ids])
-        entropy = float(
-            -np.sum(probabilities * np.log(np.maximum(probabilities, np.finfo(float).tiny)))
-        )
-        surprisal = -np.log(np.maximum(probabilities, np.finfo(float).tiny))
-        typicality = np.abs(surprisal - entropy)
-        order = np.lexsort((ids, typicality))
-        ordered_ids = ids[order]
-        ordered_probabilities = probabilities[order]
-        keep_count = int(
-            np.searchsorted(np.cumsum(ordered_probabilities), typical_p, side="left")
-        ) + 1
-        return ordered_ids[: max(1, keep_count)]
-
-    @classmethod
-    def _tail_free(
-        cls,
-        ids: np.ndarray,
-        scaled: np.ndarray,
-        tail_free_z: float,
-    ) -> np.ndarray:
-        ids = cls._sorted(ids, scaled)
-        if tail_free_z >= 1.0 or len(ids) < 3:
-            return ids
-        probabilities = _softmax(scaled[ids])
-        first_derivative = np.abs(np.diff(probabilities))
-        second_derivative = np.abs(np.diff(first_derivative))
-        total = float(np.sum(second_derivative))
-        if total <= 0.0 or not np.isfinite(total):
-            return ids
-        mass = second_derivative / total
-        keep_count = int(np.searchsorted(np.cumsum(mass), tail_free_z, side="left")) + 2
-        return ids[: max(1, min(len(ids), keep_count))]
-
-    @classmethod
-    def apply(
-        cls,
-        adjusted: np.ndarray,
-        config: SamplingFilterConfig,
-    ) -> CandidateFilterResult:
+    def apply(cls, adjusted: np.ndarray, config: SamplingFilterConfig) -> CandidateFilterResult:
         if config.temperature == 0.0:
             greedy = _top_ids(adjusted, 1)
-            stages = {
-                "after_temperature": greedy,
-                "after_top_k": greedy,
-                "after_typical": greedy,
-                "after_tail_free": greedy,
-                "after_top_p": greedy,
-                "after_min_p": greedy,
-            }
-            return CandidateFilterResult(adjusted, stages, {"filter": cls.name, "greedy": True})
-
-        temperature = float(config.temperature)
-        scaled = adjusted if temperature == 1.0 else adjusted / temperature
+            return CandidateFilterResult(adjusted, {
+                "after_temperature": greedy, "after_top_k": greedy, "after_min_p": greedy,
+            }, {"filter": cls.name, "greedy": True})
+        scaled = adjusted if config.temperature == 1.0 else adjusted / float(config.temperature)
         if not np.all(np.isfinite(scaled)):
             raise ValueError("temperature produced non-finite scaled logits")
-        if (
-            temperature == 1.0
-            and config.top_k is None
-            and config.typical_p == 1.0
-            and config.tail_free_z == 1.0
-            and config.top_p == 1.0
-            and config.min_p == 0.0
-        ):
-            all_ids = np.arange(len(scaled), dtype=np.int64)
-            return CandidateFilterResult(
-                scaled,
-                {
-                    "after_temperature": None,
-                    "after_top_k": all_ids,
-                    "after_typical": all_ids,
-                    "after_tail_free": all_ids,
-                    "after_top_p": all_ids,
-                    "after_min_p": all_ids,
-                },
-                {"filter": cls.name, "unfiltered": True},
-            )
-
-        after_top_k = (
-            _top_ids(scaled, min(config.top_k, len(scaled)))
-            if config.top_k is not None
-            else np.arange(len(scaled), dtype=np.int64)
-        )
-        typical_p = float(config.typical_p)
-        if typical_p >= 1.0:
-            after_typical = after_top_k
-        else:
-            after_typical = cls._typical(after_top_k, scaled, typical_p)
-        tail_free_z = float(config.tail_free_z)
-        if typical_p >= 1.0 and tail_free_z >= 1.0:
-            after_tail_free = after_top_k
-        else:
-            after_tail_free = cls._tail_free(after_typical, scaled, tail_free_z)
-        after_top_p = after_tail_free
-        if config.top_p < 1.0:
-            probabilities = _softmax(scaled[after_top_p])
-            keep_count = int(
-                np.searchsorted(np.cumsum(probabilities), config.top_p, side="left")
-            ) + 1
-            after_top_p = after_top_p[: max(1, keep_count)]
-
-        after_min_p = after_top_p
+        ids = (_top_ids(scaled, min(config.top_k, len(scaled)))
+               if config.top_k is not None else np.arange(len(scaled), dtype=np.int64))
+        eligible = ids
         if config.min_p > 0.0:
-            probabilities = _softmax(scaled[after_top_p])
-            mask = probabilities >= config.min_p * float(np.max(probabilities))
-            if np.any(mask):
-                after_min_p = after_top_p[mask]
-
-        return CandidateFilterResult(
-            scaled,
-            {
-                "after_temperature": None,
-                "after_top_k": after_top_k,
-                "after_typical": after_typical,
-                "after_tail_free": after_tail_free,
-                "after_top_p": after_top_p,
-                "after_min_p": after_min_p,
-            },
-            {
-                "filter": cls.name,
-                "typical_p": float(config.typical_p),
-                "tail_free_z": float(config.tail_free_z),
-            },
-        )
+            cutoff = float(np.max(scaled[ids])) + math.log(float(config.min_p))
+            eligible = ids[scaled[ids] >= cutoff]
+        return CandidateFilterResult(scaled, {
+            "after_temperature": None, "after_top_k": ids, "after_min_p": eligible,
+        }, {"filter": cls.name, "min_logit_gap": (
+            -math.log(float(config.min_p)) if config.min_p > 0.0 else None
+        )})
 
 
 def apply_candidate_filter(
@@ -290,16 +185,6 @@ def _validate_boundary(value: int, name: str = "boundary") -> int:
     return value
 
 
-def position_uniform(seed: int, stream_fingerprint: str, aligned_step: int) -> float:
-    if type(seed) is not int or not MIN_SEED <= seed <= MAX_SEED:
-        raise EditorError("seed must be a signed-64-bit integer")
-    _validate_fingerprint(stream_fingerprint)
-    _validate_boundary(aligned_step, "sampling boundary")
-    payload = f"{RNG_SCHEME}:{seed}:{stream_fingerprint}:{aligned_step}".encode()
-    value = int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big")
-    return (value + 0.5) / float(1 << 64)
-
-
 def position_uniform_token(
     seed: int,
     stream_fingerprint: str,
@@ -344,108 +229,26 @@ def position_uniform_model_rank(
     return (value + 0.5) / float(1 << 64)
 
 
-def conditional_gumbel_top_k(
-    log_probabilities: np.ndarray,
-    *,
-    count: int,
-    parent_score: float,
-    parent_log_probability: float,
-    seed: int,
-    stream_fingerprint: str,
-    aligned_step: int,
-    prefix_token_ids: Sequence[int],
-) -> tuple[tuple[int, float], ...]:
-    """Return top child Gumbel scores conditioned on their maximum.
+def _noise_indices(distribution: SparseDistribution, count: int | None) -> np.ndarray:
+    """Select top eligible pre-noise scores, with token-ID tie breaking."""
+    if count is not None and (type(count) is not int or count < 1):
+        raise EditorError("selective_noise_k must be a positive integer or null")
+    ids = np.asarray(distribution.ids, dtype=np.int64)
+    if distribution.scores is None:
+        raise ValueError("perturb-and-argmax requires candidate scores")
+    scores = np.asarray(distribution.scores, dtype=np.float64)
+    if scores.shape != ids.shape or not len(ids) or not np.all(np.isfinite(scores)):
+        raise ValueError("candidate scores must be finite and match nonempty candidate IDs")
+    if count is None or count >= len(ids):
+        return np.arange(len(ids))
+    return np.lexsort((ids, -scores))[:count]
 
-    This is the top-down Gumbel split used by stochastic beam search.  In
-    exponential-race coordinates, the winning child is sampled from the
-    conditional distribution and every later child arrives after an
-    exponential waiting time over the remaining child mass.  The returned
-    scores are therefore the highest ``count`` child scores conditioned on
-    their maximum being exactly ``parent_score``.
-    """
 
-    values = np.asarray(log_probabilities, dtype=np.float64)
-    if values.ndim != 1 or not len(values) or not np.all(np.isfinite(values)):
-        raise ValueError("conditional Gumbel sampling requires finite log probabilities")
-    if type(count) is not int or count < 1:
-        raise EditorError("conditional Gumbel sample count must be a positive integer")
-    if (
-        type(parent_score) not in {int, float}
-        or not math.isfinite(float(parent_score))
-        or type(parent_log_probability) not in {int, float}
-        or not math.isfinite(float(parent_log_probability))
-    ):
-        raise EditorError("conditional Gumbel parent scores must be finite")
-    if type(seed) is not int or not MIN_SEED <= seed <= MAX_SEED:
-        raise EditorError("seed must be a signed-64-bit integer")
-    _validate_fingerprint(stream_fingerprint)
-    _validate_boundary(aligned_step, "sampling boundary")
-    if isinstance(prefix_token_ids, (str, bytes)):
-        raise EditorError("stochastic beam prefixes must be token ID sequences")
-    prefix = tuple(prefix_token_ids)
-    if any(
-        type(token_id) is not int
-        or token_id < 0
-        or token_id >= (1 << 64)
-        for token_id in prefix
-    ):
-        raise EditorError("stochastic beam prefixes must contain nonnegative token IDs")
-
-    log_normalizer = float(np.logaddexp.reduce(values))
-    normalized = values - log_normalizer
-    weights = np.exp(normalized)
-    total_weight = float(np.sum(weights))
-    if not math.isfinite(total_weight) or total_weight <= 0.0:
-        raise ValueError("conditional Gumbel child mass is invalid")
-    weights /= total_weight
-
-    prefix_bytes = len(prefix).to_bytes(8, "big") + b"".join(
-        token_id.to_bytes(8, "big") for token_id in prefix
+def _noise_subset(distribution: SparseDistribution, indices: np.ndarray) -> SparseDistribution:
+    return SparseDistribution(
+        distribution.ids[indices], None,
+        distribution.scores[indices],
     )
-    address = (
-        f"{RNG_SCHEME}:stochastic-beam-gumbel-top-k-v1:"
-        f"{seed}:{stream_fingerprint}:{aligned_step}:"
-    ).encode() + prefix_bytes
-    parent_key = hashlib.blake2b(address, digest_size=16).digest()
-
-    def uniform(lane: bytes, ordinal: int) -> float:
-        payload = (
-            b"stochastic-beam-child-v1:" + parent_key + b":" + lane + b":"
-            + ordinal.to_bytes(8, "big")
-        )
-        value = int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big")
-        return (value + 0.5) / float(1 << 64)
-
-    def choose(remaining: np.ndarray, remaining_mass: float, quantile: float) -> int:
-        target = quantile * remaining_mass
-        index = int(np.searchsorted(np.cumsum(remaining), target, side="right"))
-        if index >= len(remaining):
-            index = int(np.flatnonzero(remaining > 0.0)[-1])
-        return index
-
-    remaining = weights.copy()
-    remaining_mass = float(np.sum(remaining))
-    winner = choose(remaining, remaining_mass, uniform(b"winner", 0))
-    result: list[tuple[int, float]] = [(winner, float(parent_score))]
-    remaining[winner] = 0.0
-
-    for ordinal in range(1, min(count, len(values))):
-        remaining_mass = float(np.sum(remaining))
-        if remaining_mass <= 0.0:
-            break
-        log_rate = float(parent_log_probability) + math.log(remaining_mass)
-        exponential_wait = -math.log(uniform(b"wait", ordinal))
-        log_wait = math.log(exponential_wait) - log_rate
-        log_arrival = float(np.logaddexp(-float(parent_score), log_wait))
-        child_score = -log_arrival
-        token_id = choose(
-            remaining, remaining_mass, uniform(b"winner", ordinal)
-        )
-        result.append((token_id, child_score))
-        remaining[token_id] = 0.0
-
-    return tuple(result)
 
 
 def gaussian_ranking_scores(
@@ -455,8 +258,19 @@ def gaussian_ranking_scores(
     stream_fingerprint: str,
     aligned_step: int,
     noise_std: float = 1.0,
+    selective_noise_k: int | None = None,
 ) -> np.ndarray:
     """Add replay-stable, per-token Gaussian noise to the active scores."""
+
+    indices = _noise_indices(distribution, selective_noise_k)
+    if len(indices) < len(distribution.ids):
+        ranking = np.asarray(distribution.scores, dtype=np.float64).copy()
+        ranking[indices] = gaussian_ranking_scores(
+            _noise_subset(distribution, indices),
+            seed=seed, stream_fingerprint=stream_fingerprint, aligned_step=aligned_step,
+            noise_std=noise_std,
+        )
+        return ranking
 
     if distribution.scores is None:
         raise ValueError("gaussian-max requires candidate scores")
@@ -642,8 +456,19 @@ def perturbation_ranking_scores(
     kernel: str,
     noise_std: float = 1.0,
     student_t_df: float = 3.0,
+    selective_noise_k: int | None = None,
 ) -> np.ndarray:
     """Add replay-stable perturbations to the active candidate scores."""
+
+    indices = _noise_indices(distribution, selective_noise_k)
+    if len(indices) < len(distribution.ids):
+        ranking = np.asarray(distribution.scores, dtype=np.float64).copy()
+        ranking[indices] = perturbation_ranking_scores(
+            _noise_subset(distribution, indices),
+            seed=seed, stream_fingerprint=stream_fingerprint, aligned_step=aligned_step,
+            kernel=kernel, noise_std=noise_std, student_t_df=student_t_df,
+        )
+        return ranking
 
     if kernel not in PERTURB_MAX_KERNELS:
         raise EditorError("unsupported perturb-and-argmax kernel")
@@ -717,15 +542,16 @@ def draw_token(
     seed: int,
     stream_fingerprint: str,
     aligned_step: int,
-    kernel: str = "categorical",
+    kernel: str = "argmax",
     gaussian_noise_std: float = 1.0,
     perturb_noise_std: float = 1.0,
     student_t_df: float = 3.0,
     gumbel_noise_address: str = "token-id",
     candidate_model_ranks: np.ndarray | None = None,
     gumbel_noise_scale: float = 1.0,
+    selective_noise_k: int | None = None,
 ) -> int:
-    """Draw one token with a replay-stable categorical or perturb-and-argmax kernel."""
+    """Select the argmax of eligible scores with optional replay-stable noise."""
 
     if kernel not in DRAW_KERNELS:
         raise EditorError("unsupported draw kernel")
@@ -735,6 +561,7 @@ def draw_token(
             seed=seed,
             stream_fingerprint=stream_fingerprint,
             aligned_step=aligned_step,
+            selective_noise_k=selective_noise_k,
             noise_address=gumbel_noise_address,
             candidate_model_ranks=candidate_model_ranks,
             gumbel_noise_scale=gumbel_noise_scale,
@@ -746,6 +573,7 @@ def draw_token(
             seed=seed,
             stream_fingerprint=stream_fingerprint,
             aligned_step=aligned_step,
+            selective_noise_k=selective_noise_k,
             noise_std=gaussian_noise_std,
         )
         return gaussian_winner(distribution, scores)
@@ -755,14 +583,15 @@ def draw_token(
             seed=seed,
             stream_fingerprint=stream_fingerprint,
             aligned_step=aligned_step,
+            selective_noise_k=selective_noise_k,
             kernel=kernel,
             noise_std=perturb_noise_std,
             student_t_df=student_t_df,
         )
         return perturbation_winner(distribution, scores)
-    draw = position_uniform(seed, stream_fingerprint, aligned_step)
-    index = int(np.searchsorted(np.cumsum(distribution.probabilities), draw, side="right"))
-    return int(distribution.ids[min(index, len(distribution.ids) - 1)])
+    if distribution.scores is None:
+        raise ValueError("argmax requires candidate scores")
+    return perturbation_winner(distribution, distribution.scores)
 
 
 def gumbel_ranking_scores(
@@ -774,8 +603,21 @@ def gumbel_ranking_scores(
     noise_address: str = "token-id",
     candidate_model_ranks: np.ndarray | None = None,
     gumbel_noise_scale: float = 1.0,
+    selective_noise_k: int | None = None,
 ) -> np.ndarray:
     """Return effective scores plus the replay-stable Gumbel perturbations."""
+
+    indices = _noise_indices(distribution, selective_noise_k)
+    if len(indices) < len(distribution.ids):
+        ranking = np.asarray(distribution.scores, dtype=np.float64).copy()
+        ranking[indices] = gumbel_ranking_scores(
+            _noise_subset(distribution, indices),
+            seed=seed, stream_fingerprint=stream_fingerprint, aligned_step=aligned_step,
+            noise_address=noise_address, gumbel_noise_scale=gumbel_noise_scale,
+            candidate_model_ranks=(None if candidate_model_ranks is None
+                                   else np.asarray(candidate_model_ranks)[indices]),
+        )
+        return ranking
 
     if distribution.scores is None:
         raise ValueError("gumbel-max requires candidate scores")
@@ -886,6 +728,7 @@ def gumbel_ranked_ids(
     noise_address: str = "token-id",
     candidate_model_ranks: np.ndarray | None = None,
     gumbel_noise_scale: float = 1.0,
+    selective_noise_k: int | None = None,
 ) -> np.ndarray:
     """Return eligible token IDs in deterministic Gumbel-Max order."""
 
@@ -895,6 +738,7 @@ def gumbel_ranked_ids(
         seed=seed,
         stream_fingerprint=stream_fingerprint,
         aligned_step=aligned_step,
+        selective_noise_k=selective_noise_k,
         noise_address=noise_address,
         candidate_model_ranks=candidate_model_ranks,
         gumbel_noise_scale=gumbel_noise_scale,
@@ -918,6 +762,7 @@ def find_seed_for_token(
     candidate_model_ranks: np.ndarray | None = None,
     gumbel_noise_scale: float = 1.0,
     next_seed: Callable[[], int],
+    selective_noise_k: int | None = None,
 ) -> tuple[int, int]:
     """Find a fresh seed whose configured draw selects an eligible token.
 
@@ -932,8 +777,19 @@ def find_seed_for_token(
         raise EditorError(
             f"token {token_id} is outside the active truncated candidate set"
         )
-    if kernel == "categorical" and distribution.probability(token_id) <= 0.0:
-        raise EditorError(f"token {token_id} has no selectable categorical mass")
+    if selective_noise_k is not None:
+        indices = _noise_indices(distribution, selective_noise_k)
+        untouched = np.ones(len(distribution.ids), dtype=bool)
+        untouched[indices] = False
+        target_index = int(np.flatnonzero(distribution.ids == token_id)[0])
+        if untouched[target_index]:
+            untouched_ids = distribution.ids[untouched]
+            untouched_scores = distribution.scores[untouched]
+            best = np.lexsort((untouched_ids, -untouched_scores))[0]
+            if int(untouched_ids[best]) != token_id:
+                raise EditorError("an unchanged higher-ranked candidate makes this token impossible to select")
+    if kernel == "argmax":
+        raise EditorError("argmax is independent of seed; choose a noise kernel to search seeds")
     if kernel in PERTURB_MAX_KERNELS and (
         type(perturb_noise_std) not in {int, float}
         or not math.isfinite(float(perturb_noise_std))
@@ -948,6 +804,7 @@ def find_seed_for_token(
             seed=current_seed,
             stream_fingerprint=stream_fingerprint,
             aligned_step=aligned_step,
+            selective_noise_k=selective_noise_k,
             kernel=kernel,
             gaussian_noise_std=0.0,
             gumbel_noise_address=gumbel_noise_address,
@@ -963,6 +820,7 @@ def find_seed_for_token(
             seed=current_seed,
             stream_fingerprint=stream_fingerprint,
             aligned_step=aligned_step,
+            selective_noise_k=selective_noise_k,
             kernel=kernel,
             perturb_noise_std=0.0,
             student_t_df=student_t_df,
@@ -978,11 +836,14 @@ def find_seed_for_token(
         ids = np.asarray(distribution.ids, dtype=np.int64)
         if scores.shape != ids.shape:
             raise ValueError("candidate scores do not match candidate IDs")
-        other_scores = scores[ids != token_id]
-        if len(other_scores):
-            half_width = math.sqrt(3.0) * float(perturb_noise_std)
-            if scores[ids == token_id][0] + half_width <= float(
-                np.max(other_scores - half_width)
+        radii = np.zeros(len(ids), dtype=np.float64)
+        radii[_noise_indices(distribution, selective_noise_k)] = (
+            math.sqrt(3.0) * float(perturb_noise_std)
+        )
+        other = ids != token_id
+        if np.any(other):
+            if (scores[ids == token_id] + radii[ids == token_id])[0] <= float(
+                np.max((scores - radii)[other])
             ):
                 raise EditorError(
                     "uniform-max bounded noise makes this token impossible to select"
@@ -993,6 +854,7 @@ def find_seed_for_token(
             seed=current_seed,
             stream_fingerprint=stream_fingerprint,
             aligned_step=aligned_step,
+            selective_noise_k=selective_noise_k,
             kernel=kernel,
             gumbel_noise_address=gumbel_noise_address,
             gumbel_noise_scale=0.0,
@@ -1015,6 +877,7 @@ def find_seed_for_token(
             seed=seed,
             stream_fingerprint=stream_fingerprint,
             aligned_step=aligned_step,
+            selective_noise_k=selective_noise_k,
             kernel=kernel,
             gaussian_noise_std=gaussian_noise_std,
             perturb_noise_std=perturb_noise_std,
@@ -1048,7 +911,6 @@ __all__ = [
     "gumbel_ranking_scores",
     "gumbel_ranked_ids",
     "gumbel_winner",
-    "position_uniform",
     "position_uniform_model_rank",
     "position_uniform_token",
     "perturbation_ranking_scores",

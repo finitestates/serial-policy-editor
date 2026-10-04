@@ -390,7 +390,6 @@ def run_session_roster(
             beam = BeamSearch(
                 session.engine,
                 request.width,
-                stochastic=request.stochastic,
                 skip_root_rank_ranges=request.skip_root_rank_ranges,
                 add_root_model_ranks=request.add_root_model_ranks,
             )

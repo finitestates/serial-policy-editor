@@ -33,9 +33,8 @@ class CommandKind(str, Enum):
     CONTEXT = "context"
     POLICY_VIEW = "policy-view"
     POLICY_COLUMN = "policy-column"
-    LOGIT_VIEW = "logit-view"
-    PROBABILITY_VIEW = "probability-view"
-    COLUMN_FOCUS = "column-focus"
+    COLUMN_CLEAR = "column-clear"
+    COLUMNS_SET = "columns-set"
     OVERLAY_TOGGLE = "overlay-toggle"
     REVIEW_BACK = "review-back"
     REVIEW_FORWARD = "review-forward"
@@ -67,6 +66,8 @@ class TeacherCommand:
     note: str | None = None
     invoked_as: str | None = None
     overlay: str | None = None
+    overlay_enabled: bool | None = None
+    column_overlays: tuple[str, ...] | None = None
     additional_rows: int | None = None
     search_query: str | None = None
     search_direction: str | None = None
@@ -90,7 +91,6 @@ class TeacherCommand:
     bias_token_id: int | None = None
     chord_ranks: tuple[int, ...] | None = None
     beam_width: int | None = None
-    beam_stochastic: bool = False
     beam_skip_rank_ranges: tuple[tuple[int, int], ...] = ()
     beam_add_model_ranks: tuple[int, ...] = ()
     sampler_text: str | None = None
@@ -136,7 +136,10 @@ HELP_TEXT = """Commands:
                       no plural or generated title-case variants
                       use literal:"text" in a group to disable surface variants
   multi-token terms bias only the final token after an exact prefix match
-  s top_k=20|none change sampler settings; changes are part of the action tape
+  s eligible_k=20|none restrict eligible logits (top_k is the same setting)
+  s selective_noise_k=5|none perturb only the top eligible scores; others still compete
+                    use with a perturb-and-argmax kernel; none perturbs all eligible scores
+                    sampler changes are part of the action tape
   s gumbel_top_k=5 shows five Gumbel-ranked candidates (proposal stays first)
   s gumbel_noise_address=model-rank selects Gumbel-Max and addresses noise by model rank
   s gumbel_noise_scale=0.5 selects Gumbel-Max and scales post-filter noise
@@ -153,10 +156,6 @@ HELP_TEXT = """Commands:
                     to commit its actions and drop the other previews
   beam [WIDTH] [skip RANKS] [add RANKS]
                     cumulative log-p beam (default width: 5; maximum: 100)
-  beam stochastic [WIDTH] [skip RANKS]
-                    open Gumbel-Top-k sampling without replacement
-  gbeam [WIDTH] [skip RANKS]
-                    short form for stochastic beam
                     skip filters one-based model ranks at the first step only;
                     the beam fills to its requested width from remaining candidates
                     when available, and skipped tokens remain available later.
@@ -188,18 +187,21 @@ HELP_TEXT = """Commands:
                      N defaults to the configured table depth
   ms - [N]           expand toward smaller ranks / higher backend probability
                      N defaults to the configured table depth
-  c                  cycle middle-column focus: logit → gap_k1 → margin → z → pct → decode_pct
-  C                  clear all overlays and shortcuts
-  overlay NAME       toggle any named overlay alongside the others
+  l                  toggle raw model logits
+  L                  toggle logit diff from the raw argmax
+  ~                  toggle additive noise (zero for untouched eligible scores)
+  %                  toggle probability diagnostics
+  C                  reset to rank | token-id | text
+  columns            show active overlays and available direct shortcuts
+  columns NAMES      set exactly those overlays (logit diff noise probability)
+  columns none       reset to the three-column view
+  overlay NAME [on|off]
+                     toggle one overlay, or explicitly enable/disable it
   context [N|all]    page more of the current context (default: 2000 chars);
-                     c N / c all still work (bare c is column focus)
+                     c N / c all still work
   v                  cycle candidate order: model → policy → Gumbel (Gumbel-Max only)
   V                  toggle policy diagnostics independently of ordering
-  l                  cycle logits: none / model / gap@raw1
-  L                  toggle model logits + gap@raw1 together
-  %                  toggle model soft-max % overlays (model-p / decode-p [/ pol-p])
-                     default table is identity-only: rank | token-id | text
-                     overlays combine with l / % shortcuts and column focus
+                     default table is rank | token-id | text; overlays are additive.
                      Δrank = backend rank - policy rank; positive means promoted.
                      model-gap = model logit minus the raw rank-1 model logit;
                      raw rank 1 is therefore always +0.000.
@@ -612,21 +614,12 @@ def parse_beam(
     raw: str,
     *,
     vocabulary_size: int | None = None,
-) -> tuple[int, bool, tuple[tuple[int, int], ...], tuple[int, ...]] | None:
-    """Recognize deterministic and stochastic beam forms with root controls."""
+) -> tuple[int, tuple[tuple[int, int], ...], tuple[int, ...]] | None:
+    """Recognize deterministic beam forms with root controls."""
     parts = raw.strip().split()
-    if not parts or parts[0].lower() not in {"beam", "gbeam"}:
+    if not parts or parts[0].lower() != "beam":
         return None
-    short_stochastic = parts[0].lower() == "gbeam"
-    stochastic = short_stochastic
     cursor = 1
-    if (
-        not short_stochastic
-        and cursor < len(parts)
-        and parts[cursor].lower() == "stochastic"
-    ):
-        stochastic = True
-        cursor += 1
 
     width = 5
     if cursor < len(parts) and parts[cursor].isdecimal():
@@ -639,8 +632,7 @@ def parse_beam(
         option = parts[cursor].lower()
         if option not in {"skip", "add"}:
             raise EditorError(
-                "use beam [WIDTH] [skip RANKS] [add RANKS], beam stochastic "
-                "[WIDTH] [skip RANKS], or gbeam [WIDTH] [skip RANKS]"
+                "use beam [WIDTH] [skip RANKS] [add RANKS]"
             )
         if option in rank_options:
             raise EditorError(f"beam {option} may be specified only once")
@@ -656,8 +648,6 @@ def parse_beam(
 
     skip_ranges = rank_options.get("skip", ())
     add_ranges = rank_options.get("add", ())
-    if stochastic and add_ranges:
-        raise EditorError("beam add is available only in deterministic beam mode")
     for option, ranges in (("skip", skip_ranges), ("add", add_ranges)):
         if vocabulary_size is not None and any(
             last > vocabulary_size for _, last in ranges
@@ -682,7 +672,7 @@ def parse_beam(
     for rank in add_ranks:
         if any(first <= rank <= last for first, last in skip_ranges):
             raise EditorError(f"model rank {rank} cannot be both skipped and added")
-    return width, stochastic, skip_ranges, add_ranks
+    return width, skip_ranges, add_ranks
 
 
 def _beam_prefix_message(raw: str) -> str | None:
@@ -693,16 +683,12 @@ def _beam_prefix_message(raw: str) -> str | None:
     if len(parts) == 1:
         word = parts[0]
         if word == "g":
-            return "Continue typing gbeam or groups."
+            return "Continue typing groups."
         if len(word) >= 2:
-            for candidate in ("beam", "gbeam", "groups"):
+            for candidate in ("beam", "groups"):
                 if candidate.startswith(word) and candidate != word:
                     return f"Continue typing {candidate}."
-    if parts[0] == "beam" and len(parts) == 2:
-        option = parts[1]
-        if option and "stochastic".startswith(option) and option != "stochastic":
-            return "Finish typing stochastic, or enter a beam width."
-    if parts[0] in {"beam", "gbeam"}:
+    if parts[0] == "beam":
         option_prefixes = {
             "skip": {"s", "sk", "ski", "skip"},
             "add": {"a", "ad", "add"},
@@ -713,8 +699,6 @@ def _beam_prefix_message(raw: str) -> str | None:
         )
         if partial is not None:
             prefix = parts[:-1]
-            if prefix[0] == "beam" and len(prefix) > 1 and prefix[1] == "stochastic":
-                prefix = [prefix[0], *prefix[2:]]
             header_ok = len(prefix) in {1, 2} and (
                 len(prefix) == 1
                 or (prefix[1].isdecimal() and 1 <= int(prefix[1]) <= 100)
@@ -743,14 +727,12 @@ def parse_command(
     if beam is not None:
         (
             beam_width,
-            beam_stochastic,
             beam_skip_rank_ranges,
             beam_add_model_ranks,
         ) = beam
         return TeacherCommand(
             CommandKind.BEAM,
             beam_width=beam_width,
-            beam_stochastic=beam_stochastic,
             beam_skip_rank_ranges=beam_skip_rank_ranges,
             beam_add_model_ranks=beam_add_model_ranks,
         )
@@ -943,18 +925,40 @@ def parse_command(
             search_direction=parts[1],
             search_rows=rows,
         )
-    # Bare c / C reclaim column focus; context keeps `context`, `c N`, `c all`.
-    if command == "C" or lower in {"column-clear", "column-focus-clear"}:
-        return TeacherCommand(CommandKind.COLUMN_FOCUS, invoked_as="C")
-    if lower == "c" or lower in {"column-focus", "column-cycle"}:
-        return TeacherCommand(CommandKind.COLUMN_FOCUS, invoked_as=command)
-    if lower.startswith("overlay "):
-        from .candidate_columns import OVERLAYS
+    from .candidate_columns import OVERLAYS, OVERLAY_ALIASES
 
-        name = lower.split(maxsplit=1)[1].strip()
-        if name not in OVERLAYS or not OVERLAYS[name].wired:
-            raise EditorError("unknown overlay; use pct, decode_pct, logit, gap_k1, margin_neighbor, or z")
-        return TeacherCommand(CommandKind.OVERLAY_TOGGLE, overlay=name)
+    def overlay_name(value: str) -> str:
+        name = OVERLAY_ALIASES.get(value, value)
+        if name not in OVERLAYS:
+            raise EditorError("unknown overlay; use logit, diff, noise, or probability")
+        return name
+
+    if command == "C" or lower in {"column-clear", "columns none", "columns clear"}:
+        return TeacherCommand(CommandKind.COLUMN_CLEAR)
+    shortcuts = {"l": "logit", "L": "diff", "~": "noise", "%": "probability"}
+    if command in shortcuts:
+        return TeacherCommand(CommandKind.OVERLAY_TOGGLE, overlay=shortcuts[command])
+    if lower in {"logit", "logits", "logit-view", "diff", "noise", "pct", "probs",
+                 "probabilities", "probability-view"}:
+        name = {"logit-view": "logit", "probabilities": "probability",
+                "probability-view": "probability"}.get(lower, lower)
+        return TeacherCommand(CommandKind.OVERLAY_TOGGLE, overlay=overlay_name(name))
+    if lower == "columns":
+        return TeacherCommand(CommandKind.COLUMNS_SET)
+    if lower.startswith("columns "):
+        names = lower.split()[1:]
+        return TeacherCommand(
+            CommandKind.COLUMNS_SET,
+            column_overlays=tuple(dict.fromkeys(overlay_name(name) for name in names)),
+        )
+    if lower.startswith("overlay "):
+        parts = lower.split()
+        if len(parts) not in {2, 3} or (len(parts) == 3 and parts[2] not in {"on", "off"}):
+            raise EditorError("use overlay NAME [on|off]")
+        return TeacherCommand(
+            CommandKind.OVERLAY_TOGGLE, overlay=overlay_name(parts[1]),
+            overlay_enabled=(None if len(parts) == 2 else parts[2] == "on"),
+        )
     if lower == "context" or lower.startswith(("c ", "context ")):
         parts = command.split()
         if len(parts) > 2:
@@ -972,12 +976,6 @@ def parse_command(
         return TeacherCommand(CommandKind.CONTEXT, context_characters=characters)
     if command == "V" or lower in {"policy-column", "policy-columns", "policy-rank-column"}:
         return TeacherCommand(CommandKind.POLICY_COLUMN, invoked_as=command)
-    if command == "L":
-        return TeacherCommand(CommandKind.LOGIT_VIEW, invoked_as="L")
-    if lower in {"l", "logit", "logits", "logit-view"}:
-        return TeacherCommand(CommandKind.LOGIT_VIEW, invoked_as=command)
-    if command == "%" or lower in {"pct", "probs", "probabilities", "probability-view"}:
-        return TeacherCommand(CommandKind.PROBABILITY_VIEW, invoked_as=command)
     if lower in {"v", "policy-view", "policy-sort"}:
         return TeacherCommand(CommandKind.POLICY_VIEW, invoked_as=lower)
     if lower == "n" or lower.startswith("n "):
@@ -1041,7 +1039,7 @@ def interpret_command(
     ):
         return CommandInterpretation(raw, CommandState.INCOMPLETE, message="Type phrase text after the command.")
     if lower == "overlay":
-        return CommandInterpretation(raw, CommandState.INCOMPLETE, message="Type a wired overlay name.")
+        return CommandInterpretation(raw, CommandState.INCOMPLETE, message="Choose logit, diff, noise, or probability; optionally add on/off.")
     if lower == "draw":
         return CommandInterpretation(raw, CommandState.INCOMPLETE, message="Type a raw rank after draw.")
     chord_parts = stripped.split()

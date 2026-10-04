@@ -266,7 +266,6 @@ class ChoiceView(RequestView):
             sort_by_gumbel=state.sort_by_gumbel,
             logit_view=state.logit_view,
             show_model_probabilities=state.show_model_probabilities,
-            column_focus=state.column_focus,
             overlays=state.overlays,
             display_candidates=state.display_candidates,
             search_lens_active=state.search_lens_active,
@@ -989,7 +988,7 @@ class BeamView(RequestView):
             self.detail_scroll.page(-1 if name == "pageup" else 1)
         elif name == "backspace" and empty and not state.at_edge:
             self._submit(f"kill {self.selected_label}" if self.selected_label is not None else "k")
-        elif name == "p" and empty and not state.at_edge and not state.stochastic:
+        elif name == "p" and empty and not state.at_edge:
             self._submit("protect")
         elif name == "f" and empty and not state.at_edge:
             self._submit("families")
@@ -1016,16 +1015,13 @@ class BeamView(RequestView):
             rendered.append("(no retained branch)")
             return rendered
         rendered.append(f"STATE: {row.state} · SCORE: {row.score.replace('-', '−')}\n")
-        if state.stochastic:
-            model_logp = "—" if row.model_log_probability is None else f"{row.model_log_probability:.3f}"
-            rendered.append(f"G {row.score.replace('-', '−')} · log-p {model_logp}\n")
         model_rank = "—" if row.model_rank is None else str(row.model_rank)
         step_logp = (
             "—" if row.step_log_probability is None
             else f"{row.step_log_probability:.3f}".replace("-", "−")
         )
         rendered.append(f"Model rank: {model_rank} · Step log-p: {step_logp}\n")
-        if row.model_log_probability is not None and not state.stochastic:
+        if row.model_log_probability is not None:
             rendered.append(f"Model log-p: {row.model_log_probability:.3f}".replace("-", "−") + "\n")
         if row.family_metadata:
             rendered.append(row.family_metadata + "\n", style=ctx.styles("beam-family"))
@@ -1044,7 +1040,7 @@ class BeamView(RequestView):
             return "Enter resume · Esc return · F1" if state.at_edge else "↑↓ move · Enter · PgUp/Dn · F1"
         if state.at_edge:
             return "Enter/→ resume · Esc/Ctrl+D return\nCtrl+K commands · Ctrl+L output · F1 help"
-        protect = "p protect · " if not state.stochastic else ""
+        protect = "p protect · "
         if width >= self.SIDE_BY_SIDE_MIN_WIDTH:
             return (
                 "↑↓ select · ←/→ step · Enter commit · PgUp/Dn details · Backspace kill · "
@@ -1119,9 +1115,6 @@ class BeamView(RequestView):
             if row.protected:
                 marker = "◆" if marker == " " else ">◆"
             score = row.score.replace("-", "−")
-            if state.stochastic:
-                model_logp = "—" if row.model_log_probability is None else f"{row.model_log_probability:.3f}"
-                score = f"G {score} · log-p {model_logp}"
             continuation = row.continuation.replace("\n", " ↵ ")
             if selected:
                 focus = rank - 1

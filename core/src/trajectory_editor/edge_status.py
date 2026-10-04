@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from .core.sampler_config import SamplerConfig
 
 
@@ -10,9 +12,8 @@ def sampler_summary(config: SamplerConfig) -> str:
 
     summary = (
         f"temp={config.temperature:g} top_k={'none' if config.top_k is None else config.top_k} "
-        f"top_p={config.top_p:g} "
-        f"min_p={config.min_p:g} typical_p={config.typical_p:g} "
-        f"tfs_z={config.tail_free_z:g} draw={config.draw_kernel} "
+        f"min_gap={-math.log(config.min_p) if config.min_p > 0 else 'off'} draw={config.draw_kernel} "
+        f"selective_noise_k={'none' if config.selective_noise_k is None else config.selective_noise_k} "
         f"rep={config.repeat_penalty:g}/{config.repeat_last_n} "
         f"presence={config.presence_penalty:g} "
         f"frequency={config.frequency_penalty:g} seed={config.seed}"

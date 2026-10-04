@@ -23,10 +23,8 @@ from .sampling import DRAW_KERNELS, GUMBEL_NOISE_ADDRESSES, MAX_SEED, MIN_SEED
 CORE_SAMPLER_FIELDS = (
     "temperature",
     "top_k",
-    "top_p",
+    "selective_noise_k",
     "min_p",
-    "typical_p",
-    "tail_free_z",
     "draw_kernel",
     "gaussian_noise_std",
     "perturb_noise_std",
@@ -49,13 +47,13 @@ CORE_SAMPLER_FIELDS = (
 _UNFILTERED_VALUES = {
     "temperature": 1.0,
     "top_k": None,
-    "top_p": 1.0,
     "min_p": 0.0,
-    "typical_p": 1.0,
-    "tail_free_z": 1.0,
 }
 
 SAMPLER_ALIASES = {
+    "eligible_k": "top_k",
+    "eligible-k": "top_k",
+    "selective-noise-k": "selective_noise_k",
     "temp": "temperature",
     "rep": "repeat_penalty",
     "rep_pen": "repeat_penalty",
@@ -75,6 +73,14 @@ class _StoreTopK(argparse.Action):
         setattr(namespace, "_top_k_specified", True)
 
 
+class _StoreSelectiveNoiseK(argparse.Action):
+    """Retain explicit none when restoring a saved sampler."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        setattr(namespace, "_selective_noise_k_specified", True)
+
+
 class _StoreGumbelTopK(argparse.Action):
     """Store an optional Gumbel menu size and retain explicit ``none``."""
 
@@ -91,10 +97,6 @@ def add_core_sampler_arguments(
     sampling = parser.add_argument_group("sampling")
     for name, kind in (
         ("temperature", float),
-        ("top_p", float),
-        ("min_p", float),
-        ("typical_p", float),
-        ("tail_free_z", float),
         ("repeat_penalty", float),
         ("repeat_last_n", int),
         ("presence_penalty", float),
@@ -102,14 +104,28 @@ def add_core_sampler_arguments(
     ):
         sampling.add_argument("--" + name.replace("_", "-"), type=kind)
     sampling.add_argument(
-        "--top-k",
+        "--min-p", type=float,
+        help="logit-gap cutoff: keep scores within -log(min-p) of the best; 0 disables",
+    )
+    sampling.add_argument(
+        "--top-k", "--eligible-k",
+        dest="top_k",
         type=_parse_top_k,
         action=_StoreTopK,
         default=None,
         metavar="N|none",
-        help="keep the top N candidates; none disables top-k (default: 40)",
+        help="only the top N adjusted-logit candidates are eligible; none allows all (default: none)",
     )
     parser.set_defaults(_top_k_specified=False)
+    sampling.add_argument(
+        "--selective-noise-k",
+        type=_parse_top_k,
+        action=_StoreSelectiveNoiseK,
+        default=None,
+        metavar="N|none",
+        help="perturb only the top N eligible scores; other eligible scores stay unchanged",
+    )
+    parser.set_defaults(_selective_noise_k_specified=False)
     sampling.add_argument(
         "--unfiltered",
         action="store_true",
@@ -119,9 +135,9 @@ def add_core_sampler_arguments(
         "--draw-kernel",
         choices=DRAW_KERNELS,
         help=(
-            "candidate draw kernel (categorical, gumbel-max, gaussian-max, "
+            "candidate draw kernel (argmax, gumbel-max, gaussian-max, "
             "logistic-max, student-t-max, laplace-max, or uniform-max; "
-            "default: categorical)"
+            "default: argmax)"
         ),
     )
     sampling.add_argument(
@@ -294,6 +310,12 @@ def sampler_from_args(
                 if _top_k_was_specified(args)
                 else base.top_k
             )
+        elif name == "selective_noise_k":
+            values[name] = (
+                getattr(args, name, None)
+                if getattr(args, "_selective_noise_k_specified", False)
+                else base.selective_noise_k
+            )
         elif name == "gumbel_top_k":
             values[name] = (
                 getattr(args, name, None)
@@ -322,6 +344,10 @@ def sampler_overrides_present(args: argparse.Namespace) -> bool:
             if _top_k_was_specified(args):
                 return True
             continue
+        if name == "selective_noise_k":
+            if getattr(args, "_selective_noise_k_specified", False):
+                return True
+            continue
         if name == "gumbel_top_k":
             if _gumbel_top_k_was_specified(args):
                 return True
@@ -341,6 +367,10 @@ def sampler_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
     for name in CORE_SAMPLER_FIELDS:
         if name == "top_k":
             if _top_k_was_specified(args):
+                values[name] = getattr(args, name, None)
+            continue
+        if name == "selective_noise_k":
+            if getattr(args, "_selective_noise_k_specified", False):
                 values[name] = getattr(args, name, None)
             continue
         if name == "gumbel_top_k":
@@ -395,10 +425,10 @@ def sampler_override(current: SamplerConfig, raw: str) -> SamplerConfig:
         if key not in values or key in {"token_biases", "bias_groups"}:
             raise EditorError(f"unknown sampler field {key!r}")
         try:
-            if key in {"top_k", "gumbel_top_k"} and value.strip().lower() == "none":
+            if key in {"top_k", "gumbel_top_k", "selective_noise_k"} and value.strip().lower() == "none":
                 values[key] = None
             elif key in {
-                "top_k", "gumbel_top_k", "repeat_last_n", "cfg_prefix_tokens", "seed"
+                "top_k", "gumbel_top_k", "selective_noise_k", "repeat_last_n", "cfg_prefix_tokens", "seed"
             }:
                 values[key] = int(value)
             elif key == "draw_kernel":
