@@ -354,6 +354,23 @@ def run_session_roster(
                     args, io, session=session
                 ),
             )
+        except EditorError as exc:
+            learner = session.engine.learner
+            if learner is None or not getattr(session.engine.backend, "_learning_failed", False):
+                raise
+            io.write(str(exc))
+            while True:
+                response = io.prompt(PromptRequest(
+                    "Training failed; enter 'learn reset' to retain the trajectory and restore original weights, or 'quit'> "))
+                if response is None or response.strip() == "quit":
+                    roster.discard()
+                    return 1
+                if response.strip() == "learn reset":
+                    io.write(learner.command("learn reset"))
+                    pending_tape = None
+                    break
+                io.write("Inference is blocked; enter learn reset or quit.")
+            continue
         except EdgeRequested:
             pending_tape = None
             action, value = session_edge_menu(io, roster, store=store)
@@ -485,6 +502,11 @@ def run_session_roster(
             except EditorError as exc:
                 io.write(str(exc))
             continue
+        if session.engine.learner is not None and action in {
+            "switch-saved", "save", "save-family", "spr", "replay",
+        }:
+            io.write("Saved learning replay is unsupported with online SGD; use export PATH for a trajectory and diagnostics artifact.")
+            continue
         if action == "switch-saved":
             if store is None or load_saved_session is None:
                 io.write("Loading a saved episode is not available here.")
@@ -511,9 +533,26 @@ def run_session_roster(
         if action == "export":
             session = roster.active_session
             try:
-                export_live_teacher_tape(session, value)
+                if session.engine.learner is not None:
+                    import json
+                    learner = session.engine.learner
+                    Path(value).write_text(json.dumps({
+                        "format": "online-sgd-experiment-v1",
+                        "replay_supported": False,
+                        "prompt": session.prompt,
+                        "token_ids": session.engine.token_ids,
+                        "text": session.engine.text,
+                        "terminal_token_id": session.engine.terminal_token_id,
+                        "terminal_reason": session.engine.terminal_reason,
+                        "backend": backend_provenance,
+                        "learning_status": json.loads(learner.command("learn status")),
+                        "learning_events": learner.events,
+                        "actions": [step.action.to_dict() for step in session.history_tape],
+                    }, indent=2) + "\n", encoding="utf-8")
+                else:
+                    export_live_teacher_tape(session, value)
                 io.write(f"Exported selected branch to {value}.")
-            except EditorError as exc:
+            except (EditorError, OSError) as exc:
                 io.write(str(exc))
             pending_tape = ReplayPlan()
             continue

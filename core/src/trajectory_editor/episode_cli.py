@@ -351,6 +351,10 @@ def build_parser(
     llama.add_argument("--no-mmap", action="store_true")
     llama.add_argument("--use-mlock", action="store_true")
 
+    learning = parser.add_argument_group("Episode-local online SGD")
+    learning.add_argument("--online-sgd", action="store_true")
+    learning.add_argument("--online-lr", type=float, default=1e-5)
+    learning.add_argument("--online-steps", type=int, default=1)
     transformers = parser.add_argument_group("Transformers")
     transformers.add_argument("--transformers-device", default="auto")
     transformers.add_argument(
@@ -433,6 +437,13 @@ def main(
         selection = _select_launch_source(args)
         _validate_prompt_source(args, selection)
         teacher_tape = selection.teacher_tape
+        if args.online_sgd:
+            from .online_learning import LearningConfig
+            LearningConfig(args.online_lr, args.online_steps).validate()
+            if args.backend != "transformers":
+                raise EditorError("--online-sgd requires --backend transformers")
+            if selection.kind != "new" or teacher_tape is not None:
+                raise EditorError("online SGD supports new linear episodes only; replay/resume/fork/teacher tapes are unsupported")
         workspace_required = {
             "--resume": args.resume,
             "--replay": args.replay,

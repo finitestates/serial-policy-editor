@@ -13,6 +13,7 @@ from .core.ui import EditAction, InsertMode
 
 
 class CommandKind(str, Enum):
+    LEARN = "learn"
     CHORD = "chord"
     BEAM = "beam"
     BIAS = "bias"
@@ -96,6 +97,7 @@ class TeacherCommand:
     sampler_text: str | None = None
     reroll_seed: int | None = None
     draw_raw_rank: int | None = None
+    learning_text: str | None = None
 
 
 class CommandState(str, Enum):
@@ -219,6 +221,10 @@ HELP_TEXT = """Commands:
   e! | eog!          commit a teacher-selected EOG immediately
   q | finish         open the live edge menu
   ?                 show this help
+
+Online SGD (requires --online-sgd): learn status, learn reset,
+learn steps=N (0 pauses automatic updates), learn lr=X, teach last steps=N.
+Rewind, fork, replay, beam, chord, and switching are unsupported in this mode.
 
 Structured short commands may omit separating spaces: h5, h.5, h|5,
 f-5, m10, ms+10, ms-10, and c900 are equivalent to their spaced forms. Text-bearing
@@ -724,6 +730,11 @@ def parse_command(
     vocabulary_size: int | None = None,
     menu_page_rows: int | None = None,
 ) -> TeacherCommand:
+    if raw.strip().startswith(("learn", "teach")):
+        text = raw.strip()
+        if not re.fullmatch(r"(?:learn (?:status|reset|steps=\d+|lr=\S+)|teach last steps=\d+)", text):
+            raise EditorError("use learn status/reset, learn steps=N/lr=X, or teach last steps=N")
+        return TeacherCommand(CommandKind.LEARN, learning_text=text)
     beam = parse_beam(raw, vocabulary_size=vocabulary_size)
     if beam is not None:
         (

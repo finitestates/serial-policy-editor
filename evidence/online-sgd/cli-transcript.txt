@@ -1,0 +1,220 @@
+Loading model with transformers: /tmp/online-sgd-final/checkpoint ...
+Model loaded.
+
+========================================================================
+Step 0 | context tail: ContextText(character_count=1)
+Argmax: 'P' (id=2)
+
+  rank  token-id  text
+     1         2  'P'
+     2         7  'ghost'
+     3         3  'red'
+     4         6  'house'
+     5         4  'blue'
+     6         1  '<eos>' [END]
+     7         5  'green'
+     8         0  ''
+
+Actions: accept | rank | chord RANK RANK... | t TEXT | x TEXT | h [N] | h . [N] | h | [N] | [ / ] review | f [N|-N] | m [N] | /TERM | ms [+|- [N]] | l logits / L diff / ~ noise / % probability / C clear | columns NAMES | context [N|all] | v order (model / policy / Gumbel) | V policy columns | l logits / L diff | ~ noise / % softmax | n [note-before] | p [note-after] | e | e! | q | ?
+
+Teacher action> ONLINE SGD
+{"corrections": 0, "lr": 0.05, "optimizer_steps": 0, "recent_events": [], "steps": 3, "weight_revision": 1}
+
+========================================================================
+Step 0 | context tail: ContextText(character_count=1)
+Argmax: 'P' (id=2)
+
+  rank  token-id  text
+     1         2  'P'
+     2         7  'ghost'
+     3         3  'red'
+     4         6  'house'
+     5         4  'blue'
+     6         1  '<eos>' [END]
+     7         5  'green'
+     8         0  ''
+
+Actions: accept | rank | chord RANK RANK... | t TEXT | x TEXT | h [N] | h . [N] | h | [N] | [ / ] review | f [N|-N] | m [N] | /TERM | ms [+|- [N]] | l logits / L diff / ~ noise / % probability / C clear | columns NAMES | context [N|all] | v order (model / policy / Gumbel) | V policy columns | l logits / L diff | ~ noise / % softmax | n [note-before] | p [note-after] | e | e! | q | ?
+
+Teacher action> [online SGD] 3 steps, loss 2.087945 -> 1.342129, gradient 2.024765, revision 4
+
+========================================================================
+Step 2 | context tail: ContextText(character_count=10)
+Argmax: 'blue' (id=4)
+
+  rank  token-id  text
+     1         4  'blue'
+     2         3  'red'
+     3         5  'green'
+     4         1  '<eos>' [END]
+     5         2  'P'
+     6         7  'ghost'
+     7         6  'house'
+     8         0  ''
+
+Actions: accept | rank | chord RANK RANK... | t TEXT | x TEXT | h [N] | h . [N] | h | [N] | [ / ] review | f [N|-N] | m [N] | /TERM | ms [+|- [N]] | l logits / L diff / ~ noise / % probability / C clear | columns NAMES | context [N|all] | v order (model / policy / Gumbel) | V policy columns | l logits / L diff | ~ noise / % softmax | n [note-before] | p [note-after] | e | e! | q | ?
+
+Teacher action> ONLINE SGD
+{"corrections": 1, "lr": 0.05, "optimizer_steps": 3, "recent_events": [{"boundary": 0, "corrected_token_ids": [3, 4], "gradient_norms": [4.629664897918701, 2.6431469917297363, 2.0247654914855957], "loss_after": 1.3421287536621094, "loss_before": 2.087944984436035, "losses": [2.087944984436035, 1.7933515310287476, 1.5285313129425049], "lr": 0.05, "prefix_token_ids": [2], "proposal_token_id": 2, "steps": 3, "weight_revision": 4}], "steps": 3, "weight_revision": 4}
+
+========================================================================
+Step 2 | context tail: ContextText(character_count=10)
+Argmax: 'blue' (id=4)
+
+  rank  token-id  text
+     1         4  'blue'
+     2         3  'red'
+     3         5  'green'
+     4         1  '<eos>' [END]
+     5         2  'P'
+     6         7  'ghost'
+     7         6  'house'
+     8         0  ''
+
+Actions: accept | rank | chord RANK RANK... | t TEXT | x TEXT | h [N] | h . [N] | h | [N] | [ / ] review | f [N|-N] | m [N] | /TERM | ms [+|- [N]] | l logits / L diff / ~ noise / % probability / C clear | columns NAMES | context [N|all] | v order (model / policy / Gumbel) | V policy columns | l logits / L diff | ~ noise / % softmax | n [note-before] | p [note-after] | e | e! | q | ?
+
+Teacher action> ONLINE SGD
+{"boundary": 0, "corrected_token_ids": [3, 4], "gradient_norms": [1.7990267276763916, 1.68446683883667, 1.9624954462051392, 3.547147274017334, 2.417818307876587], "loss_after": 0.8472448587417603, "loss_before": 1.3421287536621094, "losses": [1.3421287536621094, 1.1936986446380615, 1.0762836933135986, 1.047788143157959, 1.0169177055358887], "lr": 0.05, "prefix_token_ids": [2], "proposal_token_id": 2, "steps": 5, "weight_revision": 9}
+
+========================================================================
+Step 2 | context tail: ContextText(character_count=10)
+Argmax: 'blue' (id=4)
+
+  rank  token-id  text
+     1         4  'blue'
+     2         3  'red'
+     3         5  'green'
+     4         1  '<eos>' [END]
+     5         2  'P'
+     6         0  ''
+     7         7  'ghost'
+     8         6  'house'
+
+Actions: accept | rank | chord RANK RANK... | t TEXT | x TEXT | h [N] | h . [N] | h | [N] | [ / ] review | f [N|-N] | m [N] | /TERM | ms [+|- [N]] | l logits / L diff / ~ noise / % probability / C clear | columns NAMES | context [N|all] | v order (model / policy / Gumbel) | V policy columns | l logits / L diff | ~ noise / % softmax | n [note-before] | p [note-after] | e | e! | q | ?
+
+Teacher action> ONLINE SGD
+{"corrections": 1, "lr": 0.05, "optimizer_steps": 8, "recent_events": [{"boundary": 0, "corrected_token_ids": [3, 4], "gradient_norms": [4.629664897918701, 2.6431469917297363, 2.0247654914855957], "loss_after": 1.3421287536621094, "loss_before": 2.087944984436035, "losses": [2.087944984436035, 1.7933515310287476, 1.5285313129425049], "lr": 0.05, "prefix_token_ids": [2], "proposal_token_id": 2, "steps": 3, "weight_revision": 4}, {"boundary": 0, "corrected_token_ids": [3, 4], "gradient_norms": [1.7990267276763916, 1.68446683883667, 1.9624954462051392, 3.547147274017334, 2.417818307876587], "loss_after": 0.8472448587417603, "loss_before": 1.3421287536621094, "losses": [1.3421287536621094, 1.1936986446380615, 1.0762836933135986, 1.047788143157959, 1.0169177055358887], "lr": 0.05, "prefix_token_ids": [2], "proposal_token_id": 2, "steps": 5, "weight_revision": 9}], "steps": 3, "weight_revision": 9}
+
+========================================================================
+Step 2 | context tail: ContextText(character_count=10)
+Argmax: 'blue' (id=4)
+
+  rank  token-id  text
+     1         4  'blue'
+     2         3  'red'
+     3         5  'green'
+     4         1  '<eos>' [END]
+     5         2  'P'
+     6         0  ''
+     7         7  'ghost'
+     8         6  'house'
+
+Actions: accept | rank | chord RANK RANK... | t TEXT | x TEXT | h [N] | h . [N] | h | [N] | [ / ] review | f [N|-N] | m [N] | /TERM | ms [+|- [N]] | l logits / L diff / ~ noise / % probability / C clear | columns NAMES | context [N|all] | v order (model / policy / Gumbel) | V policy columns | l logits / L diff | ~ noise / % softmax | n [note-before] | p [note-after] | e | e! | q | ?
+
+Teacher action> Live branch 1 @ boundary 2 · temp=0 top_k=none min_gap=off draw=argmax selective_noise_k=none rep=1/64 presence=0 frequency=0 seed=12345
+[branches] show retained live branches
+[#N] switch to any retained root or branch
+[switch N] compatible branch-switch alias
+[new TEXT] start an unrelated prompt root
+[rewind N] trim this branch back to token N
+[c / continue] return to teacher decisions
+[s key=value / JSON] change sampler settings; changes are recorded
+[reroll [SEED]] replace the draw seed; recorded on the tape
+[f N] fork at boundary N
+[fm] show the fork map and choose a boundary
+[export FILE] write the portable tape (bare NAME → ./NAME.jsonl)
+[save [WORKSPACE [ID]]] materialize this branch (default: current workspace or episodes.sqlite3)
+[save-family [WORKSPACE [ROOT_ID]]] materialize this family (same workspace default)
+[e / end] end this branch and show its text
+[q / quit] discard the whole live session
+EDGE> Exported selected branch to /tmp/online-sgd-final/cli-experiment.json.
+Live branch 1 @ boundary 2 · temp=0 top_k=none min_gap=off draw=argmax selective_noise_k=none rep=1/64 presence=0 frequency=0 seed=12345
+[branches] show retained live branches
+[#N] switch to any retained root or branch
+[switch N] compatible branch-switch alias
+[new TEXT] start an unrelated prompt root
+[rewind N] trim this branch back to token N
+[c / continue] return to teacher decisions
+[s key=value / JSON] change sampler settings; changes are recorded
+[reroll [SEED]] replace the draw seed; recorded on the tape
+[f N] fork at boundary N
+[fm] show the fork map and choose a boundary
+[export FILE] write the portable tape (bare NAME → ./NAME.jsonl)
+[save [WORKSPACE [ID]]] materialize this branch (default: current workspace or episodes.sqlite3)
+[save-family [WORKSPACE [ROOT_ID]]] materialize this family (same workspace default)
+[e / end] end this branch and show its text
+[q / quit] discard the whole live session
+EDGE> 
+========================================================================
+Step 2 | context tail: ContextText(character_count=10)
+Argmax: 'blue' (id=4)
+
+  rank  token-id  text
+     1         4  'blue'
+     2         3  'red'
+     3         5  'green'
+     4         1  '<eos>' [END]
+     5         2  'P'
+     6         0  ''
+     7         7  'ghost'
+     8         6  'house'
+
+Actions: accept | rank | chord RANK RANK... | t TEXT | x TEXT | h [N] | h . [N] | h | [N] | [ / ] review | f [N|-N] | m [N] | /TERM | ms [+|- [N]] | l logits / L diff / ~ noise / % probability / C clear | columns NAMES | context [N|all] | v order (model / policy / Gumbel) | V policy columns | l logits / L diff | ~ noise / % softmax | n [note-before] | p [note-after] | e | e! | q | ?
+
+Teacher action> ONLINE SGD
+Original episode weights restored; token trajectory retained.
+
+========================================================================
+Step 2 | context tail: ContextText(character_count=10)
+Argmax: 'blue' (id=4)
+
+  rank  token-id  text
+     1         4  'blue'
+     2         6  'house'
+     3         1  '<eos>' [END]
+     4         5  'green'
+     5         3  'red'
+     6         0  ''
+     7         2  'P'
+     8         7  'ghost'
+
+Actions: accept | rank | chord RANK RANK... | t TEXT | x TEXT | h [N] | h . [N] | h | [N] | [ / ] review | f [N|-N] | m [N] | /TERM | ms [+|- [N]] | l logits / L diff / ~ noise / % probability / C clear | columns NAMES | context [N|all] | v order (model / policy / Gumbel) | V policy columns | l logits / L diff | ~ noise / % softmax | n [note-before] | p [note-after] | e | e! | q | ?
+
+Teacher action> ONLINE SGD
+{"corrections": 0, "lr": 0.05, "optimizer_steps": 0, "recent_events": [], "steps": 3, "weight_revision": 10}
+
+========================================================================
+Step 2 | context tail: ContextText(character_count=10)
+Argmax: 'blue' (id=4)
+
+  rank  token-id  text
+     1         4  'blue'
+     2         6  'house'
+     3         1  '<eos>' [END]
+     4         5  'green'
+     5         3  'red'
+     6         0  ''
+     7         2  'P'
+     8         7  'ghost'
+
+Actions: accept | rank | chord RANK RANK... | t TEXT | x TEXT | h [N] | h . [N] | h | [N] | [ / ] review | f [N|-N] | m [N] | /TERM | ms [+|- [N]] | l logits / L diff / ~ noise / % probability / C clear | columns NAMES | context [N|all] | v order (model / policy / Gumbel) | V policy columns | l logits / L diff | ~ noise / % softmax | n [note-before] | p [note-after] | e | e! | q | ?
+
+Teacher action> Live branch 1 @ boundary 2 · temp=0 top_k=none min_gap=off draw=argmax selective_noise_k=none rep=1/64 presence=0 frequency=0 seed=12345
+[branches] show retained live branches
+[#N] switch to any retained root or branch
+[switch N] compatible branch-switch alias
+[new TEXT] start an unrelated prompt root
+[rewind N] trim this branch back to token N
+[c / continue] return to teacher decisions
+[s key=value / JSON] change sampler settings; changes are recorded
+[reroll [SEED]] replace the draw seed; recorded on the tape
+[f N] fork at boundary N
+[fm] show the fork map and choose a boundary
+[export FILE] write the portable tape (bare NAME → ./NAME.jsonl)
+[save [WORKSPACE [ID]]] materialize this branch (default: current workspace or episodes.sqlite3)
+[save-family [WORKSPACE [ROOT_ID]]] materialize this family (same workspace default)
+[e / end] end this branch and show its text
+[q / quit] discard the whole live session
+EDGE> 
+Loading weights:   0%|          | 0/16 [00:00<?, ?it/s]
+Loading weights: 100%|██████████| 16/16 [00:00<00:00, 17521.90it/s]

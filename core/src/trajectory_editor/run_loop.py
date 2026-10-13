@@ -138,6 +138,8 @@ def run_plan(
             # A policy may edit steering while choosing. Capture the actual
             # surface that the action will use.
             target.engine.observe()
+            learner = getattr(target.engine, "learner", None)
+            event_count = len(learner.events) if learner is not None else 0
             try:
                 outcome = target.generate(
                     action,
@@ -153,6 +155,12 @@ def run_plan(
                 live_actions += 1
                 continue
             outcomes.append(outcome)
+            learner = getattr(target.engine, "learner", None)
+            if learner is not None and len(learner.events) > event_count:
+                io = getattr(live_policy, "io", None)
+                if io is not None and outcome.action.kind in {"write", "select-raw-rank", "end-generation", "force-phrase"}:
+                    event = learner.events[-1]
+                    io.write(f"[online SGD] {event['steps']} steps, loss {event['loss_before']:.6f} -> {event['loss_after']:.6f}, gradient {event['gradient_norms'][-1]:.6f}, revision {event['weight_revision']}")
             live_actions += 1
     except InstructionRejected as exc:
         handoff_reason = str(exc)

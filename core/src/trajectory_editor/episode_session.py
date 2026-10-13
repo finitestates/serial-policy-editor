@@ -303,6 +303,10 @@ class LiveSession:
         return captured
 
     def _activate(self, branch_id: str) -> EpisodeEngine:
+        if self._engine.learner is not None:
+            self._engine.learner.require_owner()
+            if branch_id != self._active_id or self._detached:
+                raise EditorError("branch switching/reactivation is unsupported with online SGD")
         self._require_session()
         if branch_id == self._active_id and not self._detached:
             return self._engine
@@ -330,6 +334,10 @@ class LiveSession:
         return engine
 
     def activate(self, branch_id: str) -> EpisodeEngine:
+        if self._engine.learner is not None:
+            self._engine.learner.require_owner()
+            if branch_id != self._active_id:
+                raise EditorError("branch switching is unsupported with online SGD")
         """Reactivate a retained branch on this session's one backend."""
         return self._activate(branch_id)
 
@@ -477,12 +485,19 @@ class LiveSession:
         engine = self._activate(branch_id)
         resolved_action = Accept() if action is None else action
         state = self._branches[branch_id]
-        outcome = engine.apply(
-            resolved_action,
-            expectation=expectation,
-            divergence_policy=divergence_policy,
-            replay=replay,
-        )
+        learning_error = None
+        try:
+            outcome = engine.apply(
+                resolved_action,
+                expectation=expectation,
+                divergence_policy=divergence_policy,
+                replay=replay,
+            )
+        except EditorError as exc:
+            outcome = getattr(exc, "committed_outcome", None)
+            if outcome is None:
+                raise
+            learning_error = exc
         expectation_to_record = (
             expectation if replay and expectation is not None else outcome.expectation()
         )
@@ -499,6 +514,8 @@ class LiveSession:
             status=status,
             backend_cache_snapshot=None,
         )
+        if learning_error is not None:
+            raise learning_error
         return outcome
 
     def adopt_promoted_outcomes(
@@ -539,6 +556,8 @@ class LiveSession:
         )
 
     def rewind(self, boundary: int, *, _branch_id: str | None = None) -> RewindState:
+        if self._engine.learner is not None:
+            raise EditorError("rewind/fork is unsupported with online SGD")
         branch_id = self._active_id if _branch_id is None else _branch_id
         self._require_live_branch(branch_id)
         engine = self._activate(branch_id)
@@ -583,6 +602,8 @@ class LiveSession:
         _branch_id: str | None = None,
     ) -> "LiveBranch":
         """Create a child state record on this session's active backend."""
+        if self._engine.learner is not None:
+            raise EditorError("rewind/fork is unsupported with online SGD")
         source_id = self._active_id if _branch_id is None else _branch_id
         self._require_live_branch(source_id)
         engine = self._activate(source_id)
@@ -626,6 +647,10 @@ class LiveSession:
         """Forget every branch and invalidate every outstanding branch handle."""
         if self._discarded:
             return
+        learner = self._engine.learner
+        if learner is not None and self._backend._learning_owner is learner:
+            self._backend.restore_learning_base()
+            self._backend._learning_owner = None
         self._branches.clear()
         self._rewinds.clear()
         self._forks.clear()
@@ -842,6 +867,8 @@ class LiveSessionRoster:
         raise EditorError(f"unknown live branch {reference!r}")
 
     def switch(self, reference: str | int) -> LiveSession:
+        if self.active_session._engine.learner is not None:
+            raise EditorError("episode switching is unsupported with online SGD")
         entry = self.resolve(reference)
         current = self.active_session
         if current is not entry.session:

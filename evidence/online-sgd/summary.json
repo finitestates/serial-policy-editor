@@ -1,0 +1,55 @@
+{
+  "seed": 19,
+  "model": "random GPT-2, 4016 parameters, float32 CPU",
+  "torch": "2.14.1+cpu",
+  "comparison": {
+    "frozen": {
+      "original_proposal": 2,
+      "corrected_prefix_red_probability": 0.12847012281417847,
+      "original_prefix_logits_changed": false,
+      "continuation_proposal": 4,
+      "learning_events": []
+    },
+    "online": {
+      "original_proposal": 2,
+      "corrected_prefix_red_probability": 0.3304872214794159,
+      "original_prefix_logits_changed": true,
+      "continuation_proposal": 4,
+      "learning_events": [
+        {
+          "prefix_token_ids": [
+            2
+          ],
+          "corrected_token_ids": [
+            3,
+            4
+          ],
+          "proposal_token_id": 2,
+          "boundary": 0,
+          "lr": 0.05,
+          "steps": 5,
+          "loss_before": 2.087944984436035,
+          "loss_after": 1.0762836933135986,
+          "losses": [
+            2.087944984436035,
+            1.7933515310287476,
+            1.5285313129425049,
+            1.3421287536621094,
+            1.1936986446380615
+          ],
+          "gradient_norms": [
+            4.629664897918701,
+            2.6431469917297363,
+            2.0247654914855957,
+            1.7990267276763916,
+            1.68446683883667
+          ],
+          "weight_revision": 6
+        }
+      ]
+    }
+  },
+  "cli_exit_code": 0,
+  "cli_export": "/tmp/online-sgd-final/cli-experiment.json",
+  "interpretation": "Tests local update mechanics only; no evidence of fewer future interventions."
+}

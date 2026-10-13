@@ -1,0 +1,190 @@
+{
+  "format": "online-sgd-experiment-v1",
+  "replay_supported": false,
+  "prompt": "P",
+  "token_ids": [
+    2,
+    3,
+    4
+  ],
+  "text": "P red blue",
+  "terminal_token_id": null,
+  "terminal_reason": null,
+  "backend": {
+    "backend": "transformers",
+    "adapter": "huggingface-transformers-causal-lm",
+    "model_path": "/tmp/online-sgd-final/checkpoint",
+    "vocabulary_size": 8,
+    "context_limit": 64,
+    "eog_token_ids": [
+      1
+    ],
+    "eog_source": "model.generation_config.eos_token_id",
+    "model_type": "gpt2",
+    "wrapper_model_type": "gpt2",
+    "hidden_state_width": 16,
+    "hidden_state_layer_count": 1,
+    "hidden_state_layer_types": [
+      "decoder"
+    ],
+    "transformers_version": "5.19.0",
+    "torch_version": "2.14.1+cpu",
+    "numpy_version": "2.5.4",
+    "python_version": "3.14.4 (main, Aug 20 2026, 10:41:58) [GCC 15.2.0]",
+    "platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.43",
+    "tokenizer_id": "601718a321c76cde2c0b7ae8b83b4416c9085632deee7199e9c05a876b862b78",
+    "runtime_configuration": {
+      "device": "cpu",
+      "dtype": "float32",
+      "trust_remote_code": false,
+      "use_fast_tokenizer": true,
+      "device_map": null,
+      "attention_implementation": null,
+      "quantization_method": "none",
+      "bnb_4bit_compute_dtype": "float16",
+      "bnb_4bit_quant_type": "nf4",
+      "bnb_4bit_use_double_quant": false,
+      "torch_num_threads": 1,
+      "torch_num_interop_threads": null,
+      "deterministic_algorithms": null,
+      "float32_matmul_precision": null,
+      "effective_device": "cpu",
+      "loaded_dtype": "torch.float32"
+    },
+    "modalities": [
+      "text"
+    ],
+    "model_sha256": "0b5002e38c62850793ea3e91094b0f7edbe68ce7057473d07d3c0c18ee81acb5",
+    "model_id": "0b5002e38c62850793ea3e91094b0f7edbe68ce7057473d07d3c0c18ee81acb5"
+  },
+  "learning_status": {
+    "corrections": 1,
+    "lr": 0.05,
+    "optimizer_steps": 8,
+    "recent_events": [
+      {
+        "boundary": 0,
+        "corrected_token_ids": [
+          3,
+          4
+        ],
+        "gradient_norms": [
+          4.629664897918701,
+          2.6431469917297363,
+          2.0247654914855957
+        ],
+        "loss_after": 1.3421287536621094,
+        "loss_before": 2.087944984436035,
+        "losses": [
+          2.087944984436035,
+          1.7933515310287476,
+          1.5285313129425049
+        ],
+        "lr": 0.05,
+        "prefix_token_ids": [
+          2
+        ],
+        "proposal_token_id": 2,
+        "steps": 3,
+        "weight_revision": 4
+      },
+      {
+        "boundary": 0,
+        "corrected_token_ids": [
+          3,
+          4
+        ],
+        "gradient_norms": [
+          1.7990267276763916,
+          1.68446683883667,
+          1.9624954462051392,
+          3.547147274017334,
+          2.417818307876587
+        ],
+        "loss_after": 0.8472448587417603,
+        "loss_before": 1.3421287536621094,
+        "losses": [
+          1.3421287536621094,
+          1.1936986446380615,
+          1.0762836933135986,
+          1.047788143157959,
+          1.0169177055358887
+        ],
+        "lr": 0.05,
+        "prefix_token_ids": [
+          2
+        ],
+        "proposal_token_id": 2,
+        "steps": 5,
+        "weight_revision": 9
+      }
+    ],
+    "steps": 3,
+    "weight_revision": 9
+  },
+  "learning_events": [
+    {
+      "prefix_token_ids": [
+        2
+      ],
+      "corrected_token_ids": [
+        3,
+        4
+      ],
+      "proposal_token_id": 2,
+      "boundary": 0,
+      "lr": 0.05,
+      "steps": 3,
+      "loss_before": 2.087944984436035,
+      "loss_after": 1.3421287536621094,
+      "losses": [
+        2.087944984436035,
+        1.7933515310287476,
+        1.5285313129425049
+      ],
+      "gradient_norms": [
+        4.629664897918701,
+        2.6431469917297363,
+        2.0247654914855957
+      ],
+      "weight_revision": 4
+    },
+    {
+      "prefix_token_ids": [
+        2
+      ],
+      "corrected_token_ids": [
+        3,
+        4
+      ],
+      "proposal_token_id": 2,
+      "boundary": 0,
+      "lr": 0.05,
+      "steps": 5,
+      "loss_before": 1.3421287536621094,
+      "loss_after": 0.8472448587417603,
+      "losses": [
+        1.3421287536621094,
+        1.1936986446380615,
+        1.0762836933135986,
+        1.047788143157959,
+        1.0169177055358887
+      ],
+      "gradient_norms": [
+        1.7990267276763916,
+        1.68446683883667,
+        1.9624954462051392,
+        3.547147274017334,
+        2.417818307876587
+      ],
+      "weight_revision": 9
+    }
+  ],
+  "actions": [
+    {
+      "kind": "write",
+      "text": "red blue",
+      "mode": "exact"
+    }
+  ]
+}

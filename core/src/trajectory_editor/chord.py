@@ -72,6 +72,8 @@ class Chord:
     """Owns preview engines; the episode engine and histories stay untouched."""
 
     def __init__(self, engine: EpisodeEngine, ranks: tuple[int, ...]) -> None:
+        if engine.learner is not None:
+            raise EditorError("beam/chord is unsupported with online SGD")
         if engine.ended:
             raise EditorError("chord requires a live decision boundary")
         if engine._speculative_accept_prefix is not None:

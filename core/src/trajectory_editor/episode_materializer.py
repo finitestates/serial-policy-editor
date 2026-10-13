@@ -26,6 +26,8 @@ def materialize_live_branch(
 ) -> str:
     """Write one canonical live branch as an independent durable episode."""
 
+    if session.engine.learner is not None:
+        raise EditorError("saving replayable episodes is unsupported with online SGD; use experiment export")
     if state.stream_fingerprint is None:
         raise EditorError("the selected branch has no stream fingerprint to save")
     identifier = store.create_episode(
@@ -74,6 +76,8 @@ def save_live_branch(
 ) -> str:
     """Materialize only the currently selected branch after explicit save."""
 
+    if session.engine.learner is not None:
+        raise EditorError("saving replayable episodes is unsupported with online SGD; use experiment export")
     state = session.branch_state()
     with EpisodeStore(workspace) as store:
         parent_id = state.identity.parent_id
@@ -101,6 +105,8 @@ def save_live_family(
 ) -> dict[str, str]:
     """Materialize every retained live branch and map its durable lineage."""
 
+    if session.engine.learner is not None:
+        raise EditorError("saving replayable episodes is unsupported with online SGD; use experiment export")
     states = dict(session.branch_states)
     pending = dict(states)
     identifiers: dict[str, str] = {}

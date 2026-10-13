@@ -10,8 +10,10 @@ import importlib.util
 import hashlib
 import inspect
 import json
+import math
 import platform
 import sys
+import weakref
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -586,6 +588,99 @@ class TransformersBackend:
         self._model_sha256_cache: str | None = None
         self._tokenizer_id_cache = _transformers_tokenizer_id(self._tokenizer)
 
+    def enable_online_learning(self, config):
+        from .online_learning import LearningConfig
+        config.validate()
+        torch = self._torch
+        parameters = list(self._model.parameters())
+        if (self.settings.quantization_method != "none" or self.settings.device_map is not None
+                or _is_multimodal_config(self._model.config)
+                or not parameters or any(p.dtype != torch.float32 for p in parameters)):
+            raise EditorError("online SGD requires an unquantized float32 causal LM without device_map or multimodal wrappers")
+        if any(not p.requires_grad for p in parameters):
+            raise EditorError("online SGD requires all model parameters to be trainable")
+        self.online_config = LearningConfig(config.lr, config.steps)
+        self._learning_base = {k: v.detach().cpu().clone() for k, v in self._model.state_dict().items()}
+        self.weight_revision = 0
+        self._learning_owner = None
+        self._learning_failed = False
+        self._invalidate_learning_cache()
+
+    def _invalidate_learning_cache(self):
+        for batch in getattr(self, "_learning_batches", ()):
+            batch.close()
+        self._past_key_values = None
+        self._cache_active = False
+        self._last_logits = None
+        self._speculation_prefix = None
+        self._speculation_logits = None
+        self._activation_logit_cache.clear()
+
+    def restore_learning_base(self):
+        self._model.load_state_dict(self._learning_base)
+        self._model.zero_grad(set_to_none=True)
+        self._model.eval()
+        self.weight_revision += 1
+        self._learning_failed = False
+        self._invalidate_learning_cache()
+
+    def start_learning_episode(self, owner):
+        self.restore_learning_base()
+        self._learning_owner = owner
+
+    def supervised_update(self, prefix, corrected, lr, steps):
+        from .online_learning import LearningConfig
+        LearningConfig(lr, steps).validate()
+        if steps < 1 or not prefix or not corrected:
+            raise EditorError("supervision requires a nonempty prefix, correction, and positive steps")
+        if self._learning_failed:
+            raise EditorError("online training failed; use learn reset before continuing")
+        self._validate_tokens(list(prefix) + list(corrected))
+        if self._context_limit and len(prefix) + len(corrected) - 1 > self._context_limit:
+            raise EditorError("supervised sequence exceeds model context limit")
+        torch = self._torch
+        self._model.eval()
+        losses = []
+        norms = []
+        self._invalidate_learning_cache()
+        try:
+            # Never reuse inference-mode tensors. Row len(prefix)-1 predicts
+            # corrected[0]; the following rows teacher-force the entire span.
+            with torch.inference_mode(False), torch.enable_grad():
+                inputs = torch.tensor([list(prefix) + list(corrected[:-1])],
+                                      dtype=torch.long, device=self._input_device)
+                targets = torch.tensor(list(corrected), dtype=torch.long, device=self._input_device)
+                optimizer = torch.optim.SGD(self._model.parameters(), lr=lr)
+                def loss():
+                    logits = self._model(input_ids=inputs, use_cache=False).logits
+                    return torch.nn.functional.cross_entropy(logits[0, len(prefix)-1:, :], targets)
+                for _ in range(steps):
+                    optimizer.zero_grad(set_to_none=True)
+                    value = loss()
+                    if not torch.isfinite(value):
+                        raise RuntimeError("nonfinite supervised loss")
+                    losses.append(float(value.detach()))
+                    value.backward()
+                    norm = torch.stack([p.grad.detach().float().norm().square()
+                        for p in self._model.parameters() if p.grad is not None]).sum().sqrt()
+                    if not torch.isfinite(norm):
+                        raise RuntimeError("nonfinite supervised gradient")
+                    norms.append(float(norm))
+                    optimizer.step()
+                    self.weight_revision += 1
+                with torch.no_grad():
+                    after = float(loss())
+                if not math.isfinite(after):
+                    raise RuntimeError("nonfinite loss after supervised update")
+            return dict(loss_before=losses[0], loss_after=after, losses=losses,
+                        gradient_norms=norms, weight_revision=self.weight_revision)
+        except Exception as exc:
+            self._learning_failed = True
+            raise EditorError("online training failed; inference blocked until learn reset: " + str(exc)) from exc
+        finally:
+            self._model.zero_grad(set_to_none=True)
+            self._invalidate_learning_cache()
+
     def _apply_execution_controls(self) -> None:
         if self.settings.torch_num_threads is not None:
             self._torch.set_num_threads(self.settings.torch_num_threads)
@@ -666,6 +761,8 @@ class TransformersBackend:
         their cache rows are compacted and advanced together without repeating
         the shared prompt.
         """
+        if hasattr(self, "online_config"):
+            raise EditorError("batched/beam inference is unsupported with online SGD")
         values = {
             lane_id: tuple(int(token_id) for token_id in prefix)
             for lane_id, prefix in enumerate(prefixes)
@@ -905,7 +1002,7 @@ class TransformersBackend:
             state["groups"] = []
             state["logits"] = {}
 
-        return InferenceBatch(
+        batch = InferenceBatch(
             self,
             prefixes,
             prefill=prefill,
@@ -914,6 +1011,10 @@ class TransformersBackend:
             retire=retire,
             close=close,
         )
+        if not hasattr(self, "_learning_batches"):
+            self._learning_batches = weakref.WeakSet()
+        self._learning_batches.add(batch)
+        return batch
 
     def _prefill_batch_groups(
         self,
@@ -1027,6 +1128,8 @@ class TransformersBackend:
             )
 
     def reset(self, prefix_token_ids: list[int]) -> None:
+        if getattr(self, "_learning_failed", False):
+            raise EditorError("online training failed; use learn reset before inference")
         if self._speculation_prefix is not None:
             self.rollback_speculation()
         if not prefix_token_ids:
@@ -1605,6 +1708,8 @@ class TransformersBackend:
         self.clear_hidden_state_vector()
 
     def last_logits(self) -> np.ndarray:
+        if getattr(self, "_learning_failed", False):
+            raise EditorError("online training failed; use learn reset before inference")
         if getattr(self, "_speculation_prefix", None) is not None:
             raise RuntimeError("cannot read logits while a speculative token is cached")
         if self._last_logits is None:

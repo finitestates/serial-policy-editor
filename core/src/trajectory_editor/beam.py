@@ -97,6 +97,8 @@ class BeamSearch:
     ) -> None:
         if type(width) is not int or not 1 <= width <= 100:
             raise EditorError("beam width must be between 1 and 100")
+        if engine.learner is not None:
+            raise EditorError("beam/chord is unsupported with online SGD")
         if engine.ended:
             raise EditorError("beam search requires a live decision boundary")
         if engine._speculative_accept_prefix is not None:

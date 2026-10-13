@@ -257,6 +257,7 @@ def action_preview(
                              detail=detail, command=command)
 
     effects = {
+        CommandKind.LEARN: ("online SGD", "Update or inspect episode learning on Enter."),
         CommandKind.BIAS: ("token bias", "Update a group or token bias; stay at this step."),
         CommandKind.BEAM: (
             "beam search",

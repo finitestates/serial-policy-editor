@@ -481,6 +481,8 @@ def export_live_teacher_tape(
     envelope_path: Path | None = None,
 ) -> dict[str, Any]:
     """Export the selected non-durable branch as a portable YAML or JSONL tape."""
+    if getattr(session.engine, "learner", None) is not None:
+        raise EditorError("teacher tape replay is unsupported with online SGD; use experiment export")
     environment = dict(getattr(session, "environment", {}))
     branch_state = session.branch_state
     if callable(branch_state):

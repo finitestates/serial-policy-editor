@@ -99,6 +99,11 @@ def load_backend(args: argparse.Namespace) -> Any:
         transformers_settings=transformers,
         cache_mode=args.cache,
     )
+    if getattr(args, "online_sgd", False):
+        from .online_learning import LearningConfig
+        if args.backend != "transformers":
+            raise EditorError("online SGD requires the Transformers backend")
+        result.enable_online_learning(LearningConfig(args.online_lr, args.online_steps))
     print("Model loaded.", flush=True)
     return result
 

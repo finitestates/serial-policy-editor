@@ -878,6 +878,32 @@ class InteractivePolicy:
                 continue
             command = interpretation.command
             assert command is not None
+            if command.kind == CommandKind.LEARN:
+                try:
+                    if engine.learner is None:
+                        raise EditorError("learning controls require --online-sgd")
+                    message = engine.learner.command(command.learning_text)
+                    observation = engine.observe()
+                    self._context_cursor.cancel_prewarm()
+                    candidates = candidate_page(self.menu_size, view.metrics)
+                    choice = self._choice_for_observation(engine, observation, candidates, view=view)
+                    exposed = {candidate.rank: candidate for candidate in candidates}
+                    preview_candidates = dict(exposed)
+                    search = None
+                    search_lens_active = False
+                    search_warm_commands = ()
+                    search_warm_target = None
+                    feedback = ChoiceFeedback("info", "ONLINE SGD", (message,))
+                except EditorError as exc:
+                    feedback = ChoiceFeedback("error", "ONLINE SGD", (str(exc),))
+                continue
+            if engine.learner is not None and command.kind in {
+                CommandKind.CHORD, CommandKind.BEAM, CommandKind.FORK,
+                CommandKind.REVIEW_BACK, CommandKind.REVIEW_FORWARD,
+            }:
+                feedback = ChoiceFeedback("error", "ONLINE SGD",
+                    ("rewind/review, fork, beam, and chord are unsupported with online SGD",))
+                continue
             if command.kind == CommandKind.CHORD:
                 if review_boundary is not None:
                     feedback = ChoiceFeedback(

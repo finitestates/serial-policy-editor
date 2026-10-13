@@ -207,6 +207,12 @@ class EpisodeEngine:
         # do not change token spellings, so their classifications remain valid.
         self._token_boundaries: dict[int, frozenset[str]] = {}
         self._metric_sink: Callable[[EpisodeObservation, int], None] | None = None
+        self.learner = None
+        if hasattr(backend, "online_config"):
+            if guidance_backend is not None:
+                raise EditorError("CFG is unsupported with online SGD")
+            from .online_learning import EpisodeLearner
+            self.learner = EpisodeLearner(self, backend.online_config)
 
     @property
     def initial_token_ids(self) -> tuple[int, ...]:
@@ -288,6 +294,8 @@ class EpisodeEngine:
 
     def rewind_to(self, boundary: int, *, _defer_backend_positioning: bool = False) -> None:
         """Discard visible state after a token boundary and reconcile the backend."""
+        if self.learner is not None:
+            raise EditorError("rewind is unsupported with online SGD")
         if type(boundary) is not int or boundary < 0 or boundary > self.boundary:
             raise EditorError(
                 f"rewind boundary must be between 0 and {self.boundary}"
@@ -382,6 +390,8 @@ class EpisodeEngine:
         cancelled: Callable[[], bool] | None = None,
     ) -> bool:
         """Warm one selected token in place, then commit or roll it back later."""
+        if self.learner is not None:
+            return False
         is_cancelled = cancelled or (lambda: False)
         if (
             type(generation) is not int or generation < 0
@@ -512,7 +522,7 @@ class EpisodeEngine:
     def _decision_key(self) -> tuple:
         return (
             self._observation_prefix_snapshot(), self.sampling,
-            self.stream_fingerprint,
+            self.stream_fingerprint, getattr(self.backend, "weight_revision", 0),
             tuple(sorted(self._ephemeral_logit_biases.items())),
         )
 
@@ -557,6 +567,8 @@ class EpisodeEngine:
             raise EditorError("request refers to a stale observation")
 
     def observe(self) -> EpisodeObservation:
+        if self.learner is not None:
+            self.learner.require_owner()
         if self.ended:
             raise EditorError("the episode has no live decision boundary")
         key = self._decision_key()
@@ -1178,7 +1190,31 @@ class EpisodeEngine:
             diagnostics=diagnostics,
         )
 
-    def apply(
+    def apply(self, action, *, expectation=None, divergence_policy="handoff", replay=False):
+        if self.learner is not None:
+            self.learner.require_owner()
+            if replay or expectation is not None:
+                raise EditorError("replay is unsupported with online SGD; learning events are not reconstructible yet")
+        correction = self.learner is not None and (
+            isinstance(action, (SelectRawRank, Write, EndGeneration))
+            or isinstance(action, Phrase) and action.force)
+        example = None
+        if correction:
+            example = (tuple(self.token_ids), (), self.observe().proposal_token_id, self.boundary)
+        outcome = self._apply_action(action, expectation=expectation,
+            divergence_policy=divergence_policy, replay=replay)
+        if isinstance(action, (SelectRawRank, EndGeneration)) and example is not None:
+            correction = outcome.resolved_token_ids != (example[2],)
+        if correction and outcome.status == "completed" and outcome.resolved_token_ids:
+            prefix, _, proposal, boundary = example
+            try:
+                self.learner.correction((prefix, outcome.resolved_token_ids, proposal, boundary))
+            except EditorError as exc:
+                exc.committed_outcome = outcome
+                raise
+        return outcome
+
+    def _apply_action(
         self,
         action: PolicyAction,
         *,
