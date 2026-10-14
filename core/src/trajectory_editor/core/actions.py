@@ -29,13 +29,25 @@ class Accept:
 class SelectRawRank:
     rank: int
     kind: str = "select-raw-rank"
+    learning_mode: str | None = None
+    learning_margin: float | None = None
 
     def __post_init__(self) -> None:
+        if self.learning_mode is not None and self.learning_mode not in {"!", "?"}:
+            raise EditorError("learning mode must be ! or ?")
+        if self.learning_margin is not None:
+            if self.learning_mode is None or type(self.learning_margin) not in (int, float) or not math.isfinite(self.learning_margin) or self.learning_margin < 0:
+                raise EditorError("learning margin must be finite, nonnegative, and paired with ! or ?")
         if type(self.rank) is not int or self.rank < 1:
             raise EditorError("raw rank must be a positive integer")
 
     def to_dict(self) -> dict[str, Any]:
-        return {"kind": self.kind, "rank": self.rank}
+        result = {"kind": self.kind, "rank": self.rank}
+        if self.learning_mode is not None:
+            result["learning_mode"] = self.learning_mode
+        if self.learning_margin is not None:
+            result["learning_margin"] = self.learning_margin
+        return result
 
 
 @dataclass(frozen=True)
@@ -192,7 +204,7 @@ def action_from_dict(raw: Mapping[str, Any]) -> PolicyAction:
         rank = raw.get("rank", raw.get("selected_rank"))
         if type(rank) is not int:
             raise EditorError("select action has no valid raw rank")
-        return SelectRawRank(rank)
+        return SelectRawRank(rank, learning_mode=raw.get("learning_mode"), learning_margin=raw.get("learning_margin"))
     if kind in {"insert", "write"}:
         text = raw.get("text", raw.get("supplied_text"))
         mode = raw.get("mode", raw.get("insert_mode", "continuation"))

@@ -42,6 +42,7 @@ from ..ui_themes import DEFAULT_LIVE_THEME
 from .canvas import Canvas, TextLayout
 from .driver import FrameWriter, detect_color_system, terminal_size
 from .keys import InputParser, Key, Mouse, Paste
+from .learning import LearningOverlay, dock_height, draw_dock
 from .overlays import DocumentOverlay, OutputOverlay, Overlay, PaletteOverlay
 from .palette import PaletteEntry
 from .views import BeamView, ChoiceView, EdgeView, PromptView, RequestView
@@ -148,6 +149,11 @@ class TerminalApp:
         self._saved_attrs: Any = None
         self._output_chunks: deque[str] = deque()
         self._output_chars = 0
+        self._learning_status = ""
+        self.learning_snapshot = None
+        self.learning_refreshing = False
+        self.learning_notice = ""
+        self._learning_refresh_serial = 0
         self.warm_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="spe-search-warm")
         self.running = False
 
@@ -299,18 +305,31 @@ class TerminalApp:
         """Compose one frame from the current state."""
         canvas = Canvas(width, height, self.styles.base)
         ctx = RenderContext(canvas, self.layout, self.styles)
+        learning_rows = dock_height(width, height, self.learning_snapshot is not None or bool(self._learning_status))
         if width < 20 or height < 3:
             message = "Enlarge the terminal"
             canvas.put(max(0, (width - len(message)) // 2), height // 2, message, self.styles("feedback-info"))
         elif self.view is not None:
-            self.view.render(ctx)
-            if self.overlay is not None:
-                canvas.cursor = None
-                ctx.hits.clear()
-                ctx.scroll_regions.clear()
-                self.overlay.render(ctx)
+            if learning_rows:
+                main = Canvas(width, height - learning_rows, self.styles.base)
+                main_ctx = RenderContext(main, self.layout, self.styles)
+                self.view.render(main_ctx)
+                canvas.cells[:main.height] = main.cells
+                canvas.cursor = main.cursor
+                ctx.hits.extend(main_ctx.hits)
+                ctx.scroll_regions.extend(main_ctx.scroll_regions)
+            else:
+                self.view.render(ctx)
         else:
             canvas.put(1, 0, "Policy editor · starting…", self.styles("muted"))
+        if learning_rows:
+            draw_dock(ctx, self.learning_snapshot, self._learning_status,
+                      height - learning_rows, learning_rows)
+        if self.overlay is not None and width >= 20 and height >= 3:
+            canvas.cursor = None
+            ctx.hits.clear()
+            ctx.scroll_regions.clear()
+            self.overlay.render(ctx)
         self._hits = ctx.hits
         self._wheels = ctx.scroll_regions
         return canvas
@@ -337,6 +356,19 @@ class TerminalApp:
             self.suspend()
             return
         view = self.view
+        # Learning inspection remains available while the owner runs SGD.
+        # All other editor input still follows the usual accepting gate.
+        if isinstance(event, Key) and event.name == "f3":
+            if isinstance(self.overlay, LearningOverlay):
+                self.overlay = None
+            else:
+                self.overlay = LearningOverlay(self)
+                self.refresh_learning()
+            return
+        if isinstance(self.overlay, LearningOverlay) and isinstance(event, Key) and event.name != "ctrl+c":
+            if self.overlay.on_key(event):
+                self.overlay = None
+            return
         if view is None or not view.accepting:
             self.stats["dropped_input"] += 1
             if isinstance(event, Key) and event.name == "ctrl+c" and self.interrupt_owner:
@@ -415,7 +447,9 @@ class TerminalApp:
         else:
             view = PromptView(self, lifecycle)
         self.active = lifecycle
-        self.overlay = None
+        if not isinstance(self.overlay, LearningOverlay):
+            self.overlay = None
+        self.learning_refreshing = False
         self.view = view
         view.accepting = True
         if isinstance(state, ChoiceViewState):
@@ -504,16 +538,48 @@ class TerminalApp:
 
     def deliver_owner_preview(self, generation: int, key: tuple[Any, ...], result: Any,
                               error: BaseException | None) -> None:
+        if key and key[0] == "learning-overview":
+            if self.active is not None and self.active.generation == generation:
+                self.learning_refreshing = False
+                if error is None:
+                    self.update_learning(result)
+                    self.learning_notice = "Comparisons refreshed."
+                else:
+                    self.learning_notice = "Cannot refresh: " + str(error)
+                self._dirty = True
+            return
         view = self.view
         if view is not None and view.generation == generation:
             view.owner_preview_ready(key, result, error)
 
     # -- captured output -----------------------------------------------------
 
+    def update_learning(self, snapshot) -> None:
+        self.learning_snapshot = snapshot
+        if snapshot is not None and snapshot.current is None:
+            self._learning_status = ""
+        self._dirty = True
+
+    def refresh_learning(self) -> None:
+        if self.learning_refreshing:
+            return
+        view = self.view
+        callback = getattr(view.state, "learning_overview", None) if view is not None else None
+        if view is None or not view.accepting or callback is None:
+            self.learning_notice = "Training / generation is busy; press R at the next choice to refresh." if self.learning_snapshot else ""
+            return
+        self.learning_refreshing = True
+        self.learning_notice = ""
+        self._learning_refresh_serial += 1
+        self.request_owner_preview(view.generation, ("learning-overview", self._learning_refresh_serial), callback)
+
     def write_output(self, text: str) -> None:
         safe = _safe_context_text(text)
         if not safe:
             return
+        if safe.startswith("[online SGD]"):
+            self._learning_status = safe.strip().splitlines()[-1]
+            self._dirty = True
         safe = safe[-OUTPUT_HISTORY_LIMIT:]
         self._output_chunks.append(safe)
         self._output_chars += len(safe)
@@ -758,6 +824,11 @@ class TerminalSession(AbstractContextManager["TerminalSession"]):
         if app is None or self._closing or self._thread is None or not self._thread.is_alive():
             return
         app.post(app.write_output, text + end)
+
+    def update_learning(self, snapshot) -> None:
+        app = self.application
+        if app is not None and not self._closing and self._thread is not None and self._thread.is_alive():
+            app.post(app.update_learning, snapshot)
 
     def page(self, text: str) -> None:
         self.prompt(PromptRequest("", body=text, page=True))

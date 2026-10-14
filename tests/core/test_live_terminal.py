@@ -889,3 +889,34 @@ print("standard descriptors restored")
     )
     assert result.stdout == "standard descriptors restored\n"
     assert result.stderr == ""
+
+
+@pytest.mark.parametrize('size', [(80, 24), (120, 40)])
+def test_online_sgd_progress_visible_without_output_overlay(harness, size):
+    h = harness(choice_state(), size=size)
+    h.app._dirty = False
+    h.app.write_output('[diagnostic] hidden output\n')
+    h.frame()
+    assert 'hidden output' not in h.text
+    h.app.write_output('[online SGD] step 1/5; target not yet argmax\n')
+    assert h.app._dirty
+    h.frame()
+    assert 'step 1/5' in h.lines[size[1] - 4]
+    assert h.lines[0].startswith('Step 0')
+    assert h.app.overlay is None
+    h.app.write_output('[online SGD] step 2/5; target is argmax\n')
+    h.frame()
+    assert 'step 2/5' in h.lines[size[1] - 4]
+    assert 'step 1/5' not in h.text
+    assert 'step 1/5' in h.app.output_history()
+
+
+def test_online_sgd_progress_crosses_live_thread_bridge():
+    from tests.core.term_support import LiveLoop
+    with LiveLoop(size=(80, 24)) as live:
+        live.session.write('[online SGD] step 1/5; fixed-step training')
+        frame = live.wait_for(lambda text: 'step 1/5' in text)
+        assert 'step 1/5' in frame.splitlines()[20]
+        live.session.write('[online SGD] step 2/5; fixed-step training')
+        frame = live.wait_for(lambda text: 'step 2/5' in text)
+        assert 'step 1/5' not in frame

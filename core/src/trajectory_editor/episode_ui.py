@@ -634,6 +634,10 @@ class InteractivePolicy:
         )
 
     def choose(self, engine: EpisodeEngine, observation: EpisodeObservation) -> PolicyAction:
+        if engine.learner is not None:
+            engine.learner.progress = self.io.write
+            engine.learner.display = getattr(self.io, "update_learning", None)
+            engine.learner.publish()
         self._prepare_seamless_action_index(engine, observation.boundary)
         self.choice_serial += 1
         policy_sort = self.view_preferences.sort_by_policy
@@ -798,6 +802,7 @@ class InteractivePolicy:
                 self._context_cursor.prewarm(engine, review_boundary)
             raw = self.io.read_choice(ChoiceViewState(
                 choice,
+                learning_overview=engine.learner.overview if engine.learner is not None else None,
                 candidates=tuple(exposed[rank] for rank in sorted(exposed)),
                 display_candidates=displayed,
                 resolve_candidate=resolve_candidate,
@@ -882,6 +887,9 @@ class InteractivePolicy:
                 try:
                     if engine.learner is None:
                         raise EditorError("learning controls require --online-sgd")
+                    if command.learning_rank is not None:
+                        engine.learner.progress = lambda text: self.io.write(text)
+                        return SelectRawRank(command.learning_rank, learning_mode=command.learning_mode, learning_margin=command.learning_margin)
                     message = engine.learner.command(command.learning_text)
                     observation = engine.observe()
                     self._context_cursor.cancel_prewarm()

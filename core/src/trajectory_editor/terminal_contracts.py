@@ -74,6 +74,7 @@ class ChoiceViewState:
     search_warm_commands: tuple[str, ...] = ()
     search_warm_prepared: bool = False
     sort_by_gumbel: bool = False
+    learning_overview: Callable[[], Any] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)

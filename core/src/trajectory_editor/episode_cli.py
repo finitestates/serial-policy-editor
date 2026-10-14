@@ -355,6 +355,7 @@ def build_parser(
     learning.add_argument("--online-sgd", action="store_true")
     learning.add_argument("--online-lr", type=float, default=1e-5)
     learning.add_argument("--online-steps", type=int, default=1)
+    learning.add_argument("--max-step", type=int, default=5, help="SGD ceiling for N? (default: 5)")
     transformers = parser.add_argument_group("Transformers")
     transformers.add_argument("--transformers-device", default="auto")
     transformers.add_argument(
@@ -439,7 +440,7 @@ def main(
         teacher_tape = selection.teacher_tape
         if args.online_sgd:
             from .online_learning import LearningConfig
-            LearningConfig(args.online_lr, args.online_steps).validate()
+            LearningConfig(args.online_lr, args.online_steps, args.max_step).validate()
             if args.backend != "transformers":
                 raise EditorError("--online-sgd requires --backend transformers")
             if selection.kind != "new" or teacher_tape is not None:

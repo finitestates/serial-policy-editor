@@ -215,5 +215,9 @@ class TerminalIO:
             return
         print(text, end=end, flush=True)
 
+    def update_learning(self, snapshot) -> None:
+        if self._live_session is not None:
+            self._live_session.update_learning(snapshot)
+
     def page(self, text: str) -> None:
         self.prompt(PromptRequest("", body=text, page=True))

@@ -98,6 +98,9 @@ class TeacherCommand:
     reroll_seed: int | None = None
     draw_raw_rank: int | None = None
     learning_text: str | None = None
+    learning_rank: int | None = None
+    learning_mode: str | None = None
+    learning_margin: float | None = None
 
 
 class CommandState(str, Enum):
@@ -222,7 +225,11 @@ HELP_TEXT = """Commands:
   q | finish         open the live edge menu
   ?                 show this help
 
-Online SGD (requires --online-sgd): learn status, learn reset,
+Online SGD (requires --online-sgd): N! / N ! trains rank N until argmax;
+N? / N ? trains until argmax or max_step (default 5). max_step=N sets the ceiling.
+Append a margin: N ! 5.0 / N ? 5.0 requires at least 5 logits over every competitor.
+Omit the margin to stop at argmax. Each command commits the selected token; N! has no ceiling.
+Learning controls: learn status, learn reset,
 learn steps=N (0 pauses automatic updates), learn lr=X, teach last steps=N.
 Rewind, fork, replay, beam, chord, and switching are unsupported in this mode.
 
@@ -730,6 +737,24 @@ def parse_command(
     vocabulary_size: int | None = None,
     menu_page_rows: int | None = None,
 ) -> TeacherCommand:
+    training = re.fullmatch(r"(\d+)\s*([!?])(?:\s+(\S+))?", raw.strip())
+    if training:
+        rank = int(training[1])
+        if not 1 <= rank <= (vocabulary_size or menu_size):
+            raise EditorError("learning rank is outside the vocabulary")
+        margin = None
+        if training[3] is not None:
+            try:
+                margin = float(training[3])
+            except ValueError as exc:
+                raise EditorError("learning margin must be a finite nonnegative number") from exc
+            # Use the action validation for runtime and persisted commands alike.
+            from .core.actions import SelectRawRank
+            SelectRawRank(rank, learning_mode=training[2], learning_margin=margin)
+        return TeacherCommand(CommandKind.LEARN, learning_rank=rank,
+                              learning_mode=training[2], learning_margin=margin)
+    if re.fullmatch(r"max_step=\d+", raw.strip()):
+        return TeacherCommand(CommandKind.LEARN, learning_text=raw.strip())
     if raw.strip().startswith(("learn", "teach")):
         text = raw.strip()
         if not re.fullmatch(r"(?:learn (?:status|reset|steps=\d+|lr=\S+)|teach last steps=\d+)", text):

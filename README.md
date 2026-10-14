@@ -382,3 +382,41 @@ Beam pruning with Backspace/`kill` backfills at the same depth from the previous
 expansion’s alternatives. Surviving branch IDs remain stable. Width is retained
 while candidates remain; killed paths stay excluded. Cached parent observations
 reuse scores, but replacement backend state may require rebuilding.
+
+With `--online-sgd`, enter `N!` (or `N !`) to select raw rank N and
+train until that token is the model's argmax at the original prefix. `N?`
+(or `N ?`) stops at argmax or the step ceiling, then commits the selected
+token. Set the ceiling with `--max-step N` or runtime `max_step=N` (default
+5; positive integer). These commands override `--online-steps`, including
+zero. A target already at argmax needs zero updates. The runtime reports
+completed steps and the stopping reason. `N!` has no step ceiling.
+
+An optional margin, such as `N ! 5.0` or `N ? 5.0`, requires the selected
+token to beat every other token by at least 5 logits at the original prefix.
+The margin must be finite and nonnegative. Updates may overshoot the threshold;
+the runtime displays the measured margin. Omitting it stops at argmax.
+
+The full-screen UI reserves a learning dock below the main view throughout an
+online episode. It shows target/rival logits and per-step changes, target
+probability and rank, the victory margin and sparkline, loss, gradient norm,
+and the stopping reason. Compact terminals use a smaller dock. For multi-token
+corrections the target/rival trace follows the first corrected token; the loss
+still covers the entire teacher-forced span.
+
+**F3** opens the learning overview, including during SGD. **R** refreshes
+comparisons at an idle choice; **PgUp/PgDn** or arrow keys scroll; **F3/Esc**
+closes it and preserves your command draft. The overview compares up to three
+fixed prefixes of the starting prompt and the 12 most recent distinct
+correction contexts. It shows probability/rank changes, argmax flips,
+distribution drift (Jensen–Shannon divergence in bits), and margin histories.
+Root baselines are captured with episode-start weights; correction baselines
+are captured when first seen. Earlier correction margins are rechecked on
+refresh so you can watch reinforcement and interference. Stale readings are
+marked. Sparklines scale each row independently; the numeric range gives the
+absolute scale. These are observations of the watched contexts.
+
+Comparisons use read-only uncached forwards on the episode thread. They add no
+SGD steps and do not replace generation caches. The renderer already wraps
+frame updates in DEC 2026 synchronized-output sequences and overwrites changed
+rows in place. `learn reset` clears the traces and recaptures root baselines
+without removing the dock.

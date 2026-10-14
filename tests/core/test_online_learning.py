@@ -310,3 +310,275 @@ def test_suspended_episode_cannot_silently_reset_learning(backend):
     with pytest.raises(EditorError, match='reactivation'):
         session.activate(branch_id)
     assert all(torch.equal(learned[k], v) for k, v in backend._model.state_dict().items())
+
+
+@pytest.mark.parametrize('text', ['2!', '2 !', '2?', '2 ?'])
+def test_rank_training_parser(text):
+    command = parse_command(text, menu_size=8, default_hold_tokens=1)
+    assert command.learning_rank == 2
+    assert command.learning_mode == text[-1]
+
+
+def test_train_until_argmax_pins_original_target(backend):
+    e = engine(backend)
+    target = int(e.observe().policy_calculations.top_raw_ids(8)[-1])
+    e.apply(SelectRawRank(8, learning_mode='!'))
+    event = e.learner.events[-1]
+    assert event['corrected_token_ids'] == [target]
+    assert event['stop_reason'] == 'argmax' and event['steps'] > 0
+    backend.reset([2])
+    assert int(np.argmax(backend.last_logits())) == target
+    assert e.token_ids == [2, target]
+
+
+def test_bounded_training_obeys_ceiling_and_ignores_fixed_steps(backend):
+    e = engine(backend)
+    e.learner.command('learn lr=0.000000000001')
+    e.learner.command('learn steps=0')
+    e.learner.command('max_step=2')
+    messages = []
+    e.learner.progress = messages.append
+    e.apply(SelectRawRank(8, learning_mode='?'))
+    event = e.learner.events[-1]
+    assert event['steps'] == 2 and event['stop_reason'] == 'ceiling'
+    assert len(messages) == 2 and 'step 2/2' in messages[-1]
+
+
+def test_already_argmax_needs_no_updates(backend):
+    e = engine(backend)
+    revision = backend.weight_revision
+    e.apply(SelectRawRank(1, learning_mode='!'))
+    event = e.learner.events[-1]
+    assert event['steps'] == 0 and event['stop_reason'] == 'argmax'
+    assert backend.weight_revision == revision
+
+
+def test_max_step_cli_and_validation():
+    assert build_parser().parse_args([]).max_step == 5
+    assert build_parser().parse_args(['--max-step', '9']).max_step == 9
+    with pytest.raises(EditorError):
+        LearningConfig(max_step=0).validate()
+
+
+def test_rank_training_runtime_dispatch_and_disabled_guard(backend):
+    from tests.fakes import ScriptedIO
+    from trajectory_editor.episode_ui import InteractivePolicy
+    from trajectory_editor.core.actions import action_from_dict
+    e = engine(backend)
+    policy = InteractivePolicy(io=ScriptedIO(['max_step=2', '8 ?']), menu_size=8)
+    action = policy.choose(e, e.observe())
+    assert action.rank == 8 and action.learning_mode == '?'
+    assert action_from_dict(action.to_dict()) == action
+    assert e.learner.config.max_step == 2
+    e.apply(action)
+    assert e.learner.events[-1]['steps'] <= 2
+    e.learner = None
+    with pytest.raises(EditorError, match='requires --online-sgd'):
+        e.apply(action)
+
+
+def test_fixed_step_training_reports_every_completed_update(backend):
+    e = engine(backend)
+    e.learner.command('learn steps=3')
+    messages = []
+    e.learner.progress = messages.append
+    e.apply(Write('red', mode='exact'))
+    assert len(messages) == 3
+    assert all(f'step {i}/3' in text for i, text in enumerate(messages, 1))
+
+
+@pytest.mark.parametrize('text', ['2! 5.0', '2 ! 5.0', '2? 5.0', '2 ? 5.0'])
+def test_margin_parser_and_roundtrip(text):
+    from trajectory_editor.core.actions import action_from_dict
+    command = parse_command(text, menu_size=8, default_hold_tokens=1)
+    assert command.learning_margin == 5.0
+    action = SelectRawRank(command.learning_rank, learning_mode=command.learning_mode,
+                           learning_margin=command.learning_margin)
+    assert action_from_dict(action.to_dict()) == action
+
+
+@pytest.mark.parametrize('text', ['2 ! -1', '2 ? nan', '2 ! inf', '2 ? nope', '2*'])
+def test_invalid_or_retired_training_syntax(text):
+    with pytest.raises(EditorError):
+        parse_command(text, menu_size=8, default_hold_tokens=1)
+
+
+def test_training_requires_margin_even_if_already_argmax(backend):
+    e = engine(backend)
+    target = int(np.argmax(e.observe().logits))
+    logits = e.observe().logits
+    initial_margin = float(logits[target] - np.max(np.delete(logits, target)))
+    threshold = initial_margin + 1.0
+    messages = []
+    e.learner.progress = messages.append
+    outcome = e.apply(SelectRawRank(1, learning_mode='!', learning_margin=threshold))
+    event = e.learner.events[-1]
+    assert event['steps'] > 0 and event['stop_reason'] == 'margin'
+    assert event['requested_margin'] == threshold
+    backend.reset([2])
+    row = backend.last_logits()
+    actual = float(row[target] - np.max(np.delete(row, target)))
+    assert actual >= threshold
+    assert event['final_margin'] == pytest.approx(actual, abs=1e-6)
+    assert outcome.resolved_token_ids == (target,)
+    assert 'logits; reached' in messages[-1]
+
+
+def test_margin_ceiling_stops_before_requested_victory(backend):
+    e = engine(backend)
+    e.learner.command('max_step=2')
+    e.apply(SelectRawRank(1, learning_mode='?', learning_margin=1000.0))
+    event = e.learner.events[-1]
+    assert event['steps'] == 2 and event['stop_reason'] == 'ceiling'
+    assert event['final_margin'] < 1000.0
+
+
+def test_satisfied_margin_skips_updates(backend):
+    e = engine(backend)
+    logits = e.observe().logits
+    top = np.sort(logits)[-2:]
+    threshold = float(top[1] - top[0]) / 2
+    e.apply(SelectRawRank(1, learning_mode='?', learning_margin=threshold))
+    event = e.learner.events[-1]
+    assert event['steps'] == 0 and event['stop_reason'] == 'margin'
+
+
+def test_old_plus_syntax_is_not_training():
+    command = parse_command('2+', menu_size=8, default_hold_tokens=1)
+    assert command.kind != CommandKind.LEARN
+
+
+def test_margin_runtime_dispatch(backend):
+    from tests.fakes import ScriptedIO
+    from trajectory_editor.episode_ui import InteractivePolicy
+    e = engine(backend)
+    io = ScriptedIO(['max_step=2', '1 ? 5.0'])
+    action = InteractivePolicy(io=io, menu_size=8).choose(e, e.observe())
+    assert action.learning_mode == '?' and action.learning_margin == 5.0
+    e.apply(action)
+    assert e.learner.events[-1]['requested_margin'] == 5.0
+    assert any('logits;' in text for text in io.output)
+
+
+def test_live_diagnostics_match_actual_post_update_logits_and_rival(backend):
+    e = engine(backend)
+    snapshots = []
+    def record(snapshot):
+        snapshots.append(snapshot)
+        if snapshot.current is None:
+            return
+        point = snapshot.current.comparison
+        row = backend.learning_probe_logits([2])
+        rivals = row.copy()
+        rivals[point.target_id] = -np.inf
+        assert point.target_logit == pytest.approx(float(row[point.target_id]), abs=1e-6)
+        assert point.rival_id == int(np.argmax(rivals))
+        assert point.rival_logit == pytest.approx(float(rivals.max()), abs=1e-6)
+        assert point.margin == pytest.approx(float(row[point.target_id] - rivals.max()), abs=1e-6)
+    e.learner.display = record
+    e.learner.command('learn steps=3')
+    snapshots.clear()
+    e.apply(SelectRawRank(8))
+    training = [s for s in snapshots if s.current.status == 'training']
+    assert [s.current.step for s in training] == [0, 1, 2, 3]
+    assert [s.optimizer_steps for s in training] == [0, 1, 2, 3]
+    for before, after in zip(training, training[1:]):
+        assert after.current.target_delta == pytest.approx(after.current.comparison.target_logit - before.current.comparison.target_logit)
+        assert after.current.margin_delta == pytest.approx(after.current.comparison.margin - before.current.comparison.margin)
+    assert snapshots[-1].current.status == 'fixed-steps'
+    assert len(snapshots[-1].history) == 4
+
+
+def test_overview_is_read_only_and_rechecks_earlier_corrections(backend):
+    e = engine(backend)
+    e.apply(Write('red', mode='exact'))
+    first = e.learner.snapshot().probes[-1]
+    assert first.baseline_kind == 'first seen'
+    taught_margin = first.taught_margin
+    old_snapshot = e.learner.snapshot()
+    e.apply(Write('blue', mode='exact'))
+    assert e.learner.snapshot().probes[-2].revision < backend.weight_revision
+    observation = e.observe()
+    cache = backend._past_key_values
+    original_weights = weights(backend)
+    revision = backend.weight_revision
+    events = list(e.learner.events)
+    trajectory = e.token_ids.copy()
+    result = e.learner.overview()
+    assert all(p.revision == revision for p in result.probes)
+    assert backend.weight_revision == revision and e.learner.events == events
+    assert e.token_ids == trajectory
+    assert e.observe() is observation and backend._past_key_values is cache
+    assert all(torch.equal(original_weights[k], v) for k, v in backend._model.state_dict().items())
+    first_now = result.probes[-2]
+    row = backend.learning_probe_logits([2])
+    rivals = row.copy()
+    rivals[3] = -np.inf
+    assert first_now.current.margin == pytest.approx(float(row[3] - rivals.max()))
+    assert first_now.taught_margin == taught_margin
+    assert old_snapshot.probes[-1].revision < result.probes[-2].revision
+
+
+def test_root_probes_use_original_predictions_and_reset_clears_panel(backend):
+    e = engine(backend)
+    original = e.learner.snapshot()
+    assert original.probes and all(p.baseline_kind == 'episode start' for p in original.probes)
+    original_sample = original.probes[0].baseline
+    e.apply(Write('red blue', mode='exact'))
+    result = e.learner.overview()
+    assert result.probes[0].baseline == original_sample
+    assert result.probes[0].drift > 0
+    e.learner.command('learn reset')
+    reset = e.learner.snapshot()
+    assert reset.current is None and reset.history == () and reset.optimizer_steps == 0
+    assert reset.corrections == 0
+    assert len(reset.probes) == len(original.probes)
+    assert reset.probes[0].baseline == original_sample
+    assert reset.probes[0].drift == 0
+
+
+def test_probe_history_is_bounded_and_diagnostics_do_not_change_inference(backend):
+    from trajectory_editor.learning_diagnostics import CORRECTION_PROBE_LIMIT, HISTORY_LIMIT
+    e = engine(backend)
+    observation = e.observe()
+    row = backend.learning_probe_logits([2])
+    np.testing.assert_allclose(row, observation.logits, atol=1e-7)
+    cache = backend._past_key_values
+    e.learner.overview()
+    assert backend._past_key_values is cache and e.observe() is observation
+    for _ in range(HISTORY_LIMIT + 2):
+        e.learner.overview()
+    assert len(e.learner.snapshot().probes[0].history) == HISTORY_LIMIT
+    for index in range(CORRECTION_PROBE_LIMIT + 2):
+        e.learner.last = ((2,) * (index + 1), (3,), 4, index)
+        e.learner.train(e.learner.last, 1)
+    assert sum(p.baseline_kind == 'first seen' for p in e.learner.snapshot().probes) == CORRECTION_PROBE_LIMIT
+
+
+def test_reteaching_moves_probe_to_recent_end_without_replacing_baseline(backend):
+    e = engine(backend)
+    e.apply(Write('red', mode='exact'))
+    first_example = e.learner.last
+    first_baseline = e.learner.snapshot().probes[-1].baseline
+    e.apply(Write('blue', mode='exact'))
+    e.learner.train(first_example, 1)
+    recent = e.learner.snapshot().probes[-1]
+    assert recent.label == 'correction · boundary 0'
+    assert recent.baseline == first_baseline
+    assert sum(p.baseline_kind == 'first seen' for p in e.learner.snapshot().probes) == 2
+
+
+def test_paused_correction_is_watched_without_training_or_replacing_trace(backend):
+    e = engine(backend)
+    e.apply(Write('red', mode='exact'))
+    previous_trace = e.learner.snapshot().current
+    e.learner.command('learn steps=0')
+    revision = backend.weight_revision
+    e.apply(Write('blue', mode='exact'))
+    snapshot = e.learner.snapshot()
+    assert snapshot.corrections == 2 and snapshot.optimizer_steps == 1
+    assert snapshot.current == previous_trace
+    assert backend.weight_revision == revision
+    probe = snapshot.probes[-1]
+    assert probe.current.target_id == 4 and not probe.trained
+    assert probe.baseline == probe.current

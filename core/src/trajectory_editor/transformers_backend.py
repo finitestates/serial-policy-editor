@@ -599,7 +599,7 @@ class TransformersBackend:
             raise EditorError("online SGD requires an unquantized float32 causal LM without device_map or multimodal wrappers")
         if any(not p.requires_grad for p in parameters):
             raise EditorError("online SGD requires all model parameters to be trainable")
-        self.online_config = LearningConfig(config.lr, config.steps)
+        self.online_config = LearningConfig(config.lr, config.steps, config.max_step)
         self._learning_base = {k: v.detach().cpu().clone() for k, v in self._model.state_dict().items()}
         self.weight_revision = 0
         self._learning_owner = None
@@ -628,10 +628,27 @@ class TransformersBackend:
         self.restore_learning_base()
         self._learning_owner = owner
 
-    def supervised_update(self, prefix, corrected, lr, steps):
+    def learning_probe_logits(self, prefix):
+        """Read-only uncached forward; never disturb the generation KV state."""
+        if self._learning_failed:
+            raise EditorError("online training failed; use learn reset before continuing")
+        self._validate_tokens(list(prefix))
+        if not prefix or self._context_limit and len(prefix) > self._context_limit:
+            raise EditorError("learning probe prefix is empty or exceeds the context limit")
+        torch = self._torch
+        self._model.eval()
+        with torch.inference_mode():
+            inputs = torch.tensor([list(prefix)], dtype=torch.long, device=self._input_device)
+            row = self._model(input_ids=inputs, use_cache=False).logits[0, -1]
+            return row.detach().float().cpu().numpy().copy()
+
+    def supervised_update(self, prefix, corrected, lr, steps, *, until_argmax=False, max_steps=None, progress=None, margin=None, diagnostic=None):
         from .online_learning import LearningConfig
+        from .learning_diagnostics import LearningStep, compare
         LearningConfig(lr, steps).validate()
-        if steps < 1 or not prefix or not corrected:
+        if margin is not None and (not math.isfinite(margin) or margin < 0):
+            raise EditorError("learning margin must be finite and nonnegative")
+        if (steps < 1 and not until_argmax) or not prefix or not corrected:
             raise EditorError("supervision requires a nonempty prefix, correction, and positive steps")
         if self._learning_failed:
             raise EditorError("online training failed; use learn reset before continuing")
@@ -651,12 +668,49 @@ class TransformersBackend:
                                       dtype=torch.long, device=self._input_device)
                 targets = torch.tensor(list(corrected), dtype=torch.long, device=self._input_device)
                 optimizer = torch.optim.SGD(self._model.parameters(), lr=lr)
-                def loss():
+                def evaluate():
                     logits = self._model(input_ids=inputs, use_cache=False).logits
-                    return torch.nn.functional.cross_entropy(logits[0, len(prefix)-1:, :], targets)
-                for _ in range(steps):
+                    value = torch.nn.functional.cross_entropy(logits[0, len(prefix)-1:, :], targets)
+                    return value, logits[0, len(prefix)-1]
+                current_margin = None
+                def reached(row):
+                    nonlocal current_margin
+                    if not torch.isfinite(row).all():
+                        raise RuntimeError("nonfinite logits during margin check")
+                    target = corrected[0]
+                    competitors = row.clone()
+                    competitors[target] = -torch.inf
+                    current_margin = float(row[target] - competitors.max())
+                    return int(row.argmax()) == target and (margin is None or current_margin >= margin)
+                previous_values = None
+                previous_comparison = None
+                def report(row, value, norm=None):
+                    nonlocal previous_values, previous_comparison
+                    if diagnostic:
+                        values = row.detach().float().cpu().numpy().copy()
+                        sample = compare(values, corrected[0], self.token_text)
+                        diagnostic(LearningStep(
+                            sample, len(losses),
+                            max_steps if until_argmax else steps, margin, until_argmax,
+                            float(value), norm, self.weight_revision,
+                            target_delta=(sample.target_logit - float(previous_values[sample.target_id])) if previous_values is not None else None,
+                            rival_delta=(sample.rival_logit - float(previous_values[sample.rival_id])) if previous_values is not None else None,
+                            margin_delta=(sample.margin - previous_comparison.margin) if previous_comparison is not None else None,
+                            rival_changed=previous_comparison is not None and sample.rival_id != previous_comparison.rival_id,
+                        ), values)
+                        previous_values, previous_comparison = values, sample
+                with torch.no_grad():
+                    value, row = evaluate()
+                before = float(value)
+                if not math.isfinite(before):
+                    raise RuntimeError("nonfinite supervised loss")
+                done = reached(row) if until_argmax else False
+                report(row, value)
+                while (not done if until_argmax else len(losses) < steps):
+                    if until_argmax and max_steps is not None and len(losses) >= max_steps:
+                        break
                     optimizer.zero_grad(set_to_none=True)
-                    value = loss()
+                    value, _ = evaluate()
                     if not torch.isfinite(value):
                         raise RuntimeError("nonfinite supervised loss")
                     losses.append(float(value.detach()))
@@ -668,13 +722,27 @@ class TransformersBackend:
                     norms.append(float(norm))
                     optimizer.step()
                     self.weight_revision += 1
-                with torch.no_grad():
-                    after = float(loss())
+                    with torch.no_grad():
+                        value, row = evaluate()
+                    if not torch.isfinite(value):
+                        raise RuntimeError("nonfinite loss after supervised update")
+                    if until_argmax:
+                        done = reached(row)
+                    report(row, value, norms[-1])
+                    if progress:
+                        limit = (str(max_steps) if max_steps is not None else "unbounded") if until_argmax else str(steps)
+                        status = ("target is argmax" if done else "target not yet argmax") if until_argmax else "fixed-step training"
+                        if until_argmax and margin is not None:
+                            status = f"margin {current_margin:.4f}/{margin:g} logits; {'reached' if done else 'training'}"
+                        progress(f"[online SGD] step {len(losses)}/{limit}; {status}")
+                after = float(value)
                 if not math.isfinite(after):
                     raise RuntimeError("nonfinite loss after supervised update")
-            return dict(loss_before=losses[0], loss_after=after, losses=losses,
+            return dict(steps_run=len(losses), stop_reason=(("margin" if margin is not None else "argmax") if done else "ceiling") if until_argmax else "fixed-steps",
+                        requested_margin=margin, final_margin=current_margin,
+                        loss_before=before, loss_after=after, losses=losses,
                         gradient_norms=norms, weight_revision=self.weight_revision)
-        except Exception as exc:
+        except (Exception, KeyboardInterrupt) as exc:
             self._learning_failed = True
             raise EditorError("online training failed; inference blocked until learn reset: " + str(exc)) from exc
         finally:

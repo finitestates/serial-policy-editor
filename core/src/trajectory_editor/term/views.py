@@ -71,6 +71,7 @@ def help_document(state: Any) -> Text:
     document.append("  F1                       This help\n")
     document.append("  Ctrl+K                   Search commands\n")
     document.append("  Ctrl+L                   Open captured output\n")
+    document.append("  F3                       Learning overview (R refreshes comparisons)\n")
     document.append("  Ctrl+C                   Interrupt\n")
     if isinstance(state, EdgeViewState):
         document.append(f"\n{state.mode.title()} edge commands\n", style="bold underline")
@@ -781,8 +782,11 @@ class ChoiceView(RequestView):
                 )
         label_region = regions["label"]
         if label_region.height:
+            label = "Candidates"
+            if not self.accepting and self.app.learning_snapshot is not None:
+                label += " · frozen while model updates"
             canvas.put_line(
-                label_region.x, label_region.y, (("Candidates", styles("section")),),
+                label_region.x, label_region.y, ((label, styles("section")),),
                 width=label_region.width,
             )
         table_region = regions["table"]

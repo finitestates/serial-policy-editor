@@ -1195,6 +1195,9 @@ class EpisodeEngine:
             self.learner.require_owner()
             if replay or expectation is not None:
                 raise EditorError("replay is unsupported with online SGD; learning events are not reconstructible yet")
+        mode = getattr(action, "learning_mode", None)
+        if mode is not None and (self.learner is None or mode not in {"!", "?"}):
+            raise EditorError("rank training requires --online-sgd and mode ! or ?")
         correction = self.learner is not None and (
             isinstance(action, (SelectRawRank, Write, EndGeneration))
             or isinstance(action, Phrase) and action.force)
@@ -1204,11 +1207,11 @@ class EpisodeEngine:
         outcome = self._apply_action(action, expectation=expectation,
             divergence_policy=divergence_policy, replay=replay)
         if isinstance(action, (SelectRawRank, EndGeneration)) and example is not None:
-            correction = outcome.resolved_token_ids != (example[2],)
+            correction = mode is not None or outcome.resolved_token_ids != (example[2],)
         if correction and outcome.status == "completed" and outcome.resolved_token_ids:
             prefix, _, proposal, boundary = example
             try:
-                self.learner.correction((prefix, outcome.resolved_token_ids, proposal, boundary))
+                self.learner.correction((prefix, outcome.resolved_token_ids, proposal, boundary), mode, getattr(action, "learning_margin", None))
             except EditorError as exc:
                 exc.committed_outcome = outcome
                 raise
