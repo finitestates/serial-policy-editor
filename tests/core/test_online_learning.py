@@ -582,3 +582,131 @@ def test_paused_correction_is_watched_without_training_or_replacing_trace(backen
     probe = snapshot.probes[-1]
     assert probe.current.target_id == 4 and not probe.trained
     assert probe.baseline == probe.current
+
+
+def test_phase_two_inventory_and_tied_head_rejection(backend):
+    e = engine(backend)
+    inventory = json.loads(e.learner.command('learn targets'))
+    assert inventory['layers'] == [0]
+    tied = next(p for p in inventory['parameters'] if 'lm_head.weight' in p['names'])
+    assert set(tied['blocks']) == {'lm_head', 'embeddings'}
+    before = [p.requires_grad for p in backend._model.parameters()]
+    with pytest.raises(EditorError, match='tied aliases'):
+        e.learner.command('learn thaw im_head')
+    assert before == [p.requires_grad for p in backend._model.parameters()]
+    e.learner.command('learn freeze im_head')
+    assert not backend._model.transformer.wte.weight.requires_grad
+
+
+def test_phase_two_selected_weights_and_atomic_errors(backend):
+    e = engine(backend)
+    e.learner.command('learn thaw mlp')
+    e.learner.command('learn layers 0+')
+    before = weights(backend)
+    e.apply(SelectRawRank(2))
+    changed = {n for n, v in backend._model.state_dict().items() if not torch.equal(before[n], v)}
+    assert changed and all('.mlp.' in n for n in changed)
+    assert not backend.learning_selection['preserves_kv']
+    for command in ('learn thaw nonexistent', 'learn thaw attention_qk', 'learn layers 1',
+                    'learn layers 0-3', 'learn layers 1-0', 'learn layers -1', 'learn style invalid'):
+        old = e.learner.command('learn status')
+        with pytest.raises(EditorError):
+            e.learner.command(command)
+        assert e.learner.command('learn status') == old
+    e.learner.command('learn layers all')
+    e.learner.command('learn thaw all')
+    assert all(p.requires_grad for p in backend._model.parameters())
+
+
+def test_phase_two_combined_gradient_is_teacher_minus_rival(backend):
+    e = engine(backend)
+    e.learner.command('learn style sgd-and-sga')
+    e.learner.command('learn thaw mlp')
+    e.learner.command('learn lr=0.01')
+    model = backend._model
+    inputs = torch.tensor([[2, 3]])
+    targets = torch.tensor([3, 4])
+    logits = model(input_ids=inputs, use_cache=False).logits[0]
+    competitors = logits.detach().clone()
+    competitors.scatter_(1, targets[:, None], -torch.inf)
+    rivals = competitors.argmax(-1)
+    assert (rivals != targets).all()
+    objective = (torch.nn.functional.cross_entropy(logits, targets)
+                 - torch.nn.functional.cross_entropy(logits, rivals))
+    objective.backward()
+    expected = {n: p.detach().clone() - 0.01 * p.grad if p.grad is not None else p.detach().clone()
+                for n, p in model.named_parameters()}
+    model.zero_grad(set_to_none=True)
+    event = e.learner.train(([2], [3, 4], None, 0), 1)
+    assert event['objectives'] == pytest.approx([float(objective.detach())])
+    assert event['rival_token_ids'] == [rivals.tolist()]
+    for n, p in model.named_parameters():
+        torch.testing.assert_close(p, expected[n], atol=1e-7, rtol=1e-6)
+    assert event['learning_config']['style'] == 'sgd-and-sga'
+
+
+def test_phase_two_untied_head_preserves_kv_and_matches_full_prefill(checkpoint):
+    model = GPT2LMHeadModel.from_pretrained(checkpoint)
+    model.config.tie_word_embeddings = False
+    model.lm_head.weight = torch.nn.Parameter(model.lm_head.weight.detach().clone())
+    b = TransformersBackend(checkpoint, TransformersSettings(device='cpu', dtype='float32'))
+    b._model = model.eval()
+    b.enable_online_learning(LearningConfig(lr=0.05, thaw=('lm_head',)))
+    e = engine(b)
+    b.reset([2])
+    cache = b._past_key_values
+    assert cache is not None
+    baseline = weights(b)
+    b.supervised_update([2], [3], 0.05, 1)
+    assert b._past_key_values is cache
+    assert b._last_logits is None
+    b.refresh_learning_prefix([2, 3])
+    np.testing.assert_allclose(b.last_logits(), b.learning_probe_logits([2, 3]), atol=1e-6)
+    changed = {n for n, v in b._model.state_dict().items() if not torch.equal(baseline[n], v)}
+    assert changed == {'lm_head.weight'}
+    b.restore_learning_base()
+    assert b._past_key_values is None
+
+
+def test_phase_two_cli_discovery_without_prompt(checkpoint, capsys):
+    assert main(['--model', str(checkpoint), '--target-list']) == 0
+    output = capsys.readouterr().out
+    assert '"layers": [' in output and 'lm_head.weight' in output
+    args = build_parser().parse_args(['--freeze', 'im_head', 'attention', '--layers', '0', '2-4', '7+'])
+    assert args.freeze == ['im_head', 'attention']
+    assert args.layers == ['0', '2-4', '7+']
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(['--freeze', 'mlp', '--thaw', 'lm_head'])
+    for text in ['learn targets', 'learn style sgd-and-sga', 'learn freeze mlp attention',
+                 'learn thaw all', 'learn layers 0 2-4 7+']:
+        assert parse_command(text, vocabulary_size=8, menu_size=8, default_hold_tokens=1).kind is CommandKind.LEARN
+
+
+def test_phase_two_llama_projection_groups_and_layer_ranges():
+    from transformers import LlamaConfig, LlamaForCausalLM
+    from trajectory_editor.learning_targets import LearningTargets
+    model = LlamaForCausalLM(LlamaConfig(vocab_size=8, hidden_size=16,
+        intermediate_size=24, num_hidden_layers=3, num_attention_heads=2,
+        num_key_value_heads=2, tie_word_embeddings=False))
+    targets = LearningTargets(model)
+    selected = targets.select(LearningConfig(thaw=('attention_qk',), layers=('1-2',)))
+    names = [n for t in selected for n in t.names]
+    assert set(names) == {f'model.layers.{i}.self_attn.{p}.weight'
+                          for i in (1, 2) for p in ('q_proj', 'k_proj')}
+    selected = targets.select(LearningConfig(thaw=('attention_vo',), layers=('2+',)))
+    assert {n for t in selected for n in t.names} == {
+        f'model.layers.2.self_attn.{p}.weight' for p in ('v_proj', 'o_proj')}
+    assert targets.apply(LearningConfig(thaw=('im_head',)))['preserves_kv']
+    assert not targets.apply(LearningConfig(thaw=('mlp',)))['preserves_kv']
+    selected = targets.select(LearningConfig(layers=('0', '2')))
+    assert all(t.layers <= {0, 2} for t in selected)
+
+
+def test_phase_two_runtime_cache_invalidation_for_mlp(backend):
+    e = engine(backend)
+    e.learner.command('learn thaw mlp')
+    backend.reset([2])
+    assert backend._past_key_values is not None
+    backend.supervised_update([2], [3], 0.05, 1)
+    assert backend._past_key_values is None
+    assert not backend._cache_active

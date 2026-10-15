@@ -420,3 +420,61 @@ SGD steps and do not replace generation caches. The renderer already wraps
 frame updates in DEC 2026 synchronized-output sequences and overwrites changed
 rows in place. `learn reset` clears the traces and recaptures root baselines
 without removing the dock.
+
+Phase II learning controls (Transformers, unquantized float32):
+
+```bash
+policy-editor --model /path/to/model --target-list
+policy-editor --backend transformers --model /path/to/model --online-sgd \
+  --transformers-dtype float32 --learning-style sgd-and-sga \
+  --thaw attention_qk mlp --layers 0 2-4 7+
+```
+
+`--learning-style sgd-only` is the default. `sgd-and-sga` minimizes teacher
+cross entropy minus rival cross entropy, with equal weights. Each update picks
+the strongest non-teacher token independently at each teacher-forced position.
+This directly increases the teacher/rival logit margin; the objective is
+unbounded below. The learning dock continues to show teacher cross entropy;
+events also record the combined objective and rival IDs. Fixed-step, argmax,
+and margin stopping rules retain their existing meanings.
+
+`--freeze BLOCK...` trains everything except those blocks. `--thaw BLOCK...`
+trains only those blocks; the two flags are mutually exclusive. Groups are
+`lm_head` (`im_head` alias), `embeddings`, `attention`, `attention_qk`,
+`attention_vo`, `attention_other`, `mlp`, `norm`, and `other`. `attention`
+includes all three attention subgroups. Projection-name aliases `q_proj` /
+`k_proj` select the **whole Q/K group**; `v_proj` / `o_proj` select the whole V/O
+group. Fused QKV parameters belong to `attention_other` and cannot be split by
+these controls. Unrecognized architecture paths are reported as `other`.
+Inspect `--target-list` for the exact parameter names, tied aliases, element
+counts, and discovered layer indices before selecting unfamiliar architectures.
+
+`--layers` intersects the block selection and accepts zero-based individual
+indices, inclusive ranges, and `N+` for all discovered layers N and above.
+With a layer selector active, global embeddings, final normalization and the
+output head are excluded. Unknown blocks, absent groups, invalid layers, and
+empty selections fail before changing the training configuration. Shared
+weights freeze together; a thaw selection that also enables an unrequested
+tied block is rejected (for example, an output head tied to embeddings).
+
+Runtime commands replace the corresponding selection:
+
+```text
+learn targets
+learn style sgd-and-sga
+learn freeze lm_head attention
+learn thaw attention_vo mlp
+learn layers 0 2-4 7+
+learn layers all
+learn thaw all
+learn status
+```
+
+`learn freeze` and `learn thaw` replace one another. `all` clears the relevant
+selector; clearing layers does not clear the block selection. `learn reset`
+restores original weights and keeps the chosen training configuration.
+Output-head-only updates preserve existing generation KV tensors only when
+those parameters are not tied to another block. Attention, MLP, embedding,
+normalization and other updates invalidate KV; MLP changes can alter later
+layers' keys and values. Logits, observations and speculation are invalidated
+for every weight update. Existing episode/replay restrictions still apply.

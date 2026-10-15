@@ -229,7 +229,9 @@ Online SGD (requires --online-sgd): N! / N ! trains rank N until argmax;
 N? / N ? trains until argmax or max_step (default 5). max_step=N sets the ceiling.
 Append a margin: N ! 5.0 / N ? 5.0 requires at least 5 logits over every competitor.
 Omit the margin to stop at argmax. Each command commits the selected token; N! has no ceiling.
-Learning controls: learn status, learn reset,
+Learning controls: learn status, learn reset, learn targets,
+learn style sgd-only|sgd-and-sga, learn freeze BLOCK..., learn thaw BLOCK...,
+learn layers 0 2-4 7+ (all clears each selector),
 learn steps=N (0 pauses automatic updates), learn lr=X, teach last steps=N.
 Rewind, fork, replay, beam, chord, and switching are unsupported in this mode.
 
@@ -757,8 +759,8 @@ def parse_command(
         return TeacherCommand(CommandKind.LEARN, learning_text=raw.strip())
     if raw.strip().startswith(("learn", "teach")):
         text = raw.strip()
-        if not re.fullmatch(r"(?:learn (?:status|reset|steps=\d+|lr=\S+)|teach last steps=\d+)", text):
-            raise EditorError("use learn status/reset, learn steps=N/lr=X, or teach last steps=N")
+        if not re.fullmatch(r"(?:learn (?:status|reset|targets|steps=\d+|lr=\S+|max_step=\d+|(?:freeze|thaw|layers|style) .+)|teach last steps=\d+)", text):
+            raise EditorError("use learn status/reset/targets, learn steps=N/lr=X, learn style/freeze/thaw/layers VALUE..., or teach last steps=N")
         return TeacherCommand(CommandKind.LEARN, learning_text=text)
     beam = parse_beam(raw, vocabulary_size=vocabulary_size)
     if beam is not None:

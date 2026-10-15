@@ -356,6 +356,12 @@ def build_parser(
     learning.add_argument("--online-lr", type=float, default=1e-5)
     learning.add_argument("--online-steps", type=int, default=1)
     learning.add_argument("--max-step", type=int, default=5, help="SGD ceiling for N? (default: 5)")
+    learning.add_argument("--learning-style", choices=("sgd-only", "sgd-and-sga"), default="sgd-only")
+    selection_group = learning.add_mutually_exclusive_group()
+    selection_group.add_argument("--freeze", nargs="+", default=(), metavar="BLOCK")
+    selection_group.add_argument("--thaw", nargs="+", default=(), metavar="BLOCK")
+    learning.add_argument("--layers", nargs="+", default=(), metavar="LAYER", help="Train only layers: 0 2-4 7+; excludes global parameters")
+    learning.add_argument("--target-list", action="store_true", help="Inspect Transformers parameter groups and layers, then exit")
     transformers = parser.add_argument_group("Transformers")
     transformers.add_argument("--transformers-device", default="auto")
     transformers.add_argument(
@@ -434,13 +440,26 @@ def main(
             args = parser.parse_args([*profile_tokens, *arguments])
         args._explicit_options = cli_explicit | profile_applied
         args._cli_explicit_options = cli_explicit
+        if args.target_list:
+            import json
+            from .learning_targets import LearningTargets
+            if args.backend not in (None, "transformers"):
+                raise EditorError("--target-list requires Transformers")
+            args.backend = "transformers"
+            args.online_sgd = False
+            backend = episode_backend_loader.load_backend(args)
+            print(json.dumps(LearningTargets(backend._model).inventory(), indent=2))
+            return 0
+        if not args.online_sgd and (args.freeze or args.thaw or args.layers or args.learning_style != "sgd-only"):
+            raise EditorError("learning selectors and style require --online-sgd")
         sampling_factory = SamplerConfig.from_record
         selection = _select_launch_source(args)
         _validate_prompt_source(args, selection)
         teacher_tape = selection.teacher_tape
         if args.online_sgd:
             from .online_learning import LearningConfig
-            LearningConfig(args.online_lr, args.online_steps, args.max_step).validate()
+            LearningConfig(args.online_lr, args.online_steps, args.max_step, args.learning_style,
+                           tuple(args.freeze), tuple(args.thaw), tuple(args.layers)).validate()
             if args.backend != "transformers":
                 raise EditorError("--online-sgd requires --backend transformers")
             if selection.kind != "new" or teacher_tape is not None:

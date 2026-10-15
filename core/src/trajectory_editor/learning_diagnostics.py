@@ -102,6 +102,10 @@ class LearningSnapshot:
     current: LearningStep | None = None
     history: tuple[float, ...] = ()
     probes: tuple[ProbeReadout, ...] = ()
+    style: str = "sgd-only"
+    freeze: tuple[str, ...] = ()
+    thaw: tuple[str, ...] = ()
+    layers: tuple[str, ...] = ()
 
 
 class _Probe:
@@ -207,4 +211,5 @@ class LearningDiagnostics:
             self.backend.weight_revision, corrections, self.steps,
             config.lr, config.steps, config.max_step, self.current, self.history,
             tuple(p.readout for p in self.roots + self.corrections),
+            config.style, tuple(config.freeze), tuple(config.thaw), tuple(config.layers),
         )

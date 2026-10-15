@@ -1,5 +1,5 @@
 """Episode-local direct supervision; no sampling controls or torch dependency here."""
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 import math
 import re
@@ -13,7 +13,16 @@ class LearningConfig:
     steps: int = 1
     max_step: int = 5
 
+    style: str = "sgd-only"
+    freeze: tuple = ()
+    thaw: tuple = ()
+    layers: tuple = ()
+
     def validate(self):
+        if self.style not in ("sgd-only", "sgd-and-sga"):
+            raise EditorError("learning style must be sgd-only or sgd-and-sga")
+        if self.freeze and self.thaw:
+            raise EditorError("freeze and thaw are mutually exclusive")
         if type(self.max_step) is not int or self.max_step < 1:
             raise EditorError("max_step must be a positive integer")
         if not math.isfinite(self.lr) or self.lr <= 0:
@@ -25,7 +34,7 @@ class LearningConfig:
 class EpisodeLearner:
     def __init__(self, engine, config):
         self.engine = engine
-        self.config = LearningConfig(config.lr, config.steps, config.max_step)
+        self.config = replace(config)
         self.events = []
         self.corrections = 0
         self.last = None
@@ -76,9 +85,9 @@ class EpisodeLearner:
             self.engine._invalidate_observation()
         event = dict(prefix_token_ids=list(prefix), corrected_token_ids=list(corrected),
                      proposal_token_id=proposal, boundary=boundary, lr=self.config.lr,
-                     steps=steps, **metrics)
+                     learning_config=asdict(self.config), steps=steps, **metrics)
         self.events.append(event)
-        self.engine.backend.reset(self.engine.token_ids)
+        self.engine.backend.refresh_learning_prefix(self.engine.token_ids)
         self.publish()
         return event
 
@@ -96,6 +105,7 @@ class EpisodeLearner:
         if raw == "learn status":
             return json.dumps(dict(**asdict(self.config), corrections=self.corrections,
                 optimizer_steps=sum(e['steps'] for e in self.events),
+                targets=getattr(self.engine.backend, "learning_selection", {}),
                 weight_revision=self.engine.backend.weight_revision,
                 recent_events=self.events[-3:]), sort_keys=True)
         if raw == "learn reset":
@@ -109,17 +119,35 @@ class EpisodeLearner:
             self.engine.backend.reset(self.engine.token_ids)
             self.publish()
             return "Original episode weights restored; token trajectory retained."
+        match = re.fullmatch(r"learn (freeze|thaw|layers|style) (.+)", raw)
+        if match:
+            key, value = match.groups()
+            updated = replace(self.config)
+            if key == "style":
+                updated.style = value
+            else:
+                setattr(updated, key, () if value == "all" else tuple(value.split()))
+                if key in ("freeze", "thaw"):
+                    setattr(updated, "thaw" if key == "freeze" else "freeze", ())
+            updated.validate()
+            self.engine.backend.configure_learning(updated)
+            self.config = updated
+            self.publish()
+            return self.command("learn status")
+        if raw == "learn targets":
+            return json.dumps(self.engine.backend.learning_targets.inventory(), sort_keys=True)
         if raw.startswith("max_step="):
             raw = "learn " + raw
         match = re.fullmatch(r"learn (steps|lr|max_step)=(\S+)", raw)
         if match:
             key, value = match.groups()
-            updated = LearningConfig(self.config.lr, self.config.steps, self.config.max_step)
+            updated = replace(self.config)
             try:
                 setattr(updated, key, float(value) if key == 'lr' else int(value))
                 updated.validate()
             except (ValueError, OverflowError) as exc:
                 raise EditorError("invalid learning configuration") from exc
+            self.engine.backend.configure_learning(updated)
             self.config = updated
             self.publish()
             return self.command("learn status")
@@ -131,4 +159,4 @@ class EpisodeLearner:
             if steps < 1:
                 raise EditorError("teach last requires positive steps")
             return json.dumps(self.train(self.last, steps), sort_keys=True)
-        raise EditorError("use learn status/reset, learn steps=N/lr=X, or teach last steps=N")
+        raise EditorError("use learn status/reset/targets, learn steps=N/lr=X, learn style/freeze/thaw/layers VALUE..., or teach last steps=N")

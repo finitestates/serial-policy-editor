@@ -589,7 +589,6 @@ class TransformersBackend:
         self._tokenizer_id_cache = _transformers_tokenizer_id(self._tokenizer)
 
     def enable_online_learning(self, config):
-        from .online_learning import LearningConfig
         config.validate()
         torch = self._torch
         parameters = list(self._model.parameters())
@@ -597,20 +596,41 @@ class TransformersBackend:
                 or _is_multimodal_config(self._model.config)
                 or not parameters or any(p.dtype != torch.float32 for p in parameters)):
             raise EditorError("online SGD requires an unquantized float32 causal LM without device_map or multimodal wrappers")
-        if any(not p.requires_grad for p in parameters):
-            raise EditorError("online SGD requires all model parameters to be trainable")
-        self.online_config = LearningConfig(config.lr, config.steps, config.max_step)
+        from .learning_targets import LearningTargets
+        self.learning_targets = LearningTargets(self._model)
+        self.configure_learning(config)
         self._learning_base = {k: v.detach().cpu().clone() for k, v in self._model.state_dict().items()}
         self.weight_revision = 0
         self._learning_owner = None
         self._learning_failed = False
         self._invalidate_learning_cache()
 
-    def _invalidate_learning_cache(self):
+    def configure_learning(self, config):
+        from dataclasses import replace
+        config.validate()
+        selection = self.learning_targets.apply(config)
+        self.learning_selection = selection
+        self.online_config = replace(config)
+
+    def refresh_learning_prefix(self, prefix):
+        # A head-only update leaves hidden states and existing KV tensors valid.
+        if (self.learning_selection["preserves_kv"] and self._cache_active
+                and self._past_key_values is not None
+                and list(prefix[:len(self._tokens)]) == self._tokens):
+            tail = list(prefix[len(self._tokens):])
+            if tail:
+                self.eval(tail)
+            else:
+                self._last_logits = self.learning_probe_logits(prefix)
+        else:
+            self.reset(prefix)
+
+    def _invalidate_learning_cache(self, preserve_kv=False):
         for batch in getattr(self, "_learning_batches", ()):
             batch.close()
-        self._past_key_values = None
-        self._cache_active = False
+        if not preserve_kv:
+            self._past_key_values = None
+            self._cache_active = False
         self._last_logits = None
         self._speculation_prefix = None
         self._speculation_logits = None
@@ -659,7 +679,10 @@ class TransformersBackend:
         self._model.eval()
         losses = []
         norms = []
-        self._invalidate_learning_cache()
+        objectives = []
+        rivals = []
+        preserve_kv = self.learning_selection["preserves_kv"]
+        self._invalidate_learning_cache(preserve_kv=preserve_kv)
         try:
             # Never reuse inference-mode tensors. Row len(prefix)-1 predicts
             # corrected[0]; the following rows teacher-force the entire span.
@@ -667,10 +690,13 @@ class TransformersBackend:
                 inputs = torch.tensor([list(prefix) + list(corrected[:-1])],
                                       dtype=torch.long, device=self._input_device)
                 targets = torch.tensor(list(corrected), dtype=torch.long, device=self._input_device)
-                optimizer = torch.optim.SGD(self._model.parameters(), lr=lr)
+                optimizer = torch.optim.SGD([p for p in self._model.parameters() if p.requires_grad], lr=lr)
+                span_logits = None
                 def evaluate():
+                    nonlocal span_logits
                     logits = self._model(input_ids=inputs, use_cache=False).logits
-                    value = torch.nn.functional.cross_entropy(logits[0, len(prefix)-1:, :], targets)
+                    span_logits = logits[0, len(prefix)-1:, :]
+                    value = torch.nn.functional.cross_entropy(span_logits, targets)
                     return value, logits[0, len(prefix)-1]
                 current_margin = None
                 def reached(row):
@@ -711,10 +737,20 @@ class TransformersBackend:
                         break
                     optimizer.zero_grad(set_to_none=True)
                     value, _ = evaluate()
-                    if not torch.isfinite(value):
+                    objective = value
+                    if self.online_config.style == "sgd-and-sga":
+                        # CE(teacher) - CE(rival): descend teacher loss, ascend rival loss.
+                        logits = span_logits
+                        competitors = logits.detach().clone()
+                        competitors.scatter_(1, targets[:, None], -torch.inf)
+                        rival_ids = competitors.argmax(dim=-1)
+                        objective = value - torch.nn.functional.cross_entropy(logits, rival_ids)
+                        rivals.append(rival_ids.detach().cpu().tolist())
+                    if not torch.isfinite(objective):
                         raise RuntimeError("nonfinite supervised loss")
                     losses.append(float(value.detach()))
-                    value.backward()
+                    objectives.append(float(objective.detach()))
+                    objective.backward()
                     norm = torch.stack([p.grad.detach().float().norm().square()
                         for p in self._model.parameters() if p.grad is not None]).sum().sqrt()
                     if not torch.isfinite(norm):
@@ -741,13 +777,15 @@ class TransformersBackend:
             return dict(steps_run=len(losses), stop_reason=(("margin" if margin is not None else "argmax") if done else "ceiling") if until_argmax else "fixed-steps",
                         requested_margin=margin, final_margin=current_margin,
                         loss_before=before, loss_after=after, losses=losses,
-                        gradient_norms=norms, weight_revision=self.weight_revision)
+                        gradient_norms=norms, weight_revision=self.weight_revision,
+                        learning_style=self.online_config.style, objectives=objectives, rival_token_ids=rivals,
+                        targets=dict(self.learning_selection))
         except (Exception, KeyboardInterrupt) as exc:
             self._learning_failed = True
             raise EditorError("online training failed; inference blocked until learn reset: " + str(exc)) from exc
         finally:
             self._model.zero_grad(set_to_none=True)
-            self._invalidate_learning_cache()
+            self._invalidate_learning_cache(preserve_kv=preserve_kv and not self._learning_failed)
 
     def _apply_execution_controls(self) -> None:
         if self.settings.torch_num_threads is not None:

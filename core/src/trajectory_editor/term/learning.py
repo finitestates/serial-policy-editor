@@ -76,6 +76,9 @@ def overview_document(snapshot: LearningSnapshot | None, refreshing=False, notic
     doc.append("EPISODE LEARNING\n", style="bold")
     doc.append(f"{snapshot.optimizer_steps} SGD steps · {snapshot.corrections} corrections · revision {snapshot.revision}\n")
     doc.append(f"lr {snapshot.lr:g} · default steps {snapshot.default_steps} · ceiling {snapshot.max_step}\n")
+    blocks = "freeze " + " ".join(snapshot.freeze) if snapshot.freeze else "thaw " + " ".join(snapshot.thaw) if snapshot.thaw else "all blocks"
+    layers = " ".join(snapshot.layers) or "all layers / global parameters"
+    doc.append(f"{snapshot.style} · {blocks} · layers {layers}\n")
     if refreshing:
         doc.append("Refreshing comparisons on the episode thread…\n")
     elif notice:
